@@ -39,22 +39,6 @@ export type {
   WatchTimelineEntry,
 } from "./watch.ts";
 export { renderReport } from "./report.ts";
-export {
-  MAX_RETRO_PROPOSALS,
-  MIN_RETRO_EVIDENCE_SEQS,
-  buildRetroDigest,
-  buildRetroPrompt,
-  buildSeqToTaskMap,
-  orderForRatification,
-  parseRetroProposals,
-  renderRetroFile,
-  retroDay,
-  retroFilePath,
-  retroLaneAvailable,
-  runRetroPass,
-  writtenRetroForDay,
-} from "./retro.ts";
-export type { ParsedRetro, RetroCorpus, RetroOutcome, RetroPassInput, RetroProposal } from "./retro.ts";
 export { FactoryError } from "./errors.ts";
 export {
   DEFAULT_LANE,

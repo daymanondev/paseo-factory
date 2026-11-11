@@ -190,45 +190,28 @@ test("status shows the last fresh-eyes outcome per task, or - when the task has 
   );
 });
 
-test("status prints one trailing retro line when a retro ever ran — the last one on record", async (t) => {
+test("status ignores historical retro_written lines — the Retro is gone but its Ledger lines stay readable (ADR 0056)", async (t) => {
   const dir = makeTempDir();
   disposeDir(t, dir);
   const stateDir = join(dir, "plugin-state", "paseo-factory");
   const full = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0";
 
-  const written: Record<string, unknown> = {
-    seq: 6, ts: "2026-10-09T18:00:00.000Z", event: "retro_written",
-    model: "copilot/gpt-5.4", outcome: "written", durationMs: 40_000,
-    proposalsPath: "/s/retro-2026-10-09.md", proposalCount: 7,
-  };
   writeLedger(stateDir, [
     contractEvent(1, "T-ONE"),
     { seq: 2, ts, event: "claim_reported", task: "T-ONE", attempt: 1, sha: full },
     { seq: 3, ts, event: "gate_finished", task: "T-ONE", attempt: 1, exit: 0, verdict: "green", note: "", sha: full },
     { seq: 4, ts, event: "report_written", task: "T-ONE", attempt: 1, path: "/s/report-T-ONE-1.md" },
-    written,
-    // A later failed retro is the last on record — the line shows it, no count.
-    { seq: 7, ts: "2026-10-10T09:00:00.000Z", event: "retro_written", model: "copilot/gpt-5.4", outcome: "failed", durationMs: 1_200, error: "copilot CLI exited 2" },
+    {
+      seq: 5, ts: "2026-10-09T18:00:00.000Z", event: "retro_written",
+      model: "copilot/gpt-5.4", outcome: "written", durationMs: 40_000,
+      proposalsPath: "/s/retro-2026-10-09.md", proposalCount: 7,
+    },
   ]);
 
   const status = await run(ownerCli, ["status"], { PASEO_HOME: dir });
   assert.equal(status.status, 0, status.stderr);
-  assert.equal(
-    establishedFields(status.stdout),
-    ["T-ONE attempts=1 verdict=green sha=a1b2c3d accepted=no eye=- choke=0/0/0", "retro last=2026-10-10 outcome=failed"].join("\n") + "\n",
-  );
-
-  // Without the failed line, the written one shows with its count.
-  writeLedger(stateDir, [
-    contractEvent(1, "T-ONE"),
-    { seq: 2, ts, event: "claim_reported", task: "T-ONE", attempt: 1, sha: full },
-    { seq: 3, ts, event: "gate_finished", task: "T-ONE", attempt: 1, exit: 0, verdict: "green", note: "", sha: full },
-    { seq: 4, ts, event: "report_written", task: "T-ONE", attempt: 1, path: "/s/report-T-ONE-1.md" },
-    written,
-  ]);
-  const afterWritten = await run(ownerCli, ["status"], { PASEO_HOME: dir });
-  assert.equal(afterWritten.status, 0, afterWritten.stderr);
-  assert.ok(afterWritten.stdout.endsWith("retro last=2026-10-09 outcome=written proposals=7\n"), afterWritten.stdout);
+  assert.equal(establishedFields(status.stdout), "T-ONE attempts=1 verdict=green sha=a1b2c3d accepted=no eye=- choke=0/0/0\n");
+  assert.doesNotMatch(status.stdout, /retro/);
 });
 
 test("status treats a missing or empty ledger as no tasks, not as an error", async (t) => {

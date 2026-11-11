@@ -1,21 +1,20 @@
 import { OpenDesignControl } from "./open-design.tsx";
 /**
- * The persistent Project-centered header (v0.0.35, ADR 0025, amending ADR 0009 §2
- * and ADR 0014 §1): plain-language headline, freshness dot, and the prominent
- * Project Switcher with native macOS folder picker (`+ Add Project`), collapsible
- * path input (`Paste path…`), missing-folder warning badges, live Supervisor/Lead
- * seat states & Open jumps (v0.0.27, ADR 0017 §3 — seats start only from Paseo's
- * native New Chat picker, never from a header button), two-step `Reset Project`,
- * and two-step `Delete Project`.
+ * The minimal Project header (v0.6.0 W4, ADR 0056 — W5 replaces it with the
+ * Project panel): a plain-language headline, the freshness dot, the Project
+ * bound to this workspace, live Supervisor/Lead seat states with Open jumps
+ * (v0.0.27, ADR 0017 §3 — seats start only from Paseo's native New Chat
+ * picker, never from a header button), the Open Design link control, and the
+ * two-step `Reset Project` / `Delete Project`. There is no Project picking
+ * here at all: the Project is the one the workspace is bound to.
  */
 import type { PluginTheme } from "@getpaseo/plugin";
-import { Icon, TextInput } from "@getpaseo/plugin/client/ui";
 import { useEffect, useState } from "react";
 import { Text, View } from "react-native";
 
-import type { FactoryView, ProjectView } from "../../shared/view.ts";
-import { Btn, Card, Chip, Pill } from "../kit/pill.tsx";
-import { CONTROL_SM, DOT, RADIUS, SPACING, text, tint } from "../kit/theme.ts";
+import type { FactoryView } from "../../shared/view.ts";
+import { Btn, Card, Pill } from "../kit/pill.tsx";
+import { DOT, RADIUS, SPACING, text, tint } from "../kit/theme.ts";
 import { GRACE_MS, pollEvery } from "../kit/poll.ts";
 import { isVaultActName, readAgo, VaultPane, VaultSyncBar } from "./vault.tsx";
 import type { VaultActName, VaultImportInput, VaultNote, VaultSyncInput } from "./vault.tsx";
@@ -31,16 +30,9 @@ export interface HeaderActions {
   openSupervisor(): void;
   /** Jump to the live Lead's conversation — the Supervisor spawns the seat via supervisor_dispatch_lead. */
   openLead(): void;
-  /** The Project Selector's pick — null returns to the unscoped global view. */
-  pickProject(root: string | null): void;
-  /** Native macOS Finder folder picker (`factory.project.pick.folder`) to add & bootstrap a Project (v0.0.35, ADR 0024/0025). */
-  pickProjectFolder(): void;
-  /** Add & bootstrap a Project by explicit directory path (`factory.project.add`) (v0.0.35, ADR 0024/0025). */
-  addProject?(path: string): void;
-  /** Owner-only clean-slate reset of the selected Project (v0.0.24, ADR 0015 §6). */
+  /** Owner-only clean-slate reset of the Project (v0.0.24, ADR 0015 §6). */
   resetProject(): void;
-  /** Owner-only permanent deletion of the selected Project and all its Factory/Paseo records (v0.0.35, ADR 0024/0025). */
-  deleteProject(): void;
+  /** Owner-only permanent deletion of the Project and all its Factory/Paseo records (v0.0.35, ADR 0024/0025). */
   deleteProject(target?: { root?: string; slug?: string }): void;
   busy: boolean;
 }
@@ -58,23 +50,11 @@ function headlineOf(view: FactoryView): string {
   return "No tasks yet";
 }
 
-/** One selector chip's label — explicit name,else the root's last path segment, falling back to the slug. */
+/** The Project's label — explicit name, else the root's last path segment, falling back to the slug. */
 function projectLabel(slug: string, root: string, name?: string): string {
   if (typeof name === "string" && name.trim() !== "") return name.trim();
   const last = root.split("/").filter((segment) => segment !== "");
   return last.length > 0 ? (last[last.length - 1] as string) : slug;
-}
-
-/** Count of tasks belonging to a discovered Project entry. */
-function projectTaskCount(view: FactoryView, entry: ProjectView): number {
-  if (typeof entry.activeTaskCount === "number") return entry.activeTaskCount;
-  if (view.project?.slug === entry.slug) return view.tasks.length;
-  return view.tasks.filter(
-    (t) =>
-      t.workspace === entry.root ||
-      t.workspace.startsWith(`${entry.root}/`) ||
-      t.workspace.includes(`/projects/${entry.slug}/worktrees/`),
-  ).length;
 }
 
 /** One standing seat's live state chip (v0.0.27, ADR 0017 §3) — the daemon's own status while the seat lives. */
@@ -88,7 +68,6 @@ export function Header({
   view,
   at,
   now,
-  compact = false,
   actions,
 }: {
   theme: PluginTheme;
@@ -98,11 +77,8 @@ export function Header({
   compact?: boolean;
   actions: HeaderActions;
 }) {
-  const [pickingPath, setPickingPath] = useState(false);
-  const [customPath, setCustomPath] = useState("");
   const [confirmingReset, setConfirmingReset] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
-  const [confirmingDeleteSlug, setConfirmingDeleteSlug] = useState<string | null>(null);
 
   useEffect(() => {
     if (!confirmingReset) return;
@@ -116,33 +92,9 @@ export function Header({
     return () => clearTimeout(timer);
   }, [confirmingDelete]);
 
-  useEffect(() => {
-    if (confirmingDeleteSlug === null) return;
-    const timer = setTimeout(() => setConfirmingDeleteSlug(null), 5000);
-    return () => clearTimeout(timer);
-  }, [confirmingDeleteSlug]);
-
   const busy = view.kpis.running + view.kpis.needsHuman > 0;
   const fresh = at !== null && now - at <= pollEvery(busy) + GRACE_MS;
   const project = view.project;
-  const allProjectsCount =
-    project === null
-      ? view.tasks.length
-      : view.projects.some((p) => typeof p.activeTaskCount === "number")
-        ? view.projects.reduce((sum, p) => sum + (p.activeTaskCount ?? 0), 0)
-        : view.tasks.length;
-
-  const submitPath = (): void => {
-    const trimmed = customPath.trim();
-    if (trimmed === "") return;
-    if (actions.addProject !== undefined) {
-      actions.addProject(trimmed);
-    } else {
-      actions.pickProject(trimmed);
-    }
-    setCustomPath("");
-    setPickingPath(false);
-  };
 
   return (
     <View style={{ gap: SPACING[3] }}>
@@ -209,193 +161,14 @@ export function Header({
         </View>
       </View>
 
-      {/* Prominent Project Switcher (v0.0.35, ADR 0025) */}
       <Card theme={theme} gap={SPACING[2.5]}>
-        <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[1.5] }}>
-          <View style={{ flexDirection: "row", alignItems: "center", gap: SPACING[1], paddingRight: SPACING[1] }}>
-            <Icon name="FolderGit2" size={14} color={theme.colors.accent} />
-            <Text style={text(theme, "badge")}>PROJECT SWITCHER</Text>
-          </View>
-          <Chip
-            theme={theme}
-            label="All projects"
-            active={project === null}
-            count={allProjectsCount}
-            icon="Layers"
-            onPress={() => actions.pickProject(null)}
-          />
-          {view.projects.map((entry) => (
-            <View
-              key={entry.slug}
-              style={{
-                flexDirection: "row",
-                alignItems: "center",
-                flexWrap: "wrap",
-                gap: SPACING[1],
-                ...(entry.missingRoot
-                  ? {
-                      padding: 2,
-                      paddingRight: SPACING[1.5],
-                      borderRadius: RADIUS.md,
-                      borderWidth: 1,
-                      borderColor: tint(theme.colors.statusDanger, "55"),
-                      backgroundColor: tint(theme.colors.statusDanger, "10"),
-                    }
-                  : {}),
-              }}
-            >
-              <Chip
-                theme={theme}
-                label={projectLabel(entry.slug, entry.root, entry.name)}
-                active={project?.slug === entry.slug}
-                count={projectTaskCount(view, entry)}
-                icon={entry.missingRoot ? "AlertTriangle" : "FolderGit2"}
-                onPress={() => actions.pickProject(entry.root)}
-              />
-              {entry.missingRoot ? (
-                <>
-                  <Pill theme={theme} label="Missing folder" tone="statusDanger" lit />
-                  {confirmingDeleteSlug === entry.slug ? (
-                    <View style={{ flexDirection: "row", alignItems: "center", gap: SPACING[1] }}>
-                      <Btn
-                        theme={theme}
-                        small
-                        solid
-                        icon="Trash2"
-                        label="Confirm Delete"
-                        tone="statusDanger"
-                        disabled={actions.busy}
-                        onPress={() => {
-                          setConfirmingDeleteSlug(null);
-                          actions.deleteProject({ root: entry.root, slug: entry.slug });
-                        }}
-                      />
-                      <Btn
-                        theme={theme}
-                        small
-                        icon="X"
-                        label="Cancel"
-                        tone="foregroundMuted"
-                        disabled={actions.busy}
-                        onPress={() => setConfirmingDeleteSlug(null)}
-                      />
-                    </View>
-                  ) : (
-                    <Btn
-                      theme={theme}
-                      small
-                      solid
-                      icon="Trash2"
-                      label="Delete"
-                      tone="statusDanger"
-                      disabled={actions.busy}
-                      onPress={() => {
-                        setConfirmingReset(false);
-                        setConfirmingDelete(false);
-                        setConfirmingDeleteSlug(entry.slug);
-                      }}
-                    />
-                  )}
-                </>
-              ) : null}
-            </View>
-          ))}
-          <View
-            style={{
-              ...(compact ? { width: "100%", paddingTop: SPACING[0.5] } : { marginLeft: "auto" }),
-              flexDirection: "row",
-              alignItems: "center",
-              gap: SPACING[1.5],
-              flexWrap: "wrap",
-            }}
-          >
-            <Btn
-              theme={theme}
-              small
-              solid
-              icon="FolderPlus"
-              label="+ Add Project"
-              tone="accent"
-              disabled={actions.busy}
-              onPress={() => actions.pickProjectFolder()}
-            />
-            <Btn
-              theme={theme}
-              small
-              icon={pickingPath ? "X" : "Terminal"}
-              label={pickingPath ? "Cancel" : "Paste path…"}
-              tone="foregroundMuted"
-              onPress={() => setPickingPath((v) => !v)}
-            />
-          </View>
-        </View>
-
-        {project ? null : (
-          <View
-            style={{
-              flexDirection: "row",
-              alignItems: "center",
-              gap: SPACING[1.5],
-              flexWrap: "wrap",
-              borderTopWidth: 1,
-              borderTopColor: theme.colors.border,
-              paddingTop: SPACING[2],
-            }}
-          >
-            <Pill theme={theme} label="All projects · View-only" tone="statusWarning" lit />
-            <Text style={text(theme, "meta")}>
-              Select a specific project above to modify settings.
-            </Text>
-          </View>
-        )}
-        {project && !project.missingRoot ? <OpenDesignControl key={project.root} theme={theme} root={project.root} sourceKey={actions.designSourceKey} onChanged={() => actions.refresh?.()} /> : null}
-        {pickingPath ? (
-          <View style={{ gap: SPACING[1.5], borderTopWidth: 1, borderTopColor: theme.colors.border, paddingTop: SPACING[2] }}>
-            <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[2] }}>
-              <View
-                style={{
-                  flexBasis: 240,
-                  flexGrow: 1,
-                  minHeight: CONTROL_SM,
-                  justifyContent: "center",
-                  borderWidth: 1,
-                  borderColor: theme.colors.border,
-                  borderRadius: RADIUS.md,
-                  backgroundColor: theme.colors.surface0,
-                }}
-              >
-                <TextInput
-                  value={customPath}
-                  onChangeText={setCustomPath}
-                  placeholder="/path/to/git-repo"
-                  placeholderTextColor={theme.colors.foregroundMuted}
-                  style={{ paddingHorizontal: SPACING[2.5], paddingVertical: 4, color: theme.colors.foreground, fontSize: 12 }}
-                  onSubmitEditing={submitPath}
-                />
-              </View>
-              <Btn theme={theme} small solid icon="Check" label="Select Project" tone="accent" disabled={customPath.trim() === "" || actions.busy} onPress={submitPath} />
-            </View>
-            {view.projects.length > 0 ? (
-              <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[1.5] }}>
-                <Text style={text(theme, "meta")}>Workspaces:</Text>
-                {view.projects.map((entry) => (
-                  <Btn
-                    key={`suggest:${entry.slug}`}
-                    theme={theme}
-                    small
-                    icon="Folder"
-                    label={entry.root}
-                    tone="foregroundMuted"
-                    onPress={() => {
-                      actions.addProject ? actions.addProject(entry.root) : actions.pickProject(entry.root);
-                      setPickingPath(false);
-                    }}
-                  />
-                ))}
-              </View>
-            ) : null}
+        {project === null ? (
+          <View style={{ flexDirection: "row", alignItems: "center", gap: SPACING[1.5], flexWrap: "wrap" }}>
+            <Pill theme={theme} label="No Project" tone="statusWarning" lit />
+            <Text style={text(theme, "meta")}>This workspace is not a Factory Project yet.</Text>
           </View>
         ) : null}
+        {project && !project.missingRoot ? <OpenDesignControl key={project.root} theme={theme} root={project.root} sourceKey={actions.designSourceKey} onChanged={() => actions.refresh?.()} /> : null}
 
         {project !== null ? (
           <View
@@ -499,7 +272,6 @@ export function Header({
                       disabled={actions.busy}
                       onPress={() => {
                         setConfirmingDelete(false);
-                        setConfirmingDeleteSlug(null);
                         setConfirmingReset(true);
                       }}
                     />
@@ -543,7 +315,6 @@ export function Header({
                     disabled={actions.busy}
                     onPress={() => {
                       setConfirmingReset(false);
-                      setConfirmingDeleteSlug(null);
                       setConfirmingDelete(true);
                     }}
                   />

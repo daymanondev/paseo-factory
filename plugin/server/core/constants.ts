@@ -46,11 +46,3 @@ export const WATCH_GATE_OUTPUT_MAX_CHARS = 8_000;
  * probabilities at close-out.
  */
 export const WATCH_CALLOUT_THRESHOLD = 0.5;
-
-/**
- * The Retro (v0.0.7, ticket 03 item 5+7): one total budget covering the
- * first try and its single retry — the watch's one-clock discipline, sized
- * for a minutes-long whole-corpus generation (10 min; parse failures retry
- * inside the same clock, so a malformed brace never costs a full re-run).
- */
-export const RETRO_TOTAL_BUDGET_MS = 600_000;

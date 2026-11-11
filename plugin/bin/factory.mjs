@@ -68,8 +68,8 @@ commands:
 
   contract   Set a task's done-criteria (the Owner's act — fixed before the
              agent starts; one contract per task id, the ledger is append-only)
-             Contract authoring law (v0.0.8 — the ratified Retro proposals
-             R2–R6, each clause paid for by ledger evidence): the gate
+             Contract authoring law (v0.0.8 — each clause paid for by ledger
+             evidence): the gate
              command pins its executables absolutely, never PATH-resolved —
              the gate runs under the daemon's env, which has no nvm (R6); the
              description never requires an edit outside --scope — widen the
@@ -172,7 +172,7 @@ commands:
   lanes      Inspect or set the Lane config (v0.0.13, ADR 0009 §3; the lead
              lane and --project arrive in v0.0.14, ADR 0010) — the one place
              every model-bearing role's provider/model is named: supervisor,
-             lead, worker, watch, retro, freshEyes (all defaulting to
+             lead, worker, watch, freshEyes (all defaulting to
              pi/zcode/glm-5.3). A lane is provider/model with both halves
              non-empty, or "eye.json" for freshEyes alone (the legacy direct
              HTTP config in <stateDir>/eye.json). A local read/write of
@@ -272,27 +272,11 @@ commands:
              reset [--workspace <dir>] [--project <slug>] [--keep-seats]
 
 
-  retro      Run the Retro over the whole ledger of exactly ONE Project, on
-             demand (v0.0.7; strictly per-Project since v0.0.89, ADR 0045
-             §4): the plugin builds the corpus digest from the target
-             Project's isolated ledger under <stateDir>/projects/<slug>/,
-             prompts the Project's retro lane (its lanes.json override, else
-             <stateDir>/lanes.json), writes retro-<date>.md in the Project's
-             state dir, and appends one retro_written line. --project <slug>
-             names the target; a machine with exactly one registered Project
-             defaults to it, and unscoped on multiple Projects is refused
-             with retro-project-required (exit 2, no ledger line). One
-             successful retro per UTC day per Project; a same-day second run
-             is refused (exit 2, no ledger line). Proposals are advice:
-             nothing becomes law until the Owner ratifies it.
-             retro [--project <slug>] [--wait-secs <n>]   (default 660 — the pass is minutes-long)
-
   status     Print one line per task from the ledger — attempts, last verdict,
              attested sha (short), accepted, last fresh-eyes outcome, and the
              task's choke counts (permit asks allowed / denied, git refusals
              bound to the task) — plus a needs-human key when the Lead ever
-             wrote one (v0.0.10: the glance's needs-human marker), and one
-             trailing retro line when a retro ever ran. A local read; the
+             wrote one (v0.0.10: the glance's needs-human marker). A local read; the
              plugin need not be running. Since v0.0.89 each Project's ledger
              lives under <stateDir>/projects/<slug>/ledger.jsonl:
              --project <slug> reads that one Project, and unscoped every
@@ -404,8 +388,7 @@ commands:
 
 options:
   --home <paseoHome>   daemon home (default: $PASEO_HOME or ~/.paseo)
-  --wait-secs <n>      how long to wait for the plugin's reply (default: 60;
-                       retro waits 660 — the pass is minutes-long)
+  --wait-secs <n>      how long to wait for the plugin's reply (default: 60)
 
 attribution (v0.0.9): contract and accept stamp who submitted — the
   shell's $PASEO_AGENT_ID when the daemon env carries one (the delegated
@@ -416,8 +399,6 @@ attribution (v0.0.9): contract and accept stamp who submitted — the
   (ADR 0010 §3); "lead" is judged at the factory, not trusted from here.`;
 
 const DEFAULT_WAIT_SECS = 60;
-/** The retro's own default — one pass runs minutes, and the budget alone is 600s. */
-const RETRO_WAIT_SECS = 660;
 
 /**
  * The acceptance authority seats (v0.0.14, ADR 0010 §3): `owner` and
@@ -1344,28 +1325,6 @@ if (command === "run") {
   process.exit(code);
 }
 
-if (command === "retro") {
-  const parsed = parseCommandOptions({ project: { type: "string" }, "wait-secs": { type: "string" } });
-  if (parsed.positionals.length > 0) fail(`retro: unexpected positional "${parsed.positionals[0]}" — the retro reads ONE Project's ledger, pass --project <slug> instead`);
-
-  // v0.0.89 (ADR 0045 §4): the retro runs strictly against ONE Project's own
-  // ledger — `--project <slug>` (or a single registered Project, or the
-  // submitting seat's correlation). Unscoped on a machine with multiple
-  // Projects the plugin refuses with `retro-project-required`, never a
-  // multi-Project digest; the reply's summary is the proposal count and the
-  // file path (ticket 03 item 2).
-  const projectSlug =
-    typeof parsed.values.project === "string" && parsed.values.project.trim() !== ""
-      ? parsed.values.project.trim()
-      : undefined;
-  const reply = await roundTrip(
-    { id: randomId(), kind: "retro", ...(projectSlug === undefined ? {} : { projectSlug }) },
-    waitSeconds(parsed, RETRO_WAIT_SECS),
-  );
-  console.log(`factory: ${reply.summary}`);
-  process.exit(0);
-}
-
 if (command === "status") {
   const parsed = parseCommandOptions({ project: { type: "string" } });
   if (parsed.positionals.length > 0) fail(`status: unexpected positional "${parsed.positionals[0]}"`);
@@ -1747,7 +1706,7 @@ function costLines(events) {
   const taskOrder = [];
   const byTask = new Map();
   for (const evt of events) {
-    if (typeof evt.task !== "string") continue; // retro lines and unbound git blocks belong to no row
+    if (typeof evt.task !== "string") continue; // taskless lines and unbound git blocks belong to no row
     if (!byTask.has(evt.task)) {
       if (evt.event !== "contract_set") continue; // rows register on the Contract — a ghost's refusal invents nothing
       byTask.set(evt.task, []);

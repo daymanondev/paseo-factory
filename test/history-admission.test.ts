@@ -34,13 +34,23 @@ function fixture(t: TestContext, options: Partial<FactoryOptions> = {}) {
   return { dir, workspace, sha, stateDir, factory, sources };
 }
 
+/** An in-flight Watch pass held open until `resume` — the long-running operation the admission tests queue behind. */
+function blockedWatchRunner(entered: { resolve(): void }, resume: { promise: Promise<void> }) {
+  return async () => {
+    entered.resolve();
+    await resume.promise;
+    return { code: 0, stdout: "destructive-writes: 0\ntest-weakened: 0\nstuck-loop: 0\nscope-creep: 0\nsecret-leak: 0", stderr: "", timedOut: false };
+  };
+}
+const watchTimeline = async () => ({ ok: true as const, entries: [{ seq: 1, item: { type: "message", text: "Agent investigated the Task." } }] });
+
 function deferred() {
   let resolve!: () => void;
   const promise = new Promise<void>((done) => { resolve = done; });
   return { promise, resolve };
 }
 
-for (const station of ["Fresh-eyes", "Watch", "Retro"] as const) {
+for (const station of ["Fresh-eyes", "Watch"] as const) {
   test(`imports wait for the complete ${station} pipeline and drain automatically across entrances`, { timeout: 15_000 }, async (t) => {
     const entered = deferred();
     const resume = deferred();
@@ -48,20 +58,18 @@ for (const station of ["Fresh-eyes", "Watch", "Retro"] as const) {
       entered.resolve();
       await resume.promise;
       const stdout = station === "Fresh-eyes" ? "CLEAR\nReviewed."
-        : station === "Retro" ? '{"proposals":[]}'
         : "destructive-writes: 0\ntest-weakened: 0\nstuck-loop: 0\nscope-creep: 0\nsecret-leak: 0";
       return { code: 0, stdout, stderr: "", timedOut: false };
     };
     const { factory, sources, workspace, sha, stateDir, dir } = fixture(t, {
       eyeCliProbe: () => true, eyeCliRunner: runner,
       watchCopilotProbe: () => true, watchCopilotRunner: runner,
-      retroCopilotProbe: () => true, retroCopilotRunner: runner,
       fetchTimeline: async () => ({ ok: true, entries: [{ seq: 1, item: { type: "message", text: "Agent investigated the Task." } }] }),
     });
-    writeLanes(stateDir, { freshEyes: "claude/example", watch: "claude/example", retro: "claude/example" });
+    writeLanes(stateDir, { freshEyes: "claude/example", watch: "claude/example" });
     factory.setContract({ task: "LOCAL", workspace, gate: "true", artifact: "artifact.txt", scope: ["local"], ...(station === "Fresh-eyes" ? { freshEyes: true } : station === "Watch" ? { watch: true } : {}) });
     const handlers = createSurfaceHandlers({ factory, stateDir, home: dir, daemon: {} as SurfaceDaemonApi });
-    const operation = station === "Retro" ? handlers.retro({}) : handleSpoolRequest(factory, { id: "claim", kind: "claim", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" }, task: "LOCAL", sha, agent: "peer" });
+    const operation = handleSpoolRequest(factory, { id: "claim", kind: "claim", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" }, task: "LOCAL", sha, agent: "peer" });
     try {
       await entered.promise;
       const reply = await handlers.historyImport({ sources });
@@ -72,7 +80,7 @@ for (const station of ["Fresh-eyes", "Watch", "Retro"] as const) {
     assert.equal(factory.contractFor("REMOTE")?.workspace, workspace);
     const names = factory.ledger.events.map((event) => event.event);
     const importedAt = factory.ledger.events.findIndex((event) => event.event === "contract_set" && event.task === "REMOTE");
-    assert.ok(importedAt > names.lastIndexOf(station === "Retro" ? "retro_written" : "report_written"));
+    assert.ok(importedAt > names.lastIndexOf("report_written"));
   });
 }
 
@@ -270,9 +278,10 @@ for (const proof of ["foreign path", "remote landing"] as const) {
 
 test("pending import drains before newly arriving commands and exclusive maintenance callbacks never overlap", { timeout: 10_000 }, async (t) => {
   const entered = deferred(), resume = deferred();
-  const { factory, sources, workspace } = fixture(t, { retroCopilotProbe: () => true, retroCopilotRunner: async () => { entered.resolve(); await resume.promise; return { code: 0, stdout: '{"proposals":[]}', stderr: "", timedOut: false }; } });
-  writeLanes(factory.stateDir, { retro: "claude/example" });
-  const retro = factory.retro(); await entered.promise;
+  const { factory, sources, workspace, sha } = fixture(t, { watchCopilotProbe: () => true, watchCopilotRunner: blockedWatchRunner(entered, resume), fetchTimeline: watchTimeline });
+  writeLanes(factory.stateDir, { watch: "claude/example" });
+  factory.setContract({ task: "LOCAL", workspace, gate: "true", artifact: "artifact.txt", scope: ["local"], watch: true });
+  const retro = handleSpoolRequest(factory, { id: "claim", kind: "claim", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" }, task: "LOCAL", sha, agent: "peer" }); await entered.promise;
   assert.throws(() => factory.resetProject(workspace), (error: unknown) => (error as { code: string }).code === "history-maintenance-busy");
   factory.history.stage(sources);
   const command = handleSpoolRequest(factory, { id: "new", kind: "contract", task: "NEXT", workspace, gate: "true", artifact: "artifact.txt", scope: ["next"], submitter: "owner" });
@@ -299,12 +308,13 @@ test("an interrupted owner acquisition fails closed before Ledger recovery or mu
 
 test("symlink aliases share actual writer ownership and route standalone staging to that writer", { timeout: 10_000 }, async (t) => {
   const entered = deferred(), resume = deferred();
-  const { factory, stateDir, sources, dir } = fixture(t, { retroCopilotProbe: () => true, retroCopilotRunner: async () => { entered.resolve(); await resume.promise; return { code: 0, stdout: '{"proposals":[]}', stderr: "", timedOut: false }; } });
-  writeLanes(stateDir, { retro: "claude/example" });
+  const { factory, stateDir, sources, dir, workspace, sha } = fixture(t, { watchCopilotProbe: () => true, watchCopilotRunner: blockedWatchRunner(entered, resume), fetchTimeline: watchTimeline });
+  writeLanes(stateDir, { watch: "claude/example" });
+  factory.setContract({ task: "LOCAL", workspace, gate: "true", artifact: "artifact.txt", scope: ["local"], watch: true });
   const { symlinkSync } = await import("node:fs");
   const { execFileSync } = await import("node:child_process");
   const alias = join(dir, "state-alias"); symlinkSync(stateDir, alias, "dir");
-  const operation = factory.retro(); await entered.promise;
+  const operation = handleSpoolRequest(factory, { id: "claim", kind: "claim", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" }, task: "LOCAL", sha, agent: "peer" }); await entered.promise;
   try {
     assert.throws(() => createFactory({ stateDir: alias, writerId: "competing" }), (error: unknown) => (error as { code: string }).code === "ledger-writer-active");
     const stageUrl = new URL("../plugin/bin/history-stage.mjs", import.meta.url).href;

@@ -38,7 +38,7 @@ import { lanesPath, loadLanes, saveLanes } from "../src/lanes.ts";
 import { FACTORY_ROLE_PROVIDERS } from "../src/role-providers.ts";
 import { prepareTaskWorktree } from "../src/workspace.ts";
 import { deliverLeadMail, enqueueLeadMail } from "../src/mailbox.ts";
-import { disposeDir, fakeCopilotRunner, gitCommitAll, makeTempDir, writeLanes } from "./helpers.ts";
+import { disposeDir, gitCommitAll, makeTempDir, writeLanes } from "./helpers.ts";
 
 /**
  * The Factory surface's in-process single-writer RPC handlers (v0.0.13,
@@ -161,8 +161,7 @@ function makeSurface(t: TestContext, agents: FakeAgent[] = [], plugins: DaemonPl
   disposeDir(t, dir);
   const home = join(dir, "paseo-home");
   const stateDir = join(home, "plugin-state", "paseo-factory");
-  const retroRunner = fakeCopilotRunner(() => ({ code: 0, stdout: '{"proposals":[]}' }));
-  const factory = createFactory({ stateDir, retroCopilotProbe: () => true, retroCopilotRunner: retroRunner.runner, eyeCliProbe: () => false });
+  const factory = createFactory({ stateDir, eyeCliProbe: () => false });
   const fake = fakeDaemon(agents);
   const modelSyncs: { agentId: string; model: string }[] = [];
   const thinkingSyncs: { agentId: string; thinkingOptionId: string }[] = [];
@@ -263,27 +262,18 @@ test("snapshot: versioned view folding ledger + lanes + daemon agents + provider
   assert.equal(view.kpis.totalCostUsd, 0.04, "the metered dollars sum");
   assert.equal(view.kpis.totalTokens, 2000, "the metered tokens sum across input + cachedInput + output");
 
-  const task = view.tasks.find((entry) => entry.task === "T1")!;
-  assert.equal(task.status, "ready-to-accept");
-  assert.equal(task.lane, "pi/zai/glm-5.3", "the latest meter's provider is the lane");
-  assert.equal(task.costState, "metered");
-  assert.equal(task.costUsd, 0.04);
-  assert.equal(task.attempts.length, 1);
-  const attempt = task.attempts[0]!;
-  assert.equal(attempt.verdict, "green");
-  assert.equal(attempt.open, false);
-  assert.equal(attempt.respawned, false);
-  assert.equal(attempt.gateLog, `gate-T1-1.log`);
-  assert.equal(attempt.report, `report-T1-1.md`);
-  assert.equal(attempt.eye?.outcome, "clear");
-  assert.equal(attempt.watch?.maxProbability, 0.12);
-  assert.equal(task.choke.allowed, 0);
+  // v0.6.0 W4 (ADR 0056): the snapshot carries no Task list, Timeline/Ledger
+  // stream, Retro proposals, or all-projects fold — only the counts survive.
+  const keys = Object.keys(view);
+  for (const gone of ["tasks", "ledger", "retro", "projects"]) {
+    assert.equal(keys.includes(gone), false, `view.${gone} must not ride the snapshot`);
+  }
 
   // Agents: the supervisor (seat-labeled) plus the ledger-bound worker; the
   // stranger stays out — the surface shows the factory's seats, not the daemon's census.
   assert.ok(view.supervisor !== null && view.supervisor.id === "agent-sup-1", "the seat=supervisor agent is the supervisor");
   assert.equal(view.supervisor.seat, "supervisor");
-  assert.equal(view.supervisor.seqEnd, 41, "the Timeline Oracle seqEnd rides the agent view");
+  assert.equal("seqEnd" in view.supervisor, false, "the Timeline Oracle seqEnd no longer rides the agent view");
   const worker = view.agents.find((agent) => agent.id === "agent-worker-1")!;
   assert.equal(worker.task, "T1", "a ledger-named agent is bound to its task");
   assert.equal(view.agents.some((agent) => agent.id === "agent-stranger"), false);
@@ -293,7 +283,6 @@ test("snapshot: versioned view folding ledger + lanes + daemon agents + provider
     [["claude", false], ["copilot", true], ["pi", true]],
     "the lane picker's provider list rides the snapshot",
   );
-  assert.ok(view.ledger.length > 0, "the ledger stream rides the snapshot");
   assert.equal(view.daemonError, null);
 });
 
@@ -489,8 +478,7 @@ test("snapshot: an unavailable daemon plugin list degrades to the all-not_instal
   disposeDir(t, dir);
   const home = join(dir, "paseo-home");
   const stateDir = join(home, "plugin-state", "paseo-factory");
-  const retroRunner = fakeCopilotRunner(() => ({ code: 0, stdout: '{"proposals":[]}' }));
-  const factory = createFactory({ stateDir, retroCopilotProbe: () => true, retroCopilotRunner: retroRunner.runner, eyeCliProbe: () => false });
+  const factory = createFactory({ stateDir, eyeCliProbe: () => false });
   const handlers = createSurfaceHandlers({
     factory,
     stateDir,
@@ -510,7 +498,7 @@ test("snapshot: an unavailable daemon plugin list degrades to the all-not_instal
   );
 });
 
-test("snapshot: the status fold — running, needs-human, accepted, red", async (t) => {
+test("snapshot: the status fold reaches the KPI counts — running, needs-human, accepted, red", async (t) => {
   const { stateDir, factory, handlers } = makeSurface(t);
   // T-run: an open attempt (claim without report).
   factory.ledger.append({ event: "contract_set", task: "T-RUN", workspace: "/w", gate: "true", artifact: "a" });
@@ -539,48 +527,13 @@ test("snapshot: the status fold — running, needs-human, accepted, red", async 
 
   const snap = await handlers.snapshot({});
   assert.ok(snap.ok);
-  const statusOf = (task: string) => snap.view.tasks.find((entry) => entry.task === task)!.status;
-  assert.equal(statusOf("T-RUN"), "running");
-  assert.equal(statusOf("T-RESPAWN"), "running");
-  assert.equal(statusOf("T-STUCK"), "needs-human");
-  assert.equal(statusOf("T-DONE"), "accepted");
-  assert.equal(statusOf("T-RED"), "red");
   assert.deepEqual(
     { needsHuman: snap.view.kpis.needsHuman, running: snap.view.kpis.running, accepted: snap.view.kpis.accepted, readyToAccept: snap.view.kpis.readyToAccept },
     { needsHuman: 1, running: 2, accepted: 1, readyToAccept: 0 },
   );
-  const stuck = snap.view.tasks.find((entry) => entry.task === "T-STUCK")!;
-  assert.equal(stuck.needsHumanReason, "silent-after-repoke");
 });
 
 // ---- the Owner acts (in-process single writer) --------------------------------------------
-
-test("accept: factory.accept with accepted_by 'owner' — the UI's act is the Owner's act", async (t) => {
-  const { stateDir, factory, handlers } = makeSurface(t);
-  seedGreenTask(factory, stateDir, "ACC1", "/w");
-  const reply = await handlers.accept({ task: "ACC1", attempt: 1 });
-  assert.ok(reply.ok, reply.ok ? "" : reply.error);
-  const accepted = factory.ledger.eventsFor("ACC1").findLast((e) => e.event === "attempt_accepted")!;
-  assert.equal(accepted.accepted_by, "owner", "the RPC stamps the owner, in-process");
-  assert.equal(reply.seq, accepted.seq);
-
-  const notGreen = await handlers.accept({ task: "ACC1", attempt: 2 });
-  assert.ok(!notGreen.ok);
-  assert.equal(notGreen.code, "unknown-attempt");
-});
-
-test("retro: the plugin's own factory.retro(), refusals as Failure codes", async (t) => {
-  const { stateDir, factory, handlers } = makeSurface(t);
-  factory.ledger.append({ event: "contract_set", task: "R1", workspace: "/w", gate: "true", artifact: "a" });
-  const first = await handlers.retro({});
-  assert.ok(first.ok, first.ok ? "" : first.error);
-  assert.equal(first.outcome, "written");
-  assert.equal(first.proposalCount, 0);
-  const second = await handlers.retro({});
-  assert.ok(!second.ok);
-  assert.equal(second.code, "retro-same-day", "the same-day refusal is data, not an exception");
-  void stateDir;
-});
 
 test("lanes.set: writes lanes.json, syncs a live supervisor's model and thinking level, refuses invalid values", async (t) => {
   const { stateDir, handlers, modelSyncs, thinkingSyncs } = makeSurface(t, [
@@ -859,7 +812,7 @@ test("lanes.set: a project-scoped seat save follows the Live-Seat Transition Law
   assert.equal(modelSyncs.length, 1);
 });
 
-test("snapshot: a projectRoot scopes lanes, seats, and tasks to the Project and lists discovered projects", async (t) => {
+test("snapshot: a projectRoot scopes lanes, seats, and the task counts to the Project — no Project list rides the view", async (t) => {
   const project = makeProject(t, "snap-a");
   const other = makeProject(t, "snap-b");
   const { stateDir, factory, handlers } = makeSurface(t, [
@@ -885,27 +838,20 @@ test("snapshot: a projectRoot scopes lanes, seats, and tasks to the Project and 
     commonDir: join(project.root, ".git"),
     supervisorId: "agent-sup-1",
     leadId: "agent-lead-1",
-    activeTaskCount: 1,
   });
-  assert.ok(view.projects.some((entry) => entry.slug === project.slug && entry.root === project.root && entry.activeTaskCount === 1), "the registry feeds the Project Selector");
-  assert.ok(
-    view.projects.some((entry) => entry.slug === other.slug && entry.root === other.root && entry.activeTaskCount === 1),
-    "unselected project retains its full activeTaskCount from the Ledger even when snapshot is scoped",
-  );
   assert.equal(view.lanes.supervisor, "claude/opus-4-8", "the Project override lane wins");
   assert.equal(view.lanes.worker, "copilot/gpt-5.4", "the machine table fills the rest");
   assert.ok(view.supervisor !== null && view.supervisor.id === "agent-sup-1", "the Project's supervisor is the snapshot's supervisor");
   assert.ok(view.lead !== null && view.lead.id === "agent-lead-1", "the Project's Lead rides the snapshot");
   assert.equal(view.agents.some((agent) => agent.id === "agent-other-sup"), false, "other Projects' seats stay out");
-  assert.deepEqual(view.tasks.map((task) => task.task), ["IN1"], "only in-Project tasks show");
-  assert.equal(view.kpis.readyToAccept, 1);
+  assert.equal(view.kpis.readyToAccept, 1, "only in-Project tasks count");
 
   // Unscoped: the global view, every task and every seat.
   const global = await handlers.snapshot({});
   assert.ok(global.ok);
   assert.equal(global.view.project, null);
   assert.ok(global.view.supervisor !== null, "the global view still finds a supervisor");
-  assert.deepEqual(global.view.tasks.map((task) => task.task).sort(), ["IN1", "OUT1"]);
+  assert.equal("projects" in global.view, false, "no all-projects fold rides the unscoped view");
 
   // An unresolvable scope degrades to the global view, never a failure.
   const outside = join(makeTempDir(), "nonexistent-scope");
@@ -976,158 +922,16 @@ test("snapshot: a Lead with no usage, no rotation on record, and no mailbox degr
   assert.equal(lead.queuedMailCount, 0, "no mailbox yet → zero queued, still a number the card can trust");
 });
 
-// ---- Ratify via Supervisor (v0.0.14, ADR 0010 §6) -------------------------------------------
+// ---- historical Retro lines stay tolerated (v0.6.0 W4, ADR 0056) -----------------------------
 
-test("ratify: dispatches the Retro proposal to the Project's Supervisor; unknown day/proposal are named refusals", async (t) => {
-  const project = makeProject(t, "ratify");
-  const { stateDir, factory, handlers, fake } = makeSurface(t, []);
-  mkdirSync(stateDir, { recursive: true });
-  const day = new Date().toISOString().slice(0, 10);
-  const proposalsPath = join(stateDir, `retro-${day}.md`);
-  writeFileSync(
-    proposalsPath,
-    [`# Retro ${day} — 1 proposal`, "", "## R1 — gate-check", "- Evidence (ledger seq): 1", "- Pattern: repeated X", "- Proposal: add a gate check for X.", ""].join("\n"),
-  );
-  factory.ledger.append({ event: "retro_written", model: "pi/zai/glm-5.3", outcome: "written", durationMs: 10, proposalsPath, proposalCount: 1 });
-
-  const reply = await handlers.ratifyProposal({ projectRoot: project.root, day, proposalId: 1 });
-  assert.ok(reply.ok, reply.ok ? "" : reply.error);
-  assert.match(reply.summary, /R1 \(gate-check\) dispatched to the Supervisor of/);
-  assert.equal(fake.created.length, 1, "the ratify ensured the Supervisor seat");
-  assert.deepEqual(fake.created[0]!.labels, { seat: "supervisor", project: project.slug });
-  assert.equal(fake.sent.length, 1);
-  const sent = fake.sent[0]!;
-  assert.match(sent.text, new RegExp(`ratified retro proposal R1 \\(gate-check\\) from ${day}`));
-  assert.match(sent.text, /add a gate check for X\./, "the proposal text rides the dispatch verbatim");
-  assert.match(sent.text, /AGENTS\.md or CONTEXT\.md/, "the dispatch names the two-tier memory targets");
-
-  const noDay = await handlers.ratifyProposal({ projectRoot: project.root, day: "1999-01-01", proposalId: 1 });
-  assert.ok(!noDay.ok);
-  assert.equal(noDay.code, "unknown-retro");
-  const noProposal = await handlers.ratifyProposal({ projectRoot: project.root, day, proposalId: 9 });
-  assert.ok(!noProposal.ok);
-  assert.equal(noProposal.code, "unknown-proposal");
-});
-
-// ---- the detail modal -----------------------------------------------------------------------
-
-test("taskDetail: contract + per-attempt report and gate log contents, tailed", async (t) => {
+test("snapshot: a Ledger holding historical retro_written lines still folds — the Retro is gone, its history is not", async (t) => {
   const { stateDir, factory, handlers } = makeSurface(t);
-  const workspace = "/w/detail";
-  seedGreenTask(factory, stateDir, "DET1", workspace);
-  const reply = await handlers.taskDetail({ task: "DET1" });
-  assert.ok(reply.ok, reply.ok ? "" : reply.error);
-  assert.equal(reply.detail.contract.gate, "npm test");
-  assert.deepEqual(reply.detail.contract.scope, ["src"]);
-  assert.equal(reply.detail.contract.skills, null, "a contract without mandated skills renders null, never an empty list");
-  assert.equal(reply.detail.contract.watch, false);
-  assert.equal(reply.detail.contract.freshEyes, false);
-  assert.equal(reply.detail.attempts.length, 1);
-  assert.match(reply.detail.attempts[0]!.report!, /GREEN/);
-  assert.match(reply.detail.attempts[0]!.gateLog!, /ok 5 tests/);
-
-  const unknown = await handlers.taskDetail({ task: "NOPE" });
-  assert.ok(!unknown.ok);
-  assert.equal(unknown.code, "unknown-task");
-});
-
-test("taskDetail: the contract's mandated skills ride the detail (v0.0.14)", async (t) => {
-  const { stateDir, factory, handlers } = makeSurface(t);
-  factory.ledger.append({
-    event: "contract_set", task: "DET2", workspace: "/w/skills", gate: "npm test", artifact: "src/x.ts",
-    base: "base0001", skills: ["tdd", "diagnosing-bugs"],
-  });
-  const reply = await handlers.taskDetail({ task: "DET2" });
-  assert.ok(reply.ok, reply.ok ? "" : reply.error);
-  assert.deepEqual(reply.detail.contract.skills, ["tdd", "diagnosing-bugs"]);
-});
-
-test("taskDetail & snapshot: Peer agentId rides TaskView and per-attempt AttemptView from ledger claims and CorrelationRegistry", async (t) => {
-  const { stateDir, factory, handlers } = makeSurface(t);
-  factory.ledger.append({
-    event: "contract_set",
-    task: "PEER-1",
-    workspace: "/w/peer",
-    gate: "npm test",
-    artifact: "src/peer.ts",
-    base: "base0001",
-  });
-  factory.ledger.append({ event: "claim_reported", task: "PEER-1", attempt: 1, sha: "1111111", agent: "peer-agent-attempt-1" });
-  factory.ledger.append({ event: "gate_started", task: "PEER-1", attempt: 1, cmd: "npm test" });
-  factory.ledger.append({ event: "gate_finished", task: "PEER-1", attempt: 1, exit: 1, verdict: "red", note: "failed" });
-  factory.ledger.append({ event: "report_written", task: "PEER-1", attempt: 1, path: "report-PEER-1-1.md" });
-
-  factory.ledger.append({ event: "claim_reported", task: "PEER-1", attempt: 2, sha: "2222222", agent: "peer-agent-attempt-2" });
-  factory.ledger.append({ event: "gate_started", task: "PEER-1", attempt: 2, cmd: "npm test" });
-  factory.ledger.append({ event: "gate_finished", task: "PEER-1", attempt: 2, exit: 0, verdict: "green", note: "ok", sha: "2222222" });
-  factory.ledger.append({ event: "report_written", task: "PEER-1", attempt: 2, path: "report-PEER-1-2.md" });
-
-  const detailReply = await handlers.taskDetail({ task: "PEER-1" });
-  assert.ok(detailReply.ok, detailReply.ok ? "" : detailReply.error);
-  assert.equal(detailReply.detail.task.agentId, "peer-agent-attempt-2");
-  assert.equal(detailReply.detail.attempts.length, 2);
-  assert.equal(detailReply.detail.attempts[0]?.agentId, "peer-agent-attempt-1");
-  assert.equal(detailReply.detail.attempts[1]?.agentId, "peer-agent-attempt-2");
-  assert.equal(detailReply.detail.task.attempts[0]?.agentId, "peer-agent-attempt-1");
-  assert.equal(detailReply.detail.task.attempts[1]?.agentId, "peer-agent-attempt-2");
-
-  // Also verify CorrelationRegistry enrichment for a spawned task before any claim
-  factory.ledger.append({
-    event: "contract_set",
-    task: "PEER-2",
-    workspace: "/w/peer",
-    gate: "npm test",
-    artifact: "src/peer2.ts",
-    base: "base0001",
-  });
-  factory.ledger.append({ event: "spawn_dispatched", task: "PEER-2", provider: "opencode/glm-5.1", arity: 1 });
-  new CorrelationRegistry(stateDir).issue({
-    role: "agent",
-    projectSlug: "peer-123456",
-    projectRoot: "/w/peer",
-    task: "PEER-2",
-    agentId: "peer-agent-spawned-only",
-  });
-
-  const detailReply2 = await handlers.taskDetail({ task: "PEER-2" });
-  assert.ok(detailReply2.ok, detailReply2.ok ? "" : detailReply2.error);
-  assert.equal(detailReply2.detail.task.agentId, "peer-agent-spawned-only");
-});
-
-test("retro proposals parse into R1..Rn for the Timeline tab", async (t) => {
-  const { stateDir, factory, handlers } = makeSurface(t);
-  mkdirSync(stateDir, { recursive: true });
-  const day = new Date().toISOString().slice(0, 10);
-  const proposalsPath = join(stateDir, `retro-${day}.md`);
-  writeFileSync(
-    proposalsPath,
-    [
-      `# Retro ${day} — 2 proposals`,
-      "",
-      "- Model: pi/zai/glm-5.3",
-      "",
-      "## R1 — gate-check",
-      "- Evidence (ledger seq): 1",
-      "- Pattern: repeated X",
-      "- Proposal: add a gate check for X.",
-      "",
-      "## R2 — observation",
-      "- Evidence (ledger seq): 2",
-      "- Pattern: repeated Y",
-      "- Proposal: watch Y.",
-      "",
-    ].join("\n"),
-  );
-  factory.ledger.append({ event: "retro_written", model: "pi/zai/glm-5.3", outcome: "written", durationMs: 10, proposalsPath, proposalCount: 2 });
+  seedGreenTask(factory, stateDir, "OLD1", "/w/old");
+  factory.ledger.append({ event: "retro_written", model: "pi/zai/glm-5.3", outcome: "written", durationMs: 10, proposalsPath: join(stateDir, "retro-2026-10-01.md"), proposalCount: 2 });
   const snap = await handlers.snapshot({});
-  assert.ok(snap.ok);
-  const retro = snap.view.retro[0]!;
-  assert.equal(retro.day, day);
-  assert.deepEqual(
-    retro.proposals.map((p) => [p.id, p.cls]),
-    [[1, "gate-check"], [2, "observation"]],
-    "the R-ids and classes parse for rendering",
-  );
+  assert.ok(snap.ok, snap.ok ? "" : snap.error);
+  assert.equal(snap.view.kpis.readyToAccept, 1, "the task fold is unaffected by the factory-level retro line");
+  assert.equal("retro" in snap.view, false, "no Retro proposals ride the snapshot");
 });
 
 // ---- the role-contract layer (v0.0.14, ADR 0010 §1–§2/§6) ----------------------------------
@@ -2418,8 +2222,7 @@ test("pluginsInstall: a daemon failure refuses as data — { ok: false, code: 'd
   disposeDir(t, dir);
   const home = join(dir, "paseo-home");
   const stateDir = join(home, "plugin-state", "paseo-factory");
-  const retroRunner = fakeCopilotRunner(() => ({ code: 0, stdout: '{"proposals":[]}' }));
-  const factory = createFactory({ stateDir, retroCopilotProbe: () => true, retroCopilotRunner: retroRunner.runner, eyeCliProbe: () => false });
+  const factory = createFactory({ stateDir, eyeCliProbe: () => false });
   const handlers = createSurfaceHandlers({
     factory,
     stateDir,
@@ -2461,8 +2264,7 @@ test("pluginsManage: a daemon error refuses as data — { ok: false, code: 'daem
   disposeDir(t, dir);
   const home = join(dir, "paseo-home");
   const stateDir = join(home, "plugin-state", "paseo-factory");
-  const retroRunner = fakeCopilotRunner(() => ({ code: 0, stdout: '{"proposals":[]}' }));
-  const factory = createFactory({ stateDir, retroCopilotProbe: () => true, retroCopilotRunner: retroRunner.runner, eyeCliProbe: () => false });
+  const factory = createFactory({ stateDir, eyeCliProbe: () => false });
   const handlers = createSurfaceHandlers({
     factory,
     stateDir,
@@ -2514,8 +2316,7 @@ test("companion lifecycle over the wire: the handlers bind the daemon bridge by 
   // Handlers over the fake daemon's home with NO plugin overrides — the real
   // bridge (paseo.pid + local-credential in the temp home) is the default.
   const stateDir = join(daemon.home, "plugin-state", "paseo-factory");
-  const retroRunner = fakeCopilotRunner(() => ({ code: 0, stdout: '{"proposals":[]}' }));
-  const factory = createFactory({ stateDir, retroCopilotProbe: () => true, retroCopilotRunner: retroRunner.runner, eyeCliProbe: () => false });
+  const factory = createFactory({ stateDir, eyeCliProbe: () => false });
   const handlers = createSurfaceHandlers({ factory, stateDir, home: daemon.home, daemon: fakeDaemon([]).daemon });
 
   const snap = await handlers.snapshot({});
@@ -2546,8 +2347,7 @@ test("surface deps: the plugin bridge overrides ride createSurfaceHandlers like 
   disposeDir(t, dir);
   const home = join(dir, "paseo-home");
   const stateDir = join(home, "plugin-state", "paseo-factory");
-  const retroRunner = fakeCopilotRunner(() => ({ code: 0, stdout: '{"proposals":[]}' }));
-  const factory = createFactory({ stateDir, retroCopilotProbe: () => true, retroCopilotRunner: retroRunner.runner, eyeCliProbe: () => false });
+  const factory = createFactory({ stateDir, eyeCliProbe: () => false });
   const handlers = createSurfaceHandlers({
     factory,
     stateDir,
@@ -3141,8 +2941,8 @@ test("v0.0.23 (ADR 0015 §6): spool spawn/respawn registers Task worktree worksp
   assert.ok(fake.archived.includes(liveWorker.id), "meter archived finished working Agent");
 
   // Accept T-WS-1: archives taskWorkspaces[T-WS-1] and removes it from project.json.
-  const accept1 = await handlers.accept({ task: "T-WS-1", attempt: 1 });
-  assert.ok(accept1.ok, accept1.ok ? "" : accept1.error);
+  const accept1 = await handleSpoolRequest(factory, { id: "a-ws-1", kind: "accept", task: "T-WS-1", attempt: 1, by: "owner", submitter: "owner" }, { daemon: fake.daemon });
+  assert.ok(accept1.ok, accept1.ok ? "" : accept1.message);
   assert.ok(archivedWorkspaces.includes("ws-wt-1"), "accept archived the Task worktree Paseo workspace");
   assert.equal(
     readProjectRegistration(stateDir, project.slug)?.taskWorkspaces?.["T-WS-1"],
@@ -3439,8 +3239,8 @@ test("v0.0.31 (ADR 0017 §4): accepting T-12 while worktrees/T-11 and worktrees/
   assert.equal(claim.verdict, "green");
   writeProjectRegistration(stateDir, project.slug, { root: project.root, taskWorkspaces: { "T-12": "wks-t12" } });
 
-  const reply = await handlers.accept({ task: "T-12", attempt: 1 });
-  assert.ok(reply.ok, reply.ok ? "" : reply.error);
+  const reply = await handleSpoolRequest(factory, { id: "a-t12", kind: "accept", task: "T-12", attempt: 1, by: "owner", submitter: "owner" }, { daemon: fake.daemon, home: daemon.home });
+  assert.ok(reply.ok, reply.ok ? "" : reply.message);
 
   // The accepted task's own workspace archives (the direct in-process act)…
   assert.deepEqual(archivedWorkspaces, ["wks-t12"]);
@@ -3964,7 +3764,6 @@ test("v0.0.24 (ADR 0015 §5): projectReset wipes a project's ledger events, task
   assert.doesNotMatch(resetRes.summary, /worker\(s\)/);
 
   // Returned view has 0 tasks for projectA, while projectB's task remains intact.
-  assert.deepEqual(resetRes.view?.tasks, []);
   assert.equal(factory.contractFor("T-RESET-1"), undefined);
   assert.equal(factory.contractFor("T-KEEP-1")?.workspace, projectB.root);
 
@@ -4168,8 +3967,7 @@ test("v0.0.25 (ADR 0012 §2/§4): pluginsCheckUpdates populates snapshot update 
   disposeDir(t, dir);
   const home = join(dir, "paseo-home");
   const stateDir = join(home, "plugin-state", "paseo-factory");
-  const retroRunner = fakeCopilotRunner(() => ({ code: 0, stdout: '{"proposals":[]}' }));
-  const factory = createFactory({ stateDir, retroCopilotProbe: () => true, retroCopilotRunner: retroRunner.runner, eyeCliProbe: () => false });
+  const factory = createFactory({ stateDir, eyeCliProbe: () => false });
 
   const manageCalls: { pluginId: string; action: string }[] = [];
   const handlers = createSurfaceHandlers({
@@ -4346,8 +4144,7 @@ test("v0.0.30 seam 4 — per-plugin fault isolation: a batch plugin.source.statu
   // bridge is the default; the vault runner stays fake so the snapshot's gh
   // probe never leaves the process.
   const stateDir = join(daemon.home, "plugin-state", "paseo-factory");
-  const retroRunner = fakeCopilotRunner(() => ({ code: 0, stdout: '{"proposals":[]}' }));
-  const factory = createFactory({ stateDir, retroCopilotProbe: () => true, retroCopilotRunner: retroRunner.runner, eyeCliProbe: () => false });
+  const factory = createFactory({ stateDir, eyeCliProbe: () => false });
   const handlers = createSurfaceHandlers({
     factory,
     stateDir,
@@ -4497,8 +4294,7 @@ test("v0.0.34 seam 1.1 — two-phase WebSocket update: manageDaemonPlugin sends 
 
   // Verify through SurfaceHandlers.pluginsManage over the wire.
   const stateDir = join(daemon.home, "plugin-state", "paseo-factory");
-  const retroRunner = fakeCopilotRunner(() => ({ code: 0, stdout: '{"proposals":[]}' }));
-  const factory = createFactory({ stateDir, retroCopilotProbe: () => true, retroCopilotRunner: retroRunner.runner, eyeCliProbe: () => false });
+  const factory = createFactory({ stateDir, eyeCliProbe: () => false });
   const handlers = createSurfaceHandlers({ factory, stateDir, home: daemon.home, daemon: fakeDaemon([]).daemon });
   const manageReply = await handlers.pluginsManage({ pluginId: "paseo-factory", action: "update" });
   assert.ok(manageReply.ok, manageReply.ok ? "" : manageReply.error);
@@ -4563,8 +4359,7 @@ test("v0.0.34 seam 1.2 — preview already up to date: outcome === 'current' and
   );
 
   const stateDir = join(daemon.home, "plugin-state", "paseo-factory");
-  const retroRunner = fakeCopilotRunner(() => ({ code: 0, stdout: '{"proposals":[]}' }));
-  const factory = createFactory({ stateDir, retroCopilotProbe: () => true, retroCopilotRunner: retroRunner.runner, eyeCliProbe: () => false });
+  const factory = createFactory({ stateDir, eyeCliProbe: () => false });
   const handlers = createSurfaceHandlers({ factory, stateDir, home: daemon.home, daemon: fakeDaemon([]).daemon });
   const manageReply = await handlers.pluginsManage({ pluginId: "paseo-factory", action: "update" });
   assert.ok(manageReply.ok, manageReply.ok ? "" : manageReply.error);
@@ -4660,8 +4455,7 @@ test("v0.0.34 seam 1.3 — preview and apply errors: outcome === 'local' and out
   });
 
   const stateDir = join(daemon.home, "plugin-state", "paseo-factory");
-  const retroRunner = fakeCopilotRunner(() => ({ code: 0, stdout: '{"proposals":[]}' }));
-  const factory = createFactory({ stateDir, retroCopilotProbe: () => true, retroCopilotRunner: retroRunner.runner, eyeCliProbe: () => false });
+  const factory = createFactory({ stateDir, eyeCliProbe: () => false });
   const handlers = createSurfaceHandlers({ factory, stateDir, home: daemon.home, daemon: fakeDaemon([]).daemon });
   const manageReply = await handlers.pluginsManage({ pluginId: "paseo-factory", action: "update" });
   assert.deepEqual(manageReply, {
@@ -4779,8 +4573,7 @@ test("v0.0.34 seam 1.5 — batch Update All orders paseo-factory last so Compani
   disposeDir(t, dir);
   const home = join(dir, "paseo-home");
   const stateDir = join(home, "plugin-state", "paseo-factory");
-  const retroRunner = fakeCopilotRunner(() => ({ code: 0, stdout: '{"proposals":[]}' }));
-  const factory = createFactory({ stateDir, retroCopilotProbe: () => true, retroCopilotRunner: retroRunner.runner, eyeCliProbe: () => false });
+  const factory = createFactory({ stateDir, eyeCliProbe: () => false });
 
   const manageOrder: string[] = [];
   const handlers = createSurfaceHandlers({
@@ -4952,21 +4745,22 @@ test("Seam 1.1: projectAdd bootstraps greenfield non-Git folders and discoverPro
     }),
   );
 
-  // 3. Snapshot discovers the greenfield project, unlabeled Role-provider projects, labels.project agent, and both Paseo workspaces
-  const snap = await handlers.snapshot({});
-  assert.ok(snap.ok, snap.ok ? "" : snap.error);
-  const discoveredSlugs = snap.view.projects.map((p) => p.slug);
-  assert.ok(discoveredSlugs.includes(addRes.slug), "greenfield project is in view.projects");
+  // 3. Discovery finds the greenfield project, unlabeled Role-provider projects, labels.project agent, and both Paseo workspaces
+  //    (the snapshot no longer carries a Project list — ADR 0056 — so the core door answers).
+  const listed = await fake.daemon.agents.list();
+  const discoveredProjects = discoverProjects(stateDir, listed.entries.map((entry) => entry.agent), home);
+  const discoveredSlugs = discoveredProjects.map((p) => p.slug);
+  assert.ok(discoveredSlugs.includes(addRes.slug), "greenfield project is discovered");
   assert.ok(discoveredSlugs.includes(roleSupRepo.slug), "unlabeled factory-supervisor session's project is discovered");
   assert.ok(discoveredSlugs.includes(roleLeadRepo.slug), "unlabeled factory-lead session's project is discovered");
   assert.ok(discoveredSlugs.includes(rolePeerRepo.slug), "unlabeled factory-peer session's project is discovered");
   assert.ok(discoveredSlugs.includes(labelProjectRepo.slug), "labels.project session's project is discovered");
   assert.ok(discoveredSlugs.includes(paseoWsRepo.slug), "Paseo projects.json workspace is discovered");
-  const nonGitEntry = snap.view.projects.find((p) => p.name === "paseo-nongit-ws");
-  assert.ok(nonGitEntry !== undefined, "non-Git Paseo workspace is discovered in view.projects");
+  const nonGitEntry = discoveredProjects.find((p) => p.name === "paseo-nongit-ws");
+  assert.ok(nonGitEntry !== undefined, "non-Git Paseo workspace is discovered");
 
   // 4. Selecting the discovered non-Git Paseo workspace via snapshot({ projectRoot }) auto-bootstraps Git and selects it
-  const selectNonGit = await handlers.snapshot({ projectRoot: nonGitEntry.root });
+  const selectNonGit = await handlers.snapshot({ projectRoot: nonGitEntry.root! });
   assert.ok(selectNonGit.ok, selectNonGit.ok ? "" : selectNonGit.error);
   assert.ok(selectNonGit.view.project !== null, "selecting a non-Git Paseo workspace resolves view.project instead of null");
   assert.equal(selectNonGit.view.project?.name, "paseo-nongit-ws");
@@ -5026,18 +4820,14 @@ test("Seam 1.2: deleting a registered Project's folder on disk marks it missingR
     missingRoot: true,
     supervisorId: null,
     leadId: null,
-    activeTaskCount: 1,
   };
   assert.deepEqual(
     snap.view.project,
     expectedDeletedView,
     "view.project resolves from persisted registration with missingRoot: true instead of snapping back to null",
   );
-  const viewDeletedEntry = snap.view.projects.find((p) => p.slug === deletedProject.slug);
-  assert.deepEqual(viewDeletedEntry, expectedDeletedView);
 
-  // 3. Tasks, KPIs, and lanes scope cleanly to the missing-root project without crashing
-  assert.deepEqual(snap.view.tasks.map((task) => task.task), ["T-DEL-1"]);
+  // 3. KPIs and lanes scope cleanly to the missing-root project without crashing
   assert.equal(snap.view.kpis.accepted, 1);
   assert.equal(snap.view.lanes.supervisor, "claude/opus-4-8");
 
@@ -5255,8 +5045,6 @@ test("Seam 1.3a: projectDelete refuses seats with seat-cannot-delete and purges 
 
   // Refreshed view has project: null and no longer lists targetProject
   assert.equal(delRes.view?.project, null, "refreshed view clears active project to null");
-  assert.equal(delRes.view?.projects.some((p) => p.slug === targetProject.slug), false, "deleted project absent from view.projects");
-  assert.equal(delRes.view?.projects.some((p) => p.slug === siblingProject.slug), true, "sibling project remains in view.projects");
   assert.match(delRes.summary, /Deleted project .* and purged all Factory state/);
 
   // 3. Delete a missing-root Project (folder already deleted in Finder)
@@ -5271,57 +5059,7 @@ test("Seam 1.3a: projectDelete refuses seats with seat-cannot-delete and purges 
   assert.equal(missingDelRes.project, missingProject.slug);
   assert.equal(existsSync(join(stateDir, "projects", missingProject.slug)), false, "missing-root project directory completely removed");
   assert.equal(factory.ledger.eventsFor("T-MISS-1").length, 0, "missing-root project ledger events purged");
-  assert.equal(missingDelRes.view?.projects.some((p) => p.slug === missingProject.slug), false, "missing-root project removed from view.projects");
 });
-
-test("Seam 1.3b: projectPickFolder handles native dialog cancellation and auto-bootstraps/registers chosen greenfield folders (v0.0.35, ADR 0024)", async (t) => {
-  const { dir, home, stateDir, factory, fake } = makeSurface(t);
-  let nextPickedPath: string | null = null;
-  const receivedPrompts: Array<string | undefined> = [];
-
-  const handlers = createSurfaceHandlers({
-    factory,
-    stateDir,
-    home,
-    daemon: fake.daemon,
-    pickFolder: async (prompt) => {
-      receivedPrompts.push(prompt);
-      return nextPickedPath;
-    },
-  });
-
-  // 1. User cancels the native OS folder picker dialog
-  nextPickedPath = null;
-  const cancelRes = await handlers.projectPickFolder({ prompt: "Pick a folder" });
-  assert.ok(cancelRes.ok, cancelRes.ok ? "" : cancelRes.error);
-  assert.equal(cancelRes.cancelled, true);
-  assert.equal(cancelRes.path, null);
-  assert.deepEqual(receivedPrompts, ["Pick a folder"]);
-
-  // 2. User selects a greenfield non-Git folder -> auto-bootstraps Git, registers project, and returns refreshed view
-  const greenfieldDir = join(dir, "picked-greenfield-app");
-  mkdirSync(greenfieldDir, { recursive: true });
-  nextPickedPath = greenfieldDir;
-
-  const pickedRes = await handlers.projectPickFolder({});
-  assert.ok(pickedRes.ok, pickedRes.ok ? "" : pickedRes.error);
-  assert.equal(pickedRes.cancelled, false);
-  if (!pickedRes.cancelled) {
-    assert.equal(pickedRes.bootstrapped, true);
-    assert.equal(existsSync(join(greenfieldDir, ".git")), true, "projectPickFolder bootstrapped .git");
-    assert.equal(pickedRes.project.slug, pickedRes.slug);
-    assert.equal(pickedRes.project.missingRoot, false);
-    assert.equal(pickedRes.view?.project?.slug, pickedRes.slug);
-    assert.match(pickedRes.summary, /added project picked-greenfield-app/i);
-    const reg = readProjectRegistration(stateDir, pickedRes.slug);
-    assert.ok(reg !== undefined, "projectPickFolder persisted project.json");
-    assert.equal(reg.root, pickedRes.projectRoot);
-  }
-});
-
-
-
-// ---- Seam 2 (v0.0.38, ADR 0026 §1/§2/§5): cross-Project isolation + the Lane profile lifecycle ----
 
 /** Reads the daemon-global `<home>/config.json` the role providers reconcile into. */
 function readHomeConfig(home: string): { providers: Record<string, { extends?: string; models?: { id: string }[] }>; profiles: { id: string; model?: string }[] } {
@@ -5342,7 +5080,6 @@ test("Seam 2: saving lanes, batching, or applying a profile on Project A reconci
     lead: "pi/zai/glm-5.3",
     worker: "pi/zai/glm-5.3",
     watch: "pi/zai/glm-5.3",
-    retro: "pi/zai/glm-5.3",
     freshEyes: "pi/zai/glm-5.3",
   });
   mkdirSync(home, { recursive: true });
@@ -5483,7 +5220,6 @@ test("Seam 2: profilesApply and lanesReset follow the Live-Seat Transition Law �
       lead: "claude/claude-sonnet-4-6",
       worker: "opencode/glm-5.1",
       watch: "pi/zai/glm-5.3",
-      retro: "pi/zai/glm-5.3",
       freshEyes: "pi/zai/glm-5.3",
     },
   });
@@ -5582,8 +5318,7 @@ test("daemon plugin bridge: self-heals a v0.0.40 poisoned factory-supervisor ext
   );
 
   const stateDir = join(daemon.home, "plugin-state", "paseo-factory");
-  const retroRunner = fakeCopilotRunner(() => ({ code: 0, stdout: '{"proposals":[]}' }));
-  const factory = createFactory({ stateDir, retroCopilotProbe: () => true, retroCopilotRunner: retroRunner.runner, eyeCliProbe: () => false });
+  const factory = createFactory({ stateDir, eyeCliProbe: () => false });
   const handlers = createSurfaceHandlers({
     factory,
     stateDir,
@@ -5914,8 +5649,7 @@ test("ADR 0036: snapshot surfaces only the Factory Core Skill Pack, pluginsCheck
   disposeDir(t, dir);
   const home = join(dir, "paseo-home");
   const stateDir = join(home, "plugin-state", "paseo-factory");
-  const retroRunner = fakeCopilotRunner(() => ({ code: 0, stdout: '{"proposals":[]}' }));
-  const factory = createFactory({ stateDir, retroCopilotRunner: retroRunner.runner, retroCopilotProbe: () => true, eyeCliProbe: () => false });
+  const factory = createFactory({ stateDir, eyeCliProbe: () => false });
   const fake = fakeDaemon([]);
 
   const { CORE_SKILL_SOURCES } = await import('../src/companion-tools.ts');
@@ -6261,64 +5995,30 @@ function treeFingerprint(root: string): Map<string, string> {
   return out;
 }
 
-test("Seam 1: a scoped snapshot reads tasks, timeline, and retro strictly from factoryForProject; All-projects aggregates with projectSlug attribution", async (t) => {
+test("Seam 1: a scoped snapshot counts tasks strictly from factoryForProject; the unscoped view carries no all-projects fold (ADR 0056)", async (t) => {
   const setup = makeTwinSurface(t);
   const { stateDir, rootA, rootB, slugA, slugB, registry, handlers } = setup;
   await contractGreenT01(setup, rootA, slugA);
   await contractGreenT01(setup, rootB, slugB);
 
-  // The scoped snapshot (projectRoot → the selected Project): every task row
-  // and ledger line comes from THAT Project's Factory — attributed with its slug.
+  // The scoped snapshot (projectRoot → the workspace's Project): the counts
+  // come from THAT Project's Factory alone.
   const scoped = await handlers.snapshot({ projectRoot: rootA });
   assert.ok(scoped.ok, scoped.ok ? "" : scoped.error);
-  const scopedTasks = scoped.view.tasks as (typeof scoped.view.tasks[number] & { projectSlug?: string })[];
-  assert.equal(scopedTasks.length, 1, "only the selected Project's T-01 folds");
-  assert.equal(scopedTasks[0]!.task, "T-01");
-  assert.equal(scopedTasks[0]!.projectSlug, slugA, "the task row carries its Project's slug");
-  assert.ok(scoped.view.ledger.length > 0);
-  for (const line of scoped.view.ledger as (typeof scoped.view.ledger[number] & { projectSlug?: string })[]) {
-    assert.equal(line.projectSlug, slugA, "every timeline line is attributed to the selected Project");
-  }
+  assert.equal(scoped.view.kpis.running + scoped.view.kpis.readyToAccept + scoped.view.kpis.accepted, 1, "only the selected Project's T-01 counts");
   assert.equal(scoped.view.project?.slug, slugA);
+  for (const gone of ["tasks", "ledger", "retro", "projects"]) assert.equal(gone in scoped.view, false, `view.${gone} is gone`);
 
-  // The All-projects aggregate: both Projects' T-01 rows fold separately
-  // (one per Project — never merged under the colliding id), each attributed.
-  const aggregate = await handlers.snapshot({});
-  assert.ok(aggregate.ok, aggregate.ok ? "" : aggregate.error);
-  const aggregateTasks = aggregate.view.tasks as (typeof aggregate.view.tasks[number] & { projectSlug?: string })[];
-  assert.equal(aggregateTasks.length, 2, "both Projects' T-01 rows render");
-  assert.deepEqual(
-    aggregateTasks.map((task) => [task.task, task.projectSlug]).sort((a, b) => String(a[1]).localeCompare(String(b[1]))),
-    [["T-01", slugA], ["T-01", slugB]],
-    "each task row is attributed with its own projectSlug",
-  );
-  assert.equal(aggregate.view.kpis.running + aggregate.view.kpis.readyToAccept + aggregate.view.kpis.accepted, 2, "the KPI tiles count across Projects");
-  const lineSlugs = new Set((aggregate.view.ledger as (typeof aggregate.view.ledger[number] & { projectSlug?: string })[]).map((line) => line.projectSlug));
-  assert.deepEqual([...lineSlugs].sort(), [slugA, slugB], "the aggregate timeline interleaves both Projects, each line attributed");
+  // The unscoped view no longer aggregates across Projects: no events, no counts.
+  const unscoped = await handlers.snapshot({});
+  assert.ok(unscoped.ok, unscoped.ok ? "" : unscoped.error);
+  assert.equal(unscoped.view.project, null);
+  assert.equal(unscoped.view.kpis.running + unscoped.view.kpis.readyToAccept + unscoped.view.kpis.accepted, 0, "no all-projects fold");
+  void slugB;
 
   // The strict source law: nothing was read from or written to the root ledger.
   assert.ok(!existsSync(join(stateDir, "ledger.jsonl")), "the root fallback Factory never wrote a ledger");
   assert.equal(registry.root.ledger.events.length, 0);
-});
-
-test("Seam 1: the surface retro refuses with retro-project-required unscoped on multiple Projects — and resolves the named Project through the registry", async (t) => {
-  const setup = makeTwinSurface(t);
-  const { rootA, rootB, slugA, slugB, handlers } = setup;
-  await contractGreenT01(setup, rootA, slugA);
-  await contractGreenT01(setup, rootB, slugB);
-  // A lane with no headless tool-less CLI form makes the routed pass's own
-  // pre-flight refuse deterministically — proving the scope resolved onto the
-  // per-Project Factory without depending on any CLI installed on PATH.
-  assert.ok(saveLanes(setup.stateDir, { retro: "boguslane/model" }, undefined).ok);
-
-  const unscoped = await handlers.retro({});
-  assert.ok(!unscoped.ok);
-  assert.equal(unscoped.code, "retro-project-required", "the All-projects view refuses the retro by name");
-  assert.match(unscoped.error, /exactly one Project/);
-
-  const scoped = await handlers.retro({ projectRoot: rootA });
-  assert.ok(!scoped.ok);
-  assert.equal(scoped.code, "retro-copilot-unusable", "the named Project's own lane pre-flight answered — the routing reached its Factory");
 });
 
 test("Seam 1: project reset on project-a leaves project-b's ledger and artifacts completely untouched", async (t) => {

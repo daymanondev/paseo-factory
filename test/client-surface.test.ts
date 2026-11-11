@@ -20,24 +20,14 @@ import {
   isPluginTargetedByAct,
   resolveCoreRestartWatch,
 } from "../plugin/client/factory/plugin-feedback.ts";
-import {
-  KANBAN_COLUMNS,
-  computeCardGridColumns,
-  computeEqualColumnWidth,
-  groupTasksForKanban,
-  kanbanColumnForStatus,
-  projectNameForTask,
-  resolveKanbanLayoutMode,
-  summarizeAttemptTrail,
-} from "../plugin/client/factory/kanban.ts";
-import type { KanbanColumnId } from "../plugin/client/factory/kanban.ts";
-import type { AgentView, CompanionPluginView, FactoryView, TaskView } from "../plugin/shared/view.ts";
+import type { AgentView, CompanionPluginView, FactoryView } from "../plugin/shared/view.ts";
 
 const read = (rel: string): string => readFileSync(join(repoRoot, rel), "utf8");
 
-test("TabId grows its five values (including vault) and the TabBar renders the Vault and Plugins tabs", () => {
+test("TabId is the three Settings-type panes (seats, vault, plugins) and the TabBar renders the Vault and Plugins tabs", () => {
   const pill = read("plugin/client/kit/pill.tsx");
-  assert.match(pill, /export type TabId = "tasks" \| "seats" \| "timeline" \| "vault" \| "plugins";/);
+  assert.match(pill, /export type TabId = "seats" \| "vault" \| "plugins";/);
+  assert.doesNotMatch(pill, /"tasks"|"timeline"|Timeline & Retro/, "the Tasks and Timeline & Retro tabs are gone");
   assert.match(pill, /\{ id: "vault", label: "Vault", icon: "Shield" \}/);
   assert.match(pill, /\{ id: "plugins", label: "Plugins", icon: "Blocks" \}/);
 });
@@ -136,9 +126,19 @@ test("installed cards show the state-correct action bar — Disable/Enable by en
   assert.match(plugins, /actions\.manage\(id, "(enable|disable|reload|update|remove)"\)/);
 });
 
-test("the one FactoryShell still hosts all three entries — the fourth tab needs no entry change", () => {
+test("the one FactoryShell hosts the two remaining entries — the workspace panel and the settings screen; no global screen, no sidebar row", () => {
   const entries = read("plugin/client/factory/entries.tsx");
-  assert.equal((entries.match(/<FactoryShell/g) ?? []).length, 3, "global screen, settings screen, and workspace panel all render the one shell");
+  assert.equal((entries.match(/<FactoryShell/g) ?? []).length, 2, "settings screen and workspace panel render the one shell");
+  assert.doesNotMatch(entries, /FactoryScreen|FactorySidebarItem|SidebarRow|SCREEN_ID/, "the global screen and the sidebar row are deleted");
+});
+
+test("v0.6.0 W4 (ADR 0056): the surface registers only the Workspace panel, the Settings screen, and one Command Center action", () => {
+  const index = read("plugin/index.client.tsx");
+  assert.equal((index.match(/client\.addWorkspacePanel\(/g) ?? []).length, 1);
+  assert.equal((index.match(/client\.addSettingsScreen\(/g) ?? []).length, 1);
+  assert.equal((index.match(/client\.addCommandCenterItem\(/g) ?? []).length, 1, "one Command Center action");
+  assert.match(index, /title: "Open Factory Panel"/);
+  assert.doesNotMatch(index, /client\.addScreen\(|addSidebarHeaderItem|retro|Retro|vaultSync/, "no global screen, sidebar row, Retro or Vault palette entry");
 });
 
 // ---- native seat starts & live seat states (v0.0.27, ADR 0017 §3) ---------------------------
@@ -160,7 +160,7 @@ test("v0.0.27 (ADR 0017 §3): the Header renders no Start Supervisor / Start Lea
 });
 
 test("v0.0.27 (ADR 0017 §3): Seats & Models renders no Start Supervisor / Start Lead buttons — vacant seats carry the picker hints, live seats keep Open / Rotate / Revoke", () => {
-  const seats = read("plugin/client/factory/seats.tsx") + read("plugin/client/factory/seat-graph.tsx");
+  const seats = read("plugin/client/factory/seats.tsx") + read("plugin/client/factory/seat-card.tsx");
   assert.ok(!seats.includes("Start Supervisor"), "the Seats & Models view renders no Start Supervisor button");
   assert.ok(!seats.includes("Start Lead"), "the Seats & Models view renders no Start Lead button");
   assert.match(seats, /title="Supervisor — not started"/, "the vacant Supervisor node names its not-started state");
@@ -189,7 +189,7 @@ test("v0.0.27 (ADR 0017 §3): FactoryShell drops the ensure/dispatch seat wiring
 // ---- the Lead telemetry trio (v0.0.20, ADR 0013 §6) ----------------
 
 test("the Lead card renders the 128k telemetry trio — usage pill, rotationState badge, queued mail count", () => {
-  const seats = read("plugin/client/factory/seat-graph.tsx").replace(/\s+/g, " ");
+  const seats = read("plugin/client/factory/seat-card.tsx").replace(/\s+/g, " ");
   assert.match(
     seats,
     /label=\{`\$\{Math\.round\(agent\.contextUsedTokens \/ 1000\)\}k \/ 128k handoff`\}/,
@@ -295,55 +295,18 @@ test("v0.0.24 (ADR 0015 §6): Header renders two-step Reset Project -> Confirm R
   assert.match(shell, /resetProject/, "FactoryShell passes resetProject action to Header");
 });
 
-test("v0.0.35 Seam 2.2 (ADR 0024/0025): Header renders prominent Project Switcher, Missing folder statusDanger badge, + Add Project native folder picker with Paste path… fallback, Reset Project (hidden when missingRoot), and two-step Delete Project -> Confirm Delete wired to projectDelete in FactoryShell", () => {
+test("v0.6.0 W4 (ADR 0056): Header keeps the Missing folder badge and two-step Delete Project wired to projectDelete — and carries no Project Switcher, All projects, folder picker or path paste", () => {
   const header = read("plugin/client/factory/header.tsx");
-  assert.match(header, /PROJECT SWITCHER|Project Switcher/i, "Header renders the prominent Project Switcher");
-  assert.match(header, /label="All projects"/, "Project Switcher includes the All projects pill");
-  assert.match(header, /missingRoot/, "Header checks missingRoot on discovered and active projects");
+  assert.doesNotMatch(header, /PROJECT SWITCHER|Project Switcher/i, "the Project Switcher is gone");
+  assert.doesNotMatch(header, /All projects/, "the All projects view is gone");
+  assert.doesNotMatch(header, /Add Project|Paste path|pickProjectFolder|addProject|pickProject\b/, "the folder picker and path paste are gone");
   assert.match(header, /label="Missing folder"/, "Header renders Missing folder badge when missingRoot is true");
-  assert.match(header, /Folder deleted on disk/, "Header warns when active project folder was deleted on disk");
-  assert.match(header, /label="\+ Add Project"/, "Header renders + Add Project primary action");
-  assert.match(header, /actions\.pickProjectFolder/, "+ Add Project invokes actions.pickProjectFolder()");
-  assert.match(header, /Paste path…/, "Header offers collapsible Paste path… fallback toggle");
+  assert.match(header, /Folder deleted on disk/, "Header warns when the project folder was deleted on disk");
   assert.match(header, /!project\.missingRoot/, "Reset Project is hidden when project.missingRoot === true");
-  assert.match(header, /deleteProject\?:\s*\(\)\s*=>\s*void|deleteProject\(\):\s*void/, "HeaderActions declares deleteProject()");
+  assert.match(header, /deleteProject\(target\?:/, "HeaderActions declares deleteProject()");
   assert.match(header, /label="Delete Project"/, "Header renders Delete Project button when a project is selected");
   assert.match(header, /label="Confirm Delete"/, "first click on Delete Project flips to Confirm Delete");
   assert.match(header, /actions\.deleteProject/, "Confirm Delete invokes actions.deleteProject()");
-  assert.match(
-    header,
-    /actions\.addProject \? actions\.addProject\(entry\.root\) : actions\.pickProject\(entry\.root\)/,
-    "clicking a Paseo workspace suggestion in the + Add Project drawer invokes actions.addProject when available",
-  );
-  assert.match(
-    header,
-    /view\.projects\.reduce\(/,
-    "All projects chip count sums activeTaskCount across view.projects when a single project is selected",
-  );
-
-  const shell = read("plugin/client/factory/shell.tsx");
-  assert.match(shell, /projectDelete/, "FactoryShell imports projectDelete RPC");
-  assert.match(shell, /projectPickFolder/, "FactoryShell imports projectPickFolder RPC");
-  assert.match(shell, /projectAdd/, "FactoryShell imports projectAdd RPC");
-  assert.match(shell, /useRpc\(projectDelete\)/, "FactoryShell binds useRpc(projectDelete)");
-  assert.match(shell, /useRpc\(projectPickFolder\)/, "FactoryShell binds useRpc(projectPickFolder)");
-  assert.match(shell, /useRpc\(projectAdd\)/, "FactoryShell binds useRpc(projectAdd)");
-  assert.match(shell, /deleteProject/, "FactoryShell wires deleteProject into Header actions");
-  assert.match(shell, /pickProjectFolder/, "FactoryShell wires pickProjectFolder into Header actions");
-});
-
-test("v0.0.35 Missing-folder UX & Workspace Panel scope override (ADR 0024/0025): inline Delete on missingRoot switcher entries, no vacant-seat startup hints on missing-folder projects, and picked scope overrides panel dir", () => {
-  const header = read("plugin/client/factory/header.tsx");
-  assert.match(
-    header,
-    /confirmingDeleteSlug/,
-    "Header tracks per-project inline delete confirmation for missingRoot entries right on the Project Switcher bar",
-  );
-  assert.match(
-    header,
-    /actions\.deleteProject\(\{\s*root:\s*entry\.root,\s*slug:\s*entry\.slug\s*\}\)/,
-    "Confirming inline delete on a missingRoot switcher chip passes { root: entry.root, slug: entry.slug } to actions.deleteProject",
-  );
   assert.match(
     header,
     /!project\.missingRoot[\s\S]*Select "Supervisor \(Factory\)" in New Chat to start/,
@@ -351,15 +314,14 @@ test("v0.0.35 Missing-folder UX & Workspace Panel scope override (ADR 0024/0025)
   );
 
   const shell = read("plugin/client/factory/shell.tsx");
-  assert.match(
-    shell,
-    /hasPickedScope/,
-    "FactoryShell tracks hasPickedScope so picking a project or All projects in the switcher works even inside FactoryPanel (when dir is passed)",
-  );
+  assert.match(shell, /projectDelete/, "FactoryShell imports projectDelete RPC");
+  assert.match(shell, /useRpc\(projectDelete\)/, "FactoryShell binds useRpc(projectDelete)");
+  assert.match(shell, /deleteProject/, "FactoryShell wires deleteProject into Header actions");
+  assert.doesNotMatch(shell, /projectPickFolder|hasPickedScope|pickedRoot|useRpc\(projectAdd\)/, "no folder picker and no picked scope");
   assert.match(
     shell,
     /target\?:\s*\{\s*root\?:\s*string;\s*slug\?:\s*string\s*\}/,
-    "FactoryShell deleteProject accepts an explicit { root, slug } target from inline Missing folder deletion",
+    "FactoryShell deleteProject accepts an explicit { root, slug } target",
   );
 
   const entries = read("plugin/client/factory/entries.tsx");
@@ -807,181 +769,16 @@ test("v0.0.34 Seam 2.3: PluginsPane and FactoryShell wire live elapsed progress 
   );
 });
 
-// ---- 5-Column Kanban Tasks Board (v0.0.35 Seam 2.3, ADR 0025) ----
-
-test("v0.0.35 Seam 2.3a: KANBAN_COLUMNS and groupTasksForKanban map all TaskStatus values into the 5 canonical Kanban columns in order", () => {
-  const columnIds: KanbanColumnId[] = KANBAN_COLUMNS.map((c) => c.id);
-  assert.deepEqual(columnIds, [
-    "queued",
-    "in_progress",
-    "needs_attention",
-    "ready_to_accept",
-    "accepted",
-  ]);
-  assert.deepEqual(
-    KANBAN_COLUMNS.map((c) => c.title),
-    ["Queued", "In Progress", "Needs Attention", "Ready to Accept", "Accepted"],
-  );
-
-  assert.equal(kanbanColumnForStatus("contracted"), "queued");
-  assert.equal(kanbanColumnForStatus("waiting"), "queued");
-  assert.equal(kanbanColumnForStatus("running"), "in_progress");
-  assert.equal(kanbanColumnForStatus("needs-human"), "needs_attention");
-  assert.equal(kanbanColumnForStatus("red"), "needs_attention");
-  assert.equal(kanbanColumnForStatus("ready-to-accept"), "ready_to_accept");
-  assert.equal(kanbanColumnForStatus("accepted"), "accepted");
-
-  const tasks = [
-    { task: "t-contracted", status: "contracted" as const, workspace: "/repo/a" },
-    { task: "t-waiting", status: "waiting" as const, workspace: "/repo/a" },
-    { task: "t-running", status: "running" as const, workspace: "/repo/a" },
-    { task: "t-needs-human", status: "needs-human" as const, workspace: "/repo/a" },
-    { task: "t-red", status: "red" as const, workspace: "/repo/a" },
-    { task: "t-ready", status: "ready-to-accept" as const, workspace: "/repo/a" },
-    { task: "t-accepted", status: "accepted" as const, workspace: "/repo/a" },
-  ];
-
-  const grouped = groupTasksForKanban(tasks);
-  assert.deepEqual(
-    grouped.queued.map((t) => t.task),
-    ["t-contracted", "t-waiting"],
-  );
-  assert.deepEqual(
-    grouped.in_progress.map((t) => t.task),
-    ["t-running"],
-  );
-  assert.deepEqual(
-    grouped.needs_attention.map((t) => t.task),
-    ["t-needs-human", "t-red"],
-  );
-  assert.deepEqual(
-    grouped.ready_to_accept.map((t) => t.task),
-    ["t-ready"],
-  );
-  assert.deepEqual(
-    grouped.accepted.map((t) => t.task),
-    ["t-accepted"],
-  );
-
-  // Also verify projectNameForTask resolves project names from discovered projects or workspace paths
-  const projects = [
-    { slug: "alpha-123456", root: "/Users/dev/alpha", name: "Alpha App" },
-    { slug: "beta-654321", root: "/Users/dev/beta" },
-  ];
-  assert.equal(projectNameForTask({ workspace: "/Users/dev/alpha" }, projects), "Alpha App");
-  assert.equal(
-    projectNameForTask({ workspace: "/Users/dev/.paseo/projects/beta-654321/worktrees/t-01" }, projects),
-    "beta",
-  );
-  assert.equal(projectNameForTask({ workspace: "/Users/dev/unregistered-repo" }, projects), "unregistered-repo");
-});
-
-test("v0.0.35 Seam 2.3b (ADR 0025): TasksPane renders the 5-column horizontal Kanban board with column counts, Total Cost pill, Project pill in All projects mode, Attempt #n/3 rung badges, evidence pills, direct Accept #n CTA on ready-to-accept cards, and TaskDetailModal without redundant workspace-path headers", () => {
-  const tasks = read("plugin/client/factory/tasks.tsx");
-  assert.match(tasks, /KANBAN_COLUMNS/, "tasks.tsx exports and iterates KANBAN_COLUMNS");
-  assert.match(tasks, /groupTasksForKanban/, "tasks.tsx exports and invokes groupTasksForKanban");
-  assert.match(tasks, /KanbanColumnId/, "tasks.tsx exports KanbanColumnId");
-  assert.match(tasks, /ScrollView horizontal/, "TasksPane renders a horizontal Kanban board container");
-  assert.match(tasks, /Total Cost/, "board toolbar renders compact Total Cost summary pill");
-  assert.match(tasks, /view\.kpis\.totalCostUsd/, "Total Cost pill reads view.kpis.totalCostUsd");
-  assert.match(tasks, /view\.kpis\.totalTokens/, "Total Cost pill also reads view.kpis.totalTokens");
-  assert.ok(!tasks.includes("group.workspace"), "redundant workspace-path group headers are removed from TasksPane");
-  assert.match(tasks, /view\.project === null/, "KanbanCard shows a Project pill only when view.project === null (All projects mode)");
-  assert.match(tasks, /projectNameForTask/, "KanbanCard resolves the Project pill label via projectNameForTask");
-  assert.match(tasks, /\/3/, "KanbanCard renders Attempt rung badge (#n/3)");
-  assert.match(tasks, /↻ Respawned/, "KanbanCard renders ↻ Respawned badge when respawned");
-  assert.match(tasks, /Gate green/, "KanbanCard renders Gate evidence pill");
-  assert.match(tasks, /Eye \$\{lastEye\.outcome\.toUpperCase\(\)\}/, "KanbanCard renders Eye CLEAR/CONCERN evidence pill");
-  assert.match(tasks, /Watch /, "KanbanCard renders Watch evidence pill");
-  assert.match(tasks, /Cost \$\{costLabel\(task\)\}/, "KanbanCard renders Cost evidence pill");
-  assert.match(tasks, /label=\{`Accept #\$\{green\.n\}`\}/, "ready-to-accept cards render direct Accept #n button");
-  assert.match(tasks, /actions\.accept\(task\.task,\s*green!?\.n\)/, "Accept #n button invokes actions.accept");
-  assert.match(tasks, /actions\.openDetail\(task\.task\)/, "clicking a Kanban card or Details opens TaskDetailModal");
-  assert.match(tasks, /export function TaskDetailModal\(/, "tasks.tsx exports TaskDetailModal");
-
-  const shell = read("plugin/client/factory/shell.tsx");
-  assert.match(shell, /TaskDetailModal/, "FactoryShell renders TaskDetailModal for selected Kanban cards");
-});
-
-test("v0.0.35 Responsive Kanban & 3-tier Card hierarchy (ADR 0025): resolveKanbanLayoutMode, computeEqualColumnWidth, vertical card stacking, summarizeAttemptTrail, and compact cards", () => {
-  assert.equal(resolveKanbanLayoutMode({ compact: true, containerWidth: 1200 }), "compact");
-  assert.equal(resolveKanbanLayoutMode({ compact: false, containerWidth: 420 }), "compact");
-  assert.equal(resolveKanbanLayoutMode({ compact: false, containerWidth: 800 }), "medium");
-  assert.equal(resolveKanbanLayoutMode({ compact: false, containerWidth: 1280 }), "wide");
-
-  // All 5 columns receive the exact same width regardless of whether 0, 1, or 5 columns have tasks
-  assert.equal(
-    computeEqualColumnWidth({ containerWidth: 1408, columnCount: 5, gap: 10, minColumnWidth: 190 }),
-    Math.floor((1408 - 40) / 5),
-  );
-  assert.equal(
-    computeEqualColumnWidth({ containerWidth: 992, columnCount: 5, gap: 10, minColumnWidth: 190 }),
-    Math.floor((992 - 40) / 5),
-  );
-  // Narrower horizontal viewports clamp to minColumnWidth so horizontal ScrollView scrolls cleanly
-  assert.equal(
-    computeEqualColumnWidth({ containerWidth: 700, columnCount: 5, gap: 10, minColumnWidth: 190 }),
-    190,
-  );
-
-  // Tasks inside a Kanban column always stack vertically (1 column per stage)
-  assert.equal(
-    computeCardGridColumns({ layoutMode: "wide", containerWidth: 1360, activeColumnCount: 1, cardCount: 15 }),
-    1,
-  );
-  assert.equal(
-    computeCardGridColumns({ layoutMode: "wide", containerWidth: 1024, activeColumnCount: 1, cardCount: 15 }),
-    1,
-  );
-  assert.equal(
-    computeCardGridColumns({ layoutMode: "compact", containerWidth: 420, activeColumnCount: 1, cardCount: 15 }),
-    1,
-  );
-
-  // Attempt trail summarizes long multi-epoch attempt histories into bounded dots + overflow count
-  const trail = summarizeAttemptTrail(
-    [
-      { n: 1, verdict: "red", open: false, respawned: false },
-      { n: 2, verdict: "red", open: false, respawned: true },
-      { n: 3, verdict: "red", open: false, respawned: false },
-      { n: 1, verdict: "red", open: false, respawned: false },
-      { n: 2, verdict: "red", open: false, respawned: false },
-      { n: 3, verdict: "green", open: false, respawned: true },
-    ],
-    4,
-  );
-  assert.equal(trail.visible.length, 4);
-  assert.equal(trail.hiddenCount, 2);
-  assert.equal(trail.respawnCount, 2);
-
-  const tasks = read("plugin/client/factory/tasks.tsx");
-  assert.match(tasks, /resolveKanbanLayoutMode/, "TasksPane adapts layout using resolveKanbanLayoutMode");
-  assert.match(tasks, /computeEqualColumnWidth/, "TasksPane sizes all visible columns equally via computeEqualColumnWidth");
-  assert.match(tasks, /summarizeAttemptTrail/, "KanbanCard renders compact attempt trail dots via summarizeAttemptTrail");
-  assert.ok(!tasks.includes('label="Details"'), "Redundant Details button is removed from KanbanCard face");
-});
-
-
-
-
-
-
-
-
-
-// ---- Lane Profiles bar & Live-Seat Transition Warning (v0.0.38 Seam 4, ADR 0026 §2/§3) ----
-
-test("v0.0.38 Seam 4 (ADR 0026 §3): planLiveSeatTransitions returns [] with no live seats, [] when only worker/watch/retro/freshEyes change, \"in-place\" within one provider family, and \"retire\" across families", () => {
+test("v0.0.38 Seam 4 (ADR 0026 §3): planLiveSeatTransitions returns [] with no live seats, [] when only worker/watch/freshEyes change, \"in-place\" within one provider family, and \"retire\" across families", () => {
   const baseLanes = {
     supervisor: "claude/claude-sonnet-4-6",
     lead: "opencode/glm-5.1",
     worker: "pi/zai/glm-5.3",
     watch: "pi/zai/glm-5.3",
-    retro: "pi/zai/glm-5.3",
     freshEyes: "eye.json",
   };
-  const supervisorAgent = { id: "agent-supervisor-1", title: null, status: "running", provider: "claude", model: null, thinking: null, seat: "supervisor", task: null, seqEnd: null, requiresAttention: null, cwd: null } as unknown as AgentView;
-  const leadAgent = { id: "agent-lead-1", title: null, status: "running", provider: "opencode", model: null, thinking: null, seat: "lead", task: null, seqEnd: null, requiresAttention: null, cwd: null } as unknown as AgentView;
+  const supervisorAgent = { id: "agent-supervisor-1", title: null, status: "running", provider: "claude", model: null, thinking: null, seat: "supervisor", task: null, requiresAttention: null, cwd: null } as unknown as AgentView;
+  const leadAgent = { id: "agent-lead-1", title: null, status: "running", provider: "opencode", model: null, thinking: null, seat: "lead", task: null, requiresAttention: null, cwd: null } as unknown as AgentView;
 
   // (a) No live seats: nothing to warn about, whatever the lanes do.
   assert.deepEqual(
@@ -989,9 +786,9 @@ test("v0.0.38 Seam 4 (ADR 0026 §3): planLiveSeatTransitions returns [] with no 
     [],
   );
 
-  // (b) Only worker/watch/retro/freshEyes change — the standing seats are untouched.
+  // (b) Only worker/watch/freshEyes change — the standing seats are untouched.
   assert.deepEqual(
-    planLiveSeatTransitions(baseLanes, { ...baseLanes, worker: "claude/claude-opus-4-6", watch: "copilot/gpt-5.4", retro: "copilot/gpt-5.4", freshEyes: "claude/claude-haiku-4-5" }, { supervisor: supervisorAgent, lead: leadAgent }),
+    planLiveSeatTransitions(baseLanes, { ...baseLanes, worker: "claude/claude-opus-4-6", watch: "copilot/gpt-5.4", freshEyes: "claude/claude-haiku-4-5" }, { supervisor: supervisorAgent, lead: leadAgent }),
     [],
     "a live seat whose lane value never changes is unaffected (User Story 17)",
   );
@@ -1058,12 +855,12 @@ test("v0.0.38 Seam 4 (ADR 0026 §2): SeatsPane renders the Lane Profiles bar abo
   assert.ok(!seats.includes("for (const lane of card.lanes) actions.setLane(lane, value)"), "the old per-lane save loop is gone, not left beside the batch path");
 });
 
-test("v0.0.38 Seam 4 (ADR 0026 §5): the Watch & Retro card saves through exactly ONE setLanesBatch RPC — single-lane cards keep setLane", () => {
+test("v0.0.38 Seam 4 (ADR 0026 §5): a multi-lane card saves through exactly ONE setLanesBatch RPC — single-lane cards keep setLane", () => {
   const seats = read("plugin/client/factory/seats.tsx");
   assert.match(
     seats,
     /if \(card\.lanes\.length === 1\) actions\.setLane\(card\.lanes\[0\]!, value\);\s*else actions\.setLanesBatch\(card\.lanes, value\);/,
-    "one commit path: a single-lane card rides setLane, a multi-lane card (Watch & Retro) rides ONE actions.setLanesBatch(card.lanes, value)",
+    "one commit path: a single-lane card rides setLane, a multi-lane card rides ONE actions.setLanesBatch(card.lanes, value)",
   );
   assert.match(seats, /setLanesBatch\(lanes: LaneName\[\], value: string\): void;/, "SeatsActions declares the batch action");
 
@@ -1131,24 +928,11 @@ test("v0.0.39 (ADR 0027): index.client.tsx Command Center items and client contr
   const ids = [...indexClient.matchAll(/\bid:\s*"([^"]+)"/g)].map((m) => m[1]!);
   assert.deepEqual(ids, [
     "paseo-factory",
-    "paseo-factory",
-    "factory-open-screen",
     "factory-open-panel",
-    "factory-run-retro",
-    "factory-sync-vault",
   ]);
   for (const id of ids) {
     assert.match(id, idPattern, `client contribution id "${id}" must match /^[a-z][a-z0-9-]*$/ (no dots)`);
   }
-});
-
-test("TasksPane and TaskDetailModal wire Open Peer navigation for active and archived Peer conversations", () => {
-  const tasks = read("plugin/client/factory/tasks.tsx");
-  const shell = read("plugin/client/factory/shell.tsx");
-  assert.match(tasks, /Open Peer/, "TasksPane and TaskDetailModal render Open Peer button");
-  assert.match(tasks, /openAgent\?\(agentId: string\): void/, "TasksActions includes optional openAgent callback");
-  assert.match(tasks, /onOpenAgent\?: \(agentId: string\) => void/, "TaskDetailModal accepts onOpenAgent callback");
-  assert.match(shell, /onOpenAgent=\{\(agentId\) => navigation\?\.openAgent\(\{ agentId, serverId \}\)\}/, "FactoryShell wires onOpenAgent into TaskDetailModal");
 });
 
 test("PluginsPane and FactoryShell support 1-click Switch to GitHub and Switch source… for installed Core and Companion plugins", () => {
@@ -1200,21 +984,13 @@ test("PluginsPane and FactoryShell support 1-click Switch to GitHub and Switch s
   assert.match(shell, /action: "install"/, "FactoryShell transitions to restarting-core with action: install when switching paseo-factory source");
 });
 
-test("All projects is strictly view-only", () => {
-  const header = read("plugin/client/factory/header.tsx");
+test("v0.6.0 W4 (ADR 0056): no Kanban, Timeline, Retro or Seat graph source survives in the client", () => {
+  for (const gone of ["tasks.tsx", "kanban.ts", "timeline.tsx", "seat-graph.tsx"]) {
+    assert.throws(() => read(`plugin/client/factory/${gone}`), `${gone} is deleted`);
+  }
   const seats = read("plugin/client/factory/seats.tsx");
-  assert.match(header, /All projects · View-only/, "Header displays All projects · View-only pill when no project is selected");
-  assert.match(seats, /All projects · View-only/, "SeatsPane displays All projects · View-only card when no project is selected");
-  assert.ok(!seats.includes("New-Project Default Execution Mode"), "SeatsPane no longer exposes a global mode switcher in All projects");
-});
-
-test("KanbanCard renders a dedicated horizontal wrapping badges row", () => {
-  const tasks = read("plugin/client/factory/tasks.tsx");
-  assert.match(
-    tasks,
-    /Row 1\.5: Horizontal wrapping badges/,
-    "KanbanCard separates Project/Role/Lane pills into a dedicated horizontal flexWrap row so pills never stack vertically beside #task-id",
-  );
+  assert.doesNotMatch(seats, /Seat Graph|All projects|Retro/, "SeatsPane carries no Seat graph, All projects view or Retro wording");
+  assert.match(seats, /No Project · View-only/, "SeatsPane is view-only when the workspace is not a Project");
 });
 
 test("ADR 0036: FactoryShell renders the Prerequisite Setup Gate banner when companionTools are missing/incomplete and PluginsPane protects mandatory companionTools against Disable/Remove", () => {
@@ -1289,7 +1065,7 @@ test('PluginsPane SSR renders Skill Hub inventory and Project pack controls', as
   } finally { rmSync(home, { recursive: true, force: true }); }
 });
 
-test("v0.0.87 (ADR 0043 §4): SeatsPane renders the Project Token & Model Usage card and TasksPane renders per-task token pills and model badges", () => {
+test("v0.0.87 (ADR 0043 §4): SeatsPane renders the Project Token & Model Usage card", () => {
   const seats = readFileSync(join(repoRoot, "plugin/client/factory/seats.tsx"), "utf8");
   assert.match(seats, /export function ProjectUsageCard/, "the card is its own component");
   assert.match(seats, /Project Token Usage/, "the card's section title");
@@ -1298,31 +1074,7 @@ test("v0.0.87 (ADR 0043 §4): SeatsPane renders the Project Token & Model Usage 
   assert.match(seats, /cache-hit/, "the cache-hit ratio renders");
   assert.match(seats, /<ProjectUsageCard theme=\{theme\} usage=\{view\.projectUsage \?\? null\} \/>/, "the pane mounts the card from the view's usage half");
 
-  const tasks = readFileSync(join(repoRoot, "plugin/client/factory/tasks.tsx"), "utf8");
-  assert.match(tasks, /formatTokenCount\(task\.totalTokens!\)} tok/, "the Kanban card's token pill renders the rollup aggregate");
-  assert.match(tasks, /task\.usageModel != null \? <Pill theme=\{theme\} label=\{task\.usageModel\} mono \/> : null/, "the detail modal's model badge renders");
-
   const status = readFileSync(join(repoRoot, "plugin/bin/factory.mjs"), "utf8");
   assert.match(status, /usage-status\.mjs/, "factory status reads the generated usage-status mirror");
   assert.match(status, /Token Usage/, "the CLI section header prints");
-});
-
-// ---- Project-scoped, deduplicated Retro (v0.0.89 Seam 4, ADR 0045 §4) ----
-
-test("v0.0.89 Seam 4 (ADR 0045 §4): TimelinePane disables Run Retro in the \"All projects\" view and instructs the Owner to select a Project first", () => {
-  const timeline = read("plugin/client/factory/timeline.tsx");
-  assert.match(timeline, /label="Run Retro"/, "the Run Retro action stays");
-  assert.match(
-    timeline,
-    /disabled=\{actions\.busy \|\| view\.project === null\}/,
-    "Run Retro is disabled exactly when the \"All projects\" aggregate view is selected (view.project === null) — the Ratify-via-Supervisor disabled-when-unscoped precedent",
-  );
-  assert.match(
-    timeline,
-    /view\.project === null \? \(\s*<Card theme=\{theme\}>[\s\S]*?Run Retro needs a single Project/,
-    "the \"All projects\" view renders helper text instructing the Owner to select a specific Project before running a retrospective (User Story 17)",
-  );
-  // The helper renders ONLY in the unscoped view — a selected Project never carries it.
-  const helperCount = (timeline.match(/Run Retro needs a single Project/g) ?? []).length;
-  assert.equal(helperCount, 1, "the helper text appears exactly once, inside the view.project === null guard");
 });

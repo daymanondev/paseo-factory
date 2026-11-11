@@ -10,7 +10,7 @@
  *     schema, Reports, and the 100-line Timeline stream stay untouched.
  *   - **Tier 2** is this file: an idempotent `agentId`-keyed map recording
  *     EVERY Project seat (`supervisor`, `lead`, `agent`, plus
- *     headless `watch` / `retro` runs) with the full normalized buckets,
+ *     headless `watch` runs) with the full normalized buckets,
  *     model metadata, timestamps, and `nativeSessionRef` traceability.
  *
  * Cadence (ADR 0043 §3): `agent.turn_ended` extracts incrementally and
@@ -86,7 +86,7 @@ function seatOf(labels: Record<string, string> | undefined): SessionUsageRecord[
   return "agent";
 }
 
-// The schema reserves `watch`/`retro` seats, but the headless CLI passes run
+// The schema reserves the `watch` seat, but the headless CLI passes run
 // `--no-session` and leave no native store behind — "record its usage entry
 // when available" (spec §3) resolves to the honest absence for them, and
 // the rollup only ever records what a store actually answered with.

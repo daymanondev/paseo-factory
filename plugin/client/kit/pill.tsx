@@ -230,9 +230,9 @@ export function Chip({
   );
 }
 
-export type TabId = "tasks" | "seats" | "timeline" | "vault" | "plugins";
+export type TabId = "seats" | "vault" | "plugins";
 
-/** The five-tab segmented bar — one Shell, five views of the verification line. */
+/** The three-tab segmented bar — the Settings-type panes that stay reachable until the Settings screen relocates them (ADR 0056). */
 export function TabBar({
   theme,
   active,
@@ -247,9 +247,7 @@ export function TabBar({
   compact?: boolean;
 }) {
   const tabs: { id: TabId; label: string; shortLabel?: string; icon: string }[] = [
-    { id: "tasks", label: "Tasks", icon: "CheckSquare" },
     { id: "seats", label: "Seats & Models", shortLabel: "Seats", icon: "Cpu" },
-    { id: "timeline", label: "Timeline & Retro", shortLabel: "Timeline", icon: "Activity" },
     { id: "vault", label: "Vault", icon: "Shield" },
     { id: "plugins", label: "Plugins", icon: "Blocks" },
   ];
