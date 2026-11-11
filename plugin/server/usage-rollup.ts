@@ -32,7 +32,7 @@ import type { Factory } from "./core/factory.ts";
 import type { MeterUsage } from "./core/events.ts";
 import { readProjectRegistration } from "./core/project.ts";
 import { projectTask } from "./core/task-state.ts";
-import { atomicJson } from "./core/scrum/config.ts";
+import { atomicJson } from "./core/json-store.ts";
 import { createUsageExtractor, type NormalizedUsage, type UsageAgentSource } from "./core/usage-extractor.ts";
 import { readProjectUsage, usageFilePath, type ProjectUsageFile, type SessionUsageRecord } from "./core/usage-status.ts";
 import { factoryRegistryFor, resolveTargetProject } from "./projects.ts";

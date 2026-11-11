@@ -6,7 +6,7 @@
  * Lead NEVER reads and binds by reference in Peer contracts; Peers read the
  * full bundle inside their Task worktree).
  */
-import { readOpenDesignLink, type OpenDesignProjectLink } from './scrum/open-design-link-state.ts';
+import { readOpenDesignLink, type OpenDesignProjectLink } from './open-design/open-design-link-state.ts';
 export function linkedDesignSpecification(root?: string, recorded?: OpenDesignProjectLink): string {
   const link = (root ? readOpenDesignLink(root) : undefined) ?? recorded;
   if (!link) return '';

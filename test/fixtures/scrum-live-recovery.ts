@@ -48,14 +48,6 @@ const project = resolveProject(root);
 assert.ok(project.ok);
 if (!project.ok) throw Error("project");
 saveLanes(state, { supervisor: "pi/test", lead: "pi/test" });
-await switchExecution({
-  state,
-  slug: project.slug,
-  mode: "scrum",
-  blockers: [],
-  rotate: async () => {},
-});
-const config = ensureScrumConfig(state, project.slug);
 writeProjectRegistration(state, project.slug, {
   root: project.root,
   supervisor: "sup",
@@ -85,7 +77,7 @@ const sup = {
     seat: "supervisor",
     project: project.slug,
     execution: "scrum",
-    scrumConfigRevision: String(config.configRevision ?? 1),
+    scrumConfigRevision: "1",
   },
 };
 const lead = { ...sup, id: "lead", labels: { ...sup.labels, seat: "lead" } };
@@ -112,6 +104,17 @@ const daemon = {
 };
 const stop = contribute(server);
 try {
+  // v0.6.0 (ADR 0056): every ordinary boot retires legacy Scrum selection, so a
+  // Scrum-mode Project can only exist after the lifetime under test has booted.
+  await switchExecution({
+    state,
+    slug: project.slug,
+    mode: "scrum",
+    blockers: [],
+    rotate: async () => {},
+  });
+  const config = ensureScrumConfig(state, project.slug);
+  sup.labels.scrumConfigRevision = lead.labels.scrumConfigRevision = String(config.configRevision ?? 1);
   await handlers.get("factory.snapshot")!({}, { paseo: daemon });
   await new Promise((done) => setTimeout(done, 100));
   enqueueLeadMail(join(state, "projects", project.slug, "mailbox.jsonl"), {

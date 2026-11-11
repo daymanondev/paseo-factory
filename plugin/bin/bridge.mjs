@@ -757,11 +757,13 @@ __export(ledger_validation_exports, {
 });
 module.exports = __toCommonJS(ledger_validation_exports);
 
-// src/scrum/types.ts
-var SPECIALIST_ROLES = ["pm", "ux", "architect", "dev", "qa"];
+// src/safe-id.ts
 function safeId(value) {
   return typeof value === "string" && /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(value) && value !== "..";
 }
+
+// src/scrum/types.ts
+var SPECIALIST_ROLES = ["pm", "ux", "architect", "dev", "qa"];
 function safePath(value) {
   return typeof value === "string" && value.length > 0 && !value.includes("\\") && !value.includes("\0") && value.split("/").every((p) => p !== "" && p !== "." && p !== "..");
 }
@@ -1245,7 +1247,7 @@ var FactoryError = class extends Error {
   }
 };
 
-// src/scrum/types.ts
+// src/safe-id.ts
 function safeId(value) {
   return typeof value === "string" && /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(value) && value !== "..";
 }
@@ -1260,7 +1262,7 @@ function selectionPath(state, slug) {
 }
 function executionIsValid(value) {
   const v = value;
-  return v !== null && typeof v === "object" && v.schemaVersion === 1 && ["slp", "scrum"].includes(v.mode) && Number.isSafeInteger(v.revision) && v.revision >= 0 && (v.skillPacks === void 0 || Array.isArray(v.skillPacks) && v.skillPacks.every((p) => typeof p === "string"));
+  return v !== null && typeof v === "object" && v.schemaVersion === 1 && ["slp", "scrum"].includes(v.mode) && Number.isSafeInteger(v.revision) && v.revision >= 0;
 }
 function readExecution(state, slug) {
   const path = selectionPath(state, slug);

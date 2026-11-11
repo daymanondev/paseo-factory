@@ -1,7 +1,7 @@
 /** Dependency-light validation shared by prompts, catalog sync, and RPC readers. */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { safeId } from './types.ts';
+import { safeId } from '../safe-id.ts';
 
 export interface OpenDesignProjectLink {
   projectId: string; projectName: string; designSystemId?: string | null; directionId?: string | null;

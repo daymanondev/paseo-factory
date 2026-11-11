@@ -113,3 +113,21 @@ test("both CLIs read the ledger through the shared reader", () => {
     assert.doesNotMatch(body, /function readLedgerEvents\(/, `${cli} carries no private copy of the reader`);
   }
 });
+
+test("Scrum-era contract_set execution bindings and old retro_written rows stay readable and importable (ADR 0056)", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const execution = { mode: "scrum", runId: "run-1", role: "dev", policyRevision: "0038-r1", configRevision: 1, artifactRefs: [] };
+  const body = [
+    event(1, "contract_set", { task: "T1", workspace: "/w", gate: "true", artifact: "out", scope: ["a"], execution }),
+    event(2, "retro_written", { model: "retro", outcome: "written", durationMs: 4, proposalsPath: "/w/retro.md", proposalCount: 2 }),
+  ].join("\n") + "\n";
+  const read = readLedgerEvents(writeLedger(dir, body));
+  assert.deepEqual((read.events as Array<{ event: string }>).map((e) => e.event), ["contract_set", "retro_written"]);
+  assert.deepEqual((read.events as Array<{ execution?: unknown }>)[0]!.execution, execution);
+  const { planLegacyIdentity } = await import("../src/history-identity.ts");
+  const plan = planLegacyIdentity(body, { holderId: "holder", writerId: "writer" });
+  const planned = plan.events as unknown as Array<{ event: string; execution?: unknown }>;
+  assert.ok(planned.some((e) => e.event === "retro_written"), "the retro row is planned for import");
+  assert.deepEqual(planned.find((e) => e.event === "contract_set")!.execution, execution, "the execution field travels untouched");
+});

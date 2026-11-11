@@ -1,7 +1,12 @@
 import { OPEN_DESIGN_FRAMES } from './open-design-assets.ts';
 import { posix } from 'node:path';
-import type { Diagnostic } from './linter.ts';
-import { designScreens } from './design-contract.ts';
+import { designScreens } from './design-vocab.ts';
+export interface Diagnostic {
+  path: string;
+  line: number;
+  category: string;
+  message: string;
+}
 
 /** References stay relative to the mockups directory, including nested frame assets. */
 export function offlineAssetPath(path: string, reference: string): string | null {

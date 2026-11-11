@@ -78,10 +78,9 @@ test("RG-1: the console's real transport folds the Integrations roster — core 
   const syncedAt = "2026-11-08T09:05:00.000Z";
   const digest = "f01dab1eceed0123456789abcdef0123456789abcdef0123456789abcdef";
   writeFileSync(
-    join(fixture.stateDir, "projects", slug, "execution.json"),
+    join(fixture.stateDir, "projects", slug, "project-settings.json"),
     JSON.stringify({
       schemaVersion: 1,
-      mode: "slp",
       revision: 1,
       openDesignLink: {
         projectId: "checkout-redesign",

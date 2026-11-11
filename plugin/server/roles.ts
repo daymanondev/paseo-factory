@@ -4,6 +4,7 @@ import { buildRoleKickoffPrompt } from "./core/roles-contract.ts";
 import { readRun as readScrumRun } from "./core/scrum/run-journal.ts";
 import { restoreLegacyUiEnvironment } from "./core/scrum/companion-tools.ts";
 import { readExecution } from "./core/scrum/config.ts";
+import { readProjectSettings } from "./core/project-settings.ts";
 import { resolveRoleLane, laneProviderConfig } from "./provider-lanes.ts";
 import type { ProviderCatalogEntry } from "./provider-lanes.ts";
 import { provisionScrumHarness, resolveScrumIdentity, scrumIdentityLane, scopeScrumCapabilities } from "./core/scrum/harness.ts";
@@ -561,7 +562,7 @@ export function injectRoleOnCreate<R extends AgentCreateRequest>(
       );
       const taskEnv = factoryEnvFor("agent", { stateDir, project: { root: projectRoot, slug: worktree.slug }, task: worktree.task, correlationId: issued.correlationId, userHome, provider: request.config.provider, environment: request.env });
       return sanitizeAgentCreateHookResult({
-        config: execution === undefined ? fencedConfig : scopeScrumCapabilities(fencedConfig, "agent", execution, taskEnv.PI_CODING_AGENT_DIR, { projectRoot, configuredPacks: readExecution(stateDir, worktree.slug).skillPacks, userHome }),
+        config: execution === undefined ? fencedConfig : scopeScrumCapabilities(fencedConfig, "agent", execution, taskEnv.PI_CODING_AGENT_DIR, { projectRoot, configuredPacks: readProjectSettings(stateDir, worktree.slug).skillPacks, userHome }),
         env: {
           ...(request.env ?? {}),
           ...taskEnv,
@@ -619,7 +620,7 @@ export function injectRoleOnCreate<R extends AgentCreateRequest>(
     },
   );
   return sanitizeAgentCreateHookResult({
-    config: execution === undefined ? fencedConfig : scopeScrumCapabilities(fencedConfig, role, execution, undefined, { projectRoot: projectIdentity.root, configuredPacks: readExecution(stateDir, projectIdentity.slug).skillPacks, userHome }),
+    config: execution === undefined ? fencedConfig : scopeScrumCapabilities(fencedConfig, role, execution, undefined, { projectRoot: projectIdentity.root, configuredPacks: readProjectSettings(stateDir, projectIdentity.slug).skillPacks, userHome }),
     env: {
       ...(request.env ?? {}),
       ...factoryEnvFor(role, { stateDir, project: projectIdentity, correlationId: issued.correlationId, userHome, provider: request.config.provider, environment: request.env }),

@@ -6512,7 +6512,7 @@ test('Skill Hub RPC imports host skills and persists explicit Project pack overr
   writeFileSync(join(repo, 'package.json'), JSON.stringify({ dependencies: { expo: '*' } })); gitCommitAll(repo);
   const project = resolveProject(repo); assert.ok(project.ok); if (!project.ok) return;
   const { ensureProjectRegistered } = await import('../plugin/server/core/project.ts');
-  const { readExecution } = await import('../plugin/server/core/scrum/config.ts');
+  const { readProjectSettings } = await import('../plugin/server/core/project-settings.ts');
   ensureProjectRegistered(stateDir, project);
   mkdirSync(join(userHome, '.zcode/skills/asc-iap'), { recursive: true });
   writeFileSync(join(userHome, '.zcode/skills/asc-iap/SKILL.md'), '# ASC IAP');
@@ -6524,7 +6524,7 @@ test('Skill Hub RPC imports host skills and persists explicit Project pack overr
   assert.ok((await handlers.skillsImport({ id: 'zcode:asc-iap' })).ok);
   assert.equal(readFileSync(join(userHome, '.agents/skills/asc-iap/SKILL.md'), 'utf8'), '# ASC IAP');
   assert.ok((await handlers.skillsTogglePack({ projectRoot: repo, pack: 'expo', enabled: false })).ok);
-  assert.deepEqual(readExecution(stateDir, project.slug).skillPacks, []);
+  assert.deepEqual(readProjectSettings(stateDir, project.slug).skillPacks, []);
   factory.setContract({ task: 'qa-iap', workspace: repo, gate: 'true', skills: ['asc-iap'], execution: { mode: 'scrum', runId: 'test-run', role: 'qa', policyRevision: '1', configRevision: 1, artifactRefs: [] } });
   const after = await handlers.snapshot({ projectRoot: repo }); assert.ok(after.ok); if (!after.ok) return;
   assert.equal(after.view.skillHub?.totalInstalled, 1);

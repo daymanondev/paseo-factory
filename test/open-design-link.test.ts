@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { readOpenDesignLink, exportOpenDesignProject, syncOpenDesignLink, prepareOpenDesignDispatch } from '../src/scrum/open-design-link.ts';
+import { readOpenDesignLink, exportOpenDesignProject, syncOpenDesignLink, prepareOpenDesignDispatch } from '../src/open-design/open-design-link.ts';
 import { linkedDesignSpecification } from '../src/linked-design.ts';
 import { resolveProject } from '../src/project.ts';
 import { createFactory } from '../plugin/server/core/factory.ts';
@@ -43,7 +43,7 @@ test('dispatch preserves a populated provenance bundle and restores the recorded
   const bundle = exportOpenDesignProject('goal-partner');
   syncOpenDesignLink({ root, state, slug, bundle });
   // Host source for subsequent dispatches; client sources require an RPC acknowledgement.
-  const execution = join(state, 'projects', slug, 'execution.json');
+  const execution = join(state, 'projects', slug, 'project-settings.json');
   const selection = JSON.parse(readFileSync(execution, 'utf8'));
   writeFileSync(execution, JSON.stringify({ ...selection, openDesignSource: { kind: 'host' } }));
   const note = JSON.stringify(provenance), manifest = '{"provenance":"Peer-authored"}';

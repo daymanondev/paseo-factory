@@ -1,5 +1,5 @@
 import { previewBundle } from "./preview-bundle.ts";
-import { seedLinkedOpenDesign } from "./open-design-link.ts";
+import { seedLinkedOpenDesign } from "./open-design-seed.ts";
 import { browserCoverageIssues } from './design-contract.ts';
 import { assertOwnerDependencies } from "./owner-work.ts";
 import { scrumSeatOperation } from "./seat-operations.ts";

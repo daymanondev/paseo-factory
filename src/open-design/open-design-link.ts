@@ -8,10 +8,9 @@ import { execFileSync } from 'node:child_process';
 import type { DatabaseSync } from 'node:sqlite';
 import { FactoryError } from '../errors.ts';
 import { writeDurableFile } from '../history-stage.ts';
-import { readExecution, selectionPath } from './selection.ts';
+import { readProjectSettings, writeProjectSettings } from '../project-settings.ts';
 import { stageOpenDesignFrames } from './open-design.ts';
-import { listRuns, terminalRun } from './run-journal.ts';
-import { safeId } from './types.ts';
+import { safeId } from '../safe-id.ts';
 import { readOpenDesignLink, type OpenDesignProjectLink } from './open-design-link-state.ts';
 export { readOpenDesignLink, type OpenDesignProjectLink } from './open-design-link-state.ts';
 
@@ -80,7 +79,7 @@ export function exportOpenDesignProject(projectId: string, userHome?: string): O
   const files = inventory(join(openDesignDataDir(userHome), 'projects', projectId));
   return { project: { ...project, digest: digest(files) }, files };
 }
-function safeDestination(root: string, path: string, boundary = dirname(root)): string {
+export function safeDestination(root: string, path: string, boundary = dirname(root)): string {
   if (!validPath(path)) fail(`Unsafe path: ${path}`);
   const base = resolve(root);
   const target = join(base, path);
@@ -92,10 +91,12 @@ function safeDestination(root: string, path: string, boundary = dirname(root)): 
   }
   return join(base, path);
 }
-export function syncOpenDesignLink(input: { state: string; slug: string; root: string; projectId?: string; bundle?: OpenDesignBundle; syncRequestId?: string; expectedDigest?: string; userHome?: string }): OpenDesignProjectLink {
+/** Scrum-era hook (removed with Scrum): seeds an in-flight run's workspace after the link changes. */
+export type LinkedDesignSeeder = () => void;
+export function syncOpenDesignLink(input: { state: string; slug: string; root: string; projectId?: string; bundle?: OpenDesignBundle; syncRequestId?: string; expectedDigest?: string; userHome?: string; seedRuns?: LinkedDesignSeeder }): OpenDesignProjectLink {
   const previous = readOpenDesignLink(input.root);
   if (input.expectedDigest !== undefined && previous?.digest !== input.expectedDigest) throw new FactoryError('open-design-link-changed', 'The design link changed in another window; refresh before syncing');
-  const recorded = readExecution(input.state, input.slug);
+  const recorded = readProjectSettings(input.state, input.slug);
   if (input.syncRequestId && (recorded.openDesignSource?.requestId !== input.syncRequestId || input.bundle?.project.projectId !== previous?.projectId)) throw new FactoryError('open-design-sync-superseded', 'The requested source sync is no longer current');
   const bundle = input.bundle ?? exportOpenDesignProject(input.projectId ?? previous?.projectId ?? '', input.userHome);
   if (!bundle?.project || !safeId(bundle.project.projectId) || typeof bundle.project.projectName !== 'string' || !Array.isArray(bundle.files) || bundle.files.length > 5000) fail('Invalid bundle metadata');
@@ -120,46 +121,21 @@ export function syncOpenDesignLink(input: { state: string; slug: string; root: s
   }
   const link: OpenDesignProjectLink = { projectId: bundle.project.projectId, projectName: bundle.project.projectName, designSystemId: bundle.project.designSystemId, directionId: bundle.project.directionId, sourceUpdatedAt: bundle.project.sourceUpdatedAt, digest: bundle.project.digest, screenCount: screens(bundle.files).length, syncedAt: new Date().toISOString(), files: [...new Set([...names, ...generatedFrames, 'design-manifest.json'])].sort() };
   writeDurableFile(join(dir, 'open-design-link.json'), JSON.stringify(link, null, 2) + '\n');
-  const selection = readExecution(input.state, input.slug);
-  const source = { ...selection.openDesignSource, kind: input.bundle ? 'client' as const : 'host' as const };
-  const checkpointPaths = [...new Set([...(selection.openDesignCheckpointPaths ?? []), ...link.files, ...stale, 'open-design-link.json'])];
-  writeDurableFile(selectionPath(input.state, input.slug), JSON.stringify({ ...selection, openDesignLink: link, openDesignSource: source, openDesignCheckpointPaths: checkpointPaths }) + '\n');
-  if (selection.mode === 'scrum') for (const run of listRuns(input.state, input.slug).filter(r => !terminalRun(r))) seedLinkedOpenDesign(input.root, input.root, run.initiativeId);
+  const settings = readProjectSettings(input.state, input.slug);
+  const source = { ...settings.openDesignSource, kind: input.bundle ? 'client' as const : 'host' as const };
+  const checkpointPaths = [...new Set([...(settings.openDesignCheckpointPaths ?? []), ...link.files, ...stale, 'open-design-link.json'])];
+  writeProjectSettings(input.state, input.slug, { ...settings, openDesignLink: link, openDesignSource: source, openDesignCheckpointPaths: checkpointPaths });
+  input.seedRuns?.();
   checkpointLinkedDesign(input.root, checkpointPaths);
-  const { openDesignCheckpointPaths: _pending, ...finished } = readExecution(input.state, input.slug);
-  writeDurableFile(selectionPath(input.state, input.slug), JSON.stringify({ ...finished, ...(input.syncRequestId && source.requestId === input.syncRequestId ? { openDesignSource: { ...source, acknowledgedRequestId: input.syncRequestId } } : {}) }) + '\n');
+  const { openDesignCheckpointPaths: _pending, ...finished } = readProjectSettings(input.state, input.slug);
+  writeProjectSettings(input.state, input.slug, { ...finished, ...(input.syncRequestId && source.requestId === input.syncRequestId ? { openDesignSource: { ...source, acknowledgedRequestId: input.syncRequestId } } : {}) });
   return link;
 }
-export function autoSyncOpenDesignLink(input: { state: string; slug: string; root: string; userHome?: string }): void {
-  const link = readOpenDesignLink(input.root) ?? readExecution(input.state, input.slug).openDesignLink; if (!link) return;
+export function autoSyncOpenDesignLink(input: { state: string; slug: string; root: string; userHome?: string; seedRuns?: LinkedDesignSeeder }): void {
+  const link = readOpenDesignLink(input.root) ?? readProjectSettings(input.state, input.slug).openDesignLink; if (!link) return;
   const source = discoverOpenDesignProjects(input.userHome).find(p => p.projectId === link.projectId);
   const hasBundle = existsSync(join(input.root, 'design/index.html')) || existsSync(join(input.root, 'design/screens.html'));
   if (source && (!hasBundle || source.digest !== link.digest || source.sourceUpdatedAt > link.sourceUpdatedAt)) syncOpenDesignLink({ ...input, projectId: link.projectId });
-}
-/** Refresh unchanged seeds; a specialist's refinements require explicit reconciliation. */
-export function seedLinkedOpenDesign(root: string, workspace: string, initiativeId: string): void {
-  if (!safeId(initiativeId)) fail('Invalid initiative id');
-  const link = readOpenDesignLink(root); if (!link) return;
-  const destination = join(workspace, '.scratch', initiativeId, 'mockups');
-  const marker = safeDestination(destination, 'open-design-seed.json', workspace);
-  let previous: Record<string, string> = {};
-  try { previous = JSON.parse(readFileSync(marker, 'utf8')).files ?? {}; } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e; }
-  const next: Record<string, string> = {}; const writes: Array<{ path: string; bytes: Buffer }> = [];
-  for (const file of inventory(join(root, 'design')).filter(f => link.files.includes(f.path))) {
-    const path = safeDestination(destination, file.path, workspace), bytes = Buffer.from(file.contentBase64, 'base64');
-    const hash = createHash('sha256').update(bytes).digest('hex'); next[file.path] = hash;
-    if (existsSync(path)) {
-      const current = createHash('sha256').update(readFileSync(path)).digest('hex');
-      if (current === hash || previous[file.path] === hash) continue;
-      if (previous[file.path] !== current) throw new FactoryError('open-design-seed-conflict', `Preserve specialist edits in ${path}; reconcile them with the updated Owner design before dispatch`);
-    }
-    writes.push({ path, bytes });
-  }
-  const removals: string[] = [];
-  for (const [path, hash] of Object.entries(previous)) if (!(path in next)) { const target = safeDestination(destination, path, workspace); if (existsSync(target)) { if (createHash('sha256').update(readFileSync(target)).digest('hex') !== hash) throw new FactoryError('open-design-seed-conflict', `Reconcile specialist edits before removing ${target}`); removals.push(target); } }
-  for (const path of removals) rmSync(path);
-  for (const file of writes) { mkdirSync(dirname(file.path), { recursive: true }); writeFileSync(file.path, file.bytes); }
-  mkdirSync(destination, { recursive: true }); writeFileSync(marker, JSON.stringify({ digest: link.digest, files: next }, null, 2) + '\n');
 }
 /** The synced specification is versioned before a Task can branch from the root. */
 function checkpointLinkedDesign(root: string, files: string[]): void {
@@ -175,16 +151,16 @@ function checkpointLinkedDesign(root: string, files: string[]): void {
   } catch { throw new FactoryError('open-design-checkpoint-failed', 'Design files were copied but could not be committed. Resolve repository hooks/index conflicts and sync again before dispatch.'); }
 }
 /** A client-pushed source must acknowledge a fresh read before mail is queued. */
-export async function prepareOpenDesignDispatch(input: { state: string; slug: string; root: string; userHome?: string; timeoutMs?: number; requestId?: string }): Promise<void> {
-  const selection = readExecution(input.state, input.slug);
+export async function prepareOpenDesignDispatch(input: { state: string; slug: string; root: string; userHome?: string; timeoutMs?: number; requestId?: string; seedRuns?: LinkedDesignSeeder }): Promise<void> {
+  const selection = readProjectSettings(input.state, input.slug);
   if (!selection.openDesignLink) return;
-  if (selection.openDesignSource?.kind !== 'client') { autoSyncOpenDesignLink(input); const link = readOpenDesignLink(input.root); if (link) { if (selection.mode === 'scrum') for (const run of listRuns(input.state, input.slug).filter(r => !terminalRun(r))) seedLinkedOpenDesign(input.root, input.root, run.initiativeId); checkpointLinkedDesign(input.root, [...(selection.openDesignCheckpointPaths ?? []), ...link.files, 'open-design-link.json']); } return; }
+  if (selection.openDesignSource?.kind !== 'client') { autoSyncOpenDesignLink(input); const link = readOpenDesignLink(input.root); if (link) { input.seedRuns?.(); checkpointLinkedDesign(input.root, [...(selection.openDesignCheckpointPaths ?? []), ...link.files, 'open-design-link.json']); } return; }
   const requestId = input.requestId ?? randomUUID();
   if (selection.openDesignSource.acknowledgedRequestId === requestId) return;
-  writeDurableFile(selectionPath(input.state, input.slug), JSON.stringify({ ...selection, openDesignSource: { ...selection.openDesignSource, requestId } }) + '\n');
+  writeProjectSettings(input.state, input.slug, { ...selection, openDesignSource: { ...selection.openDesignSource, requestId } });
   const deadline = Date.now() + (input.timeoutMs ?? 15000);
   while (Date.now() < deadline) {
-    const latest = readExecution(input.state, input.slug);
+    const latest = readProjectSettings(input.state, input.slug);
     if (!latest.openDesignLink || latest.openDesignSource?.acknowledgedRequestId === requestId) return;
     if (latest.openDesignSource?.requestId !== requestId) throw new FactoryError('open-design-sync-superseded', 'Another directive requested a newer design sync; retry this directive');
     await new Promise(resolve => setTimeout(resolve, 100));
@@ -192,10 +168,10 @@ export async function prepareOpenDesignDispatch(input: { state: string; slug: st
   throw new FactoryError('open-design-client-sync-required', 'Open Factory on the design computer and grant its linked folder access, then retry the directive. No seat mail was queued.');
 }
 export function unlinkOpenDesign(state: string, slug: string, root: string): void {
-  const selection = readExecution(state, slug); const { openDesignLink: _link, openDesignSource: _source, openDesignCheckpointPaths: _pending, ...rest } = selection;
+  const selection = readProjectSettings(state, slug); const { openDesignLink: _link, openDesignSource: _source, openDesignCheckpointPaths: _pending, ...rest } = selection;
   rmSync(safeDestination(join(root, 'design'), 'open-design-link.json'), { force: true });
   checkpointLinkedDesign(root, [...(selection.openDesignCheckpointPaths ?? []), 'open-design-link.json']);
-  writeDurableFile(selectionPath(state, slug), JSON.stringify(rest) + '\n');
+  writeProjectSettings(state, slug, rest);
 }
 
 export { inventory as readOpenDesignFiles };

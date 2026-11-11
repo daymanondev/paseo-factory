@@ -15,13 +15,8 @@ export interface ScrumTaskBinding {
   configRevision: number;
   artifactRefs: ArtifactRef[];
 }
-export function safeId(value: unknown): value is string {
-  return (
-    typeof value === "string" &&
-    /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(value) &&
-    value !== ".."
-  );
-}
+import { safeId } from "../safe-id.ts";
+export { safeId };
 export function safePath(value: unknown): value is string {
   return (
     typeof value === "string" &&

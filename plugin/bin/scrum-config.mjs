@@ -71,11 +71,13 @@ function needsHumanEvidenceIsValid(evidence, reason) {
   return isDenialRepoke || isAttemptGate || isSpawnRespawn;
 }
 
-// src/scrum/types.ts
-var SPECIALIST_ROLES = ["pm", "ux", "architect", "dev", "qa"];
+// src/safe-id.ts
 function safeId(value) {
   return typeof value === "string" && /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(value) && value !== "..";
 }
+
+// src/scrum/types.ts
+var SPECIALIST_ROLES = ["pm", "ux", "architect", "dev", "qa"];
 function safePath(value) {
   return typeof value === "string" && value.length > 0 && !value.includes("\\") && !value.includes("\0") && value.split("/").every((p) => p !== "" && p !== "." && p !== "..");
 }
@@ -889,7 +891,7 @@ function selectionPath(state, slug) {
 }
 function executionIsValid(value) {
   const v = value;
-  return v !== null && typeof v === "object" && v.schemaVersion === 1 && ["slp", "scrum"].includes(v.mode) && Number.isSafeInteger(v.revision) && v.revision >= 0 && (v.skillPacks === void 0 || Array.isArray(v.skillPacks) && v.skillPacks.every((p) => typeof p === "string"));
+  return v !== null && typeof v === "object" && v.schemaVersion === 1 && ["slp", "scrum"].includes(v.mode) && Number.isSafeInteger(v.revision) && v.revision >= 0;
 }
 function readExecution(state, slug) {
   const path = selectionPath(state, slug);
@@ -928,15 +930,14 @@ function registerExecutionSelection(state, slug) {
 }
 
 // src/scrum/config.ts
-import { AsyncLocalStorage as AsyncLocalStorage2 } from "node:async_hooks";
-import { readFileSync as readFileSync10, rmSync as rmSync4 } from "node:fs";
+import { rmSync as rmSync4 } from "node:fs";
 import { join as join9 } from "node:path";
 
 // src/lanes.ts
 import { mkdirSync as mkdirSync4, mkdtempSync, readFileSync as readFileSync5, rmSync as rmSync2, writeFileSync as writeFileSync4 } from "node:fs";
 import { dirname as dirname3, join as join5 } from "node:path";
 
-// src/scrum/open-design.ts
+// src/open-design/open-design.ts
 var OPEN_DESIGN_DIRECTIONS = [
   { id: "editorial-monocle", colors: ["#f7f8f4", "#214f3d", "#162019", "#e9f0e5"], typography: "Georgia display; system UI sans", craft: "Generous breathing room, warm paper and sage tonal surfaces" },
   { id: "modern-minimal", colors: ["#fafafa", "#09090b", "#e4e4e7"], typography: "System sans; tabular numerals", craft: "Crisp monochrome, hairline borders and precision grids" },
@@ -952,7 +953,7 @@ Deliver mockups/index.html (interactive), screens.html (story-grouped Flow Board
 Prototype routing reads ?screen=<id>&state=<state>, reflects root dataset.screen/state and handles scrum:set-state messages. Preserve app navigation for contextual empty/loading/error/offline/permission-denied states. Keep screen/state controls in the outer Studio. Use product language and SVG icons; keep internal spec identifiers in documentation.
 Record actual offline Chromium evidence in browser.json: network: disabled, consoleErrors: [], pageErrors: [], viewports with screen, width/height, scrollWidth/clientWidth and SHA-256 PNG screenshot path/hash. Capture screens-board (screens-board.png) and every Core Screen at its declared surface (Mobile 390x844, Desktop 1280x800, responsive both). Record passing keyboard populated checks for each Core Screen and all five system states through edge screens/state handlers, or the legacy six-state matrix. Record detector {tool: open-design, passed: true, nonAdvisoryCount: 0, viewportsChecked, findings}. Derive it from factory open-design lint --dir <mockupsDir> and actual viewport checks; never invent results. Run lint-scrum-doc --kind ux before Claim. Dev consumes the approved manifest, DESIGN.md, styles.css and screens.html; UI Dev and QA supply the same offline evidence before sign-off.`;
 
-// src/scrum/open-design-link-state.ts
+// src/open-design/open-design-link-state.ts
 import { readFileSync as readFileSync3 } from "node:fs";
 import { join as join3 } from "node:path";
 function readOpenDesignLink(root) {
@@ -1311,6 +1312,10 @@ var TOOLLESS_OPENCODE_CONFIG = JSON.stringify({
     read: { "*": "ask" }
   }
 });
+
+// src/json-store.ts
+import { AsyncLocalStorage as AsyncLocalStorage2 } from "node:async_hooks";
+import { readFileSync as readFileSync10 } from "node:fs";
 
 // src/upgrade-state.ts
 import { readFileSync as readFileSync6, readdirSync as readdirSync3 } from "node:fs";
@@ -2130,11 +2135,25 @@ var LedgerAdmission = class _LedgerAdmission {
   }
 };
 
-// src/scrum/config.ts
+// src/json-store.ts
+function readOptionalJson(path, code = "state-json-invalid") {
+  try {
+    return JSON.parse(readFileSync10(path, "utf8"));
+  } catch (error) {
+    if (error.code === "ENOENT") return void 0;
+    throw new FactoryError(code, `${code}: ${path}: ${String(error)}`);
+  }
+}
+function atomicJson(path, value) {
+  writeDurableFile(path, JSON.stringify(value, null, 2) + "\n");
+}
 var mutation = new AsyncLocalStorage2();
-function scrumMutation(state, fn) {
+function stateMutation(state, fn) {
   return mutation.getStore() === state ? fn() : LedgerAdmission.stateMutation(state, () => mutation.run(state, fn));
 }
+
+// src/scrum/config.ts
+var scrumMutation = stateMutation;
 var SCRUM_ROLES = ["pm", "ux", "architect", "dev", "qa"];
 var SCRUM_LANES = [
   "supervisor",
@@ -2144,20 +2163,7 @@ var SCRUM_LANES = [
   "retro"
 ];
 var scopeDir = (state, slug) => slug === void 0 ? state : projectStateDir(state, slug);
-function readOptionalJson(path) {
-  try {
-    return JSON.parse(readFileSync10(path, "utf8"));
-  } catch (error) {
-    if (error.code === "ENOENT") return void 0;
-    throw new FactoryError(
-      "scrum-config-invalid",
-      `scrum-config-invalid: ${path}: ${String(error)}`
-    );
-  }
-}
-function atomicJson(path, value) {
-  writeDurableFile(path, JSON.stringify(value, null, 2) + "\n");
-}
+var readOptionalJson2 = (path) => readOptionalJson(path, "scrum-config-invalid");
 function saveExecutionDefault(state, mode) {
   return scrumMutation(state, () => {
     if (!["slp", "scrum"].includes(mode))
@@ -2183,7 +2189,7 @@ function scrumConfigIsValid(value) {
 }
 function readScrumConfig(state, slug) {
   const path = join9(scopeDir(state, slug), "scrum-lanes.json");
-  const value = readOptionalJson(path);
+  const value = readOptionalJson2(path);
   if (value === void 0) return void 0;
   if (!scrumConfigIsValid(value))
     throw new FactoryError(
@@ -2256,15 +2262,6 @@ function ensureScrumConfig(state, slug, reset = false) {
     return next;
   });
 }
-function setProjectSkillPacks(state, slug, skillPacks) {
-  return scrumMutation(state, () => {
-    const current = readExecution(state, slug);
-    if (skillPacks.some((p) => !["expo", "firebase", "zcode-3d", "science"].includes(p))) throw new FactoryError("invalid-skill-pack", "Unknown Project skill pack");
-    const next = { ...current, revision: current.revision + 1, skillPacks: [...new Set(skillPacks)] };
-    atomicJson(join9(scopeDir(state, slug), "execution.json"), next);
-    return next;
-  });
-}
 export {
   SCRUM_LANES,
   SCRUM_ROLES,
@@ -2272,13 +2269,12 @@ export {
   ensureScrumConfig,
   executionIsValid,
   readExecution,
-  readOptionalJson,
+  readOptionalJson2 as readOptionalJson,
   readScrumConfig,
   registerExecution,
   saveExecutionDefault,
   saveScrumConfig,
   scopeDir,
   scrumConfigIsValid,
-  scrumMutation,
-  setProjectSkillPacks
+  scrumMutation
 };
