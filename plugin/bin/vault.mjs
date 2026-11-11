@@ -2562,6 +2562,12 @@ function safeId(value) {
 }
 
 // src/open-design/open-design-link-state.ts
+function parseOpenDesignLink(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return void 0;
+  const link = value;
+  if (typeof link.projectId !== "string" || !safeId(link.projectId) || typeof link.projectName !== "string" || !["designSystemId", "directionId"].every((key) => link[key] == null || typeof link[key] === "string") || typeof link.sourceUpdatedAt !== "number" || !Number.isFinite(link.sourceUpdatedAt) || typeof link.syncedAt !== "string" || !link.syncedAt.trim() || typeof link.digest !== "string" || !link.digest.trim() || typeof link.screenCount !== "number" || !Number.isFinite(link.screenCount) || !Array.isArray(link.files) || !link.files.every((file) => typeof file === "string")) return void 0;
+  return value;
+}
 function readOpenDesignLink(root) {
   let value;
   try {
@@ -2570,10 +2576,7 @@ function readOpenDesignLink(root) {
     if (e instanceof SyntaxError || e.code === "ENOENT") return void 0;
     throw e;
   }
-  if (!value || typeof value !== "object" || Array.isArray(value)) return void 0;
-  const link = value;
-  if (typeof link.projectId !== "string" || !safeId(link.projectId) || typeof link.projectName !== "string" || !["designSystemId", "directionId"].every((key) => link[key] == null || typeof link[key] === "string") || typeof link.sourceUpdatedAt !== "number" || !Number.isFinite(link.sourceUpdatedAt) || typeof link.syncedAt !== "string" || !link.syncedAt.trim() || typeof link.digest !== "string" || !link.digest.trim() || typeof link.screenCount !== "number" || !Number.isFinite(link.screenCount) || !Array.isArray(link.files) || !link.files.every((file) => typeof file === "string")) return void 0;
-  return value;
+  return parseOpenDesignLink(value);
 }
 
 // src/linked-design.ts

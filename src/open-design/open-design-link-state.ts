@@ -17,10 +17,8 @@ export interface OpenDesignProjectLink {
 export function openDesignBundleReady(root: string): boolean {
   return existsSync(join(root, 'design/index.html')) || existsSync(join(root, 'design/screens.html'));
 }
-export function readOpenDesignLink(root: string): OpenDesignProjectLink | undefined {
-  let value: unknown;
-  try { value = JSON.parse(readFileSync(join(root, 'design/open-design-link.json'), 'utf8')); }
-  catch (e) { if (e instanceof SyntaxError || (e as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw e; }
+/** The link record's shape check — one validator for the staged file and the legacy settings migration. */
+export function parseOpenDesignLink(value: unknown): OpenDesignProjectLink | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
   const link = value as Record<string, unknown>;
   if (typeof link.projectId !== 'string' || !safeId(link.projectId) || typeof link.projectName !== 'string' ||
@@ -30,4 +28,10 @@ export function readOpenDesignLink(root: string): OpenDesignProjectLink | undefi
       typeof link.screenCount !== 'number' || !Number.isFinite(link.screenCount) ||
       !Array.isArray(link.files) || !link.files.every(file => typeof file === 'string')) return undefined;
   return value as OpenDesignProjectLink;
+}
+export function readOpenDesignLink(root: string): OpenDesignProjectLink | undefined {
+  let value: unknown;
+  try { value = JSON.parse(readFileSync(join(root, 'design/open-design-link.json'), 'utf8')); }
+  catch (e) { if (e instanceof SyntaxError || (e as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw e; }
+  return parseOpenDesignLink(value);
 }
