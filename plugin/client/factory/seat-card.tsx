@@ -1,3 +1,10 @@
+/**
+ * One standing seat's card — the salvage of the retired Seat graph (ADR 0056):
+ * a live agent's status, model, thinking level and bound task, the Lead's
+ * handoff telemetry trio, plus the Open / Revoke / Rotate jumps; a vacant seat
+ * renders as a `SeatNode` carrying its picker hint. W5 replaces both with the
+ * Project panel's seat rows.
+ */
 import type { PluginTheme } from "@getpaseo/plugin";
 import { Icon } from "@getpaseo/plugin/client/ui";
 import { Text, View } from "react-native";
@@ -60,26 +67,6 @@ export function SeatNode({
         {subtitle}
       </Text>
     </Card>
-  );
-}
-
-/** The orthogonal rail between graph levels — a clean vertical connector. */
-export function Rail({
-  theme,
-  height = SPACING[2.5],
-}: {
-  theme: PluginTheme;
-  height?: number;
-}) {
-  return (
-    <View
-      style={{
-        width: 2,
-        height,
-        backgroundColor: theme.colors.border,
-        marginLeft: SPACING[4],
-      }}
-    />
   );
 }
 
@@ -185,9 +172,6 @@ export function AgentCard({
         ) : null}
         {agent.task !== null ? (
           <Pill theme={theme} label={`task ${agent.task}`} tone="accent" lit />
-        ) : null}
-        {agent.seqEnd !== null ? (
-          <Pill theme={theme} label={`seqEnd ${agent.seqEnd}`} mono />
         ) : null}
         {/* The Lead telemetry trio (v0.0.20, ADR 0013 §6): live context usage
             against the fixed 128k handoff mark, the rotation state, and the

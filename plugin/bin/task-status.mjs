@@ -49,11 +49,6 @@ function taskStatusLines(events, workspaceFilter) {
     const eligible = (role) => state.attempts.filter((attempt) => attempt[role]).map((attempt) => attempt.attempt).join(",") || "-";
     lines.push(`${task} attempts=${state.maxAttempt} verdict=${state.verdict ?? "-"} sha=${gate?.sha?.slice(0, 7) ?? "-"} accepted=${state.acceptance === void 0 ? "no" : "yes"}` + (state.closed === void 0 ? "" : ` closed=yes reason="${state.closed.reason}"`) + ` eye=${review?.outcome ?? "-"} choke=${count("permit_allowed")}/${count("permit_denied")}/${count("git_blocked")}` + (state.needs === void 0 ? "" : ` needs-human=${state.needs.reason}`) + ` review=${current?.reviewState ?? (state.contract?.freshEyes === true ? "pending" : "off")} owner-eligible=${eligible("ownerEligible")} lead-eligible=${eligible("leadEligible")}`);
   }
-  const retro = events.findLast((event) => event.event === "retro_written");
-  if (retro !== void 0) {
-    const count = retro.outcome === "written" && Number.isInteger(retro.proposalCount) ? ` proposals=${retro.proposalCount}` : "";
-    lines.push(`retro last=${retro.ts.slice(0, 10)} outcome=${retro.outcome}${count}`);
-  }
   return lines;
 }
 export {

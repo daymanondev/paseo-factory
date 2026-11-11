@@ -750,7 +750,6 @@ test("spool command authority (v0.0.23, ADR 0015 §1): refuses contract/spawn/re
     { id: "ag-9", kind: "repoke", task: "AUTH-1", agent: "ag-1", seat: "agent" },
     { id: "ag-10", kind: "needs_human", task: "AUTH-1", reason: "attempt-ceiling", evidence: { attempt: 3, gate: 2 }, seat: "agent" },
     { id: "ag-11", kind: "meter", task: "AUTH-1", provider: "opencode/glm-5.1", usage: {}, seat: "agent" },
-    { id: "ag-12", kind: "retro", seat: "agent" },
   ];
   for (const req of agentRequests) {
     const parsed = parseSpoolRequest({ ...req, submitter: "ag-1" });
@@ -1571,33 +1570,9 @@ test("Seam 1: an unscoped Task id resolves when exactly one Project owns it — 
   assert.ok(!unknown.ok && unknown.code === "unknown-project");
 });
 
-test("Seam 1: an unscoped retro on multiple Projects refuses with retro-project-required; a scoped one runs against that Project's Factory", async (t) => {
-  const { stateDir, rootA, rootB, slugA, slugB, registry } = makeTwinProjects(t);
-  const root = registry.root;
-  for (const root_ of [rootA, rootB]) {
-    const reply = await handleSpoolRequest(root, { id: `c-${root_.length}`, kind: "contract", task: "T-01", workspace: root_, gate: "true", artifact: "README.md", submitter: "owner" }, {}, registry);
-    assert.ok(reply.ok);
-  }
-  // A lane with no headless tool-less CLI form makes the scoped pass's own
-  // pre-flight refuse deterministically — proving the routing reached the
-  // per-Project Factory without depending on any CLI installed on PATH.
-  const saved = saveLanes(stateDir, { retro: "boguslane/model" }, undefined);
-  assert.ok(saved.ok, `the unusable retro lane must save (got: ${saved.ok ? "" : saved.reason})`);
-
-  const unscoped = await handleSpoolRequest(root, { id: "retro-unscoped", kind: "retro" }, {}, registry);
-  assert.ok(!unscoped.ok);
-  assert.equal(unscoped.code, "retro-project-required", "unscoped retro with two registered Projects refuses by name");
-  assert.match(unscoped.message, /exactly one Project/);
-
-  const scoped = await handleSpoolRequest(root, { id: "retro-scoped", kind: "retro", projectSlug: slugA }, {}, registry);
-  assert.ok(!scoped.ok);
-  assert.equal(scoped.code, "retro-copilot-unusable", "the scoped retro routed onto project-a's Factory and reached its own lane pre-flight");
-  assert.equal(
-    readProjectLedger(stateDir, slugA).filter((event) => event.event === "retro_written").length,
-    0,
-    "a refused retro records no line",
-  );
-  assert.ok(!existsSync(join(stateDir, "projects", slugB, "ledger.jsonl")) || readProjectLedger(stateDir, slugB).every((event) => event.event !== "retro_written"));
+test("v0.6.0 W4 (ADR 0056): a `retro` spool request no longer parses — the Retro door is gone", () => {
+  assert.equal(parseSpoolRequest({ id: "retro-1", kind: "retro" }), undefined);
+  assert.equal(parseSpoolRequest({ id: "retro-2", kind: "retro", projectSlug: "any-slug" }), undefined);
 });
 
 test("Seam 2 (v0.0.92): a spawn without worktree on a root-workspace Contract allocates the Task worktree server-side — spawn_dispatched records it, the Peer runs inside it, and its Paseo workspace is never the Lead's", async (t) => {

@@ -17,7 +17,7 @@ import { projectStateDir } from "./project.ts";
 export interface SessionUsageRecord {
   agentId: string;
   projectSlug: string;
-  seat: "supervisor" | "lead" | "agent" | "watch" | "retro";
+  seat: "supervisor" | "lead" | "agent" | "watch";
   task?: string;
   attempt?: number;
   harness: "pi" | "codex" | "opencode" | "antigravity" | "claude" | "copilot" | (string & {});
@@ -115,7 +115,6 @@ const SEAT_LABELS: Readonly<Record<SessionUsageRecord["seat"], string>> = {
   lead: "Lead",
   agent: "Peer",
   watch: "Watch",
-  retro: "Retro",
 };
 
 /** The row label a seat renders. */

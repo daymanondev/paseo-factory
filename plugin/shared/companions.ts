@@ -51,7 +51,7 @@ export const CORE_PLUGIN_DEFAULT_VERSION = "0.0.26";
 export const CORE_PLUGIN_ENTRY: CorePluginCatalogEntry = {
   id: "paseo-factory",
   title: "Factory Core",
-  tagline: "The verification core — Contracts, Gates, Fresh-eyes, Watch, Retro, and Project seats.",
+  tagline: "The verification core — Contracts, Gates, Fresh-eyes, Watch, and Project seats.",
   description:
     "Verification core for Paseo agents: owner-set contracts, a gate the agent cannot grade itself with, an append-only ledger, and standing Supervisor/Lead project seats.",
   canonicalSource: "git:daymanondev/paseo-factory:plugin",

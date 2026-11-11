@@ -375,28 +375,6 @@ export interface RespawnRequest {
 }
 
 /**
- * The Owner's Retro request (v0.0.7, ticket 03 item 2): `factory retro`
- * drops this and the plugin does everything — digest, copilot pass,
- * proposals file, the one factory-level `retro_written` line (the one-writer
- * law). Deliberately a NEW kind, not a contract reuse: different validation,
- * different act. The whole-ledger scope is always whole — no `--since`, no
- * task filter (v1) — but since v0.0.38 (ADR 0026 §1) the optional Project
- * scope (`projectSlug`, or `projectRoot` resolved to its slug) names whose
- * `retro` lane override the pass runs under.
- */
-export interface RetroRequest {
-  id: string;
-  kind: "retro";
-  /** The Project's registered slug — the registry door. */
-  projectSlug?: string;
-  /** Any directory inside the Project's repository — resolved to its canonical slug. */
-  projectRoot?: string;
-  submitter?: string;
-  /** Caller seat stamped from `PASEO_FACTORY_SEAT` when present (v0.0.23, ADR 0015 §1). */
-  seat?: SpoolSeat;
-}
-
-/**
  * The Lead's notebook update (v0.5.0, ADR 0052 Decision 1): the full
  * replacement content for `<projectStateDir>/notebook.md`, submitted for the
  * plugin — the one writer — to validate and persist in-process. OS-sandboxed
@@ -531,7 +509,6 @@ export type SpoolRequest =
   | MeterRequest
   | RepokeRequest
   | NeedsHumanRequest
-  | RetroRequest
   | NotebookRequest;
 
 /** Handles a synthetic ask — `createChoke(...).spoolAskHandler` is the implementation. */
@@ -585,9 +562,6 @@ export type SpoolReply =
       decision?: "allowed" | "denied";
       rule?: string;
       reason?: string;
-      /** Retro replies: the proposals file and its count (the success stdout's two facts). */
-      proposalsPath?: string;
-      proposalCount?: number;
       /** Spawn / respawn replies: the ledger event appended for the request (carries seq). */
       event?: LedgerEvent;
       /**
@@ -928,25 +902,6 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
     };
   }
 
-  if (req.kind === "retro") {
-    // The Retro carries its kind plus the optional Project scope (v0.0.38,
-    // ADR 0026 §1) and the submitter/seat stamps — whole-ledger always. Any
-    // extra field makes it not-a-retro.
-    if (req.projectSlug !== undefined && (typeof req.projectSlug !== "string" || req.projectSlug.trim() === "")) return undefined;
-    if (req.projectRoot !== undefined && (typeof req.projectRoot !== "string" || req.projectRoot.trim() === "")) return undefined;
-    const keys = Object.keys(req).filter(
-      (key) => key !== "id" && key !== "kind" && key !== "seat" && key !== "submitter" && key !== "projectSlug" && key !== "projectRoot",
-    );
-    if (keys.length > 0) return undefined;
-    return {
-      id: req.id,
-      kind: "retro",
-      ...(req.projectSlug === undefined ? {} : { projectSlug: req.projectSlug }),
-      ...(req.projectRoot === undefined ? {} : { projectRoot: req.projectRoot }),
-      ...submitterField,
-      ...seatField,
-    };
-  }
   if (req.kind === "notebook") {
     // The notebook update (v0.5.0, ADR 0052 Decision 1): the content is any
     // string — an empty or malformed one is the WRITER's named refusal
@@ -1524,8 +1479,7 @@ function contextOfSpoolRequest(request: SpoolRequest): TargetProjectContext {
  * slug is unregistered, or whose bare Task id exists in more than one
  * Project, is refused here by name — never routed onto a guessed Project.
  * The reset/delete handlers keep resolving and refusing on their own, so for
- * those kinds routing only picks the maintenance lane; `retro` resolves
- * wholly inside its own handler (its refusal is `retro-project-required`).
+ * those kinds routing only picks the maintenance lane.
  */
 export function routeSpoolRequest(root: Factory, request: SpoolRequest, registry: FactoryRegistry | undefined): SpoolRouting {
   if (registry === undefined || !PROJECT_SCOPED_SPOOL_KINDS.has(request.kind)) return { factory: root };
@@ -1671,8 +1625,7 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
         (request.kind === "lead_dispatch" && request.from !== "peer") ||
         request.kind === "supervisor_dispatch" ||
         request.kind === "supervisor_report" ||
-        request.kind === "lead_rotate" ||
-        request.kind === "retro") &&
+        request.kind === "lead_rotate") &&
       effectiveSeat === "agent"
     ) {
       // v0.5.0 (ADR 0054 §5, ticket 05): the retirement's own named refusal —
@@ -2260,58 +2213,6 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
         summary: `needs-human for ${request.task}: ${event.reason} (${detail})`,
       };
     }
-    if (request.kind === "retro") {
-      // The Owner's on-demand pass (v0.0.7): the plugin runs it whole. A
-      // `failed` outcome already ledgered its visible line — the reply still
-      // refuses (exit 2), so the Owner sees the error at the terminal too.
-      // v0.0.89 (ADR 0045 §4): the pass runs strictly against ONE Project's
-      // own Factory — its isolated Ledger, Reports, and retro files under
-      // `<stateDir>/projects/<slug>/`. With the registry wired, the scope
-      // resolves through the context-first order (explicit `projectSlug` /
-      // `projectRoot` → Correlation token → workspace); unscoped on a machine
-      // with zero or multiple registered Projects it refuses by name — never
-      // a multi-Project digest. The legacy single-Factory entrance (no
-      // registry) forwards the optional scope as-is (v0.0.38, ADR 0026 §1).
-      if (registry !== undefined) {
-        const target = resolveTargetProject(registry, {
-          project: request.projectSlug,
-          workspace: request.projectRoot,
-          submitter: request.submitter,
-        });
-        if (!target.ok) {
-          return target.code === "unknown-project"
-            ? { id: request.id, ok: false, code: "unknown-project", message: target.message }
-            : {
-                id: request.id,
-                ok: false,
-                code: "retro-project-required",
-                message: `the retro runs against exactly one Project's ledger — ${target.message}`,
-              };
-        }
-        const outcome = await registry.factoryForProject(target.slug).retro(target.slug);
-        if (outcome.outcome === "failed") {
-          return { id: request.id, ok: false, code: "retro-failed", message: outcome.error ?? "(no reason recorded)" };
-        }
-        return {
-          id: request.id,
-          ok: true,
-          summary: `retro written: ${outcome.proposalCount} proposals → ${outcome.proposalsPath}`,
-          proposalsPath: outcome.proposalsPath,
-          proposalCount: outcome.proposalCount,
-        };
-      }
-      const outcome = await factory.retro(request.projectSlug ?? request.projectRoot);
-      if (outcome.outcome === "failed") {
-        return { id: request.id, ok: false, code: "retro-failed", message: outcome.error ?? "(no reason recorded)" };
-      }
-      return {
-        id: request.id,
-        ok: true,
-        summary: `retro written: ${outcome.proposalCount} proposals → ${outcome.proposalsPath}`,
-        proposalsPath: outcome.proposalsPath,
-        proposalCount: outcome.proposalCount,
-      };
-    }
     // The clean retirement (v0.5.0, ADR 0054 §5, ticket 05): the factory's
     // `close` appends `task_closed` and removes the Task worktree + branch;
     // this handler owns the Plugin-shell halves the core cannot see — cancel
@@ -2342,8 +2243,8 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
       // Decision 1): the write happens in-process at
       // `<projectStateDir>/notebook.md` — never inside `<project-root>` — so
       // OS-sandboxed Lead seats never shell-write the notebook again. The
-      // target resolves through the same context-first order the retro uses
-      // (explicit slug/root → Correlation token → single-Project fallback);
+      // target resolves through the context-first order (explicit slug/root →
+      // Correlation token → single-Project fallback);
       // an unresolvable target is a named refusal, never a guessed Project.
       let slug: string | undefined;
       let projectRoot: string | undefined =

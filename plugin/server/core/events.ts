@@ -678,6 +678,10 @@ export interface NeedsHuman extends EventIdentityMetadata {
 }
 
 /**
+ * HISTORICAL (ADR 0056): the Retro was deleted in v0.6.0 and no new
+ * `retro_written` line is ever written, but Ledgers that recorded one stay
+ * readable, foldable and importable — this shape and its validation remain.
+ *
  * The Retro's one line (v0.0.7, ticket 03) — the first factory-level event:
  * no task, no attempt, because the Retro reads the whole ledger, not any
  * task's slice of it. Mirrors `watch_written`'s shape: `model` is the pinned

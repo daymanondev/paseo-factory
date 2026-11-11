@@ -591,11 +591,6 @@ test("surface.snapshot populates projectUsage (totals, byModel, bySeat, byTask) 
   assert.equal(usageView!.byTask[0]!.task, "S1");
   assert.equal(usageView!.byTask[0]!.totalTokens, 2_077_529 + 136_075_392 + 983_447);
 
-  const task = snap.view.tasks.find(entry => entry.task === "S1");
-  assert.ok(task);
-  assert.equal(task!.totalTokens, 2_077_529 + 136_075_392 + 983_447, "the rollup's aggregate lights the token pill without any meter line");
-  assert.equal(task!.usageModel, "glm-5.3", "the model badge names the rollup's model");
-
   // The unscoped global view carries no usage half.
   const globalSnap = await handlers.snapshot({});
   assert.equal(globalSnap.ok, true);

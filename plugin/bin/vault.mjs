@@ -2682,7 +2682,7 @@ function renderRoleContract(role, options = {}) {
       SUPERVISOR_OUTCOME_BOUNDARY,
       "Diagnostics & Run-Verification Law: When the Owner reports an application cannot run or asks why a command fails, inspect `<project-root>` with read-only diagnostics (`ls -la`, `cat package.json`, and checking `node_modules/.bin`) before dispatching. Never run package-mutating commands such as `npm install` or git-mutating commands yourself; immediately dispatch a repair directive with the diagnostic evidence via `supervisor_dispatch_lead`. For these run-failure reports, read-only diagnosis may precede the dispatch required by the Delegation Boundary.",
       'Delegation Boundary: When the Owner provides a complete specification on Turn 1 (with no unresolved architectural traps such as unconfirmed single-file consolidation of a multi-subsystem app), or once the Owner answers your clarifying questions or approves the direction, your FIRST and ONLY tool call must be `paseo-factory_supervisor_dispatch_lead` (or `supervisor_dispatch_lead` / `call_mcp_tool` with `ServerName: "paseo-factory_paseo_factory"`, `ToolName: "supervisor_dispatch_lead"`, `Arguments: { message: "<directive>", workspace: "<project-root>" }` / `lead dispatch`), then immediately end your turn \u2014 do not read `grilling/SKILL.md` or ask unnecessary questions when the Owner\'s prompt already specifies the full requirements. CRITICAL: Lead is a separate process and CANNOT read your chat messages \u2014 writing a \'Directive for Lead\' or \'Design Spec\' in chat text without calling the dispatch tool does NOTHING and leaves the factory stuck! Do NOT write out the Design Spec or Directive in your chat reply before calling the tool: invoke `paseo-factory_supervisor_dispatch_lead` (or `supervisor_dispatch_lead`) IMMEDIATELY as the very first action of your turn, passing the full Design Spec and Directive inside the tool\'s `message` parameter, and only write a short confirmation to the Owner after the tool call succeeds. NEVER run `mkdir` or `cat > ...` to write `GLOSSARY.md`, `docs/adr/**`, `src/**`, or scaffolding during a feature request \u2014 all domain modeling, ADRs, seam interfaces, and code are authored after dispatch by Lead and Task Agents.',
-      "Seat write fence: When the Owner states a project rule in chat or ratifies a Retro proposal, record it in this repository's AGENTS.md or CONTEXT.md (or docs/** / .scratch/**) \u2014 you and the Lead are the only seats that may edit project memory, and you may never edit product source code on `<project-root>`.",
+      "Seat write fence: When the Owner states a project rule in chat, record it in this repository's AGENTS.md or CONTEXT.md (or docs/** / .scratch/**) \u2014 you and the Lead are the only seats that may edit project memory, and you may never edit product source code on `<project-root>`.",
       `You never grade work yourself: the Gate, the Choke, the Watch and the Ledger are the law. Only call \`${cmdPrefix} accept <task> --attempt <n> --by supervisor\` on the Owner's word after Lead reports green completion.`,
       "",
       ...renderSeatCommandBlock("supervisor", cmdPrefix),
@@ -2832,7 +2832,7 @@ function mergeLaneProfilesFiles(local, remote, options) {
 }
 
 // src/lanes.ts
-var LANE_NAMES = ["supervisor", "lead", "worker", "watch", "retro", "freshEyes"];
+var LANE_NAMES = ["supervisor", "lead", "worker", "watch", "freshEyes"];
 var EYE_JSON_LANE = "eye.json";
 function projectLanesPath(stateDir, projectSlug) {
   return join12(projectStateDir(stateDir, projectSlug), "lanes.json");

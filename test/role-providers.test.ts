@@ -17,7 +17,7 @@ import {
 import { projectLanesPath, saveLanes } from "../src/lanes.ts";
 import type { Lanes } from "../src/lanes.ts";
 import { laneProviderConfig } from "../plugin/server/provider-lanes.ts";
-import { disposeDir, fakeCopilotRunner, gitCommitAll, makeTempDir, writeLanes } from "./helpers.ts";
+import { disposeDir, gitCommitAll, makeTempDir, writeLanes } from "./helpers.ts";
 
 /**
  * The Role Provider Reconciliation seam (v0.0.27, ADR 0017 §1, spec §Testing
@@ -101,7 +101,6 @@ const LANES: Lanes = {
   lead: "claude-code/claude-opus-5",
   worker: "pi/zcode/glm-5.3",
   watch: "pi/zcode/glm-5.3",
-  retro: "pi/zcode/glm-5.3",
   freshEyes: "pi/zcode/glm-5.3",
 };
 
@@ -342,8 +341,7 @@ test("v0.0.27 (ADR 0017 §1): lanesSet reconciles <home>/config.json when a Supe
   disposeDir(t, dir);
   const home = join(dir, "paseo-home");
   const stateDir = join(home, "plugin-state", "paseo-factory");
-  const retroRunner = fakeCopilotRunner(() => ({ code: 0, stdout: '{"proposals":[]}' }));
-  const factory = createFactory({ stateDir, retroCopilotProbe: () => true, retroCopilotRunner: retroRunner.runner });
+  const factory = createFactory({ stateDir });
   const handlers = createSurfaceHandlers({ factory, stateDir, home, daemon: emptyDaemon(), onLog: () => {} });
   writeConfig(home, liveLikeConfig());
 

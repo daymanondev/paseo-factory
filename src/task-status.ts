@@ -21,10 +21,5 @@ export function taskStatusLines(events: readonly LedgerEvent[], workspaceFilter?
       (state.needs === undefined ? "" : ` needs-human=${state.needs.reason}`) +
       ` review=${current?.reviewState ?? (state.contract?.freshEyes === true ? "pending" : "off")} owner-eligible=${eligible("ownerEligible")} lead-eligible=${eligible("leadEligible")}`);
   }
-  const retro = events.findLast(event => event.event === "retro_written");
-  if (retro !== undefined) {
-    const count = retro.outcome === "written" && Number.isInteger(retro.proposalCount) ? ` proposals=${retro.proposalCount}` : "";
-    lines.push(`retro last=${retro.ts.slice(0, 10)} outcome=${retro.outcome}${count}`);
-  }
   return lines;
 }

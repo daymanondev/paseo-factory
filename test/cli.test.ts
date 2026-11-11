@@ -1224,7 +1224,7 @@ test("factory profile + lanes reset: the Owner's whole Lane profile lifecycle ov
   assert.equal(applied.path, join(stateDir, "projects", slug, "lanes.json"));
   assert.equal(applied.lanes.worker, "opencode/glm-5.1");
   const projectLanes = JSON.parse(readFileSync(join(stateDir, "projects", slug, "lanes.json"), "utf8")) as Record<string, string>;
-  assert.deepEqual(Object.keys(projectLanes).sort(), ["freshEyes", "lead", "retro", "supervisor", "watch", "worker"], "Copy-on-Apply writes all six lanes");
+  assert.deepEqual(Object.keys(projectLanes).sort(), ["freshEyes", "lead", "supervisor", "watch", "worker"], "Copy-on-Apply writes all five lanes");
   const profilesFile = JSON.parse(readFileSync(join(stateDir, "profiles.json"), "utf8")) as { activeProfileByScope?: Record<string, string> };
   assert.equal(profilesFile.activeProfileByScope?.[slug], "fast-stack", "the scope's active profile pointer is recorded");
 
@@ -1314,7 +1314,6 @@ test("the Lane profile store's two implementations cannot drift: plugin/bin/lane
     lead: "codex/gpt-5.4",
     worker: "opencode/glm-5.1",
     watch: "pi/zai/glm-5.3",
-    retro: "pi/zai/glm-5.3",
     freshEyes: "eye.json",
   };
   const lanesB = { ...lanesA, worker: "claude/claude-sonnet-4-6", freshEyes: "claude/claude-haiku-4-5" };
@@ -1355,8 +1354,8 @@ test("the Lane profile store's two implementations cannot drift: plugin/bin/lane
   assert.deepEqual(fileOf(binDir), fileOf(coreDir), "the activeProfileByScope pointer matches");
 
   // Batch save parity: one partial multi-lane update, one file.
-  const coreBatch = core.saveLanesBatch(coreDir, { watch: "copilot/gpt-5.4", retro: "copilot/gpt-5.4" }, slug);
-  const binBatch = bin.saveLanesBatch(binDir, { watch: "copilot/gpt-5.4", retro: "copilot/gpt-5.4" }, slug);
+  const coreBatch = core.saveLanesBatch(coreDir, { watch: "copilot/gpt-5.4", worker: "copilot/gpt-5.4" }, slug);
+  const binBatch = bin.saveLanesBatch(binDir, { watch: "copilot/gpt-5.4", worker: "copilot/gpt-5.4" }, slug);
   assert.ok(binBatch.ok, binBatch.ok ? "" : binBatch.reason);
   assert.deepEqual(binBatch.lanes, coreBatch.lanes);
   assert.deepEqual(JSON.parse(readFileSync(join(binDir, "projects", slug, "lanes.json"), "utf8")), JSON.parse(readFileSync(join(coreDir, "projects", slug, "lanes.json"), "utf8")));
@@ -1402,7 +1401,7 @@ test("the Lane profile store's two implementations cannot drift: plugin/bin/lane
 import { createFactoryRegistry, writeProjectRegistration } from "../plugin/server/projects.ts";
 import { resolveProject as resolveCoreProject } from "../plugin/server/core/project.ts";
 
-test("Seam 1: the CLI plumbs --project through the spool router — and factory retro refuses unscoped with retro-project-required", async (t) => {
+test("Seam 1: the CLI plumbs --project through the spool router", async (t) => {
   const dir = makeTempDir();
   disposeDir(t, dir);
   const home = join(dir, "paseo-home");
@@ -1454,10 +1453,4 @@ test("Seam 1: the CLI plumbs --project through the spool router — and factory 
     readFileSync(join(stateDir, "projects", slug, "ledger.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
   assert.ok(ledgerOf(b.slug).some((event) => event.event === "attempt_accepted"), "the acceptance landed in project-b's ledger");
   assert.ok(!ledgerOf(a.slug).some((event) => event.event === "attempt_accepted"), "project-a's ledger never saw project-b's acceptance");
-
-  // The unscoped retro on a two-Project machine refuses by name — the CLI
-  // relays the plugin's exact code at the terminal.
-  const retro = await run(ownerCli, ["retro", "--wait-secs", "30"], ownerEnv);
-  assert.equal(retro.status, 2, `the unscoped retro must refuse (stdout: ${retro.stdout})`);
-  assert.match(retro.stderr, /retro-project-required/);
 });

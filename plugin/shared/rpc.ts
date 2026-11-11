@@ -6,13 +6,12 @@ import { OpenDesignProjectLinkSchema } from "./view.ts";
  * discriminated union on `ok` so a refusal is data, never an exception
  * (PigMonitor's `Failure` pattern). The handlers run inside the plugin
  * server process that owns the single Factory instance — the in-process
- * single-writer amendment to ADR 0004: Owner acts from the UI invoke
- * `factory.accept(...)`/`factory.retro()` directly, never through the
- * spool.
+ * single-writer amendment to ADR 0004: Owner acts from the UI invoke the
+ * in-process handlers directly, never through the spool.
  */
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
-import { HelperMcpViewSchema, ImportMaterializationSchema, ImportStatusSchema, FactoryViewSchema, LaneNameSchema, LaneProfileViewSchema, LanesSchema, LanesUpdateSchema, ProjectViewSchema, TaskDetailViewSchema, VaultStatusViewSchema } from "./view.ts";
+import { HelperMcpViewSchema, ImportMaterializationSchema, ImportStatusSchema, FactoryViewSchema, LaneNameSchema, LaneProfileViewSchema, LanesSchema, LanesUpdateSchema, ProjectViewSchema, VaultStatusViewSchema } from "./view.ts";
 
 /** Every handler's refusal shape: a stable machine code plus the human sentence. */
 export const Failure = z.object({ ok: z.literal(false), code: z.string(), error: z.string() });
@@ -34,43 +33,6 @@ export const snapshot = defineRpc({
   output: z.union([z.object({ ok: z.literal(true), view: FactoryViewSchema }), Failure]),
 });
 
-// Method names must match /^[a-z][a-z0-9._-]*$/ (the daemon validates and
-// rejects uppercase), so the camelCase ticket spelling `factory.taskDetail`
-// ships as `factory.task.detail`.
-export const taskDetail = defineRpc({
-  name: "factory.task.detail",
-  input: z.object({ task: z.string().min(1) }),
-  output: z.union([z.object({ ok: z.literal(true), detail: TaskDetailViewSchema }), Failure]),
-});
-
-export const accept = defineRpc({
-  name: "factory.accept",
-  input: z.object({ task: z.string().min(1), attempt: z.number().int().min(1) }),
-  output: z.union([z.object({ ok: z.literal(true), seq: z.number().int(), summary: z.string() }), Failure]),
-});
-
-export const retro = defineRpc({
-  name: "factory.retro",
-  input: z.object({
-    /**
-     * The Project scope (v0.0.38, ADR 0026 §1) — any directory inside the
-     * Project's repository. The pass resolves that Project's own `retro` lane
-     * override before the machine table; omitted keeps the machine lane.
-     */
-    projectRoot: z.string().optional(),
-  }),
-  output: z.union([
-    z.object({
-      ok: z.literal(true),
-      outcome: z.string(),
-      proposalCount: z.number().int().nullable(),
-      proposalsPath: z.string().nullable(),
-      error: z.string().nullable(),
-    }),
-    Failure,
-  ]),
-});
-
 export const lanesSet = defineRpc({
   name: "factory.lanes.set",
   input: z.object({
@@ -87,7 +49,6 @@ export const lanesSet = defineRpc({
         lead: z.string(),
         worker: z.string(),
         watch: z.string(),
-        retro: z.string(),
         freshEyes: z.string(),
       }),
       /** What the live seat model sync did: applied / skipped (no live seat agent) / failed (reason). */
@@ -97,7 +58,7 @@ export const lanesSet = defineRpc({
   ]),
 });
 
-// The atomic batch lane save (v0.0.38, ADR 0026 §1 — the Watch & Retro race
+// The atomic batch lane save (v0.0.38, ADR 0026 §1 — the dual-save race
 // fix): every lane in `lanes` lands in ONE write, so two cards never race on
 // `lanes.json` or the daemon config reload. (The spec's camelCase spelling
 // `factory.lanes.setBatch` ships as `factory.lanes.set.batch` — method names
@@ -303,34 +264,6 @@ export const projectDelete = defineRpc({
   ]),
 });
 
-export const projectPickFolder = defineRpc({
-  name: "factory.project.pick.folder",
-  input: z
-    .object({
-      prompt: z.string().optional(),
-    })
-    .optional(),
-  output: z.union([
-    z.object({
-      ok: z.literal(true),
-      cancelled: z.literal(true),
-      path: z.null(),
-    }),
-    z.object({
-      ok: z.literal(true),
-      cancelled: z.literal(false),
-      path: z.string(),
-      projectRoot: z.string(),
-      slug: z.string(),
-      project: ProjectViewSchema,
-      bootstrapped: z.boolean(),
-      summary: z.string(),
-      view: FactoryViewSchema.optional(),
-    }),
-    Failure,
-  ]),
-});
-
 // The UI's quick dispatch (v0.0.20, ADR 0013 §4): the third internal caller
 // of the in-process `enqueueLeadMail()` pipeline — the same door the spool's
 // `lead_dispatch` rides (auto-ensure the Lead seat, queue the directive in
@@ -358,15 +291,6 @@ export const leadDispatch = defineRpc({
     }),
     Failure,
   ]),
-});
-
-// Ratify via Supervisor (v0.0.14, ADR 0010 §6): dispatch one Retro proposal
-// to the Project's Supervisor to apply to <project-root>/AGENTS.md,
-// CONTEXT.md, or Gate config — the two-tier memory loop's Owner act.
-export const ratifyProposal = defineRpc({
-  name: "factory.retro.ratify",
-  input: z.object({ projectRoot: z.string(), day: z.string(), proposalId: z.number().int() }),
-  output: z.union([z.object({ ok: z.literal(true), agentId: z.string(), summary: z.string() }), Failure]),
 });
 
 // The companion plugin lifecycle (v0.0.17, ADR 0012 §3): install from the

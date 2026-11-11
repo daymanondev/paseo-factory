@@ -37,8 +37,7 @@ var SEAT_LABELS = {
   supervisor: "Supervisor",
   lead: "Lead",
   agent: "Peer",
-  watch: "Watch",
-  retro: "Retro"
+  watch: "Watch"
 };
 function seatLabelOf(record) {
   return SEAT_LABELS[record.seat] ?? record.seat;

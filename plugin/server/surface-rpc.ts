@@ -13,15 +13,13 @@ import { withExecutionLane } from "./core/execution-lane.ts";
 import { projectTask } from "./core/task-state.ts";
 import { upgradeFactory } from "./core/history-upgrade.ts";
 import type { UpgradeInput } from "./core/history-upgrade.ts";
-import { acceptanceSummary, executeAcceptance } from "./commands.ts";
 export { acceptanceSummary, archiveAcceptedTaskWorkspace } from "./commands.ts";
 /**
  * The Factory surface's in-process single-writer handlers (v0.0.13, ADR
  * 0009 §2/§4, the amendment to ADR 0004): every `factory.*` RPC runs inside
  * the plugin server process that owns the one Factory instance, so Owner
- * acts from the UI — Accept, Retro, Lane config, the seat bridges — invoke
- * `factory.accept({...})`, `factory.retro()` and `saveLanes` directly, never
- * through the spool. The daemon half rides the PaseoApi each `handle` call
+ * acts from the UI — Lane config, the seat bridges — invoke `saveLanes` and
+ * the seat helpers directly, never through the spool. The daemon half rides the PaseoApi each `handle` call
  * receives (`context.paseo`), reduced to the structural slice below — SDK
  * types stay out by the timeline.ts precedent.
  *
@@ -30,8 +28,7 @@ export { acceptanceSummary, archiveAcceptedTaskWorkspace } from "./commands.ts";
  * `{seat, project: <slug>}` — `supervisorEnsure`/`leadEnsure` find or create
  * them under their lane (additive role injection lives in roles.ts; nothing
  * under the project root is ever written), `leadRotate` retires a Lead so
- * the next dispatch starts fresh, and `ratifyProposal` dispatches a Retro
- * proposal to the Project's Supervisor (the two-tier memory loop). The two
+ * the next dispatch starts fresh. The two
  * daemon acts the in-process API lacks (a live agent's model sync,
  * cancelling a running agent) ride the CLI bridge in daemon-cli.ts.
  */
@@ -59,8 +56,7 @@ import {
 } from "./core/companion-tools.ts";
 import type { CompanionToolRunner, CompanionToolUpdateStatus } from "./core/companion-tools.ts";
 import { basename, join, resolve } from "node:path";
-import { FACTORY_VIEW_VERSION } from "../shared/view.ts";
-import { foldRetro, foldTasks, foldView, readTailed } from "./view.ts";
+import { foldView } from "./view.ts";
 import type { ProjectEventStream } from "./view.ts";
 import type { LedgerEvent } from "./core/events.ts";
 import { setAgentModelViaCli, setAgentThinkingViaCli, stopAgentViaCli } from "./daemon-cli.ts";
@@ -69,7 +65,7 @@ import type { DaemonPluginAction, DaemonPluginItem, DaemonPluginSourceStatus, Da
 import { effectiveLanesForReconcile, reconcilePaseoRoleProviders } from "./core/role-providers.ts";
 import { SEAT_TITLES, inferRoleFromProviderId, resolveEffectiveProviderFamily } from "./roles.ts";
 import type { SeatName } from "./roles.ts";
-import { ensureProjectRegistered, discoverProjects, writeProjectRegistration, resolveTargetProject } from "./projects.ts";
+import { ensureProjectRegistered, writeProjectRegistration, resolveTargetProject } from "./projects.ts";
 import type { FactoryRegistry } from "./projects.ts";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { COMPANION_CATALOG, COMPANION_TOOLS_CATALOG, CORE_PLUGIN_ENTRY, MANAGEABLE_PLUGIN_IDS, MANAGEABLE_TOOL_IDS } from "../shared/companions.ts";
@@ -77,7 +73,6 @@ import type { CompanionCatalogEntry, CompanionToolCatalogEntry, ManageablePlugin
 import type { SpoolLeadDispatchRequest, SpoolSupervisorReportRequest, SpoolReply } from "./spool.ts";
 import {
   openDesignCatalog, openDesignExport, openDesignStatus, openDesignSync, openDesignUnlink, openDesignPreview,
-  accept,
   lanesSet,
   lanesReset,
   lanesSetBatch,
@@ -95,14 +90,10 @@ import {
   profilesSave,
   projectAdd,
   projectDelete,
-  projectPickFolder,
   projectReset,
-  ratifyProposal,
-  retro,
   snapshot,
   supervisorEnsure,
   supervisorRevoke,
-  taskDetail,
   vaultConfigure,
   vaultHydrate,
   vaultImport,
@@ -113,10 +104,8 @@ import {
   vaultPush,
   vaultSync,
 } from "../shared/rpc.ts";
-import type { CompanionPluginView, AgentView, LaneName, LaneProfileView, Lanes, ProjectView, TaskView, VaultStatusView } from "../shared/view.ts";
+import type { CompanionPluginView, AgentView, LaneName, LaneProfileView, Lanes, ProjectView, VaultStatusView } from "../shared/view.ts";
 import type { UsageRuntime } from "./usage-rollup.ts";
-import { enrichTaskUsage } from "./view.ts";
-import { readProjectUsage } from "./core/usage-status.ts";
 
 // ---- the daemon slice ---------------------------------------------------------------------
 
@@ -373,15 +362,11 @@ export interface SurfaceDeps {
    * null usage half, never a failed snapshot.
    */
   usage?: UsageRuntime;
-  /** Native OS folder picker override (v0.0.35, ADR 0024; tests) — `osascript` on macOS by default. */
-  pickFolder?: (prompt?: string) => Promise<string | null> | string | null;
-  /** Alias for pickFolder. */
-  folderPicker?: (prompt?: string) => Promise<string | null> | string | null;
   onLog?: (message: string) => void;
 }
 
-/** How many agents one snapshot resolves a Timeline Oracle seqEnd for (seats + bound workers). */
-const SEQ_END_CAP = 12;
+/** How many agents one snapshot carries (seats + bound workers). */
+const SNAPSHOT_AGENT_CAP = 12;
 
 function realpathSafe(path: string): string {
   try {
@@ -397,32 +382,6 @@ function messageOf(err: unknown): string {
 
 function codeOf(err: unknown): string {
   return err instanceof FactoryError ? err.code : "failed";
-}
-
-function defaultPickFolderOnMac(prompt = "Select a project folder for Factory:"): string | null {
-  if (process.platform !== "darwin") {
-    throw new FactoryError(
-      "folder-picker-unsupported",
-      `Native folder picker is only supported on macOS (current platform: ${process.platform}); paste a path instead.`,
-    );
-  }
-  const escapedPrompt = prompt.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-  const res = spawnSync("osascript", ["-e", `POSIX path of (choose folder with prompt "${escapedPrompt}")`], {
-    encoding: "utf8",
-    timeout: 120_000,
-  });
-  if (res.status === 0 && typeof res.stdout === "string") {
-    const trimmed = res.stdout.trim();
-    return trimmed === "" ? null : trimmed.replace(/\/+$/, "") || "/";
-  }
-  const stderr = typeof res.stderr === "string" ? res.stderr : "";
-  if (res.status === 1 || /user canceled|-128/i.test(stderr)) {
-    return null;
-  }
-  throw new FactoryError(
-    "folder-picker-failed",
-    `Failed to open native folder picker: ${stderr.trim() || res.error?.message || `exit ${res.status ?? "unknown"}`}`,
-  );
 }
 
 /** One companion install's sentence — the source actually used, the ref when one was given. */
@@ -709,51 +668,6 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
   };
 
   /**
-   * Enriches folded `TaskView` rows with Peer `agentId` bindings from
-   * `<stateDir>/correlations.json` (and live daemon agents when present) so a
-   * spawned Peer conversation is reachable even before its first Claim or when
-   * a claim arrived without an agent stamp. The Contract lookup rides the
-   * row's OWN Project stream when it carries one (v0.0.89 — a Task id two
-   * Projects share resolves each side's Contract, never the ambiguity
-   * refusal); the task-only lookup stands in for unattributed rows.
-   */
-  const enrichTaskPeerAgents = (tasks: readonly (TaskView & { projectSlug?: string })[], liveAgents: readonly SurfaceAgentSnapshot[] = []): TaskView[] => {
-    const correlations = new CorrelationRegistry(deps.stateDir).list();
-    return tasks.map((taskView) => {
-      const contract =
-        taskView.projectSlug !== undefined
-          ? contractInProject(taskView.task, taskView.projectSlug)
-          : (() => {
-              const routed = resolveTaskFactory(taskView.task);
-              return routed.ok ? routed.factory.contractFor(taskView.task) : undefined;
-            })();
-      const livePeer = liveAgents.find(
-        (a) => a.labels.seat === "agent" && a.labels.task === taskView.task && typeof a.id === "string" && a.id !== "",
-      );
-      const corrPeer = correlations.findLast(
-        (r) =>
-          r.role === "agent" &&
-          r.task === taskView.task &&
-          typeof r.agentId === "string" &&
-          r.agentId !== "" &&
-          (contract === undefined || r.issuedAt >= contract.ts),
-      );
-      const fallbackAgentId = livePeer?.id ?? corrPeer?.agentId ?? null;
-      const resolvedTaskAgentId = taskView.agentId ?? fallbackAgentId;
-      const attempts = taskView.attempts.map((attempt, idx) =>
-        (attempt.agentId === null || attempt.agentId === undefined) && idx === taskView.attempts.length - 1 && resolvedTaskAgentId !== null
-          ? { ...attempt, agentId: resolvedTaskAgentId }
-          : attempt,
-      );
-      return {
-        ...taskView,
-        agentId: resolvedTaskAgentId,
-        attempts,
-      };
-    });
-  };
-
-  /**
    * One task's contract workspace sits inside the Project root (equal or
    * nested). The Contract resolves through the Project's OWN stream when the
    * caller names its slug (v0.0.89 — a Task id two Projects share answers per
@@ -816,21 +730,12 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     return { ...tokens, queuedMailCount: queued, ...(rotationState === undefined ? {} : { rotationState }) };
   };
 
-  /** One agent → AgentView, with the Timeline Oracle seqEnd when the daemon answers. */
-  const agentViewOf = async (
-    daemon: SurfaceDaemonApi,
+  /** One agent → AgentView. */
+  const agentViewOf = (
     agent: SurfaceAgentSnapshot,
     task: string | null,
     seatOverride?: "supervisor" | "lead",
-  ): Promise<AgentView> => {
-    let seqEnd: number | null = null;
-    try {
-      const page = await daemon.agents.ref(agent.id).timeline.refetch({ direction: "tail", limit: 1 });
-      const entry = page.entries?.[0];
-      if (typeof entry?.seqEnd === "number") seqEnd = entry.seqEnd;
-    } catch {
-      // the oracle's answer is optional — the card renders without it
-    }
+  ): AgentView => {
     return {
       id: agent.id,
       title: agent.title,
@@ -841,7 +746,6 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       // A native-picker seat carries no labels — its recognized seat rides anyway (ADR 0017 §2).
       seat: agent.labels.seat ?? seatOverride ?? null,
       task,
-      seqEnd,
       ...leadTelemetryOf(agent),
       requiresAttention: agent.requiresAttention,
       cwd: agent.cwd,
@@ -1917,17 +1821,16 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       if (!machineLanes.ok) return failure("lanes-unreadable", machineLanes.reason);
       const daemon = resolveDaemon(context);
       // v0.0.89 (ADR 0045 §1.3): a selected Project reads its events strictly
-      // from `factoryForProject(slug)`; the "All projects" view aggregates
-      // every registered Factory's events, each stream tagged with its
-      // Project's slug so the fold can attribute every task row and ledger
-      // line. Unwired registry (the legacy single-Factory entrances) keeps
-      // the root Factory's ledger as the one event stream.
+      // from `factoryForProject(slug)`. Since v0.6.0 (ADR 0056) there is no
+      // all-projects fold: an unscoped snapshot carries no events at all when
+      // the registry is wired, and the root Factory's ledger when it is not
+      // (the legacy single-Factory entrances).
       // A selected Project that is REGISTERED reads its own Factory's ledger; a
-      // repo no Project Factory owns yet (an unregistered directory in the
-      // Project Selector's scope) falls back to the root Factory's events — a
-      // read never mints a Project state directory. One damaged per-Project
-      // Ledger degrades to ITS OWN empty stream (v0.0.89, the daemon-half
-      // law: never a failed snapshot) — the error rides the Project row.
+      // repo no Project Factory owns yet falls back to the root Factory's
+      // events — a read never mints a Project state directory. One damaged
+      // per-Project Ledger degrades to ITS OWN empty stream (v0.0.89, the
+      // daemon-half law: never a failed snapshot) — the error rides the
+      // Project row.
       const streamErrors = new Map<string, string>();
       const streamForSlug = (slug: string): ProjectEventStream => {
         try {
@@ -1941,14 +1844,8 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       };
       const scopedStream = (slug: string): ProjectEventStream =>
         readProjectRegistration(deps.stateDir, slug) !== undefined ? streamForSlug(slug) : { slug, events: deps.factory.ledger.events };
-      const projectStreams: ProjectEventStream[] | undefined =
-        deps.registry === undefined
-          ? undefined
-          : project !== null
-            ? [scopedStream(project.slug)]
-            : deps.registry.slugs().map((slug) => streamForSlug(slug));
       const allEvents: readonly LedgerEvent[] =
-        projectStreams !== undefined ? projectStreams.flatMap((stream) => stream.events) : deps.factory.ledger.events;
+        deps.registry === undefined ? deps.factory.ledger.events : project !== null ? scopedStream(project.slug).events : [];
       const bound = agentTaskIndex(allEvents);
 
       let rawAgents: SurfaceAgentSnapshot[] = [];
@@ -2004,23 +1901,15 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         const task = bound.get(agent.id);
         return task !== undefined && taskInProject(task, project.root, project.slug);
       };
-      const relevant = rawAgents.filter(inScope).slice(0, SEQ_END_CAP);
+      const relevant = rawAgents.filter(inScope).slice(0, SNAPSHOT_AGENT_CAP);
       const agents: AgentView[] = [];
       for (const agent of relevant) {
         const seatOverride = agent.id === supervisorRaw?.id ? ("supervisor" as const) : agent.id === leadRaw?.id ? ("lead" as const) : undefined;
-        agents.push(await agentViewOf(daemon, agent, bound.get(agent.id) ?? null, seatOverride));
+        agents.push(agentViewOf(agent, bound.get(agent.id) ?? null, seatOverride));
       }
       const supervisor = supervisorRaw === undefined ? null : (agents.find((agent) => agent.id === supervisorRaw!.id) ?? null);
       const lead = leadRaw === undefined ? null : (agents.find((agent) => agent.id === leadRaw!.id) ?? null);
 
-      // The task fold stays per Project (v0.0.89): two Projects may share a
-      // Task id (`T-01` in each), so the aggregate folds each stream separately
-      // and attributes every row with its `projectSlug` — never one merged
-      // slice under a colliding id.
-      const allTasks: TaskView[] =
-        projectStreams === undefined
-          ? foldTasks(allEvents)
-          : projectStreams.flatMap((stream) => foldTasks(stream.events).map((task) => ({ ...task, projectSlug: stream.slug })));
       const scopedProject = project;
       const events =
         scopedProject === null
@@ -2061,21 +1950,8 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           ...(ledgerError !== undefined ? { ledgerError } : {}),
           supervisorId: liveSup?.id ?? reg?.supervisor ?? entry.supervisorId ?? null,
           leadId: liveLead?.id ?? reg?.lead ?? entry.leadId ?? null,
-          activeTaskCount: allTasks.filter((t) => taskInProject(t.task, entry.root, entry.slug)).length,
         };
       };
-      const projects = discoverProjects(
-        deps.stateDir,
-        rawAgents.filter(
-          (agent) =>
-            agent.labels.seat !== undefined ||
-            agent.labels.project !== undefined ||
-            inferRoleFromProviderId(agent.provider) !== undefined,
-        ),
-        deps.home,
-      )
-        .filter((entry): entry is typeof entry & { root: string } => entry.root !== null)
-        .map(enrichProjectView);
       const enrichedProject = scopedProject === null ? null : enrichProjectView(scopedProject);
 
       const updateSnap = localUpdateSnapshot ?? getCachedPluginUpdateStatus(deps.home);
@@ -2096,7 +1972,6 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         generatedAt: new Date().toISOString(),
         lanes: lanes.lanes,
         events,
-        ...(projectStreams === undefined ? {} : { projectStreams }),
         usage: usageFile,
         daemon: { agents, supervisor, lead, providers, daemonError },
         // v0.0.17 (ADR 0012 §2) & v0.0.25 (ADR 0012 §3–§4): the daemon plugin
@@ -2111,7 +1986,6 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         // degrades inside the view's own `error` field, never a refusal.
         vault: await vaultStatusOf(),
         project: enrichedProject,
-        projects,
       });
       // v0.0.38 (ADR 0026 §5): the Lane profile half — the gatherer-owned
       // filesystem probe layered over the fold (the vault-status precedent),
@@ -2124,7 +1998,6 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         ok: true as const,
         view: {
           ...view,
-          tasks: enrichTaskPeerAgents(view.tasks, rawAgents),
           machineLanes: machineLanes.lanes,
           skillHub: inspectSkillHub({ slpLanes: lanes.lanes, userHome: resolveSurfaceUserHome(), projectRoot: enrichedProject?.root, configuredPacks }),
           companionTools: buildCompanionToolsView(),
@@ -2132,115 +2005,6 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           ...laneProfilesGather(enrichedProject?.slug, view.lanes),
         },
       };
-    },
-
-    async taskDetail(input: { task: string }, _context?: SurfaceCallContext) {
-      // v0.0.89: the detail reads the task-owning Project's Factory — its own
-      // ledger fold and its own per-attempt files under
-      // `<stateDir>/projects/<slug>/`. A task id shared by several Projects
-      // refuses by name; an unknown task falls to the root Factory's refusal.
-      const routed = resolveTaskFactory(input.task);
-      if (!routed.ok) return failure(routed.code, routed.error);
-      const taskFactory = routed.factory;
-      const contract = taskFactory.contractFor(input.task);
-      if (contract === undefined) {
-        return failure("unknown-task", `no contract set for task ${input.task}`);
-      }
-      if (!loadLanes(deps.stateDir).ok) return failure("lanes-unreadable", `the lane table under ${deps.stateDir} is unreadable`);
-      const folded = foldTasks(taskFactory.ledger.events).find((entry) => entry.task === input.task);
-      if (folded === undefined) return failure("unknown-task", `no foldable history for task ${input.task}`);
-      const detailStateDir = routed.slug === undefined ? deps.stateDir : projectStateDir(deps.stateDir, routed.slug);
-      // v0.0.87 (ADR 0043 §4): the modal's token pill and model badge read the
-      // Project rollup too — the aggregate stands even when no `meter_written`
-      // line ever landed for the task.
-      const contractProject = resolveProject(contract.workspace);
-      const task = enrichTaskPeerAgents(
-        enrichTaskUsage([folded], contractProject.ok ? readProjectUsage(deps.stateDir, contractProject.slug) : undefined),
-      )[0]!;
-      return {
-        ok: true as const,
-        detail: {
-          version: FACTORY_VIEW_VERSION,
-          task,
-          contract: {
-            task: contract.task,
-            workspace: contract.workspace,
-            gate: contract.gate,
-            artifact: contract.artifact,
-            scope: contract.scope === undefined || contract.scope.length === 0 ? null : contract.scope,
-            skills: contract.skills === undefined || contract.skills.length === 0 ? null : contract.skills,
-            base: contract.base ?? null,
-            description: contract.description ?? null,
-            watch: contract.watch === true,
-            freshEyes: contract.freshEyes === true,
-            by: contract.by ?? null,
-          },
-          attempts: task.attempts.map((attempt) => ({
-            n: attempt.n,
-            verdict: attempt.verdict,
-            agentId: attempt.agentId ?? null,
-            report: attempt.report === null ? null : readTailed(detailStateDir, attempt.report),
-            gateLog: attempt.gateLog === null ? null : readTailed(detailStateDir, attempt.gateLog),
-          })),
-        },
-      };
-    },
-
-    async accept(input: { task: string; attempt: number }, context?: SurfaceCallContext) {
-      try {
-        // v0.0.89: the acceptance lands on the task-owning Project's Factory —
-        // its own ledger line, its own worktree landing lane.
-        const routed = resolveTaskFactory(input.task);
-        if (!routed.ok) return failure(routed.code, routed.error);
-        // Awaited since v0.0.14: a worktree task's local landing runs before
-        // the line records, and the summary carries the outcome.
-        const event = await executeAcceptance(routed.factory, { task: input.task, attempt: input.attempt, accepted_by: "owner" }, { authority: "owner", daemon: resolveDaemon(context), home: deps.home, cleanup: deps.cleanupDaemonWorkspaces });
-        return {
-          ok: true as const,
-          seq: event.seq,
-          summary: acceptanceSummary({ task: input.task, attempt: input.attempt, by: "owner", landing: event.landing, landingNote: event.landingNote }),
-        };
-      } catch (err) {
-        return failure(codeOf(err), messageOf(err));
-      }
-    },
-
-    async retro(input: { projectRoot?: string }, _context?: SurfaceCallContext) {
-      try {
-        // v0.0.38 (ADR 0026 §1): the pass honors the active Project's own
-        // `retro` lane. v0.0.89 (ADR 0045 §4): the pass runs strictly against
-        // ONE Project's own Factory — its isolated Ledger, Reports, and retro
-        // files. With the registry wired, the scope resolves through the
-        // context-first order; unscoped on a machine with zero or multiple
-        // registered Projects (the "All projects" view) it refuses by name —
-        // `retro-project-required` — never a multi-Project digest.
-        if (deps.registry !== undefined) {
-          const target = resolveTargetProject(deps.registry, { workspace: input?.projectRoot });
-          if (!target.ok) {
-            return target.code === "unknown-project"
-              ? failure(target.code, target.message)
-              : failure("retro-project-required", `the retro runs against exactly one Project's ledger — ${target.message}`);
-          }
-          const outcome = await deps.registry.factoryForProject(target.slug).retro(target.slug);
-          return {
-            ok: true as const,
-            outcome: outcome.outcome,
-            proposalCount: outcome.proposalCount ?? null,
-            proposalsPath: outcome.proposalsPath ?? null,
-            error: outcome.error ?? null,
-          };
-        }
-        const outcome = await deps.factory.retro(input?.projectRoot);
-        return {
-          ok: true as const,
-          outcome: outcome.outcome,
-          proposalCount: outcome.proposalCount ?? null,
-          proposalsPath: outcome.proposalsPath ?? null,
-          error: outcome.error ?? null,
-        };
-      } catch (err) {
-        return failure(codeOf(err), messageOf(err));
-      }
     },
 
     async lanesSet(input: { lane: LaneName; value: string; projectRoot?: string }, context?: SurfaceCallContext) {
@@ -2641,7 +2405,6 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
               missingRoot: false,
               supervisorId: null,
               leadId: null,
-              activeTaskCount: 0,
             };
       const summary = resolved.bootstrapped
         ? `Initialized Git repository and added project ${resolved.name} (${resolved.slug}).`
@@ -2656,33 +2419,6 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         bootstrapped: resolved.bootstrapped,
         summary,
         ...(snap.ok ? { view: snap.view } : {}),
-      };
-    },
-
-    /**
-     * Native OS folder picker (v0.0.35, ADR 0024): opens the native folder dialog
-     * (or invokes `deps.pickFolder` in tests), then delegates to `projectAdd` so
-     * bootstrap, safety refusal, registration, and Paseo workspace sync share one seam.
-     */
-    async projectPickFolder(
-      input: { prompt?: string } = {},
-      context?: SurfaceCallContext,
-    ) {
-      const picker = deps.pickFolder ?? deps.folderPicker ?? defaultPickFolderOnMac;
-      let chosen: string | null;
-      try {
-        chosen = await picker(input?.prompt);
-      } catch (err) {
-        return failure(codeOf(err), messageOf(err));
-      }
-      if (chosen === null || typeof chosen !== "string" || chosen.trim() === "") {
-        return { ok: true as const, cancelled: true as const, path: null };
-      }
-      const added = await this.projectAdd({ projectRoot: chosen.trim() }, context);
-      if (!added.ok) return added;
-      return {
-        ...added,
-        cancelled: false as const,
       };
     },
 
@@ -3067,35 +2803,6 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         rotationState: reply.rotationState ?? "normal",
         summary: reply.summary,
       };
-    },
-
-    async ratifyProposal(input: { projectRoot: string; day: string; proposalId: number }, context?: SurfaceCallContext) {
-      const project = projectOrRefusal(input.projectRoot);
-      if (!project.ok) return project;
-      // v0.0.89: the proposals fold reads the Project's OWN Factory ledger —
-      // its retro_written lines and per-Project retro files.
-      const retro = foldRetro(factoryForSlug(project.slug).ledger.events).findLast((entry) => entry.day === input.day);
-      if (retro === undefined) {
-        return failure("unknown-retro", `no retro was written on ${input.day} — nothing to ratify`);
-      }
-      const proposal = retro.proposals.find((entry) => entry.id === input.proposalId);
-      if (proposal === undefined) {
-        return failure("unknown-proposal", `retro ${input.day} has no proposal R${input.proposalId} — its proposals are ${retro.proposals.map((entry) => `R${entry.id}`).join(", ") || "none"}`);
-      }
-      // The dispatch (the supervisorEnsure({message}) precedent): the
-      // Project's Supervisor applies the ratified proposal to project memory
-      // — <project-root>/AGENTS.md, CONTEXT.md, or Gate config — and reports.
-      const message = [
-        `The Owner ratified retro proposal R${proposal.id} (${proposal.cls}) from ${input.day} — apply it now.`,
-        "",
-        `Proposal: ${proposal.text}`,
-        "",
-        `Apply it to this repository's project memory: <project-root>/AGENTS.md or CONTEXT.md for rules and context, or propose the Gate/command change in your reply if it belongs there. Then confirm what changed and where.`,
-      ].join("\n");
-      const ensured = await ensureSeat("supervisor", { projectRoot: input.projectRoot, message }, context);
-      if (!ensured.ok) return ensured;
-      log(`retro: R${proposal.id} of ${input.day} ratified via the supervisor of ${project.slug} (${ensured.agentId})`);
-      return { ok: true as const, agentId: ensured.agentId, summary: `R${proposal.id} (${proposal.cls}) dispatched to the Supervisor of ${project.slug}` };
     },
 
     // ---- the companion plugin lifecycle (v0.0.17, ADR 0012 §3) -----------------------------
@@ -3497,7 +3204,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       }
     },
   };
-  const reads = new Set(["cachedProviders", "sanitizeLane", "snapshot", "taskDetail", "pluginsCheckUpdates", "projectPickFolder", "historyImport", "historyImports", "historyUpgrade", "vaultHydrate", "vaultPull", "vaultPush", "vaultSync", "vaultImport"]);
+  const reads = new Set(["cachedProviders", "sanitizeLane", "snapshot", "pluginsCheckUpdates", "historyImport", "historyImports", "historyUpgrade", "vaultHydrate", "vaultPull", "vaultPush", "vaultSync", "vaultImport"]);
   const wrappers = new Map<PropertyKey, unknown>();
   return new Proxy(handlers, {
     get(target, key, receiver) {
@@ -3542,15 +3249,12 @@ export function registerSurfaceRpc(
   };
   server.handle(historyUpgrade, (input, context) => { pass(context); return handlers.historyUpgrade(input); });
       server.handle(snapshot, (input, context) => handlers.snapshot(input, pass(context)));
-  server.handle(taskDetail, (input, context) => handlers.taskDetail(input, pass(context)));
   server.handle(openDesignCatalog, input => handlers.openDesignCatalog(input));
   server.handle(openDesignExport, input => handlers.openDesignExport(input));
   server.handle(openDesignStatus, input => handlers.openDesignStatus(input));
   server.handle(openDesignSync, input => handlers.openDesignSync(input));
   server.handle(openDesignUnlink, input => handlers.openDesignUnlink(input));
   server.handle(openDesignPreview, input => handlers.openDesignPreview(input));
-  server.handle(accept, (input, context) => handlers.accept(input, pass(context)));
-  server.handle(retro, (input, context) => handlers.retro(input, pass(context)));
   server.handle(lanesSet, (input, context) => handlers.lanesSet(input, pass(context)));
   server.handle(lanesSetBatch, (input, context) => handlers.lanesSetBatch(input, pass(context)));
   server.handle(lanesReset, (input, context) => handlers.lanesReset(input, pass(context)));
@@ -3562,11 +3266,9 @@ export function registerSurfaceRpc(
   server.handle(leadEnsure, (input, context) => handlers.leadEnsure(input, pass(context)));
   server.handle(leadRotate, (input, context) => handlers.leadRotate(input, pass(context)));
   server.handle(projectAdd, (input, context) => handlers.projectAdd(input, pass(context)));
-  server.handle(projectPickFolder, (input, context) => handlers.projectPickFolder(input ?? {}, pass(context)));
   server.handle(projectDelete, (input, context) => handlers.projectDelete(input, pass(context)));
   server.handle(projectReset, (input, context) => handlers.projectReset(input, pass(context)));
   server.handle(leadDispatch, (input, context) => handlers.leadDispatch(input, pass(context)));
-  server.handle(ratifyProposal, (input, context) => handlers.ratifyProposal(input, pass(context)));
   server.handle(skillsImport, input => handlers.skillsImport(input));
   server.handle(skillsTogglePack, input => handlers.skillsTogglePack(input));
   server.handle(pluginsInstall, (input, context) => handlers.pluginsInstall(input, pass(context)));

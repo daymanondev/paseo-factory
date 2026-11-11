@@ -1,26 +1,26 @@
 /**
- * The one `<FactoryShell />` every Paseo surface entry renders (ADR 0009 §1):
- * global screen, workspace panel, settings screen — one component, three
- * hosts. It owns the snapshot poll and every RPC action (Accept, Run Retro,
- * lanes.set, the v0.0.38 batch/profile/reset lane acts — lanes.setBatch,
- * lanes.reset, profiles.save/apply/delete (ADR 0026 §2/§5) — Revoke
- * Supervisor, Rotate Lead, Ratify via Supervisor, task detail); the three
- * panes are pure renders of the view plus action callbacks. The Project
- * scope (v0.0.14, ADR 0010 §1) is the workspace panel's directory when
- * hosted there, else the header's Project Selector pick — the snapshot rides
- * it. Seats start only from Paseo's native New Chat picker (v0.0.27, ADR
- * 0017 §3) — the shell's Open actions are pure navigation jumps to a live
- * seat's conversation.
+ * The one `<FactoryShell />` the surface entries render (ADR 0009 §1;
+ * v0.6.0 W4, ADR 0056): the workspace panel and the settings screen — one
+ * component, two hosts, until the Project panel (W5) and the Settings screen
+ * (W8) replace it. It owns the snapshot poll and every RPC action (lanes.set,
+ * the v0.0.38 batch/profile/reset lane acts — lanes.setBatch, lanes.reset,
+ * profiles.save/apply/delete (ADR 0026 §2/§5) — Revoke Supervisor, Rotate
+ * Lead, Reset/Delete Project, plugins, Vault, Skill Hub); the three panes are
+ * pure renders of the view plus action callbacks. The Project scope is the
+ * workspace panel's directory — the snapshot rides it; there is no Project
+ * Switcher. Seats start only from Paseo's native New Chat picker (v0.0.27,
+ * ADR 0017 §3) — the shell's Open actions are pure navigation jumps to a
+ * live seat's conversation.
  * Function components only — no class syntax reaches the Hermes bundle.
  */
 import type { PluginTheme } from "@getpaseo/plugin";
 import type { PluginTab } from "@getpaseo/plugin/client";
 import { useRpc, useTabState } from "@getpaseo/plugin/client";
-import { Modal, ScrollView, useToast } from "@getpaseo/plugin/client/ui";
+import { ScrollView, useToast } from "@getpaseo/plugin/client/ui";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Text, View } from "react-native";
 import { z } from "zod";
-import { skillsImport, skillsTogglePack, accept, lanesReset, lanesSet, lanesSetBatch, leadRotate, helperMcpsSyncAndProbe, helperMcpsSetEnabled, pluginsInstall, pluginsManage, pluginsCheckUpdates, profilesApply, profilesDelete, profilesSave, projectAdd, projectDelete, projectPickFolder, projectReset, ratifyProposal, retro, snapshot, supervisorRevoke, taskDetail, vaultConfigure, vaultHydrate, vaultImport, vaultSync } from "../../shared/rpc.ts";
+import { skillsImport, skillsTogglePack, lanesReset, lanesSet, lanesSetBatch, leadRotate, helperMcpsSyncAndProbe, helperMcpsSetEnabled, pluginsInstall, pluginsManage, pluginsCheckUpdates, profilesApply, profilesDelete, profilesSave, projectDelete, projectReset, snapshot, supervisorRevoke, vaultConfigure, vaultHydrate, vaultImport, vaultSync } from "../../shared/rpc.ts";
 import type { ManageablePluginId } from "../../shared/companions.ts";
 import type { FactoryView, LaneName } from "../../shared/view.ts";
 import { Btn, Card, Pill, TabBar } from "../kit/pill.tsx";
@@ -32,10 +32,7 @@ import { VaultPane, isVaultActName } from "./vault.tsx";
 import type { VaultNote } from "./vault.tsx";
 import { actionFeedback, createResponseOrder } from "./vault-feedback.ts";
 import type { VaultStatusView } from "../../shared/view.ts";
-import { TaskDetailModal, TasksPane } from "./tasks.tsx";
-import type { TaskDetailModalState } from "./tasks.tsx";
 import { SeatsPane } from "./seats.tsx";
-import { TimelinePane } from "./timeline.tsx";
 import { PluginsPane } from "./plugins.tsx";
 import { isCoreSelfRestartError, resolveCoreRestartWatch } from "./plugin-feedback.ts";
 import type { ActivePluginAct, PluginsNote } from "./plugin-feedback.ts";
@@ -45,12 +42,8 @@ export interface Navigation {
   openAgent(input: { agentId: string; serverId?: string }): void;
 }
 
-type DetailState = TaskDetailModalState;
-
 const FactoryTabStateSchema = z.object({
-  tab: z.enum(["tasks", "seats", "timeline", "vault", "plugins"]),
-  pickedRoot: z.string().nullable(),
-  hasPickedScope: z.boolean(),
+  tab: z.enum(["seats", "vault", "plugins"]),
 });
 
 export function FactoryShell({
@@ -59,13 +52,13 @@ export function FactoryShell({
   dir,
   navigation,
   serverId,
-  initialTab = "tasks",
+  initialTab = "seats",
   showDiagnostics = false,
   panelTab,
 }: {
   theme: PluginTheme;
   layout?: { compact: boolean; platform?: "ios" | "android" | "web" };
-  /** The workspace panel's directory scope; undefined on the global screen. */
+  /** The workspace panel's directory scope; undefined on the settings screen. */
   dir?: string;
   navigation?: Navigation;
   serverId?: string;
@@ -76,8 +69,6 @@ export function FactoryShell({
 }) {
   const toast = useToast();
   const snapshotCall = useRpc(snapshot);
-  const acceptCall = useRpc(accept);
-  const retroCall = useRpc(retro);
   const lanesSetCall = useRpc(lanesSet);
   // The v0.0.38 lane acts (ADR 0026 §2/§5): one useRpc per contract, every
   // dispatch through act() — the SeatsPane stays a pure render of the view
@@ -91,11 +82,7 @@ export function FactoryShell({
   const leadRotateCall = useRpc(leadRotate);
   const projectResetCall = useRpc(projectReset);
   const projectDeleteCall = useRpc(projectDelete);
-  const projectPickFolderCall = useRpc(projectPickFolder);
-  const projectAddCall = useRpc(projectAdd);
-  const ratifyCall = useRpc(ratifyProposal);
 
-  const detailCall = useRpc(taskDetail);
   const helperMcpsSyncCall = useRpc(helperMcpsSyncAndProbe);
   const helperMcpsEnableCall = useRpc(helperMcpsSetEnabled);
   const pluginsInstallCall = useRpc(pluginsInstall);
@@ -122,16 +109,11 @@ export function FactoryShell({
   const [persistedState, setPersistedState] = useTabState(
     panelTab ?? fallbackPluginTab,
     FactoryTabStateSchema,
-    { tab: initialTab, pickedRoot: null, hasPickedScope: false },
+    { tab: initialTab },
   );
   const tab = persistedState.tab;
-  const pickedRoot = persistedState.pickedRoot;
-  const hasPickedScope = persistedState.hasPickedScope;
   const setTab = (nextTab: TabId): void => {
     setPersistedState({ ...persistedState, tab: nextTab });
-  };
-  const setPickedScope = (nextRoot: string | null, nextHasPicked = true): void => {
-    setPersistedState({ ...persistedState, pickedRoot: nextRoot, hasPickedScope: nextHasPicked });
   };
 
   const [bump, setBump] = useState(0);
@@ -145,23 +127,12 @@ export function FactoryShell({
   const vaultResponses = useRef(createResponseOrder());
   const [vaultNote, setVaultNote] = useState<VaultNote | null>(null);
   const [laneNote, setLaneNote] = useState<string | null>(null);
-  const [retroNote, setRetroNote] = useState<string | null>(null);
-  const [detail, setDetail] = useState<DetailState | null>(null);
   const [containerWidth, setContainerWidth] = useState<number>(0);
   const lastViewRef = useRef<FactoryView | null>(null);
   const refresh = () => setBump((n) => n + 1);
 
-  const prevDirRef = useRef<string | undefined>(dir);
-  useEffect(() => {
-    if (prevDirRef.current !== dir) {
-      prevDirRef.current = dir;
-      setPickedScope(null, false);
-    }
-  }, [dir]);
-
-  // The active Project scope: the Owner's explicit Project Switcher pick when
-  // made (`hasPickedScope`), else the workspace panel's directory (auto-bound).
-  const scopeRoot = hasPickedScope ? (pickedRoot ?? undefined) : (dir ?? pickedRoot ?? undefined);
+  // The active Project scope: the workspace panel's directory (auto-bound).
+  const scopeRoot = dir;
   const isCompact = layout?.compact === true || (containerWidth > 0 && containerWidth < 640);
 
   const poll = usePoll(
@@ -289,14 +260,6 @@ export function FactoryShell({
     }
   };
 
-  const openDetail = (task: string): void => {
-    setDetail({ task, loading: true, detail: null, error: null });
-    void (async () => {
-      const reply = await detailCall({ task });
-      setDetail({ task, loading: false, detail: reply.ok ? reply.detail : null, error: reply.ok ? null : reply.error });
-    })();
-  };
-
   if (view === null) {
     return (
       <View style={{ flex: 1, backgroundColor: theme.colors.surface0, padding: SPACING[4], gap: SPACING[2] }}>
@@ -336,36 +299,9 @@ export function FactoryShell({
         ...(targetRoot === undefined ? {} : { projectRoot: targetRoot }),
         ...(targetSlug === undefined ? {} : { projectSlug: targetSlug, project: targetSlug }),
       });
-      if (reply.ok) {
-        setPickedScope(null, true);
-        setDetail(null);
-      }
       return reply;
     });
   };
-  const pickProjectFolder = (): void => {
-    void act("Add Project", async () => {
-      const reply = await projectPickFolderCall({});
-      if (reply.ok && !reply.cancelled && typeof reply.path === "string") {
-        setPickedScope(reply.path, true);
-        setDetail(null);
-      }
-      return reply;
-    });
-  };
-  const addProject = (path: string): void => {
-    const trimmed = path.trim();
-    if (trimmed === "") return;
-    void act("Add Project", async () => {
-      const reply = await projectAddCall({ projectRoot: trimmed, path: trimmed });
-      if (reply.ok) {
-        setPickedScope(reply.path, true);
-        setDetail(null);
-      }
-      return reply;
-    });
-  };
-
   const vaultPane = (
     <VaultPane
       theme={theme}
@@ -420,11 +356,6 @@ export function FactoryShell({
             openLead,
             resetProject,
             deleteProject,
-            pickProjectFolder,
-            addProject,
-            pickProject: (root) => {
-              setPickedScope(root, true);
-            },
             busy,
           }}
         />
@@ -548,34 +479,12 @@ export function FactoryShell({
           onPick={setTab}
           compact={isCompact}
           counts={{
-            tasks: view.tasks.length,
             seats: view.agents.length,
-            timeline: view.retro.length,
             vault: view.vault.hydratedApps.length,
             plugins: view.companions.filter((c) => c.status === "running").length,
           }}
         />
         {tab === "vault" ? vaultPane : null}
-        {tab === "tasks" ? (
-          <TasksPane
-            theme={theme}
-            view={view}
-            dir={hasPickedScope ? undefined : dir}
-            compact={isCompact}
-            containerWidth={Math.max(0, containerWidth - (isCompact ? SPACING[3] * 2 : SPACING[4] * 2))}
-            actions={{
-              busy,
-              openDetail,
-              openAgent: (agentId) => navigation?.openAgent({ agentId, serverId }),
-              pickProject: (root) => {
-                setPickedScope(root, true);
-              },
-              accept: (task, attempt) => {
-                void act("Accept", () => acceptCall({ task, attempt }));
-              },
-            }}
-          />
-        ) : null}
         {tab === "seats" ? (
           <SeatsPane
             theme={theme}
@@ -645,32 +554,6 @@ export function FactoryShell({
               resetLanes: () => {
                 if (projectRoot === undefined) return;
                 void act("Reset to Machine Default", () => lanesResetCall({ projectRoot }));
-              },
-            }}
-          />
-        ) : null}
-        {tab === "timeline" ? (
-          <TimelinePane
-            theme={theme}
-            view={view}
-            now={now}
-            retroNote={retroNote}
-            actions={{
-              busy,
-              runRetro: () => {
-                void act("Retro", async () => {
-                  const reply = await retroCall({});
-                  if (reply.ok) setRetroNote(reply.outcome === "written" ? `retro written — ${reply.proposalCount ?? 0} proposals → ${reply.proposalsPath ?? "?"}` : `retro failed — ${reply.error ?? "no reason"}`);
-                  return reply;
-                });
-              },
-              ratify: (day, proposalId) => {
-                if (projectRoot === undefined) return;
-                void act("Ratify", async () => {
-                  const reply = await ratifyCall({ projectRoot, day, proposalId });
-                  if (reply.ok) setRetroNote(reply.summary);
-                  return reply;
-                });
               },
             }}
           />
@@ -862,13 +745,6 @@ export function FactoryShell({
         ) : null}
       </ScrollView>
 
-      {/* The Detail Modal: Contract, per-attempt Report.md, Gate Log, Watch & Eye breakdown. */}
-      <TaskDetailModal
-        theme={theme}
-        detail={detail}
-        onClose={() => setDetail(null)}
-        onOpenAgent={(agentId) => navigation?.openAgent({ agentId, serverId })}
-      />
     </View>
   );
 }

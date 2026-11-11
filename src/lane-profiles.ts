@@ -257,7 +257,7 @@ export function applyLaneProfile(
 }
 
 /**
- * ONE atomic multi-lane write (the Watch & Retro race fix, ADR 0026 §1):
+ * ONE atomic multi-lane write (the dual-save race fix, ADR 0026 §1):
  * every lane in `update` is validated first — any refusal writes nothing,
  * anywhere — then the whole batch lands in a single `saveLanes` write into
  * the machine `lanes.json` or the Project's override file. Returns the

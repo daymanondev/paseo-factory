@@ -441,7 +441,7 @@ function shellWriteDestinations(tokens: readonly string[]): string[] {
 /**
  * The workspace-root files a contracted working Agent never writes unless the
  * Contract explicitly scopes them — project memory is the Supervisor's and
- * Lead's act (or a ratified Retro proposal's), never a worker's side effect.
+ * Lead's act, never a worker's side effect.
  */
 export const MEMORY_FILES = ["AGENTS.md", "CLAUDE.md", "CONTEXT.md"] as const;
 

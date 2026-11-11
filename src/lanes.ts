@@ -3,7 +3,7 @@
  * 0009 §3; the `lead` lane and per-Project overrides arrive in v0.0.14, ADR
  * 0010 §2/§5). `<stateDir>/lanes.json` names the provider/model lane every
  * model-bearing role runs under — `supervisor`, `lead`, `worker`, `watch`,
- * `retro`, `freshEyes` — with safe defaults (`pi/zcode/glm-5.3`, $0 marginal)
+ * `freshEyes` — with safe defaults (`pi/zcode/glm-5.3`, $0 marginal)
  * when the file is absent or partial, and an optional per-Project override
  * file under `<stateDir>/projects/<slug>/lanes.json` layered on top. The
  * machine file is the one place the Owner configures or switches models; a
@@ -53,8 +53,8 @@ export {
 } from "./lane-profiles.ts";
 export type { LaneProfile, LaneProfileTombstone, LaneProfilesFile } from "./lane-profiles.ts";
 
-/** The six model-bearing roles — the file's exact key set (5 UI cards; supervisor and lead pair under Seats). */
-export const LANE_NAMES = ["supervisor", "lead", "worker", "watch", "retro", "freshEyes"] as const;
+/** The five model-bearing roles — the file's key set. A stale `retro` key left in an older lanes.json is an unknown key: ignored on read, dropped on the next save (ADR 0056). */
+export const LANE_NAMES = ["supervisor", "lead", "worker", "watch", "freshEyes"] as const;
 
 export type LaneName = (typeof LANE_NAMES)[number];
 
@@ -82,7 +82,7 @@ export function projectLanesPath(stateDir: string, projectSlug: string): string 
 
 /** The fresh defaults — a fresh copy every call, never a shared mutable. */
 export function defaultLanes(): Lanes {
-  return { supervisor: DEFAULT_LANE, lead: DEFAULT_LANE, worker: DEFAULT_LANE, watch: DEFAULT_LANE, retro: DEFAULT_LANE, freshEyes: DEFAULT_LANE };
+  return { supervisor: DEFAULT_LANE, lead: DEFAULT_LANE, worker: DEFAULT_LANE, watch: DEFAULT_LANE, freshEyes: DEFAULT_LANE };
 }
 
 export type LanesResult = { ok: true; lanes: Lanes } | { ok: false; reason: string };
@@ -453,7 +453,7 @@ export type LaneCliRunner = (input: {
 /**
  * The lane's whole availability surface: its CLI answers `--version` (the
  * copilot amendment-2 precedent — the CLI carries its own auth, there is no
- * key file). `contract_set`/`retro` fail-fast on a false here. Unknown lanes
+ * key file). `contract_set` fails fast on a false here. Unknown lanes
  * are unavailable by construction.
  */
 export function laneCliAvailable(lane: string): boolean {
@@ -464,7 +464,7 @@ export function laneCliAvailable(lane: string): boolean {
 }
 
 /**
- * One headless tool-less lane invocation, shared by the Watch, the Retro and
+ * One headless tool-less lane invocation, shared by the Watch and
  * the Fresh-eyes CLI path (the runCopilot discipline, generalized): scratch
  * cwd, prompt on stdin, SIGKILL at the deadline, stderr squashed into the
  * error. A nonzero exit names the command; a blown deadline flags

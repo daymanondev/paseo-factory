@@ -1,11 +1,10 @@
-import { SeatNode, Rail, AgentCard } from "./seat-graph.tsx";
+import { SeatNode, AgentCard } from "./seat-card.tsx";
 /**
  * Tab 2 — Seats & Models (ADR 0009 §2; the Lead lane and live Lead seat
  * arrive in v0.0.14, ADR 0010 §2): the Lane Profiles bar (v0.0.38, ADR 0026
- * §2) above four Lane Cards (Supervisor, Lead, Default Worker, Watch &
- * Retro) opening the live provider/model/thinking picker modal,
- * and below them the orthogonal Seat Graph — Owner ⇄ Supervisor ⇄ Lead ⇄
- * Working Agents — with live Timeline Oracle seqEnd, Open
+ * §2) above four Lane Cards (Supervisor, Lead, Default Worker, Watch)
+ * opening the live provider/model/thinking picker modal, and below them the
+ * standing seats — Supervisor, Lead, working Agents — with Open
  * (navigation.openAgent), Revoke Supervisor, and Rotate Lead on live seats
  * (v0.0.27, ADR 0017 §3); vacant seats carry their picker hints — the
  * Supervisor starts from Paseo's native New Chat picker, the Lead is spawned
@@ -19,10 +18,9 @@ import type { PluginTheme } from "@getpaseo/plugin";
 import { Icon, Modal, ScrollView, TextInput } from "@getpaseo/plugin/client/ui";
 import { useEffect, useState } from "react";
 import { Pressable, Text, View } from "react-native";
-import type { AgentView, FactoryView, LaneName, LaneProfileView, Lanes, ProjectUsageView, ProviderModelView } from "../../shared/view.ts";
+import type { FactoryView, LaneName, LaneProfileView, Lanes, ProjectUsageView, ProviderModelView } from "../../shared/view.ts";
 import { Btn, Card, Chip, Pill } from "../kit/pill.tsx";
-import { CONTROL_H, CONTROL_SM, MONO_FONT, RADIUS, SPACING, hoveredOf, text, tint } from "../kit/theme.ts";
-import type { Colour } from "../kit/theme.ts";
+import { CONTROL_H, MONO_FONT, RADIUS, SPACING, hoveredOf, text, tint } from "../kit/theme.ts";
 import { planLiveSeatTransitions } from "../kit/live-seats.ts";
 import type { LiveSeatTransition } from "../kit/live-seats.ts";
 
@@ -34,11 +32,11 @@ export interface SeatsActions {
    * RPC (v0.0.38, ADR 0026 §5), never concurrent single-lane calls.
    */
   setLanesBatch(lanes: LaneName[], value: string): void;
-  /** Save the scope's current 6-lane table as a new named Lane profile. */
+  /** Save the scope's current lane table as a new named Lane profile. */
   saveProfile(name: string, description?: string): void;
-  /** Overwrite one saved profile with the scope's current 6-lane table. */
+  /** Overwrite one saved profile with the scope's current lane table. */
   updateProfile(profileId: string, name: string): void;
-  /** Copy-on-Apply a saved profile's six lanes into the selected scope. */
+  /** Copy-on-Apply a saved profile's lanes into the selected scope. */
   applyProfile(profileId: string): void;
   /** Remove one saved Lane profile (behind the chip's two-step confirm). */
   deleteProfile(profileId: string): void;
@@ -59,7 +57,7 @@ function seatLabel(seat: "supervisor" | "lead"): string {
   return seat === "supervisor" ? "Supervisor" : "Lead";
 }
 
-/** Which lanes a card covers — "Watch & Retro" writes both lanes, one value. */
+/** Which lanes a card covers — one value written to every lane the card names. */
 interface LaneCard {
   id: string;
   title: string;
@@ -76,7 +74,7 @@ const LANE_CARDS: LaneCard[] = [
     title: "Supervisor",
     icon: "Shield",
     tier: "Reasoning / Pro",
-    hint: "Drafts Contracts, reviews ratified Retro proposals, and relays verdicts to the Owner.",
+    hint: "Drafts Contracts and relays verdicts to the Owner.",
     lanes: ["supervisor"],
     value: (l) => l.supervisor,
   },
@@ -99,15 +97,14 @@ const LANE_CARDS: LaneCard[] = [
     value: (l) => l.worker,
   },
   {
-    id: "watch-retro",
-    title: "Watch & Retro",
+    id: "watch",
+    title: "Watch",
     icon: "Eye",
     tier: "Flash / Fast",
-    hint: "Fast, wide-context model for 5-question risk scoring & daily ledger retrospective.",
-    lanes: ["watch", "retro"],
-    value: (l) => (l.watch === l.retro ? l.watch : `${l.watch} · ${l.retro}`),
+    hint: "Fast, wide-context model for 5-question risk scoring.",
+    lanes: ["watch"],
+    value: (l) => l.watch,
   },
-
 ];
 
 const FALLBACK_THINKING_OPTIONS: { id: string; label: string }[] = [
@@ -868,8 +865,8 @@ export function SeatsPane({
     const next: Lanes = { ...view.lanes };
     for (const lane of card.lanes) next[lane] = value;
     // v0.0.38 (ADR 0026 §5): a multi-lane card rides ONE atomic setLanesBatch
-    // RPC — the two concurrent single-lane saves raced (the Watch & Retro
-    // defect); a single-lane card keeps the single setLane act.
+    // RPC — two concurrent single-lane saves raced; a single-lane card keeps
+    // the single setLane act.
     const commit = (): void => {
       if (card.lanes.length === 1) actions.setLane(card.lanes[0]!, value);
       else actions.setLanesBatch(card.lanes, value);
@@ -896,11 +893,11 @@ export function SeatsPane({
   const machineControls = view.project === null ? (
     <Card theme={theme} gap={SPACING[2.5]}>
       <View style={{ flexDirection: "row", alignItems: "center", gap: SPACING[1.5], flexWrap: "wrap" }}>
-        <Pill theme={theme} label="All projects · View-only" tone="statusWarning" lit />
-        <Text style={text(theme, "section")}>Read-only Overview</Text>
+        <Pill theme={theme} label="No Project · View-only" tone="statusWarning" lit />
+        <Text style={text(theme, "section")}>Read-only machine defaults</Text>
       </View>
       <Text style={text(theme, "meta")}>
-        Lane/profile edits are disabled in All projects to protect existing projects. Select a specific project in the Project Switcher above to change its lanes.
+        This workspace is not a Factory Project yet. Lane/profile edits apply to a Project — open the Factory panel inside a Project's workspace to change its lanes.
       </Text>
     </Card>
   ) : null;
@@ -915,7 +912,7 @@ export function SeatsPane({
             <Text style={text(theme, "section")}>Model & Thinking Lanes</Text>
             <Text style={text(theme, "label")}>
               {view.project === null
-                ? "Read-only machine default lanes — select a project above to configure project lanes."
+                ? "Read-only machine default lanes — open a Project's workspace to configure project lanes."
                 : `Configure provider, model, and thinking level per role (project override: ${view.project.slug}).`}
             </Text>
           </View>
@@ -1020,22 +1017,12 @@ export function SeatsPane({
         </View>
       </View>
 
-      {/* Section 2: Seat Graph */}
+      {/* Section 2: the standing seats */}
       <View style={{ gap: SPACING[1.5] }}>
         <View style={{ gap: 2, paddingBottom: SPACING[1] }}>
-          <Text style={text(theme, "section")}>Seat Graph</Text>
-          <Text style={text(theme, "label")}>
-            Orthogonal hierarchy: Owner ⇄ Supervisor ⇄ Lead ⇄ Working Agents.
-          </Text>
+          <Text style={text(theme, "section")}>Seats</Text>
+          <Text style={text(theme, "label")}>Supervisor, Lead and the working Agents of this Project.</Text>
         </View>
-        <SeatNode
-          theme={theme}
-          title="Owner"
-          icon="User"
-          subtitle="You — the only seat that accepts verified attempts and ratifies retro proposals."
-          pills={[{ label: `$${view.kpis.totalCostUsd.toFixed(2)} metered`, mono: true }]}
-        />
-        <Rail theme={theme} />
         {view.supervisor !== null ? (
           <AgentCard
             theme={theme}
@@ -1053,7 +1040,6 @@ export function SeatsPane({
             pills={[{ label: "seat=supervisor", tone: "foregroundMuted" }, { label: view.lanes.supervisor, mono: true }]}
           />
         )}
-        <Rail theme={theme} />
         {view.lead !== null ? (
           <AgentCard
             theme={theme}
@@ -1071,7 +1057,6 @@ export function SeatsPane({
             pills={[{ label: "seat=lead", tone: "foregroundMuted" }, { label: view.lanes.lead, mono: true }]}
           />
         )}
-        <Rail theme={theme} />
         {workers.length === 0 ? (
           <SeatNode
             theme={theme}
@@ -1159,7 +1144,7 @@ export function SeatsPane({
             </View>
             <View style={{ gap: SPACING[1] }}>
               <Text style={text(theme, "badge")}>ACTIVE LANES</Text>
-              {(["supervisor", "lead", "worker", "watch", "retro"] as LaneName[]).map((lane) => (
+              {(["supervisor", "lead", "worker", "watch"] as LaneName[]).map((lane) => (
                 <Text key={lane} style={text(theme, "code")}>
                   {lane}={view.lanes[lane]}
                 </Text>

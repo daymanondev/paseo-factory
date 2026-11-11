@@ -12,8 +12,8 @@ import { z } from "zod";
 /** Bump when the shape changes in a way an older client cannot render. */
 export const FACTORY_VIEW_VERSION = 3 as const;
 
-/** The six model-bearing roles — mirrors src/lanes.ts (kept by test/lanes.test.ts). */
-export const LaneNameSchema = z.enum(["supervisor", "lead", "worker", "watch", "retro", "freshEyes"]);
+/** The five model-bearing roles — mirrors src/lanes.ts (kept by test/lanes.test.ts). */
+export const LaneNameSchema = z.enum(["supervisor", "lead", "worker", "watch", "freshEyes"]);
 export type LaneName = z.infer<typeof LaneNameSchema>;
 
 export const LanesSchema = z.object({
@@ -21,7 +21,6 @@ export const LanesSchema = z.object({
   lead: z.string(),
   worker: z.string(),
   watch: z.string(),
-  retro: z.string(),
   freshEyes: z.string(),
 });
 export type Lanes = z.infer<typeof LanesSchema>;
@@ -32,14 +31,13 @@ export const LanesUpdateSchema = z.object({
   lead: z.string().optional(),
   worker: z.string().optional(),
   watch: z.string().optional(),
-  retro: z.string().optional(),
   freshEyes: z.string().optional(),
 });
 export type LanesUpdate = z.infer<typeof LanesUpdateSchema>;
 
 /**
  * One Owner-authored `Lane profile` as the Lane Profiles bar reads it
- * (v0.0.38, ADR 0026 §2) — a named 6-lane preset persisted in
+ * (v0.0.38, ADR 0026 §2) — a named 5-lane preset persisted in
  * `<stateDir>/profiles.json`, always whole (Copy-on-Apply), never a live
  * pointer into a Project's `lanes.json`.
  */
@@ -52,7 +50,7 @@ export const LaneProfileViewSchema = z.object({
 });
 export type LaneProfileView = z.infer<typeof LaneProfileViewSchema>;
 
-/** The five header tiles — counts the fold derives, the header just lights. */
+/** The task counts the fold derives — the poll cadence and the headline read them; no Task list rides the view (ADR 0056). */
 export const KpisSchema = z.object({
   needsHuman: z.number().int(),
   running: z.number().int(),
@@ -174,8 +172,6 @@ export const AgentViewSchema = z.object({
   seat: z.string().nullable(),
   /** The factory task this agent is bound to (a ledger claim/spawn/meter named it), when any. */
   task: z.string().nullable(),
-  /** The Timeline Oracle's last seqEnd, when the daemon answered. */
-  seqEnd: z.number().nullable(),
   /**
    * The Lead telemetry pair (v0.0.20, ADR 0013 §6): the daemon's live
    * `agent.lastUsage` context-window reading — present on the Project's Lead
@@ -208,7 +204,6 @@ export const ProjectViewSchema = z.object({
   missingRoot: z.boolean().optional(),
   supervisorId: z.string().nullable().optional(),
   leadId: z.string().nullable().optional(),
-  activeTaskCount: z.number().int().optional(),
   /** The Project's Ledger could not be opened for the snapshot (v0.0.89) — its stream renders empty; additive, older clients ignore it. */
   ledgerError: z.string().optional(),
 });
@@ -238,18 +233,6 @@ export const ProviderViewSchema = z.object({
   models: z.array(ProviderModelViewSchema).nullable(),
 });
 export type ProviderView = z.infer<typeof ProviderViewSchema>;
-
-/** One rendered retro: day, outcome, and the R1..Rn proposals parsed out of its file. */
-export const RetroViewSchema = z.object({
-  seq: z.number().int(),
-  day: z.string(),
-  outcome: z.string(),
-  model: z.string(),
-  proposalCount: z.number().int().nullable(),
-  proposalsPath: z.string().nullable(),
-  proposals: z.array(z.object({ id: z.number().int(), cls: z.string(), text: z.string() })),
-});
-export type RetroView = z.infer<typeof RetroViewSchema>;
 
 /**
  * One companion plugin's lifecycle state as the daemon reports it (v0.0.17,
@@ -291,16 +274,6 @@ export const CompanionPluginViewSchema = z.object({
   error: z.string().nullable(),
 });
 export type CompanionPluginView = z.infer<typeof CompanionPluginViewSchema>;
-
-/** One ledger line for the stream — seq, ts, kind, and a one-line rendering. */
-export const LedgerLineViewSchema = z.object({
-  seq: z.number().int(),
-  ts: z.string(),
-  event: z.string(),
-  task: z.string().nullable(),
-  line: z.string(),
-});
-export type LedgerLineView = z.infer<typeof LedgerLineViewSchema>;
 
 /**
  * The `Private vault` status half (v0.0.21, ADR 0014 §4) — the zod mirror of
@@ -370,7 +343,7 @@ export type ModelUsageRowView = z.infer<typeof ModelUsageRowSchema>;
 
 /** One seat row of the By Seat / Role breakdown. */
 export const SeatUsageRowSchema = z.object({
-  seat: z.enum(["supervisor", "lead", "agent", "watch", "retro"]),
+  seat: z.enum(["supervisor", "lead", "agent", "watch"]),
   label: z.string(),
 }).extend(UsageBucketsSchema.shape);
 export type SeatUsageRowView = z.infer<typeof SeatUsageRowSchema>;
@@ -452,21 +425,15 @@ export const FactoryViewSchema = z.object({
    */
   machineLanes: LanesSchema,
   kpis: KpisSchema,
-  tasks: z.array(TaskViewSchema),
   agents: z.array(AgentViewSchema),
   providers: z.array(ProviderViewSchema),
   supervisor: AgentViewSchema.nullable(),
   /** The Project's standing Lead agent (v0.0.14, ADR 0010 §2) — null when the seat is vacant. */
   lead: AgentViewSchema.nullable(),
-  retro: z.array(RetroViewSchema),
-  /** The newest lines first, capped — a stream, not a mirror. */
-  ledger: z.array(LedgerLineViewSchema),
   /** The daemon half's health: null when every daemon read answered. */
   daemonError: z.string().nullable(),
   /** The snapshot's active Project scope — null on the unscoped global view (v0.0.14). */
   project: ProjectViewSchema.nullable(),
-  /** Every discovered Project for the header's Project Selector, slug order. */
-  projects: z.array(ProjectViewSchema),
   /** The Core plugin (`paseo-factory`) joined with the daemon's plugin list and update check cache (v0.0.25, ADR 0012 §2). */
   corePlugin: CompanionPluginViewSchema,
   /** The companion catalog joined with the daemon's plugin list (v0.0.17, ADR 0012 §2). */
@@ -510,33 +477,3 @@ export const FactoryViewSchema = z.object({
   projectUsage: ProjectUsageViewSchema.nullable().optional(),
 });
 export type FactoryView = z.infer<typeof FactoryViewSchema>;
-
-/** One task's full detail — the modal's payload: contract, and per-attempt file contents (tailed). */
-export const TaskDetailViewSchema = z.object({
-  version: z.literal(FACTORY_VIEW_VERSION),
-  task: TaskViewSchema,
-  contract: z.object({
-    task: z.string(),
-    workspace: z.string(),
-    gate: z.string(),
-    artifact: z.string(),
-    scope: z.array(z.string()).nullable(),
-    /** The mandated SKILL.md workflows (v0.0.14) — null when the contract names none. */
-    skills: z.array(z.string()).nullable(),
-    base: z.string().nullable(),
-    description: z.string().nullable(),
-    watch: z.boolean(),
-    freshEyes: z.boolean(),
-    by: z.string().nullable(),
-  }),
-  attempts: z.array(
-    z.object({
-      n: z.number().int(),
-      verdict: z.enum(["red", "green"]).nullable(),
-      agentId: z.string().nullable().optional(),
-      report: z.string().nullable(),
-      gateLog: z.string().nullable(),
-    }),
-  ),
-});
-export type TaskDetailView = z.infer<typeof TaskDetailViewSchema>;

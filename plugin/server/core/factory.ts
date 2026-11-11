@@ -17,11 +17,9 @@ import type { LaneCliRunner, PeerThinkingLevel } from "./lanes.ts";
 import { loadEyeConfig, projectSlugOfWorkspace, resolveEyeLane, runFreshEyesPass } from "./fresh-eyes.ts";
 import { runWatchPass, watchLaneAvailable } from "./watch.ts";
 import type { CopilotRunner, TimelineFetcher } from "./watch.ts";
-import { buildRetroDigest, buildSeqToTaskMap, retroDay, retroLaneAvailable, runRetroPass, writtenRetroForDay } from "./retro.ts";
-import type { RetroOutcome } from "./retro.ts";
 import { changedFiles, checkCleanAt, deleteTaskWorktreeBranch, headCommitSync, landTaskWorktree, removeTaskWorktree, resolveClaimedCommit, scopeCoversFile } from "./workspace.ts";
 import { MEMORY_FILES } from "./choke.ts";
-import { projectStateDir, readProjectNotebook, resolveProject } from "./project.ts";
+import { projectStateDir } from "./project.ts";
 import { FactoryError } from "./errors.ts";
 import type { AttemptAccepted, ClaimReported, ContractSet, GateFinished, GitBlocked, LedgerEvent, MeterWritten, MeterUsage, NeedsHuman, NeedsHumanEvidence, NeedsHumanReason, PeerDisposition, PeerHandoffFields, RepokeDispatched, RepokeRefused, RespawnDispatched, RespawnRefused, SpawnDispatched, SpawnRefused, TaskClosed, Verdict } from "./events.ts";
 import type { GateResult } from "./gate.ts";
@@ -162,12 +160,6 @@ export interface FactoryOptions {
   watchCopilotProbe?: (lane: string) => boolean;
   /** Watch lane CLI runner override (tests) — the lane and its tool-less flags stay fixed regardless. */
   watchCopilotRunner?: CopilotRunner;
-  /** Retro total budget override (ms), both tries together (tests). Defaults to RETRO_TOTAL_BUDGET_MS. */
-  retroBudgetMs?: number;
-  /** Retro lane availability probe override (tests) — the pass refuses before any ask when false. */
-  retroCopilotProbe?: (lane: string) => boolean;
-  /** Retro lane CLI runner override (tests) — the lane and its tool-less flags stay fixed regardless. */
-  retroCopilotRunner?: CopilotRunner;
   /** Fresh-eyes CLI lane availability probe override (tests) — the eye.json path keeps its own config check. */
   eyeCliProbe?: (lane: string) => boolean;
   /** Fresh-eyes CLI lane runner override (tests) — the lane's tool-less flags stay fixed regardless. */
@@ -570,38 +562,6 @@ export interface Factory {
    * given) in-memory and on disk without disturbing other projects' events.
    */
   resetProject(projectRoot: string, projectSlug?: string): { purgedEvents: number; tasks: string[]; removedFiles: number };
-  /**
-   * Runs the Retro (v0.0.7): builds the whole-ledger digest, prompts the
-   * pinned Copilot model, writes `retro-<date>.md`, appends one
-   * factory-level `retro_written` line (ADR 0004 one-writer law — the CLI
-   * only asked through the spool). Whole-ledger always. The optional
-   * `projectSlug` (v0.0.38, ADR 0026 §1) — a Project slug, or a Project
-   * root resolved to its slug — scopes the retro LANE to that Project's own
-   * lanes.json override; omitted, a project-scoped factory uses its own
-   * Project and a root factory keeps the machine lane. Refused retros
-   * (copilot CLI unusable, a same-day successful Retro already on the
-   * ledger) throw and write NO line — nothing changed, nothing recorded.
-   * Technical failures never throw: the pass's own `failed` outcome lands
-   * as a visible ledger line with the error, no file.
-   */
-  retro(projectSlug?: string): Promise<RetroOutcome>;
-}
-
-/**
- * Normalizes a retro scope argument (v0.0.38, ADR 0026 §1): a slug passes
- * through; a path-looking argument (a Project root) resolves to its
- * canonical slug via `resolveProject` — an unresolvable root is a named
- * refusal, never a guessed scope; blank or undefined keeps the machine lane.
- */
-function retroProjectScope(project: string | undefined): string | undefined {
-  const trimmed = project?.trim();
-  if (trimmed === undefined || trimmed === "") return undefined;
-  if (!trimmed.includes("/")) return trimmed;
-  const resolved = resolveProject(trimmed);
-  if (!resolved.ok) {
-    throw new FactoryError("unknown-project", `could not resolve Project root "${trimmed}" — ${resolved.reason}`);
-  }
-  return resolved.slug;
 }
 
 export function createFactory(options: FactoryOptions): Factory {
@@ -1848,70 +1808,8 @@ export function createFactory(options: FactoryOptions): Factory {
       return { purgedEvents, tasks, removedFiles };
     },
 
-    async retro(projectSlug?: string) {
-      // Refusal 1 — the pass probes availability itself (ticket 03 item 5:
-      // `contract_set`'s pre-flight is untouched; the Retro refuses per
-      // item 3, workspace-conflict style: no ledger line). Since v0.0.13 the
-      // probe is lane-shaped (ADR 0009 §3), and since v0.0.38 (ADR 0026 §1)
-      // the lane resolves per Project: an explicit argument — a slug, or a
-      // Project root resolved to its slug — wins; omitted, a project-scoped
-      // factory uses its own Project, a root factory the machine table.
-      const scope = retroProjectScope(projectSlug ?? options.projectSlug);
-      const usable = retroLaneAvailable(stateDir, options.retroCopilotProbe, scope);
-      if (!usable.ok) {
-        throw new FactoryError(
-          "retro-copilot-unusable",
-          `the retro needs its lane usable — ${usable.reason}`,
-        );
-      }
-      // Refusal 2 — one successful Retro per UTC day (the ledger's ts day,
-      // the file's day, the same day): a refused second run points at
-      // today's file and records nothing.
-      const today = retroDay(new Date());
-      const prior = writtenRetroForDay(ledger.events, today);
-      if (prior !== undefined) {
-        throw new FactoryError(
-          "retro-same-day",
-          `a retro already ran today — its ${prior.proposalCount ?? 0} proposals sit in ${prior.proposalsPath}; a failed retro leaves no line, so only a failed one may be re-run today`,
-        );
-      }
-      // The digest reads the gate logs by basename against the DATA dir
-      // (v0.0.14: project factories keep them under projects/<slug>/); the
-      // pass writes its proposals file there too, while the lane reads the
-      // scoped table (root lanes.json, or the Project's own override).
-      // Since v0.1.0 (ADR 0048 §4) a project-scoped pass also feeds the
-      // bounded Project notebook into the digest (already-hardened patterns
-      // are not re-proposed), and every pass carries the seq → Task map so
-      // the rendered file cites `T-xx (seq N)` evidence.
-      const notebook = scope === undefined ? undefined : readProjectNotebook(stateDir, scope);
-      const corpus = buildRetroDigest(ledger.events, dataDir, notebook === undefined ? undefined : { notebook });
-      const seqToTask = buildSeqToTaskMap(ledger.events);
-      const outcome = await runRetroPass(
-        {
-          stateDir,
-          ...(options.projectSlug === undefined ? {} : { dataDir }),
-          corpus,
-          seqToTask,
-          ...(options.retroBudgetMs === undefined ? {} : { budgetMs: options.retroBudgetMs }),
-          ...(options.retroCopilotRunner === undefined ? {} : { copilotRunner: options.retroCopilotRunner }),
-        },
-        scope,
-      );
-      // The pass wrote the file before returning a `written` outcome; the
-      // line lands after it, by construction (ticket 03 item 3).
-      ledger.append({
-        event: "retro_written",
-        model: outcome.model,
-        outcome: outcome.outcome,
-        durationMs: outcome.durationMs,
-        ...(outcome.error === undefined ? {} : { error: outcome.error }),
-        ...(outcome.proposalsPath === undefined ? {} : { proposalsPath: outcome.proposalsPath }),
-        ...(outcome.proposalCount === undefined ? {} : { proposalCount: outcome.proposalCount }),
-      });
-      return outcome;
-    },
   };
-  const asyncOperations = new Set(["claim", "accept", "retro"]);
+  const asyncOperations = new Set(["claim", "accept"]);
   const syncOperations = new Set(["setContract", "requestSpawn", "meter", "repoke", "respawn", "needsHuman", "resetProject"]);
   const wrappers = new Map<PropertyKey, unknown>();
   return new Proxy(factory, {

@@ -4,14 +4,14 @@ import type { AttemptState } from "./core/task-state.ts";
  * The Factory surface's server-side fold (v0.0.13, ADR 0009 §2): ledger
  * events + lanes + daemon agents → the one versioned FactoryView the client
  * renders. Pure over its inputs — no daemon calls happen here — so the whole
- * verification line (tasks, attempt ladders, evidence, KPIs, retro, ledger
- * stream) is derivable and testable from the ledger alone; surface-rpc.ts
- * adds the daemon half (live agents, providers, seqEnd) around it.
+ * verification line (tasks, attempt ladders, evidence, KPIs) is derivable and
+ * testable from the ledger alone; surface-rpc.ts adds the daemon half (live
+ * agents, providers) around it. Since v0.6.0 (ADR 0056) the snapshot carries
+ * the KPI counts only — no Task list, Ledger stream, Retro or all-projects fold.
  */
-import { readFileSync } from "node:fs";
-import { basename, join } from "node:path";
+import { basename } from "node:path";
 import { FACTORY_VIEW_VERSION } from "../shared/view.ts";
-import type { AgentView, AttemptView, CompanionPluginView, CompanionStatus, FactoryView, LedgerLineView, Lanes, ProjectUsageView, ProjectView, RetroView, TaskView, VaultStatusView } from "../shared/view.ts";
+import type { AgentView, AttemptView, CompanionPluginView, CompanionStatus, FactoryView, Lanes, ProjectUsageView, ProjectView, TaskView, VaultStatusView } from "../shared/view.ts";
 import { foldProjectUsageSummary } from "./core/usage-status.ts";
 import type { ProjectUsageFile } from "./core/usage-status.ts";
 import { COMPANION_CATALOG, CORE_PLUGIN_DEFAULT_VERSION, CORE_PLUGIN_ENTRY } from "../shared/companions.ts";
@@ -19,12 +19,6 @@ import type { CompanionCatalogEntry, CorePluginCatalogEntry } from "../shared/co
 import { readPluginVersionFromDisk } from "./daemon-cli.ts";
 import type { DaemonPluginSourceStatus } from "./daemon-cli.ts";
 import type { LedgerEvent } from "./core/events.ts";
-
-/** How many ledger lines ride one snapshot — a stream, not a mirror. */
-export const LEDGER_STREAM_CAP = 100;
-
-/** Every per-attempt file the detail modal reads is tailed to this size. */
-export const DETAIL_TAIL_CHARS = 20_000;
 
 type AnyEvent = LedgerEvent;
 
@@ -285,57 +279,9 @@ export function enrichTaskUsage(tasks: readonly TaskView[], file: ProjectUsageFi
   });
 }
 
-// ---- the retro fold -----------------------------------------------------------------------
+// ---- the ledger line rendering ------------------------------------------------------------
 
-/** Parses `## R<n> — <class>` sections out of a proposals file — the rendered R1..Rn. */
-function parseProposals(path: string): { id: number; cls: string; text: string }[] {
-  let file: string;
-  try {
-    file = readFileSync(path, "utf8");
-  } catch {
-    return [];
-  }
-  const proposals: { id: number; cls: string; text: string }[] = [];
-  const lines = file.split("\n");
-  let current: { id: number; cls: string } | null = null;
-  for (const line of lines) {
-    const header = /^## R(\d+) — (.+)$/.exec(line.trim());
-    if (header !== null) {
-      current = { id: Number(header[1]), cls: header[2]! };
-      continue;
-    }
-    if (current !== null) {
-      const proposal = /^- Proposal: (.+)$/.exec(line);
-      if (proposal !== null) {
-        proposals.push({ id: current.id, cls: current.cls, text: proposal[1]! });
-        current = null;
-      }
-    }
-  }
-  return proposals;
-}
-
-/** Folds every retro_written into a rendered retro (newest last, ledger order). */
-export function foldRetro(events: readonly AnyEvent[]): RetroView[] {
-  const views: RetroView[] = [];
-  for (const evt of events) {
-    if (evt.event !== "retro_written") continue;
-    views.push({
-      seq: evt.seq,
-      day: evt.ts.slice(0, 10),
-      outcome: evt.outcome,
-      model: evt.model,
-      proposalCount: evt.proposalCount ?? null,
-      proposalsPath: evt.proposalsPath ?? null,
-      proposals: evt.proposalsPath === undefined ? [] : parseProposals(evt.proposalsPath),
-    });
-  }
-  return views;
-}
-
-// ---- the ledger stream --------------------------------------------------------------------
-
-/** One ledger line, rendered — the stream's whole payload. */
+/** One ledger line, rendered — the Lead handoff digest's one-line form. */
 export function renderLedgerLine(evt: AnyEvent): string {
   switch (evt.event) {
     case "ledger_schema":
@@ -385,66 +331,12 @@ export function renderLedgerLine(evt: AnyEvent): string {
   }
 }
 
-function ledgerLines(events: readonly AnyEvent[]): LedgerLineView[] {
-  const lines: LedgerLineView[] = [];
-  for (let i = events.length - 1; i >= 0 && lines.length < LEDGER_STREAM_CAP; i -= 1) {
-    const evt = events[i]!;
-    lines.push({ seq: evt.seq, ts: evt.ts, event: evt.event, task: "task" in evt && typeof evt.task === "string" ? evt.task : null, line: renderLedgerLine(evt) });
-  }
-  return lines;
-}
+// ---- the Project event stream ---------------------------------------------------------------
 
-// ---- the "All projects" aggregate (v0.0.89, ADR 0045 §1.3) ----------------------------------
-
-/**
- * One Project's ledger events with their owning Project's slug — the
- * per-Project Factory registry's stream shape. Task ids are scoped strictly
- * per Project (two Projects may both use `T-01`), so the aggregate folds
- * each stream separately and attributes every row and line with its
- * `projectSlug` — an additive field an older client renders by ignoring.
- */
+/** One Project's ledger events with their owning Project's slug — the per-Project Factory registry's stream shape. */
 export interface ProjectEventStream {
   slug: string;
   events: readonly AnyEvent[];
-}
-
-/** A task row attributed with its owning Project's slug (the aggregate's TaskView extension). */
-export type ProjectTaskView = TaskView & { projectSlug: string };
-
-/** One ledger line attributed with its owning Project's slug (the aggregate's LedgerLineView extension). */
-export type ProjectLedgerLineView = LedgerLineView & { projectSlug: string };
-
-/** Folds every stream's tasks separately, attributing each row with its Project's slug. */
-export function foldTasksAcross(streams: readonly ProjectEventStream[]): ProjectTaskView[] {
-  return streams.flatMap((stream) => foldTasks(stream.events).map((task) => ({ ...task, projectSlug: stream.slug })));
-}
-
-/**
- * The aggregate ledger stream: each Project's newest lines first (its own
- * seq order), merged across Projects by timestamp (newest first) and capped
- * at `LEDGER_STREAM_CAP` — every line tagged with its Project's slug so the
- * "All projects" timeline never interleaves two `seq` namespaces unlabeled.
- */
-export function ledgerLinesAcross(streams: readonly ProjectEventStream[]): ProjectLedgerLineView[] {
-  const tagged: ProjectLedgerLineView[] = [];
-  for (const stream of streams) {
-    const events = stream.events;
-    let taken = 0;
-    for (let i = events.length - 1; i >= 0 && taken < LEDGER_STREAM_CAP; i -= 1) {
-      const evt = events[i]!;
-      tagged.push({
-        seq: evt.seq,
-        ts: evt.ts,
-        event: evt.event,
-        task: "task" in evt && typeof evt.task === "string" ? evt.task : null,
-        line: renderLedgerLine(evt),
-        projectSlug: stream.slug,
-      });
-      taken += 1;
-    }
-  }
-  tagged.sort((a, b) => (a.ts < b.ts ? 1 : a.ts > b.ts ? -1 : 0));
-  return tagged.slice(0, LEDGER_STREAM_CAP);
 }
 
 // ---- the whole view -----------------------------------------------------------------------
@@ -627,15 +519,8 @@ export function foldView(input: {
   stateDir: string;
   generatedAt: string;
   lanes: Lanes;
+  /** The scoped Project's ledger events — the KPI counts fold from them (no Task list rides the view). */
   events: readonly AnyEvent[];
-  /**
-   * The per-Project event streams (v0.0.89, ADR 0045 §1.3): when present,
-   * tasks and the ledger stream fold per Project (each row and line
-   * attributed with its `projectSlug` — never one merged slice under a
-   * colliding Task id) and `events` is only the retro fold's concatenated
-   * input. Absent, the single `events` stream folds everything, as before.
-   */
-  projectStreams?: readonly ProjectEventStream[];
   /**
    * The scoped Project's usage rollup (v0.0.87, ADR 0043 §4) — the gathered
    * `<projectStateDir>/usage.json`, undefined when none exists. Pure input:
@@ -647,8 +532,6 @@ export function foldView(input: {
   companions: DaemonPluginsInput;
   /** The active Project scope (v0.0.14) — null on the unscoped global view. */
   project: ProjectView | null;
-  /** Every discovered Project for the header's Project Selector. */
-  projects: readonly ProjectView[];
   /**
    * The `Private vault` status half (v0.0.21, ADR 0014 §4) — the gathered
    * `VaultStatusView` passes through the way `foldCompanions` folds the plugin
@@ -657,17 +540,13 @@ export function foldView(input: {
    */
   vault: VaultStatusView;
 }): FactoryViewFold {
-  const tasks = enrichTaskUsage(
-    input.projectStreams === undefined ? foldTasks(input.events) : foldTasksAcross(input.projectStreams),
-    input.usage,
-  );
+  const tasks = enrichTaskUsage(foldTasks(input.events), input.usage);
   return {
     version: FACTORY_VIEW_VERSION,
     stateDir: input.stateDir,
     generatedAt: input.generatedAt,
     lanes: input.lanes,
     kpis: foldKpis(tasks),
-    tasks,
     projectUsage: foldProjectUsage(input.usage),
     agents: [...input.daemon.agents],
     providers: input.daemon.providers.map((provider) => ({
@@ -677,26 +556,11 @@ export function foldView(input: {
     })),
     supervisor: input.daemon.supervisor,
     lead: input.daemon.lead,
-    retro: foldRetro(input.projectStreams === undefined ? input.events : input.projectStreams.flatMap((stream) => stream.events)),
-    ledger: input.projectStreams === undefined ? ledgerLines(input.events) : ledgerLinesAcross(input.projectStreams),
     daemonError: input.daemon.daemonError,
     project: input.project,
-    projects: [...input.projects],
     corePlugin: foldCorePlugin(input.companions.plugins, input.companions.updates),
     companions: foldCompanions(input.companions.plugins, input.companions.updates),
     pluginsCheckedAt: input.companions.checkedAt ?? null,
     vault: input.vault,
   };
-}
-
-/** Reads a per-attempt file from the stateDir, tailed — the detail modal's payload. */
-export function readTailed(stateDir: string, name: string): string | null {
-  let file: string;
-  try {
-    file = readFileSync(join(stateDir, name), "utf8");
-  } catch {
-    return null;
-  }
-  if (file.length <= DETAIL_TAIL_CHARS) return file;
-  return `[truncated]\n${file.slice(-DETAIL_TAIL_CHARS)}`;
 }

@@ -66,7 +66,6 @@ test("absent lanes.json loads the six defaults", (t) => {
     lead: DEFAULT_LANE,
     worker: DEFAULT_LANE,
     watch: DEFAULT_LANE,
-    retro: DEFAULT_LANE,
     freshEyes: DEFAULT_LANE,
   });
 });
@@ -117,11 +116,30 @@ test("an invalid lane value is a named error naming the lane", (t) => {
   const dir = makeTempDir();
   disposeDir(t, dir);
   const stateDir = join(dir, "factory");
-  writeRawLanes(stateDir, `${JSON.stringify({ retro: "pi" })}\n`);
+  writeRawLanes(stateDir, `${JSON.stringify({ watch: "pi" })}\n`);
 
   const lanes = loadLanes(stateDir);
   assert.ok(!lanes.ok);
-  assert.match(lanes.reason, /retro/);
+  assert.match(lanes.reason, /watch/);
+});
+
+test("v0.6.0 W4 (ADR 0056): a stale `retro` lane left in an older lanes.json is ignored on read and dropped on the next save", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const stateDir = join(dir, "factory");
+  writeRawLanes(stateDir, `${JSON.stringify({ worker: "copilot/gpt-5.4", retro: "copilot/gpt-5.4" })}\n`);
+
+  const lanes = loadLanes(stateDir);
+  assert.ok(lanes.ok, lanes.ok ? "" : lanes.reason);
+  assert.equal(lanes.lanes.worker, "copilot/gpt-5.4");
+  assert.equal("retro" in lanes.lanes, false, "the retro lane is no longer part of the table");
+
+  writeRawLanes(stateDir, `${JSON.stringify({ retro: "not-a-lane" })}\n`);
+  assert.ok(loadLanes(stateDir).ok, "even an unusable retro value is just an unknown key now");
+
+  const saved = saveLanes(stateDir, { watch: "copilot/gpt-5.4" });
+  assert.ok(saved.ok, saved.ok ? "" : saved.reason);
+  assert.deepEqual(JSON.parse(readFileSync(lanesPath(stateDir), "utf8")), { watch: "copilot/gpt-5.4" }, "the next save writes only the lanes the table knows");
 });
 
 test("saveLanes validates every lane and persists only the lanes it names — defaults are never materialized", (t) => {
@@ -559,26 +577,6 @@ test("an opencode lane completes the Watch, the Retro, and the Fresh-eyes CLI pa
   assert.equal(watchFake.calls[0]!.env?.CI, "1");
   assert.ok(watchFake.calls[0]!.stdin.includes("STATE"), "the prompt rides stdin with the state as its tail");
 
-  // The Retro: strict JSON proposals citing known seqs.
-  writeLanes(stateDir, { retro: lane });
-  const retroJson = JSON.stringify({
-    proposals: [{ class: "observation", evidence: [1, 2], pattern: "reports bury the gate note", text: "Surface the note." }],
-  });
-  const retroFake = fakeLaneRunner(() => ({ code: 0, stdout: retroJson }));
-  const retro = await core.runRetroPass({
-    stateDir,
-    corpus: { digest: "the corpus", eventsRead: 2, taskBlocks: 1, reports: 0, redGateLogs: 0, knownSeqs: new Set([1, 2]) },
-    copilotRunner: retroFake.runner,
-    budgetMs: 5_000,
-  });
-  assert.equal(retro.outcome, "written", retro.outcome === "written" ? "" : retro.error ?? "retro failed");
-  assert.equal(retro.model, lane);
-  assert.equal(retroFake.calls.length, 1);
-  assert.equal(retroFake.calls[0]!.command, "opencode");
-  assert.deepEqual(retroFake.calls[0]!.args, expectedArgs);
-  assert.equal(retroFake.calls[0]!.env?.OPENCODE_CONFIG_CONTENT, core.TOOLLESS_OPENCODE_CONFIG);
-  assert.equal(retroFake.calls[0]!.env?.CI, "1");
-
   // The Fresh-eyes CLI path: first line CONCERN or CLEAR.
   writeLanes(stateDir, { freshEyes: lane });
   const eyeFake = fakeLaneRunner(() => ({ code: 0, stdout: "CLEAR\nNothing to add." }));
@@ -904,14 +902,14 @@ test("Lane profiles start empty (zero built-ins) and run the save→apply→batc
   const projectLanesPath = join(stateDir, "projects", "acme-api-abc123", "lanes.json");
   const beforeBatch = readFileSync(projectLanesPath, "utf8");
   assert.throws(
-    () => saveLanesBatch(stateDir, { watch: "claude/claude-opus-4-6:high", retro: "auto" }, "acme-api-abc123"),
+    () => saveLanesBatch(stateDir, { watch: "claude/claude-opus-4-6:high", worker: "auto" }, "acme-api-abc123"),
     factoryErrorCode("invalid-lane"),
   );
   assert.equal(readFileSync(projectLanesPath, "utf8"), beforeBatch, "a refused batch leaves the target file byte-identical");
-  const batch = saveLanesBatch(stateDir, { watch: "claude/claude-opus-4-6:high", retro: "claude/claude-opus-4-6:high" }, "acme-api-abc123");
+  const batch = saveLanesBatch(stateDir, { watch: "claude/claude-opus-4-6:high", worker: "claude/claude-opus-4-6:high" }, "acme-api-abc123");
   assert.deepEqual(
     JSON.parse(readFileSync(batch.path, "utf8")),
-    profileLanes({ worker: "pi/zcode/glm-5.3", watch: "claude/claude-opus-4-6:high", retro: "claude/claude-opus-4-6:high" }),
+    profileLanes({ worker: "claude/claude-opus-4-6:high", watch: "claude/claude-opus-4-6:high" }),
     "the batch lands whole in one write",
   );
   assert.equal(batch.lanes.watch, "claude/claude-opus-4-6:high");

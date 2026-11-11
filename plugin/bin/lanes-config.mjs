@@ -13,7 +13,7 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { projectStateDir } from "./project.mjs";
 
-export const LANE_NAMES = ["supervisor", "lead", "worker", "watch", "retro", "freshEyes"];
+export const LANE_NAMES = ["supervisor", "lead", "worker", "watch", "freshEyes"];
 export const DEFAULT_LANE = "pi/zcode/glm-5.3";
 export const EYE_JSON_LANE = "eye.json";
 
@@ -27,7 +27,7 @@ export function projectLanesPath(stateDir, projectSlug) {
 }
 
 export function defaultLanes() {
-  return { supervisor: DEFAULT_LANE, lead: DEFAULT_LANE, worker: DEFAULT_LANE, watch: DEFAULT_LANE, retro: DEFAULT_LANE, freshEyes: DEFAULT_LANE };
+  return { supervisor: DEFAULT_LANE, lead: DEFAULT_LANE, worker: DEFAULT_LANE, watch: DEFAULT_LANE, freshEyes: DEFAULT_LANE };
 }
 
 /** Mirrors parseLane in src/lanes.ts — splits provider/model[:thinking]. */
@@ -193,7 +193,7 @@ export function resolveRunProvider(stateDir, providerFlag, projectSlug) {
 
 /**
  * The atomic batch lane save (v0.0.38, ADR 0026 §5): several lanes in ONE
- * file write, never concurrent single-lane writes racing (the Watch & Retro
+ * file write, never concurrent single-lane writes racing (the dual-save
  * defect). The bin mirror of `saveLanesBatch` in src/lanes.ts — `saveLanes`
  * here already persists a whole partial update in a single write, so the
  * parity name rides it directly.
