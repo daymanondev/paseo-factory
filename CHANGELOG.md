@@ -32,6 +32,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The linked Open Design Studio is view-only: the Scrum approval path (Approve / Request Changes / Waive, pinned findings, screen statuses and the decision relay) is removed. The preview, Sync and Studio view stay.
+- Every Needs-you item carries exactly one action: a Supervisor-less, Lead-less Project offers Start Supervisor, a broken Open Design link offers Sync again, and mobile says "on Paseo Desktop" for the install, start and sync acts instead of showing nothing.
 - The Lane config is five lanes (supervisor, lead, worker, watch, freshEyes). A stale `retro` key in an older `lanes.json` is ignored on read and dropped on the next save.
 - Ledger validation and folding accept and ignore the historical `execution` field on `contract_set` events and keep reading historical `retro_written` events; neither shape is written any more.
 - `CONTEXT.md` rewritten to describe only what v0.6.0 does (Factory surface, Lane config, Lane profile, Pi harness home, Role-scoped MCP bridge, Seat kickoff packet, Skill hub, Open Design project link and related terms), with a "Retired in v0.6.0" section; the glossary and role instructions never describe removed features. ADR 0038, 0049 and 0051 are marked Superseded by ADR 0056 and ADR 0017 is marked Amended. README, runbooks and judged-run notes swept of stale Scrum, Retro and console mentions.

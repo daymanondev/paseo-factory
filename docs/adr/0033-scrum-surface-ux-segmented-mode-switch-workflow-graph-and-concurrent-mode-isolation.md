@@ -1,7 +1,7 @@
 # 0033 — Scrum Surface UX, Optimistic Segmented Mode Switch, Workflow Graph, and Concurrent Multi-Project Isolation
 
 - **Date:** 2026-10-28
-- **Status:** Accepted
+- **Status:** Accepted — **Superseded in part by [ADR 0056](0056-slim-factory-panel-slp-only-and-guided-onboarding.md)** (its Scrum-mode decisions: Execution mode, Scrum roles, Owner wait, Task allowance, the UI Design Approval Checkpoint and the linked-design approval path; the linked-design preview and Studio view are retained)
 - **Amends:** ADR 0025, ADR 0026, ADR 0032
 - **Preserves:** ADR 0001–0032
 

@@ -11,7 +11,7 @@ import { writeDurableFile } from '../history-stage.ts';
 import { readProjectSettings, writeProjectSettings } from '../project-settings.ts';
 import { stageOpenDesignFrames } from './open-design.ts';
 import { safeId } from '../safe-id.ts';
-import { readOpenDesignLink, type OpenDesignProjectLink } from './open-design-link-state.ts';
+import { openDesignBundleReady, readOpenDesignLink, type OpenDesignProjectLink } from './open-design-link-state.ts';
 export { readOpenDesignLink, type OpenDesignProjectLink } from './open-design-link-state.ts';
 
 export interface OpenDesignFile { path: string; contentBase64: string }
@@ -131,7 +131,7 @@ export function syncOpenDesignLink(input: { state: string; slug: string; root: s
 export function autoSyncOpenDesignLink(input: { state: string; slug: string; root: string; userHome?: string}): void {
   const link = readOpenDesignLink(input.root) ?? readProjectSettings(input.state, input.slug).openDesignLink; if (!link) return;
   const source = discoverOpenDesignProjects(input.userHome).find(p => p.projectId === link.projectId);
-  const hasBundle = existsSync(join(input.root, 'design/index.html')) || existsSync(join(input.root, 'design/screens.html'));
+  const hasBundle = openDesignBundleReady(input.root);
   if (source && (!hasBundle || source.digest !== link.digest || source.sourceUpdatedAt > link.sourceUpdatedAt)) syncOpenDesignLink({ ...input, projectId: link.projectId });
 }
 /** The synced specification is versioned before a Task can branch from the root. */

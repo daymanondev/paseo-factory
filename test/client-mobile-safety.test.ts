@@ -97,7 +97,7 @@ test("StudioRelay mounts under a RN-like window and renders the SDK DocumentFram
   const { StudioRelay } = await load("plugin/client/factory/studio-relay.tsx");
   const { createElement } = await import("react");
   const theme = { colors: { surface0: "#fff", surface1: "#fff", surface2: "#fff", foreground: "#111", foregroundMuted: "#555", accent: "#35a", border: "#ccc", statusSuccess: "#272", statusWarning: "#860", statusDanger: "#a33" } };
-  const bundle = { studioHtml: "<p>Studio</p>", channel: "c", activeGateId: null, model: { revision: 1, runId: "r", design: { revision: 1, digest: "d" } } };
+  const bundle = { studioHtml: "<p>Studio</p>", model: { revision: 1, runId: "r", design: { revision: 1, digest: "d" } } };
   const html = await mountUnderNativeWindow(async (createRoot, container, act) => {
     const root = createRoot(container);
     goNative();

@@ -20,7 +20,7 @@
  * - the same parse refuses browser-only APIs that crash Paseo mobile
  *   (v0.6.0, ADR 0056): `window`/`document` event APIs not behind a
  *   `typeof <host>?.<method> === "function"` guard (React Native's `window`
- *   has no addEventListener), and DOM element creation (a string-tag
+ *   has no addEventListener; bare global `addEventListener(…)` calls included), and DOM element creation (a string-tag
  *   createElement/jsx call, or `document.createElement`).
  *
  * Exit 0: both bundles build from the tracked files alone. Exit 1: they do
@@ -192,6 +192,22 @@ function hostApiOf(node) {
   return name === null ? null : { host: host.text, name };
 }
 
+/** A bare call of a global event API (`addEventListener(…)`) — the global object is the host, so React Native's missing method is just as fatal. */
+function bareApiOf(node) {
+  return ts.isCallExpression(node) && ts.isIdentifier(node.expression) && EVENT_APIS.has(node.expression.text) ? { host: null, name: node.expression.text } : null;
+}
+
+/** Names a module itself declares (variable, function, parameter, binding), so its own local `addEventListener` is not mistaken for the global. */
+function declaredEventApiNames(parsed) {
+  const names = new Set();
+  const visit = (node) => {
+    if ((ts.isVariableDeclaration(node) || ts.isFunctionDeclaration(node) || ts.isParameter(node) || ts.isBindingElement(node)) && node.name && ts.isIdentifier(node.name) && EVENT_APIS.has(node.name.text)) names.add(node.name.text);
+    ts.forEachChild(node, visit);
+  };
+  visit(parsed);
+  return names;
+}
+
 /** True when a `typeof <host>.<name>` test (any optional-chain spelling) is the condition of an enclosing if / ternary / && that governs this node. */
 function guardedByTypeof(node, api) {
   const tests = (condition) => {
@@ -199,7 +215,7 @@ function guardedByTypeof(node, api) {
     const scan = (n) => {
       if (ts.isTypeOfExpression(n)) {
         const operand = n.expression;
-        const target = hostApiOf(operand);
+        const target = api.host === null ? (ts.isIdentifier(operand) ? { host: null, name: operand.text } : null) : hostApiOf(operand);
         if (target && target.host === api.host && target.name === api.name) found = true;
       }
       ts.forEachChild(n, scan);
@@ -230,11 +246,16 @@ function browserApiErrors(code) {
   const report = (node, message) => {
     errors.push(`${fileOf(node)}: ${message}`);
   };
+  const declared = declaredEventApiNames(parsed);
   const calleeName = (callee) => (ts.isIdentifier(callee) ? callee.text : ts.isPropertyAccessExpression(callee) ? callee.name.text : null);
   const visit = (node) => {
     const api = hostApiOf(node);
     if (api && EVENT_APIS.has(api.name) && !optionallyCalled(node) && !guardedByTypeof(node, api) && !ts.isTypeOfExpression(node.parent)) {
       report(node, `${api.host}.${api.name} is used without a \`typeof ${api.host}?.${api.name} === "function"\` guard — React Native's ${api.host} has no ${api.name}, so Paseo mobile crashes on load`);
+    }
+    const bare = bareApiOf(node);
+    if (bare && !declared.has(bare.name) && !guardedByTypeof(node, bare)) {
+      report(node, `bare ${bare.name} is used without a \`typeof ${bare.name} === "function"\` guard — React Native's global scope has no ${bare.name}, so Paseo mobile crashes on load`);
     }
     if (api && api.host === "document" && /^createElement/.test(api.name)) {
       report(node, `document.${api.name} creates a DOM element — Paseo mobile has no DOM; use the plugin SDK's DocumentFrame or React Native primitives`);

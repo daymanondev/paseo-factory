@@ -22,7 +22,7 @@ import { useRpc } from "@getpaseo/plugin/client";
 import { ScrollView, useToast } from "@getpaseo/plugin/client/ui";
 import { useEffect, useRef, useState } from "react";
 import { Text, View } from "react-native";
-import { skillsImport, skillsTogglePack, lanesReset, lanesSet, lanesSetBatch, leadRotate, onboardingCommit, onboardingInspect, openDesignCatalog, helperMcpsSyncAndProbe, helperMcpsSetEnabled, pluginsInstall, pluginsManage, pluginsCheckUpdates, profilesApply, profilesDelete, profilesSave, projectDelete, projectReset, snapshot, supervisorRevoke, supervisorStart, vaultConfigure, vaultHydrate, vaultImport, vaultSync } from "../../shared/rpc.ts";
+import { skillsImport, skillsTogglePack, lanesReset, lanesSet, lanesSetBatch, leadRotate, onboardingCommit, onboardingInspect, openDesignCatalog, openDesignSync, helperMcpsSyncAndProbe, helperMcpsSetEnabled, pluginsInstall, pluginsManage, pluginsCheckUpdates, profilesApply, profilesDelete, profilesSave, projectDelete, projectReset, snapshot, supervisorRevoke, supervisorStart, vaultConfigure, vaultHydrate, vaultImport, vaultSync } from "../../shared/rpc.ts";
 import type { ManageablePluginId } from "../../shared/companions.ts";
 import type { FactoryView, LaneName } from "../../shared/view.ts";
 import { SPACING, text } from "../kit/theme.ts";
@@ -79,6 +79,7 @@ export function FactoryShell({
   const onboardingInspectCall = useRpc(onboardingInspect);
   const onboardingCommitCall = useRpc(onboardingCommit);
   const openDesignCatalogCall = useRpc(openDesignCatalog);
+  const openDesignSyncCall = useRpc(openDesignSync);
   const projectResetCall = useRpc(projectReset);
   const projectDeleteCall = useRpc(projectDelete);
   // The v0.0.38 lane acts (ADR 0026 §2/§5): one useRpc per contract, every
@@ -282,6 +283,11 @@ export function FactoryShell({
       if (reply.ok) navigation?.openAgent({ agentId: reply.agentId, serverId });
       return reply;
     });
+  };
+  /** A broken Open Design link's primary action: sync the linked design again from the host (desktop only — the card below also offers a granted-folder Sync). */
+  const syncOpenDesign = (): void => {
+    if (projectRoot === undefined || mobile) return;
+    void act("Sync Open Design", () => openDesignSyncCall({ projectRoot }));
   };
   const resetProject = (): void => {
     if (projectRoot === undefined) return;
@@ -648,7 +654,7 @@ export function FactoryShell({
             mobile={mobile}
             now={now}
             daemonError={view.daemonError}
-            actions={{ openAgent, installPrerequisites, rotateLead, revokeSupervisor, startSupervisor, busy: busy || activePluginAct !== null }}
+            actions={{ openAgent, installPrerequisites, rotateLead, revokeSupervisor, startSupervisor, syncOpenDesign, busy: busy || activePluginAct !== null }}
             openDesignActions={
               !mobile && view.project !== null && view.project.missingRoot !== true ? (
                 <OpenDesignControl key={view.project.root} part="card" theme={theme} root={view.project.root} sourceKey={`${serverId ?? "local"}:${view.project.root}`} onChanged={refresh} />

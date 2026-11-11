@@ -2,7 +2,7 @@ import { prepareOpenDesignDispatch } from "./core/open-design/open-design-link.t
 import { discoverHelperMcps } from "./core/helper-mcp-sync.ts";
 import { resolveVaultUserHome } from "./core/vault-materialization.ts";
 import { liveSeatCandidates } from "./seats.ts";
-import { withExecutionLane } from "./core/execution-lane.ts";
+import { withProjectIngressLock } from "./core/project-ingress-lock.ts";
 import { atomicJson, readOptionalJson } from "./core/json-store.ts";
 import { commitSeatMemoryOnRoot } from "./core/workspace.ts";
 /**
@@ -488,7 +488,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
 
   const projectLane = <T>(slug: string, run: () => Promise<T>): Promise<T> => {
     const prior = lanes.get(slug) ?? Promise.resolve();
-    const admitted = () => withExecutionLane(deps.stateDir, slug, () => deps.factory.history.runOperation(run));
+    const admitted = () => withProjectIngressLock(deps.stateDir, slug, () => deps.factory.history.runOperation(run));
     const job = prior.then(admitted, admitted);
     lanes.set(
       slug,

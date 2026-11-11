@@ -51,7 +51,7 @@ import { resolve as resolvePath } from "node:path";
 // The plugin server no longer runs one unscoped root Factory for every
 // Project: each registered Project owns its own Factory instance — its own
 // serialized writer lane (the per-ledger LedgerAdmission), its own
-// ledger.jsonl, report-*/gate-*/retro-* files under
+// ledger.jsonl, report-*/gate-* files under
 // `<stateDir>/projects/<slug>/`. Independent Projects never block one
 // another's Ledger writes or Gate runs; the single-writer invariant holds
 // WITHIN each Project. The root Factory remains as the lightweight fallback

@@ -46,10 +46,18 @@ export interface ProjectPanelActions {
   revokeSupervisor(): void;
   /** Start the Supervisor on a vacant seat with the Owner's optional first directive (desktop only). */
   startSupervisor(directive: string): void;
+  /** Sync the linked Open Design project again from the host — a broken link's primary action (desktop only). */
+  syncOpenDesign(): void;
   busy: boolean;
 }
 
-/** UI-only state a host may seed — what is open and the directive draft. Never data. */
+/**
+ * UI-only state a host may seed — what is open and the directive draft. Never
+ * data. Kept deliberately (review S7): the panel's tests render to static
+ * markup, which cannot click a `⋯` or type a draft, so seeding the initial UI
+ * state is the only door to the open-menu and typed-directive renders. The
+ * live state stays local to the component either way.
+ */
 export interface ProjectPanelInitialUi {
   menuOpen?: boolean;
   supervisorMenuOpen?: boolean;
@@ -64,6 +72,13 @@ const NEEDS_YOU_TONE: Record<PanelNeedsYouItem["kind"], Colour> = {
   "handoff-stuck": "statusDanger",
   prerequisites: "statusWarning",
   "open-design-broken": "statusDanger",
+};
+
+/** What mobile says in place of a desktop-only act — a settings write, a seat start or a design sync cannot finish on a phone. */
+const DESKTOP_ONLY_HINT: Record<"install-prerequisites" | "start-supervisor" | "sync-open-design", string> = {
+  "install-prerequisites": "Install them on Paseo Desktop.",
+  "start-supervisor": "Start the Supervisor on Paseo Desktop.",
+  "sync-open-design": "Sync the design again on Paseo Desktop.",
 };
 
 function toneColour(tone: PanelTone): Colour | undefined {
@@ -108,17 +123,22 @@ function Block({ theme, testID, border, children }: { theme: PluginTheme; testID
 function NeedsYouRow({ theme, item, mobile, actions }: { theme: PluginTheme; item: PanelNeedsYouItem; mobile: boolean; actions: ProjectPanelActions }) {
   const colour = NEEDS_YOU_TONE[item.kind];
   const action = item.action;
+  const buttonId = `factory-panel-needs-you-action-${item.key}`;
   return (
     <View testID={`factory-panel-needs-you-${item.key}`} style={{ gap: SPACING[1], paddingVertical: SPACING[1] }}>
       <Text style={text(theme, "rowTitle", colour)}>{item.title}</Text>
       {item.detail !== null ? <Text style={text(theme, "meta")}>{item.detail}</Text> : null}
-      {action !== null && action.kind === "open-agent" ? (
-        <Btn theme={theme} small label={action.label} onPress={() => actions.openAgent(action.agentId)} />
-      ) : null}
-      {action !== null && action.kind === "install-prerequisites" && !mobile ? (
-        <Btn theme={theme} small label={action.label} disabled={actions.busy} onPress={actions.installPrerequisites} />
-      ) : null}
-      {action !== null && action.kind === "open-design" ? <Text style={text(theme, "meta")}>See Open Design below.</Text> : null}
+      {action.kind === "open-agent" ? (
+        <Btn theme={theme} small testID={buttonId} label={action.label} onPress={() => actions.openAgent(action.agentId)} />
+      ) : mobile ? (
+        <Text testID={`factory-panel-needs-you-hint-${item.key}`} style={text(theme, "meta")}>{DESKTOP_ONLY_HINT[action.kind]}</Text>
+      ) : action.kind === "install-prerequisites" ? (
+        <Btn theme={theme} small testID={buttonId} label={action.label} disabled={actions.busy} onPress={actions.installPrerequisites} />
+      ) : action.kind === "start-supervisor" ? (
+        <Btn theme={theme} small testID={buttonId} label={action.label} disabled={actions.busy} onPress={() => actions.startSupervisor("")} />
+      ) : (
+        <Btn theme={theme} small testID={buttonId} label={action.label} disabled={actions.busy} onPress={actions.syncOpenDesign} />
+      )}
     </View>
   );
 }

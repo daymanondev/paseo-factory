@@ -41,6 +41,70 @@ function MenuSection({ theme, id, title, children }: { theme: PluginTheme; id: s
   );
 }
 
+/**
+ * One destructive act behind its two-step confirm: the idle button arms it,
+ * the armed pair is Confirm / Cancel. `emphasised` draws the idle button solid
+ * red — Delete on a Project whose folder is gone, where it is the only act left.
+ */
+function ConfirmableDanger({
+  theme,
+  kind,
+  icon,
+  label,
+  confirmLabel,
+  busy,
+  emphasised = false,
+  confirming,
+  setConfirming,
+  onConfirm,
+}: {
+  theme: PluginTheme;
+  kind: "reset" | "delete";
+  icon: "RotateCcw" | "Trash2";
+  label: string;
+  confirmLabel: string;
+  busy: boolean;
+  emphasised?: boolean;
+  confirming: boolean;
+  setConfirming(on: boolean): void;
+  onConfirm(): void;
+}) {
+  if (confirming) {
+    return (
+      <>
+        <Btn
+          theme={theme}
+          small
+          solid
+          testID={`factory-panel-menu-confirm-${kind}`}
+          icon={icon}
+          label={confirmLabel}
+          tone="statusDanger"
+          disabled={busy}
+          onPress={() => {
+            setConfirming(false);
+            onConfirm();
+          }}
+        />
+        <Btn theme={theme} small label="Cancel" tone="foregroundMuted" disabled={busy} onPress={() => setConfirming(false)} />
+      </>
+    );
+  }
+  return (
+    <Btn
+      theme={theme}
+      small
+      solid={emphasised}
+      testID={`factory-panel-menu-${kind}`}
+      icon={icon}
+      label={label}
+      tone={emphasised ? "statusDanger" : "foregroundMuted"}
+      disabled={busy}
+      onPress={() => setConfirming(true)}
+    />
+  );
+}
+
 export function ProjectMenu({
   theme,
   mobile,
@@ -127,68 +191,30 @@ export function ProjectMenu({
           ) : null}
           <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[2] }}>
             {!missingRoot ? (
-              confirming === "reset" ? (
-                <>
-                  <Btn
-                    theme={theme}
-                    small
-                    solid
-                    testID="factory-panel-menu-confirm-reset"
-                    icon="RotateCcw"
-                    label="Confirm Reset"
-                    tone="statusDanger"
-                    disabled={busy}
-                    onPress={() => {
-                      setConfirming(null);
-                      resetProject();
-                    }}
-                  />
-                  <Btn theme={theme} small label="Cancel" tone="foregroundMuted" disabled={busy} onPress={() => setConfirming(null)} />
-                </>
-              ) : (
-                <Btn
-                  theme={theme}
-                  small
-                  testID="factory-panel-menu-reset"
-                  icon="RotateCcw"
-                  label="Reset Project"
-                  tone="foregroundMuted"
-                  disabled={busy}
-                  onPress={() => setConfirming("reset")}
-                />
-              )
-            ) : null}
-            {confirming === "delete" ? (
-              <>
-                <Btn
-                  theme={theme}
-                  small
-                  solid
-                  testID="factory-panel-menu-confirm-delete"
-                  icon="Trash2"
-                  label="Confirm Delete"
-                  tone="statusDanger"
-                  disabled={busy}
-                  onPress={() => {
-                    setConfirming(null);
-                    deleteProject();
-                  }}
-                />
-                <Btn theme={theme} small label="Cancel" tone="foregroundMuted" disabled={busy} onPress={() => setConfirming(null)} />
-              </>
-            ) : (
-              <Btn
+              <ConfirmableDanger
                 theme={theme}
-                small
-                solid={missingRoot}
-                testID="factory-panel-menu-delete"
-                icon="Trash2"
-                label="Delete Project"
-                tone={missingRoot ? "statusDanger" : "foregroundMuted"}
-                disabled={busy}
-                onPress={() => setConfirming("delete")}
+                kind="reset"
+                icon="RotateCcw"
+                label="Reset Project"
+                confirmLabel="Confirm Reset"
+                busy={busy}
+                confirming={confirming === "reset"}
+                setConfirming={(on) => setConfirming(on ? "reset" : null)}
+                onConfirm={resetProject}
               />
-            )}
+            ) : null}
+            <ConfirmableDanger
+              theme={theme}
+              kind="delete"
+              icon="Trash2"
+              label="Delete Project"
+              confirmLabel="Confirm Delete"
+              busy={busy}
+              emphasised={missingRoot}
+              confirming={confirming === "delete"}
+              setConfirming={(on) => setConfirming(on ? "delete" : null)}
+              onConfirm={deleteProject}
+            />
           </View>
         </MenuSection>
       ) : null}

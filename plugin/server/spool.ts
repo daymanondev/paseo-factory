@@ -1,6 +1,6 @@
 import { spoolRequestSemanticKey } from "./core/mcp/transport.ts";
 export { spoolRequestSemanticKey } from "./core/mcp/transport.ts";
-import { withExecutionLane } from "./core/execution-lane.ts";
+import { withProjectIngressLock } from "./core/project-ingress-lock.ts";
 import { detectProjectSkillPacks } from "./core/skill-hub.ts";
 import { safeId } from "./core/safe-id.ts";
 import { recordUpgradeControlReceipt } from "./core/history-upgrade.ts";
@@ -1534,7 +1534,7 @@ export async function handleSpoolRequest(
   const run = () => {
     const workspace = request.kind === "contract" ? request.workspace : (request.kind === "spawn" || request.kind === "respawn") ? effective.contractFor(request.task)?.workspace : undefined;
     const project = workspace === undefined ? undefined : resolveProject(workspace);
-    return project?.ok ? withExecutionLane(effective.stateDir, project.slug, admitted) : admitted();
+    return project?.ok ? withProjectIngressLock(effective.stateDir, project.slug, admitted) : admitted();
   };
   if (request.kind !== "spawn" && request.kind !== "contract") return run();
   // Spool requests run concurrently. Serialize only Peer lifecycle operations
@@ -1723,7 +1723,7 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
       // Claim admission synchronously records gate_started under the same
       // lifecycle lane as handoff. Release the lane before awaiting the Gate:
       // permits, mailbox delivery, and context observation remain available.
-      const admitted = project?.ok ? await withExecutionLane(factory.stateDir, project.slug, admit) : await admit();
+      const admitted = project?.ok ? await withProjectIngressLock(factory.stateDir, project.slug, admit) : await admit();
       const outcome = await admitted.completion;
       const replayed = outcome.gate.seq <= admitted.priorSeq;
       if (!replayed) {

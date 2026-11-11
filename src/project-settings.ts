@@ -8,6 +8,7 @@ import { existsSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { FactoryError } from "./errors.ts";
 import { atomicJson, readOptionalJson, stateMutation } from "./json-store.ts";
+import { parseOpenDesignLink } from "./open-design/open-design-link-state.ts";
 import type { OpenDesignProjectLink } from "./open-design/open-design-link-state.ts";
 import { safeId } from "./safe-id.ts";
 
@@ -53,21 +54,25 @@ export function projectSettingsAreValid(value: unknown): value is ProjectSetting
 /** A Project with no settings record yet has the defaults: no link, no packs. */
 export function readProjectSettings(state: string, slug: string): ProjectSettings {
   const path = projectSettingsPath(state, slug);
-  let value: unknown;
-  try {
-    value = readOptionalJson(path, "project-settings-invalid");
-  } catch {
-    throw new FactoryError("project-settings-invalid", `project-settings-invalid: ${path}`);
-  }
+  // readOptionalJson already refuses by name (`project-settings-invalid`) with the file path and the parse failure.
+  const value = readOptionalJson(path, "project-settings-invalid");
   if (value === undefined) return { schemaVersion: 1, revision: 0 };
   if (!projectSettingsAreValid(value)) throw new FactoryError("project-settings-invalid", `project-settings-invalid: ${path}`);
   return value;
 }
 
-/** Durable replace of the whole record. The caller owns any read-modify-write ordering. */
+/**
+ * Durable replace of the whole record, serialised behind the state-directory
+ * mutation gate (re-entrant, so a caller already inside `stateMutation` is
+ * unaffected). The caller still owns any read-modify-write ordering across
+ * its own read and this write — `setProjectSkillPacks` holds one mutation
+ * across both, and the Open Design sync runs under the Project ingress lock.
+ */
 export function writeProjectSettings(state: string, slug: string, settings: ProjectSettings): ProjectSettings {
-  atomicJson(projectSettingsPath(state, slug), settings);
-  return settings;
+  return stateMutation(state, () => {
+    atomicJson(projectSettingsPath(state, slug), settings);
+    return settings;
+  });
 }
 
 export function setProjectSkillPacks(state: string, slug: string, skillPacks: string[]): ProjectSettings {
@@ -82,16 +87,25 @@ export function setProjectSkillPacks(state: string, slug: string, skillPacks: st
 /** Files the pre-0.6.0 Scrum workflow left beside a Project's own state. */
 const SCRUM_STATE_FILES = ["execution-switch.json", "scrum-lanes.json", "scrum-profiles.json", "scrum-active-profile.json"];
 
+/** A source record with a known kind and string-or-absent request ids; anything else is not carried across. */
+function openDesignSourceOf(value: unknown): OpenDesignSource | undefined {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const source = value as Record<string, unknown>;
+  if (source.kind !== "host" && source.kind !== "client") return undefined;
+  for (const key of ["requestId", "acknowledgedRequestId"]) if (source[key] !== undefined && typeof source[key] !== "string") return undefined;
+  return source as unknown as OpenDesignSource;
+}
+
 function legacySettings(value: unknown): ProjectSettings | undefined {
   if (value === null || typeof value !== "object") return undefined;
   const legacy = value as Record<string, unknown>;
   const settings: ProjectSettings = { schemaVersion: 1, revision: 1 };
   if (isStringArray(legacy.skillPacks)) settings.skillPacks = legacy.skillPacks;
   if (isStringArray(legacy.openDesignCheckpointPaths)) settings.openDesignCheckpointPaths = legacy.openDesignCheckpointPaths;
-  const source = legacy.openDesignSource as OpenDesignSource | null | undefined;
-  if (source && typeof source === "object" && (source.kind === "host" || source.kind === "client")) settings.openDesignSource = source;
-  const link = legacy.openDesignLink as OpenDesignProjectLink | null | undefined;
-  if (link && typeof link === "object") settings.openDesignLink = link;
+  const source = openDesignSourceOf(legacy.openDesignSource);
+  if (source !== undefined) settings.openDesignSource = source;
+  const link = parseOpenDesignLink(legacy.openDesignLink);
+  if (link !== undefined) settings.openDesignLink = link;
   return settings;
 }
 

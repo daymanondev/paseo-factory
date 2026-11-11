@@ -90,7 +90,7 @@ function makePanel(overrides: Partial<PanelView> = {}): PanelView {
 }
 
 const noopActions = () => ({
-  openAgent() {}, installPrerequisites() {}, rotateLead() {}, revokeSupervisor() {}, startSupervisor() {}, busy: false,
+  openAgent() {}, installPrerequisites() {}, rotateLead() {}, revokeSupervisor() {}, startSupervisor() {}, syncOpenDesign() {}, busy: false,
 });
 
 async function render(panel: PanelView, props: { mobile?: boolean; openDesignActions?: unknown; menu?: unknown; initialUi?: Record<string, unknown>; actions?: Record<string, unknown> } = {}): Promise<string> {
@@ -209,6 +209,26 @@ test("mobile hides the prerequisite install (a settings write) but keeps convers
   const mobile = await render(panel, { mobile: true });
   assert.match(mobile, /Open Lead/);
   assert.doesNotMatch(mobile, />Install</);
+});
+
+test("every Needs-you action kind renders one button on desktop; on mobile the install, start and sync acts say to use Desktop instead of vanishing", async () => {
+  const items = [
+    { key: "needs-human:T-08", kind: "needs-human", title: "T-08 needs your decision", detail: null, action: { kind: "start-supervisor", label: "Start Supervisor" } },
+    { key: "prerequisites", kind: "prerequisites", title: "Required skills & tools are missing", detail: "factory-skills-pack", action: { kind: "install-prerequisites", label: "Install" } },
+    { key: "open-design-broken", kind: "open-design-broken", title: "Open Design link is broken", detail: "The staged design files are missing — sync the design again.", action: { kind: "sync-open-design", label: "Sync again" } },
+    { key: "seat-stuck:lead", kind: "seat-stuck", title: "Lead errored", detail: null, action: { kind: "open-agent", agentId: "agent-lead", label: "Open Lead" } },
+  ] as PanelView["needsYou"];
+  const action = (html: string, key: string): boolean => hasHook(html, `factory-panel-needs-you-action-${key}`);
+  const hint = (html: string, key: string): boolean => hasHook(html, `factory-panel-needs-you-hint-${key}`);
+  const desktop = await render(makePanel({ needsYou: items }), { mobile: false });
+  for (const item of items) { assert.ok(action(desktop, item.key), `${item.key} has its button on desktop`); assert.equal(hint(desktop, item.key), false); }
+  const mobile = await render(makePanel({ needsYou: items }), { mobile: true });
+  assert.ok(action(mobile, "seat-stuck:lead"), "a conversation jump works on mobile");
+  for (const key of ["needs-human:T-08", "prerequisites", "open-design-broken"]) {
+    assert.equal(action(mobile, key), false, `${key} offers no button on mobile`);
+    assert.ok(hint(mobile, key), `${key} says what to do instead`);
+  }
+  assert.match(mobile, /on Paseo Desktop/);
 });
 
 test("a workspace that is not a Project says to set it up on Desktop on mobile, and mounts the onboarding wizard on desktop", async () => {
