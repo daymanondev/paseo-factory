@@ -12,7 +12,7 @@ import { OpenDesignProjectLinkSchema } from "./view.ts";
  */
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
-import { HelperMcpViewSchema, ImportMaterializationSchema, ImportStatusSchema, FactoryViewSchema, LaneNameSchema, LaneProfileViewSchema, LanesSchema, LanesUpdateSchema, OwnerRequestViewSchema, ProjectViewSchema, TaskDetailViewSchema, VaultStatusViewSchema } from "./view.ts";
+import { HelperMcpViewSchema, ImportMaterializationSchema, ImportStatusSchema, FactoryViewSchema, LaneNameSchema, LaneProfileViewSchema, LanesSchema, LanesUpdateSchema, ProjectViewSchema, TaskDetailViewSchema, VaultStatusViewSchema } from "./view.ts";
 
 /** Every handler's refusal shape: a stable machine code plus the human sentence. */
 export const Failure = z.object({ ok: z.literal(false), code: z.string(), error: z.string() });
@@ -47,119 +47,6 @@ export const accept = defineRpc({
   name: "factory.accept",
   input: z.object({ task: z.string().min(1), attempt: z.number().int().min(1) }),
   output: z.union([z.object({ ok: z.literal(true), seq: z.number().int(), summary: z.string() }), Failure]),
-});
-
-// The console's native read-only transcript read (ADR 0051 §5, T-04): the
-// projected timeline tail of ONE Factory-known agent, reduced to plain data
-// the Task Detail disclosure renders. It answers only for agents the Factory
-// attributes to a Task's Attempt (the ledger's own agent stamps) or to a
-// Project seat (`project.json` + the correlation registry's session
-// bindings) — any other id refuses as data (`unknown-agent`). A missing
-// PaseoApi, a daemon error, or a wiped in-memory store is honest unavailable
-// data on the ok arm, never a throw. It accepts no write and reads no
-// arbitrary path — the daemon's own `agents.ref(id).timeline.refetch` seam
-// (`plugin/server/timeline.ts`) is the only source.
-export const AgentTranscriptEntrySchema = z.object({
-  /** The entry's `seqEnd` — the seq position the line keys on. */
-  seq: z.number().int(),
-  /** The render role: user/assistant messages read; tool calls stay compact; the rest is system chrome. */
-  role: z.enum(["user", "assistant", "tool", "system"]),
-  /** The daemon's own item type, verbatim — `user_message`, `tool_call`, `compaction`, … */
-  kind: z.string(),
-  /** The message text — null for entries that carry none (tool calls, todos). */
-  text: z.string().nullable(),
-  /** The tool call's name — `detail.type` first, the item's own `name` second; null otherwise. */
-  tool: z.string().nullable(),
-  /** One-line flat summary — the same compact line the Watch pass reads (`renderTimelineTranscript`). */
-  summary: z.string().nullable(),
-});
-
-export type AgentTranscriptEntry = z.infer<typeof AgentTranscriptEntrySchema>;
-
-export const agentTranscript = defineRpc({
-  name: "factory.agent.transcript",
-  input: z.object({ agent: z.string().min(1) }),
-  output: z.union([
-    z.object({ ok: z.literal(true), agent: z.string(), entries: z.array(AgentTranscriptEntrySchema) }),
-    /** The agent is Factory-known but its timeline cannot be read right now — the honest reason rides as data. */
-    z.object({ ok: z.literal(true), agent: z.string(), unavailable: z.literal(true), reason: z.string() }),
-    Failure,
-  ]),
-});
-
-// The console's cross-Project inbox read (ADR 0051, T-05). The unscoped
-// `factory.snapshot` already carries every Project's Tasks (each row
-// attributed with its additive `projectSlug`, v0.0.89), but its `execution`
-// half is the global scope's — it names no per-Project Scrum run, so the
-// pending `Owner wait`s are invisible there. This ONE read-only door fills
-// exactly that half: every Project's active run's Owner requests, each
-// attributed with its Project's slug. It takes no input (no write, no
-// arbitrary path), answers every request status verbatim (the console's own
-// fold filters pending), and a Project whose run journal cannot be read
-// refuses as a per-Project row — never a failed whole read.
-//
-// T-06 extended the row additively: each row also carries the run journal's
-// `revision` (the `expectedRevision` the Owner's console commands submit),
-// the run's count-based `allowance` used/allowed state, and its `blockers`
-// verbatim — a run blocked on budget (blocker causes `tasks` /
-// `qaFixRounds`, ADR 0038) now lists even when it holds no Owner request,
-// so the Inbox can offer the Grant +N act from the run's own facts.
-export const InboxProjectRequestsSchema = z.object({
-  /** The owning Project — the same slug the snapshot's task rows carry. */
-  projectSlug: z.string(),
-  /** The run the requests wait on — its durable identity, never inferred. */
-  runId: z.string(),
-  phase: z.string(),
-  requests: z.array(OwnerRequestViewSchema),
-  /**
-   * T-06 (additive): the run journal's revision — the `expectedRevision`
-   * every Owner command (`wait.answer`, `wait.cancel`, `design.decide`,
-   * `allowance.*`) must carry. Absent only on an older schema's reply.
-   */
-  revision: z.number().int().optional(),
-  /**
-   * T-06 (additive): the run's count-based allowance state — the Grant
-   * item's own used/allowed data (ADR 0038: a grant adds capacity without
-   * resetting the used count).
-   */
-  allowance: z
-    .object({
-      tasksUsed: z.number().int(),
-      tasksAllowed: z.number().int(),
-      qaFixRoundsUsed: z.number().int(),
-      qaFixRoundsAllowed: z.number().int(),
-    })
-    .optional(),
-  /**
-   * T-06 (additive): the run's blocker details verbatim — the fold filters
-   * the causes an Owner grant can remedy (`tasks` / `qaFixRounds`); the
-   * read answers every cause, never a pre-filtered subset.
-   */
-  blockers: z
-    .array(
-      z.object({
-        id: z.string(),
-        reason: z.string(),
-        causes: z.array(z.enum(["tasks", "qaFixRounds", "elapsed", "other", "ambiguous"])),
-      }),
-    )
-    .optional(),
-});
-export type InboxProjectRequests = z.infer<typeof InboxProjectRequestsSchema>;
-
-export const inbox = defineRpc({
-  name: "factory.inbox",
-  input: z.object({}),
-  output: z.union([
-    z.object({
-      ok: z.literal(true),
-      /** One row per Project whose active run carries at least one Owner request — registry slug order. */
-      projects: z.array(InboxProjectRequestsSchema),
-      /** Per-Project read refusals — a damaged run journal renders as data, never a failed inbox. */
-      refusals: z.array(z.object({ projectSlug: z.string(), error: z.string() })),
-    }),
-    Failure,
-  ]),
 });
 
 export const retro = defineRpc({

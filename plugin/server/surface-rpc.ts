@@ -1,5 +1,4 @@
 import { setProjectSkillPacks } from "./core/scrum/config.ts";
-import { factoryKnownAgents, reduceTimelineEntry } from "./agent-transcript.ts";
 import { linkedPreviewBundle } from "./core/scrum/preview-bundle.ts";
 import { serveLinkedPreview } from "./core/scrum/preview-server.ts";
 import { seedLinkedOpenDesign } from "./core/scrum/open-design-link.ts";
@@ -86,9 +85,7 @@ import type { SpoolLeadDispatchRequest, SpoolSupervisorReportRequest, SpoolReply
 import {
   openDesignCatalog, openDesignExport, openDesignStatus, openDesignSync, openDesignUnlink, openDesignPreview,
   accept,
-  agentTranscript,
   executionSetMode,
-  inbox,
   scrumCommand,
   lanesSet,
   lanesReset,
@@ -125,7 +122,6 @@ import {
   vaultPush,
   vaultSync,
 } from "../shared/rpc.ts";
-import type { AgentTranscriptEntry, InboxProjectRequests } from "../shared/rpc.ts";
 import type { CompanionPluginView, ExecutionView, AgentView, LaneName, LaneProfileView, Lanes, ProjectView, TaskView, VaultStatusView } from "../shared/view.ts";
 import type { UsageRuntime } from "./usage-rollup.ts";
 import { enrichTaskUsage } from "./view.ts";
@@ -2491,118 +2487,6 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       }
     },
 
-    async agentTranscript(input: { agent: string }, context?: SurfaceCallContext) {
-      // The console's native transcript read (ADR 0051 §5, T-04) — read-only,
-      // no write, no arbitrary path: the daemon's own
-      // `agents.ref(id).timeline.refetch` seam (the timeline.ts precedent) is
-      // the only source. The scope door runs FIRST: the transcript answers
-      // only for agents the Factory's own records attribute to a Task's
-      // Attempt or to a Project seat — the ledger agent stamps across the
-      // root Factory and every registered one, the `project.json` seat
-      // bindings, and the correlation registry's session→agent associations
-      // (a running Attempt's Peer, before any ledger stamp lands). A
-      // stranger id refuses as data, before any daemon call is made.
-      const events: unknown[] = [...deps.factory.ledger.events];
-      if (deps.registry !== undefined) {
-        for (const slug of deps.registry.slugs()) {
-          try {
-            events.push(...deps.registry.factoryForProject(slug).ledger.events);
-          } catch (error) {
-            log(`agentTranscript: project ${slug} ledger unreadable — ${messageOf(error)}`);
-          }
-        }
-      }
-      const seats = listProjectRegistrations(deps.stateDir).flatMap((reg) => [reg.supervisor, reg.lead]);
-      let correlations: readonly { agentId?: string }[] = [];
-      try {
-        correlations = new CorrelationRegistry(deps.stateDir).list();
-      } catch (error) {
-        log(`agentTranscript: correlation registry unreadable — ${messageOf(error)}`);
-      }
-      if (!factoryKnownAgents({ events, seats, correlations }).has(input.agent)) {
-        return failure("unknown-agent", `agent ${input.agent} is not attributed to any Task Attempt or Project seat the Factory knows`);
-      }
-      // The daemon seam's honest-unavailable vocabulary (timeline.ts): the
-      // shell's capture is `undefined` until a lifecycle hook has fired —
-      // that state answers as data on the ok arm, never a throw.
-      const daemon: SurfaceDaemonApi | undefined = resolveDaemon(context);
-      if (daemon === undefined || typeof daemon.agents?.ref !== "function") {
-        return { ok: true as const, agent: input.agent, unavailable: true as const, reason: "the plugin captured no PaseoApi — no lifecycle hook has fired since boot" };
-      }
-      let page: { entries?: readonly unknown[]; error?: string | null };
-      try {
-        // Tail direction, one page — the default limit 200 covers every
-        // measured real task (the fetcher's own measured precedent).
-        page = await daemon.agents.ref(input.agent).timeline.refetch({ direction: "tail" });
-      } catch (err) {
-        return { ok: true as const, agent: input.agent, unavailable: true as const, reason: `fetching the timeline of agent ${input.agent} failed: ${messageOf(err)}` };
-      }
-      if (typeof page?.error === "string" && page.error !== "") {
-        return { ok: true as const, agent: input.agent, unavailable: true as const, reason: `the daemon answered: ${page.error}` };
-      }
-      const entries = (page?.entries ?? [])
-        .map((raw) => reduceTimelineEntry(raw))
-        .filter((entry): entry is AgentTranscriptEntry => entry !== null);
-      if (entries.length === 0) {
-        return { ok: true as const, agent: input.agent, unavailable: true as const, reason: `the daemon holds no timeline for agent ${input.agent} — unknown agent, or a restart wiped the in-memory store` };
-      }
-      return { ok: true as const, agent: input.agent, entries };
-    },
-
-    async inbox(_input: object, _context?: SurfaceCallContext) {
-      // The console's cross-Project inbox read (ADR 0051, T-05) — read-only,
-      // stateDir-only (the `historyImports` precedent): no daemon call, no
-      // write, no arbitrary path. The snapshot already carries every
-      // Project's Tasks; this door fills only the Scrum half — every
-      // registered Project's active run (the same `executionView` law: the
-      // first non-terminal run, else the newest) with its Owner requests,
-      // EVERY status verbatim (the console's own fold filters pending). A
-      // Project whose run journal cannot be read refuses as a per-Project
-      // row — never a failed whole read. No registry (the legacy
-      // single-Factory entrances) mirrors the global scope's law: no runs,
-      // an empty `projects`.
-      //
-      // T-06: each row additively carries the run journal's `revision` (the
-      // `expectedRevision` the Owner's console commands submit), its
-      // count-based `allowance` used/allowed state, and its `blockers`
-      // verbatim — and a run blocked on budget (causes `tasks` /
-      // `qaFixRounds`, ADR 0038) lists even with no Owner request, so the
-      // Inbox's Grant +N act rides the run's own facts, never a guess.
-      const projects: InboxProjectRequests[] = [];
-      const refusals: { projectSlug: string; error: string }[] = [];
-      if (deps.registry !== undefined) {
-        for (const slug of deps.registry.slugs()) {
-          try {
-            const runs = listRuns(deps.stateDir, slug);
-            const run = runs.find((r) => !terminalRun(r)) ?? runs.at(-1);
-            if (run === undefined) continue;
-            const requests = run.ownerRequests ?? [];
-            const blockers = run.blockerDetails ?? [];
-            const budgetBlocked = blockers.some((blocker) => blocker.causes.some((cause) => cause === "tasks" || cause === "qaFixRounds"));
-            if (requests.length > 0 || budgetBlocked) {
-              projects.push({
-                projectSlug: slug,
-                runId: run.runId,
-                phase: run.phase,
-                requests,
-                revision: run.revision,
-                allowance: {
-                  tasksUsed: run.tasks.length,
-                  tasksAllowed: run.budgets.maxTasks,
-                  qaFixRoundsUsed: run.fixRounds,
-                  qaFixRoundsAllowed: run.budgets.maxQaFixRounds,
-                },
-                blockers,
-              });
-            }
-          } catch (error) {
-            refusals.push({ projectSlug: slug, error: messageOf(error) });
-          }
-        }
-      }
-      return { ok: true as const, projects, refusals };
-    },
-
     async retro(input: { projectRoot?: string }, _context?: SurfaceCallContext) {
       try {
         // v0.0.38 (ADR 0026 §1): the pass honors the active Project's own
@@ -3897,7 +3781,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       }
     },
   };
-  const reads = new Set(["cachedProviders", "sanitizeLane", "snapshot", "taskDetail", "agentTranscript", "inbox", "pluginsCheckUpdates", "projectPickFolder", "historyImport", "historyImports", "historyUpgrade", "vaultHydrate", "vaultPull", "vaultPush", "vaultSync", "vaultImport"]);
+  const reads = new Set(["cachedProviders", "sanitizeLane", "snapshot", "taskDetail", "pluginsCheckUpdates", "projectPickFolder", "historyImport", "historyImports", "historyUpgrade", "vaultHydrate", "vaultPull", "vaultPush", "vaultSync", "vaultImport"]);
   const wrappers = new Map<PropertyKey, unknown>();
   return new Proxy(handlers, {
     get(target, key, receiver) {
@@ -3952,8 +3836,6 @@ export function registerSurfaceRpc(
   server.handle(openDesignUnlink, input => handlers.openDesignUnlink(input));
   server.handle(openDesignPreview, input => handlers.openDesignPreview(input));
   server.handle(accept, (input, context) => handlers.accept(input, pass(context)));
-  server.handle(agentTranscript, (input, context) => handlers.agentTranscript(input, pass(context)));
-  server.handle(inbox, (input) => handlers.inbox(input));
   server.handle(retro, (input, context) => handlers.retro(input, pass(context)));
   server.handle(lanesSet, (input, context) => handlers.lanesSet(input, pass(context)));
   server.handle(lanesSetBatch, (input, context) => handlers.lanesSetBatch(input, pass(context)));
