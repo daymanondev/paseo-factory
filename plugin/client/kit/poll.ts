@@ -2,7 +2,8 @@
  * The surface's poll clock — PigMonitor's usePoll trimmed: adaptive cadence
  * (5s while anything runs or needs a human, 30s quiet), keeps the last good
  * view on errors, restarts when the reload key changes. No `document`
- * reference survives on Hermes (the typeof guard), no node built-ins.
+ * reference survives on Hermes (the typeof guard), `window` event methods are
+ * guarded per method (React Native's window lacks them), no node built-ins.
  */
 import { useEffect, useRef, useState } from "react";
 import { createResponseOrder } from "./response-order.ts";
@@ -62,13 +63,14 @@ export function usePoll<T>(
     setState({ value: null, error: null, at: null });
     void tick();
     page?.addEventListener?.("visibilitychange", shown);
-    if (typeof window !== "undefined") window.addEventListener("focus", shown);
+    // React Native's `window` exists but has no event methods (Paseo mobile) — guard the method, not the global.
+    if (typeof window?.addEventListener === "function") window.addEventListener("focus", shown);
     return () => {
       live = false;
       order.invalidate();
       clearTimeout(timer);
       page?.removeEventListener?.("visibilitychange", shown);
-      if (typeof window !== "undefined") window.removeEventListener("focus", shown);
+      if (typeof window?.removeEventListener === "function") window.removeEventListener("focus", shown);
     };
   }, [reloadKey]);
   return state;

@@ -23,7 +23,7 @@ import { useEffect, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import type { AgentView, FactoryView, LaneName, LaneProfileView, Lanes, ProjectUsageView, ProviderModelView } from "../../shared/view.ts";
 import { Btn, Card, Chip, Pill, SegmentedControl } from "../kit/pill.tsx";
-import { CONTROL_H, CONTROL_SM, RADIUS, SPACING, hoveredOf, text, tint } from "../kit/theme.ts";
+import { CONTROL_H, CONTROL_SM, MONO_FONT, RADIUS, SPACING, hoveredOf, text, tint } from "../kit/theme.ts";
 import type { Colour } from "../kit/theme.ts";
 import { planLiveSeatTransitions } from "../kit/live-seats.ts";
 import type { LiveSeatTransition } from "../kit/live-seats.ts";
@@ -485,7 +485,7 @@ function LaneModalBody({
                 onChangeText={setModel}
                 placeholder="e.g. zai/glm-5.3 or claude-sonnet-4-6"
                 placeholderTextColor={theme.colors.foregroundMuted}
-                style={{ paddingHorizontal: SPACING[2.5], paddingVertical: 5, color: theme.colors.foreground, fontSize: 12, fontFamily: "monospace" }}
+                style={{ paddingHorizontal: SPACING[2.5], paddingVertical: 5, color: theme.colors.foreground, fontSize: 12, fontFamily: MONO_FONT }}
               />
             </View>
           </View>

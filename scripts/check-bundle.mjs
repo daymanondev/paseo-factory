@@ -17,6 +17,11 @@
  * - after a successful client build, the bundle output is parsed with the
  *   TypeScript compiler API: class declarations/expressions fail — Hermes
  *   evaluates class syntax to undefined (PigMonitor's check, replicated).
+ * - the same parse refuses browser-only APIs that crash Paseo mobile
+ *   (v0.6.0, ADR 0056): `window`/`document` event APIs not behind a
+ *   `typeof <host>?.<method> === "function"` guard (React Native's `window`
+ *   has no addEventListener), and DOM element creation (a string-tag
+ *   createElement/jsx call, or `document.createElement`).
  *
  * Exit 0: both bundles build from the tracked files alone. Exit 1: they do
  * not, with every failure named.
@@ -175,6 +180,85 @@ function classSyntaxErrors(code) {
   return errors;
 }
 
+const HOST_OBJECTS = new Set(["window", "document", "globalThis", "self"]);
+const EVENT_APIS = new Set(["addEventListener", "removeEventListener", "dispatchEvent"]);
+/** Modules exempt from the DOM-element rule until they are deleted (the Scrum preview iframes die in W3, ADR 0056). */
+const DOM_ELEMENT_EXEMPT = new Set([path.join("client", "factory", "scrum.tsx")]);
+
+/** `window.addEventListener` / `window?.addEventListener` / `window["addEventListener"]` → "window.addEventListener". */
+function hostApiOf(node) {
+  if (!ts.isPropertyAccessExpression(node) && !ts.isElementAccessExpression(node)) return null;
+  const host = node.expression;
+  if (!ts.isIdentifier(host) || !HOST_OBJECTS.has(host.text)) return null;
+  const name = ts.isPropertyAccessExpression(node) ? node.name.text : ts.isStringLiteralLike(node.argumentExpression) ? node.argumentExpression.text : null;
+  return name === null ? null : { host: host.text, name };
+}
+
+/** True when a `typeof <host>.<name>` test (any optional-chain spelling) is the condition of an enclosing if / ternary / && that governs this node. */
+function guardedByTypeof(node, api) {
+  const tests = (condition) => {
+    let found = false;
+    const scan = (n) => {
+      if (ts.isTypeOfExpression(n)) {
+        const operand = n.expression;
+        const target = hostApiOf(operand);
+        if (target && target.host === api.host && target.name === api.name) found = true;
+      }
+      ts.forEachChild(n, scan);
+    };
+    scan(condition);
+    return found;
+  };
+  for (let child = node, parent = node.parent; parent; child = parent, parent = parent.parent) {
+    if (ts.isIfStatement(parent) && parent.thenStatement === child && tests(parent.expression)) return true;
+    if (ts.isConditionalExpression(parent) && parent.whenTrue === child && tests(parent.condition)) return true;
+    if (ts.isBinaryExpression(parent) && parent.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken && parent.right === child && tests(parent.left)) return true;
+  }
+  return false;
+}
+
+/** Optional-call spelling: `window.addEventListener?.(…)` throws on no host. */
+function optionallyCalled(node) {
+  const parent = node.parent;
+  return ts.isCallExpression(parent) && parent.expression === node && parent.questionDotToken !== undefined;
+}
+
+/** Paseo mobile (React Native on Hermes) has no DOM: no window/document event APIs without a method guard, and no element creation. */
+function browserApiErrors(code) {
+  const parsed = ts.createSourceFile("client.js", code, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+  const modules = [...code.matchAll(/^\/\/ (.+)$/gm)].map((match) => ({ at: match.index, file: path.relative(root, path.resolve(match[1])) }));
+  const errors = [];
+  const fileOf = (node) => modules.findLast((module) => module.at < node.getStart(parsed))?.file ?? "client bundle";
+  const report = (node, message) => {
+    const file = fileOf(node);
+    if (DOM_ELEMENT_EXEMPT.has(file) && /DOM element/.test(message)) return;
+    errors.push(`${file}: ${message}`);
+  };
+  const calleeName = (callee) => (ts.isIdentifier(callee) ? callee.text : ts.isPropertyAccessExpression(callee) ? callee.name.text : null);
+  const visit = (node) => {
+    const api = hostApiOf(node);
+    if (api && EVENT_APIS.has(api.name) && !optionallyCalled(node) && !guardedByTypeof(node, api) && !ts.isTypeOfExpression(node.parent)) {
+      report(node, `${api.host}.${api.name} is used without a \`typeof ${api.host}?.${api.name} === "function"\` guard — React Native's ${api.host} has no ${api.name}, so Paseo mobile crashes on load`);
+    }
+    if (api && api.host === "document" && /^createElement/.test(api.name)) {
+      report(node, `document.${api.name} creates a DOM element — Paseo mobile has no DOM; use the plugin SDK's DocumentFrame or React Native primitives`);
+    }
+    if (ts.isCallExpression(node)) {
+      let callee = node.expression;
+      // esbuild emits (0, import_react.createElement)(…) for namespace calls.
+      if (ts.isParenthesizedExpression(callee) && ts.isBinaryExpression(callee.expression) && callee.expression.operatorToken.kind === ts.SyntaxKind.CommaToken) callee = callee.expression.right;
+      const name = calleeName(callee);
+      const first = node.arguments[0];
+      if (name && /^(createElement|jsx|jsxs|jsxDEV|_jsx|_jsxs)$/.test(name) && first && ts.isStringLiteralLike(first)) {
+        report(node, `DOM element <${first.text}> is created — Paseo mobile has no DOM; use the plugin SDK's DocumentFrame or React Native primitives`);
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(parsed);
+  return errors;
+}
+
 /** Paseo's server loader evaluates the compiled CJS bundle without `import.meta` or `__dirname`. */
 function serverEvalErrors(code) {
   const mod = { exports: {} };
@@ -207,7 +291,10 @@ function serverEvalErrors(code) {
 const results = await Promise.allSettled([bundle("index.client.tsx", "client"), bundle("index.server.ts", "server")]);
 rmSync(root, { recursive: true, force: true });
 const failures = results.flatMap((result) => (result.status === "rejected" ? (result.reason.errors?.map((error) => `${error.location ? `${error.location.file}:${error.location.line}: ` : ""}${error.text}`) ?? [String(result.reason)]) : []));
-if (results[0].status === "fulfilled") failures.push(...classSyntaxErrors(results[0].value.outputFiles[0].text));
+if (results[0].status === "fulfilled") {
+  failures.push(...classSyntaxErrors(results[0].value.outputFiles[0].text));
+  failures.push(...browserApiErrors(results[0].value.outputFiles[0].text));
+}
 if (results[1].status === "fulfilled") failures.push(...serverEvalErrors(results[1].value.outputFiles[0].text));
 if (failures.length > 0) {
   console.error(failures.join("\n"));

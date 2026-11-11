@@ -5,9 +5,13 @@
  * syntax reaches the client bundle.
  */
 import type { PluginTheme } from "@getpaseo/plugin";
+import { Platform } from "react-native";
 import type { PressableStateCallbackType, TextStyle } from "react-native";
 
 export const SPACING = { 0.5: 2, 1: 4, 1.5: 6, 2: 8, 2.5: 10, 3: 12, 4: 16, 5: 20, 6: 24 } as const;
+
+/** iOS ships no `monospace` family (Android's keyword); Menlo is on every iOS device. */
+export const MONO_FONT: string = Platform.select({ ios: "Menlo", default: "monospace" });
 
 const FONT_SIZE = { xs: 11, code: 12, sm: 12, section: 13, base: 14, lg: 16 } as const;
 
@@ -30,7 +34,7 @@ const ROLES = {
   stat: { fontSize: 20, lineHeight: 24, fontWeight: "600", colour: "foreground" },
   detailTitle: { fontSize: FONT_SIZE.lg, lineHeight: 22, fontWeight: "600", colour: "foreground" },
   meta: { fontSize: FONT_SIZE.sm, lineHeight: 18, fontWeight: "400", colour: "foregroundMuted" },
-  code: { fontSize: FONT_SIZE.code, lineHeight: 16, fontWeight: "500", colour: "foreground", fontFamily: "monospace" },
+  code: { fontSize: FONT_SIZE.code, lineHeight: 16, fontWeight: "500", colour: "foreground", fontFamily: MONO_FONT },
 } as const satisfies Record<string, TextStyle & { colour: Colour }>;
 
 export type Role = keyof typeof ROLES;
