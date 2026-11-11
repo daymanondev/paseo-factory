@@ -191,13 +191,10 @@ export function renderBrief(task, pathValue, description, skills, branch = task,
  * `thinking` tier and its `thinkingReason` — present only when the operator
  * supplied them, so an ordinary run's request stays byte-identical to before.
  */
-export function driverSpawnRequest({ id, runId, role, providerExplicit, driverProjectSlug, task, provider, arity, worktree, thinking, thinkingReason }) {
+export function driverSpawnRequest({ id, driverProjectSlug, task, provider, arity, worktree, thinking, thinkingReason }) {
   return {
     id,
     kind: "spawn",
-    ...(runId === undefined ? {} : { runId }),
-    ...(role === undefined ? {} : { role }),
-    ...(providerExplicit === undefined ? {} : { providerExplicit }),
     ...(driverProjectSlug === undefined ? {} : { projectSlug: driverProjectSlug }),
     task,
     provider,
@@ -209,13 +206,11 @@ export function driverSpawnRequest({ id, runId, role, providerExplicit, driverPr
 }
 
 /**
- * The lane the driver's own agent create runs under. An execution (Scrum)
- * contract keeps today's recorded-lane behavior; an SLP spawn prefers the
+ * The lane the driver's own agent create runs under. A spawn prefers the
  * spool's provider-adaptive `resolvedProvider` when a thinking tier was
  * requested — otherwise the locally resolved provider stands (ticket 04).
  */
-export function effectiveCreateLane({ execution, eventProvider, resolvedProvider, provider }) {
-  if (execution) return eventProvider ?? provider;
+export function effectiveCreateLane({ resolvedProvider, provider }) {
   return typeof resolvedProvider === "string" && resolvedProvider !== "" ? resolvedProvider : provider;
 }
 
@@ -1054,7 +1049,7 @@ export async function observeTasks(
         const workspace = entry.workspace ?? contract?.workspace;
         cleanWorkspaceForRespawn(workspace); // the TASK WORKTREE on the worktree path — never <project-root>
         const brief = entry.brief ?? renderBrief(entry.task, process.env.PATH ?? "", contract?.description, contract?.skills, entry.branch, contract?.disposition);
-        const { provider: providerId, model, thinking } = splitProvider(contract?.execution ? reply.event?.provider ?? entry.provider ?? provider : provider);
+        const { provider: providerId, model, thinking } = splitProvider(provider);
         const respawnSeq = reply.event?.seq;
         const idempotencyKey = respawnSeq !== undefined ? `${entry.task}-respawn-${respawnSeq}` : `${entry.task}-respawn`;
         const leadAgentId = reply.leadAgentId ?? entry.leadAgentId;
@@ -1387,7 +1382,7 @@ async function submitMeter(spoolRoot, entry, provider, log) {
  * meter is a recorder and never re-judges a green run. Exit 0 iff every task
  * ended green and nothing was refused or failed along the way; else exit 2.
  */
-export async function runDriver({ runId, role, providerExplicit, home, stateDir, spoolRoot, tasks, provider, thinking, thinkingReason, project, waitSecs = 60, pollMs = POLL_MS, staggerMs = STAGGER_MS, log = (m) => console.log(m) }) {
+export async function runDriver({ home, stateDir, spoolRoot, tasks, provider, thinking, thinkingReason, project, waitSecs = 60, pollMs = POLL_MS, staggerMs = STAGGER_MS, log = (m) => console.log(m) }) {
   // These change spawn routing when the driver itself runs under an agent —
   // the driver spawns as itself, never as somebody's child (scout §a caveat).
   delete process.env.PASEO_AGENT_ID;
@@ -1468,9 +1463,6 @@ export async function runDriver({ runId, role, providerExplicit, home, stateDir,
     // the recorded fact, not a local complaint.
     const request = stampDriverRequest(driverSpawnRequest({
       id: randomId(),
-      runId,
-      role,
-      providerExplicit,
       driverProjectSlug,
       task,
       provider,
@@ -1507,8 +1499,6 @@ export async function runDriver({ runId, role, providerExplicit, home, stateDir,
       // The create's lane: the spool's thinking-resolved provider when a tier
       // was requested (ticket 04), else today's behavior verbatim.
       const actualLane = effectiveCreateLane({
-        execution: contract.execution !== undefined,
-        eventProvider: reply.event?.provider,
         resolvedProvider: reply.resolvedProvider,
         provider,
       });
@@ -1526,7 +1516,6 @@ export async function runDriver({ runId, role, providerExplicit, home, stateDir,
         ...(reply.projectSlug === undefined ? {} : { projectSlug: reply.projectSlug }),
       });
       entries.push({
-        ...(contract.execution ? { provider: actualLane } : {}),
         task,
         agentId,
         workspace: prep?.cwd ?? contract.workspace,

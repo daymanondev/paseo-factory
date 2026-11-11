@@ -26,15 +26,15 @@ test("copied-core check refuses changed, missing and orphan output without modif
   rmSync(orphan); assert.equal(check().status, 0);
 });
 
-test("copied-core recursively syncs Scrum modules and diagnoses nested orphans", (t) => {
+test("copied-core recursively syncs nested modules and diagnoses nested orphans", (t) => {
   const dir = makeTempDir(); disposeDir(t, dir);
-  for (const path of ["scripts", "src/scrum", "plugin/server/core"]) mkdirSync(join(dir, path), { recursive: true });
+  for (const path of ["scripts", "src/open-design", "plugin/server/core"]) mkdirSync(join(dir, path), { recursive: true });
   copyFileSync(join(repoRoot, "scripts/sync-plugin-core.mjs"), join(dir, "scripts/sync-plugin-core.mjs"));
-  writeFileSync(join(dir, "src/scrum/config.ts"), "export const mode = 'scrum';\n");
+  writeFileSync(join(dir, "src/open-design/config.ts"), "export const mode = 'nested';\n");
   const run = (...args: string[]) => spawnSync(process.execPath, [join(dir, "scripts/sync-plugin-core.mjs"), ...args], { encoding: "utf8" });
   assert.equal(run("--check").status, 1);
   assert.equal(run().status, 0);
-  assert.equal(readFileSync(join(dir, "plugin/server/core/scrum/config.ts"), "utf8"), "export const mode = 'scrum';\n");
-  writeFileSync(join(dir, "plugin/server/core/scrum/orphan.ts"), "orphan");
-  assert.match(run("--check").stderr, /scrum\/orphan.ts has no counterpart/);
+  assert.equal(readFileSync(join(dir, "plugin/server/core/open-design/config.ts"), "utf8"), "export const mode = 'nested';\n");
+  writeFileSync(join(dir, "plugin/server/core/open-design/orphan.ts"), "orphan");
+  assert.match(run("--check").stderr, /open-design\/orphan.ts has no counterpart/);
 });

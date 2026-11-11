@@ -64,10 +64,7 @@ const usage = `usage: factory [--home <paseoHome>] <command> [options]
 commands:
   transcript <agent-id | supervisor | lead> [--project <dir>] [--format md|html]
              [--out <path>] [--conversations-dir <dir>] (read-only, no daemon needed)
-  execution  get | set-mode <slp|scrum> [--project <dir>] (Owner only)
-  scrum      <operation> [--project <dir>] [--run <id>] [--revision <n>] [--payload <json> | --file <json-file>] [--request-id <id>]
   open-design stage|lint|inspect|sync|od [--dir <mockupsDir>]
-  lint-scrum-doc --kind <prd|ux|architecture|backlog|qa|ui> --dir <initiative>
 
   contract   Set a task's done-criteria (the Owner's act — fixed before the
              agent starts; one contract per task id, the ledger is append-only)
@@ -565,36 +562,8 @@ if (command === "open-design") {
   } catch (error) { console.error(String(error)); process.exit(2); }
 }
 
-if (command === "lint-scrum-doc") {
-  const parsed = parseCommandOptions({ kind: { type: "string" }, dir: { type: "string" } });
-  const { lintScrumDirectory } = await import("./scrum-doc.mjs");
-  const result = lintScrumDirectory(parsed.values.kind ?? "", parsed.values.dir ?? "");
-  console.log(JSON.stringify(result)); process.exit(result.code);
-}
-if (command === "execution") {
-  const parsed = parseCommandOptions({ project: { type: "string" }, json: { type: "boolean" }, "wait-secs": { type: "string" } });
-  const [operation, mode] = parsed.positionals;
-  if (operation === "get" || operation === undefined) {
-    const { readExecution } = await import("./scrum-config.mjs");
-    const slug = parsed.values.project ? resolveProjectSlug("execution", parsed.values.project) : undefined;
-    try { console.log(JSON.stringify(readExecution(stateDir, slug))); process.exit(0); } catch (error) { fail(String(error)); }
-  }
-  if (operation !== "set-mode" || !["slp", "scrum"].includes(mode)) fail("execution set-mode <slp|scrum> [--project <dir>]");
-  const reply = await roundTrip({ id: randomId(), kind: "execution_mode", mode, ...(parsed.values.project ? { projectRoot: resolvePath(parsed.values.project) } : {}) }, waitSeconds(parsed));
-  console.log(JSON.stringify(reply.data)); process.exit(0);
-}
-if (command === "scrum") {
-  const parsed = parseCommandOptions({ project: { type: "string" }, run: { type: "string" }, payload: { type: "string" }, file: { type: "string" }, revision: { type: "string" }, "request-id": { type: "string" }, json: { type: "boolean" }, "wait-secs": { type: "string" } });
-  const operation = parsed.positionals[0] ?? "get";
-  let payload;
-  try { payload = parsed.values.file ? JSON.parse(readFileSync(resolvePath(parsed.values.file), "utf8")) : parsed.values.payload ? JSON.parse(parsed.values.payload) : {}; } catch (error) { fail(`scrum: invalid JSON payload: ${String(error)}`); }
-  const reply = await roundTrip({ id: randomId(), kind: "scrum_command", operation, requestId: parsed.values["request-id"] ?? randomId(), ...(parsed.values.project ? { projectRoot: resolvePath(parsed.values.project) } : {}), ...(parsed.values.run ? { runId: parsed.values.run } : {}), ...(parsed.values.revision === undefined ? {} : { expectedRevision: Number(parsed.values.revision) }), payload }, waitSeconds(parsed));
-  console.log(JSON.stringify(reply.data, null, 2)); process.exit(0);
-}
-
 if (command === "contract") {
   const parsed = parseCommandOptions({
-    run: { type: "string" }, role: { type: "string" }, "artifact-refs": { type: "string" },
     task: { type: "string" },
     workspace: { type: "string" },
     gate: { type: "string" },
@@ -635,9 +604,6 @@ if (command === "contract") {
   const request = {
     id: randomId(),
     kind: "contract",
-    ...(v.run === undefined ? {} : { runId: v.run }),
-    ...(v.role === undefined ? {} : { role: v.role }),
-    ...(v["artifact-refs"] === undefined ? {} : { artifactRefs: JSON.parse(v["artifact-refs"]) }),
     task: v.task,
     workspace: resolvePath(v.workspace), // fixed, absolute — the agent never picks a cwd
     gate: typeof v.gate === "string" ? v.gate : "",
@@ -1128,7 +1094,7 @@ function listRawScopes(stateDir) {
 }
 
 if (command === "lead") {
-  const parsed = parseCommandOptions({ project: { type: "string" }, workspace: { type: "string" }, message: { type: "string" }, run: { type: "string" }, scrum: { type: "string" }, "wait-secs": { type: "string" } });
+  const parsed = parseCommandOptions({ project: { type: "string" }, workspace: { type: "string" }, message: { type: "string" }, "wait-secs": { type: "string" } });
   const sub = parsed.positionals[0];
 
   if (sub === "rotate") {
@@ -1174,8 +1140,6 @@ if (command === "lead") {
       {
         id: randomId(),
         kind: "lead_dispatch",
-        ...(parsed.values.run === undefined ? {} : { runId: parsed.values.run }),
-        ...(parsed.values.scrum === undefined ? {} : { scrum: JSON.parse(parsed.values.scrum) }),
         ...(hasProject ? { project: parsed.values.project.trim() } : {}),
         ...(hasWorkspace ? { workspace: resolvePath(parsed.values.workspace) } : {}),
         message,
@@ -1191,7 +1155,6 @@ if (command === "lead") {
 
 if (command === "supervisor") {
   const parsed = parseCommandOptions({
-    run: { type: "string" }, scrum: { type: "string" }, "report-type": { type: "string" },
     project: { type: "string" },
     workspace: { type: "string" },
     message: { type: "string" },
@@ -1220,9 +1183,6 @@ if (command === "supervisor") {
       {
         id: randomId(),
         kind: sub === "dispatch" ? "supervisor_dispatch" : "supervisor_report",
-        ...(parsed.values.run === undefined ? {} : { runId: parsed.values.run }),
-        ...(parsed.values.scrum === undefined ? {} : { scrum: JSON.parse(parsed.values.scrum) }),
-        ...(parsed.values["report-type"] === undefined ? {} : { reportType: parsed.values["report-type"] }),
         ...(hasProject ? { project: parsed.values.project.trim() } : {}),
         ...(hasWorkspace ? { workspace: resolvePath(parsed.values.workspace) } : {}),
         message,
@@ -1304,7 +1264,6 @@ if (command === "reset" || command === "delete" || command === "project") {
 
 if (command === "run") {
   const parsed = parseCommandOptions({
-    run: { type: "string" }, role: { type: "string" },
     provider: { type: "string" },
     thinking: { type: "string" },
     "thinking-reason": { type: "string" },
@@ -1370,17 +1329,8 @@ if (command === "run") {
     seen.add(task);
   }
 
-  if (parsed.values.run !== undefined || parsed.values.role !== undefined) {
-    const { readDriverLedger, contractFromLedger } = await import("./driver.mjs");
-    const events = readDriverLedger(stateDir, driverLedgerOptions);
-    for (const task of tasks) {
-      const bound = contractFromLedger(events, task)?.execution;
-      if (parsed.values.run !== undefined && parsed.values.run !== bound?.runId || parsed.values.role !== undefined && parsed.values.role !== bound?.role) fail(`task-execution-mismatch: ${task}`);
-    }
-  }
   const { runDriver } = await import("./driver.mjs");
   const code = await runDriver({
-    runId: parsed.values.run, role: parsed.values.role, providerExplicit: provider !== undefined,
     home,
     stateDir,
     spoolRoot,

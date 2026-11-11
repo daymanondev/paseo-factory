@@ -36,7 +36,8 @@ export type {
   ProjectRegistration,
 } from "./core/project.ts";
 
-import { resolveProject as resolveCoreProject, ensureProjectRegistered as ensureCoreProjectRegistered, readProjectRegistration as existingRegistration, listProjectRegistrations } from "./core/project.ts";
+import { resolveProject as resolveCoreProject, readProjectRegistration as existingRegistration, listProjectRegistrations } from "./core/project.ts";
+export { ensureProjectRegistered } from "./core/project.ts";
 import { createFactory } from "./core/factory.ts";
 import type { Factory } from "./core/factory.ts";
 import type { TimelineFetcher } from "./core/watch.ts";
@@ -44,19 +45,6 @@ import { FactoryError } from "./core/errors.ts";
 import { readCorrelations } from "./core/correlations.ts";
 import { parseTaskWorktreePath } from "./core/workspace.ts";
 import { resolve as resolvePath } from "node:path";
-import { readExecution } from "./core/scrum/selection.ts";
-import { ensureScrumConfig } from "./core/scrum/config.ts";
-export function ensureProjectRegistered(...args: Parameters<typeof ensureCoreProjectRegistered>): ReturnType<typeof ensureCoreProjectRegistered> {
-  const [state, input] = args;
-  const resolved = typeof input === "string" ? resolveCoreProject(input) : { ok: true as const, slug: input.slug };
-  const isNew = resolved.ok && existingRegistration(state, resolved.slug) === undefined;
-  const result = ensureCoreProjectRegistered(...args);
-  if (isNew && result.ok && readExecution(state, result.slug).mode === "scrum") {
-    // This is an explicit registration/seat creation act, never snapshot/read migration.
-    ensureScrumConfig(state, result.slug);
-  }
-  return result;
-}
 
 // ---- the Per-Project Factory Registry (v0.0.89, ADR 0045 §1) --------------------------------
 //

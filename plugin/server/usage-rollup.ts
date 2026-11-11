@@ -9,7 +9,7 @@
  *     strictly onto the existing 4-field `MeterUsage` shape so the Ledger
  *     schema, Reports, and the 100-line Timeline stream stay untouched.
  *   - **Tier 2** is this file: an idempotent `agentId`-keyed map recording
- *     EVERY Project seat (`supervisor`, `lead`, `agent` / Scrum role, plus
+ *     EVERY Project seat (`supervisor`, `lead`, `agent`, plus
  *     headless `watch` / `retro` runs) with the full normalized buckets,
  *     model metadata, timestamps, and `nativeSessionRef` traceability.
  *
@@ -51,7 +51,6 @@ export interface UsageDaemonApi {
   };
 }
 
-const SCRUM_ROLES: readonly string[] = ["pm", "ux", "architect", "dev", "qa"];
 
 /** The debounce window between `agent.turn_ended` and the atomic flush (ADR 0043 §3). */
 export const USAGE_FLUSH_DEBOUNCE_MS = 2_000;
@@ -91,11 +90,6 @@ function seatOf(labels: Record<string, string> | undefined): SessionUsageRecord[
 // `--no-session` and leave no native store behind — "record its usage entry
 // when available" (spec §3) resolves to the honest absence for them, and
 // the rollup only ever records what a store actually answered with.
-
-function scrumRoleOf(labels: Record<string, string> | undefined): SessionUsageRecord["scrumRole"] | undefined {
-  const role = labels?.specialization;
-  return role !== undefined && SCRUM_ROLES.includes(role) ? (role as SessionUsageRecord["scrumRole"]) : undefined;
-}
 
 /** Merges one extracted snapshot into a Project's rollup — idempotent per `agentId`, `startedAt` preserved. */
 function upsertSession(stateDir: string, slug: string, record: SessionUsageRecord): ProjectUsageFile {
@@ -159,12 +153,10 @@ function buildRecordFor(
   if (slug === undefined) return undefined; // not a factory seat — none of the Meter's business
   const task = meta?.task ?? agent.labels?.task;
   const attempt = meta?.attempt ?? (task !== undefined ? projectTask(factory.ledger.events, task).currentAttempt?.attempt : undefined);
-  const scrumRole = scrumRoleOf(agent.labels);
   return {
     agentId: agent.id,
     projectSlug: slug,
     seat: seatOf(agent.labels),
-    ...(scrumRole !== undefined ? { scrumRole } : {}),
     ...(task !== undefined ? { task } : {}),
     ...(attempt !== undefined ? { attempt } : {}),
     harness: usage.harness,

@@ -20,10 +20,8 @@ import { Icon, Markdown, Modal, ScrollView, copyText } from "@getpaseo/plugin/cl
 import { useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import type { FactoryView, TaskDetailView, TaskStatus, TaskView } from "../../shared/view.ts";
-import { Btn, Card, Chip, Pill, SegmentedControl } from "../kit/pill.tsx";
+import { Btn, Card, Chip, Pill } from "../kit/pill.tsx";
 import { DOT, PILL_H, RADIUS, SPACING, hoveredOf, text, tint } from "../kit/theme.ts";
-import { ScrumWorkflowPipeline } from "./scrum.tsx";
-import type { ScrumAction } from "./scrum.tsx";
 import { formatTokenCount } from "./seats.tsx";
 import {
   KANBAN_COLUMNS,
@@ -68,7 +66,6 @@ export interface TasksActions {
   accept(task: string, attempt: number): void;
   openDetail(task: string): void;
   openAgent?(agentId: string): void;
-  scrum?: ScrumAction;
   pickProject?(root: string): void;
   busy: boolean;
 }
@@ -304,11 +301,7 @@ function KanbanCard({
         {showProjectPill ? (
           <Pill theme={theme} icon="FolderGit2" label={projectLabel} />
         ) : null}
-        <Pill
-          theme={theme}
-          label={task.execution ? `Scrum · ${{ pm: "PM", ux: "UX", architect: "Arch", dev: "Dev", qa: "QA" }[task.execution.role]}` : "SLP · Peer"}
-          tone="accent"
-        />
+        <Pill theme={theme} label="SLP · Peer" tone="accent" />
         {task.attempts.length > 0 && task.lane !== null && !isAccepted ? (
           <Pill theme={theme} label={shortLaneLabel(task.lane)} mono />
         ) : null}
@@ -419,7 +412,6 @@ export function TasksPane({
   actions: TasksActions;
 }) {
   const [filter, setFilter] = useState<BoardFilter>("all");
-  const [modeFilter, setModeFilter] = useState<"all" | "slp" | "scrum">("all");
   const [boardWidth, setBoardWidth] = useState<number>(0);
 
   const sameTree = (workspace: string): boolean => {
@@ -432,7 +424,7 @@ export function TasksPane({
     dir === undefined || view.project !== null
       ? view.tasks
       : view.tasks.filter((task) => sameTree(task.workspace));
-  const scoped = view.project !== null || modeFilter === "all" ? workspaceTasks : workspaceTasks.filter(task => (task.execution?.mode ?? "slp") === modeFilter);
+  const scoped = workspaceTasks;
   const grouped = groupTasksForKanban(scoped);
   const visibleColumns =
     filter === "all" ? KANBAN_COLUMNS : KANBAN_COLUMNS.filter((column) => column.id === filter);
@@ -573,88 +565,6 @@ export function TasksPane({
         if (w > 0 && Math.abs(w - boardWidth) >= 4) setBoardWidth(w);
       }}
     >
-      {view.project === null ? <SegmentedControl theme={theme} size="sm" value={modeFilter} onChange={setModeFilter} options={[{ value: "all", label: "All" }, { value: "slp", label: "SLP" }, { value: "scrum", label: "Agile Scrum" }]} /> : null}
-      {view.project !== null && view.execution?.selectedMode === "scrum" && view.execution?.run !== undefined ? (
-        <ScrumWorkflowPipeline
-          theme={theme}
-          view={view}
-          action={actions.scrum}
-          actions={{
-            busy: actions.busy,
-            openAgent: (agentId) => actions.openAgent?.(agentId),
-          }}
-        />
-      ) : null}
-      {view.project === null &&
-      view.projects.some((p) => p.executionMode === "scrum" && p.activeScrumPhase !== null && p.activeScrumPhase !== undefined) ? (
-        <Card
-          theme={theme}
-          gap={SPACING[2]}
-          style={{
-            borderColor: view.projects.some((p) => p.activeScrumPhase === "awaiting-ui-approval" || p.activeScrumPhase === "blocked")
-              ? theme.colors.statusWarning
-              : theme.colors.accent,
-            backgroundColor: tint(
-              view.projects.some((p) => p.activeScrumPhase === "awaiting-ui-approval" || p.activeScrumPhase === "blocked")
-                ? theme.colors.statusWarning
-                : theme.colors.accent,
-              "0d",
-            ),
-          }}
-        >
-          <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: SPACING[2] }}>
-            <Text style={text(theme, "rowTitle")}>Active Agile Scrum Runs</Text>
-            <Text style={text(theme, "meta")}>Select a project to view its 5-stage Scrum pipeline and UI Mockup preview.</Text>
-          </View>
-          <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[2] }}>
-            {view.projects
-              .filter((p) => p.executionMode === "scrum" && p.activeScrumPhase !== null && p.activeScrumPhase !== undefined)
-              .map((entry) => {
-                const isApproval = entry.activeScrumPhase === "awaiting-ui-approval";
-                const isBlocked = entry.activeScrumPhase === "blocked";
-                return (
-                  <View
-                    key={entry.slug}
-                    style={{
-                      flexDirection: "row",
-                      alignItems: "center",
-                      flexWrap: "wrap",
-                      gap: SPACING[1.5],
-                      paddingHorizontal: SPACING[2],
-                      paddingVertical: SPACING[1.5],
-                      borderRadius: RADIUS.md,
-                      borderWidth: 1,
-                      borderColor: isBlocked
-                        ? theme.colors.statusDanger
-                        : isApproval
-                          ? theme.colors.statusWarning
-                          : theme.colors.border,
-                      backgroundColor: theme.colors.surface0,
-                    }}
-                  >
-                    <Pill theme={theme} icon="FolderGit2" label={entry.name ?? entry.slug} />
-                    <Pill
-                      theme={theme}
-                      label={`Scrum · ${entry.activeScrumPhase}`}
-                      tone={isBlocked ? "statusDanger" : isApproval ? "statusWarning" : "accent"}
-                      lit
-                    />
-                    {actions.pickProject !== undefined ? (
-                      <Btn
-                        theme={theme}
-                        small
-                        solid={isApproval || isBlocked}
-                        tone={isBlocked ? "statusDanger" : isApproval ? "statusWarning" : "accent"}
-                        label={isApproval ? "Review UI Mockup" : "Open Scrum Pipeline"}
-                        onPress={() => actions.pickProject!(entry.root)}
-                      />
-                    ) : null}
-                  </View>
-                );
-              })}
-          </View>
-        </Card>
-      ) : null}
       {/* Board Toolbar: Column Filter Chips + Compact Total Cost Summary Pill */}
       <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: SPACING[2] }}>
         <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[1.5] }}>

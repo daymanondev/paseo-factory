@@ -28,9 +28,6 @@ export declare function renderRunBanner(tasks: readonly string[], provider: stri
  */
 export declare function driverSpawnRequest(input: {
   id: string;
-  runId?: string;
-  role?: string;
-  providerExplicit?: boolean;
   driverProjectSlug?: string;
   task: string;
   provider: string;
@@ -43,11 +40,9 @@ export declare function driverSpawnRequest(input: {
 /**
  * The lane the driver's own agent create runs under — the spool's
  * provider-adaptive `resolvedProvider` on the SLP path when a thinking tier
- * was requested; the recorded lane for execution contracts (ticket 04).
+ * was requested (ticket 04).
  */
 export declare function effectiveCreateLane(input: {
-  execution: boolean;
-  eventProvider?: string;
   resolvedProvider?: string;
   provider: string;
 }): string;
@@ -161,7 +156,6 @@ export declare function usageOf(lastUsage: unknown): MeterUsage;
 export declare function pickUsage(terminal: MeterUsage, refetched: MeterUsage): MeterUsage;
 
 export interface ObserveEntry {
-  /** Bound Scrum Tasks keep their recorded role lane across driver retries/meters. */
   provider?: string;
   task: string;
   agentId: string;
@@ -206,9 +200,6 @@ export declare function observeTasks(
 ): Promise<void>;
 
 export interface RunDriverInput {
-  runId?: string;
-  role?: string;
-  providerExplicit?: boolean;
   home: string;
   stateDir: string;
   spoolRoot: string;

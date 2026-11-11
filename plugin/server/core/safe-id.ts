@@ -1,4 +1,4 @@
-/** A path-segment-safe identifier: shared by Project slugs, Open Design project ids and Scrum run ids. */
+/** A path-segment-safe identifier: shared by Project slugs, and Open Design project ids. */
 export function safeId(value: unknown): value is string {
   return (
     typeof value === "string" &&

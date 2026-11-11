@@ -886,8 +886,6 @@ test("snapshot: a projectRoot scopes lanes, seats, and tasks to the Project and 
     supervisorId: "agent-sup-1",
     leadId: "agent-lead-1",
     activeTaskCount: 1,
-    executionMode: "slp",
-    activeScrumPhase: null,
   });
   assert.ok(view.projects.some((entry) => entry.slug === project.slug && entry.root === project.root && entry.activeTaskCount === 1), "the registry feeds the Project Selector");
   assert.ok(
@@ -5029,8 +5027,6 @@ test("Seam 1.2: deleting a registered Project's folder on disk marks it missingR
     supervisorId: null,
     leadId: null,
     activeTaskCount: 1,
-    executionMode: "slp",
-    activeScrumPhase: null,
   };
   assert.deepEqual(
     snap.view.project,
@@ -5718,198 +5714,6 @@ test("sweepProjectWorkspaces: keepWorkspaceIds preserves an opening Supervisor s
 });
 
 
-test("execution mode refuses pending Tasks/mail and isolates Scrum snapshot failures", async t => {
-  const { handlers, factory, stateDir } = makeSurface(t);
-  const project = makeProject(t, "mode-project");
-  factory.setContract({ task: "unfinished", workspace: project.root, gate: "true" });
-  const busy = await handlers.executionSetMode({ projectRoot: project.root, mode: "scrum" });
-  assert.equal(busy.ok, false); if (!busy.ok) { assert.equal(busy.code, "execution-mode-busy"); assert.match(busy.error, /unfinished/); }
-  assert.equal(existsSync(join(stateDir, "projects", project.slug, "scrum-lanes.json")), false);
-  const other = makeProject(t, "scrum-project");
-  const switched = await handlers.executionSetMode({ projectRoot: other.root, mode: "scrum" });
-  assert.equal(switched.ok, true, JSON.stringify(switched));
-  writeFileSync(join(stateDir, "projects", other.slug, "scrum-lanes.json"), "broken");
-  const broken = await handlers.snapshot({ projectRoot: other.root });
-  assert.equal(broken.ok, true); if (broken.ok) assert.match(broken.view.execution?.error ?? "", /scrum-config-invalid/);
-  const slp = await handlers.snapshot({ projectRoot: project.root });
-  assert.equal(slp.ok, true); if (slp.ok) assert.equal(slp.view.execution?.selectedMode, "slp");
-});
-
-test("Scrum cancellation checks revision before stopping Agents and recovers a persisted interrupted intent", async t => {
-  const agents: FakeAgent[] = [];
-  const { handlers, factory, stateDir, home, fake } = makeSurface(t, agents);
-  const project = makeProject(t, "cancel-project");
-  assert.equal((await handlers.executionSetMode({ projectRoot: project.root, mode: "scrum" })).ok, true);
-  const created = await handlers.scrumCommand({ projectRoot: project.root, operation: "run.create", runId: "cancel-run", requestId: "create", payload: { initiativeId: "cancel-fixture", track: "small", rationale: "test cancellation", ownedPaths: [] } });
-  assert.equal(created.ok, true);
-  agents.push({ id: "owned-dev", provider: "pi/test", status: "running", labels: { seat: "agent", project: project.slug, run: "cancel-run" } });
-  const stops: string[] = []; let failStop = true;
-  const restarted = createSurfaceHandlers({ factory, stateDir, home, daemon: fake.daemon, stopAgent: async id => { stops.push(id); if (failStop) throw new Error("connection lost"); return { ok: true }; } });
-  const stale = await restarted.scrumCommand({ projectRoot: project.root, operation: "run.cancel", runId: "cancel-run", requestId: "cancel", expectedRevision: 99, payload: { reason: "Owner cancellation" } });
-  assert.equal(stale.ok, false); assert.deepEqual(stops, []); assert.equal(fake.archived.length, 0);
-  const interrupted = await restarted.scrumCommand({ projectRoot: project.root, operation: "run.cancel", runId: "cancel-run", requestId: "cancel", expectedRevision: 1, payload: { reason: "Owner cancellation" } });
-  assert.equal(interrupted.ok, false);
-  const { readRun } = await import("../plugin/server/core/scrum/run-journal.ts");
-  const pending = readRun(stateDir, project.slug, "cancel-run");
-  assert.equal(pending.cancellation?.requestId, "cancel"); assert.notEqual(pending.phase, "cancelled");
-  failStop = false;
-  const resumed = await restarted.scrumCommand({ projectRoot: project.root, operation: "run.cancel", runId: "cancel-run", requestId: "cancel", expectedRevision: pending.revision, payload: { reason: "Owner cancellation" } });
-  assert.equal(resumed.ok, true, JSON.stringify(resumed)); assert.equal(readRun(stateDir, project.slug, "cancel-run").phase, "cancelled"); assert.ok(fake.archived.includes("owned-dev"));
-});
-
-test("Scrum completion sees an in-flight mailbox delivery after its queue becomes empty", async t => {
-  const { handlers, stateDir } = makeSurface(t);
-  const project = makeProject(t, "completion-flight");
-  assert.equal((await handlers.executionSetMode({ projectRoot: project.root, mode: "scrum" })).ok, true);
-  assert.equal((await handlers.scrumCommand({ operation: "run.create", projectRoot: project.root, runId: "r", requestId: "create", payload: { initiativeId: "completion-flight", track: "small", rationale: "fixture", ownedPaths: [] } })).ok, true);
-  const mailbox = join(stateDir, "projects", project.slug, "mailbox.jsonl");
-  const mail = enqueueLeadMail(mailbox, { from: "owner", kind: "directive", text: "verify before completion" });
-  deliverLeadMail(mailbox, { mailIds: [mail.mailId], toAgentId: "lead" });
-  const result = await handlers.scrumCommand({ operation: "run.complete", projectRoot: project.root, runId: "r", requestId: "complete", expectedRevision: 1 });
-  assert.equal(result.ok, false); if (!result.ok) assert.match(result.error, /Agents\/directives still in flight/);
-});
-
-test("Owner reset/delete reclaim only target Scrum runtime while reset preserves selection and both rosters", async t => {
-  const {handlers,stateDir}=makeSurface(t);
-  const target=makeProject(t,'scrum-cleanup'),other=makeProject(t,'scrum-untouched');
-  assert.equal((await handlers.executionSetMode({projectRoot:target.root,mode:'scrum'})).ok,true);
-  const dir=join(stateDir,'projects',target.slug),otherDir=join(stateDir,'projects',other.slug);
-  writeFileSync(join(dir,'lanes.json'),JSON.stringify({worker:'pi/preserved'}));
-  const configBefore=['execution.json','lanes.json','scrum-lanes.json'].map(p=>readFileSync(join(dir,p),'utf8'));
-  for(const base of [dir,otherDir]){mkdirSync(join(base,'scrum/runs/r'),{recursive:true});writeFileSync(join(base,'scrum/runs/r/evidence'),'owned');mkdirSync(join(base,'scrum/harness'),{recursive:true});writeFileSync(join(base,'scrum/harness/prompt'),'owned');}
-  // A malformed target journal must still be removable by the Owner.
-  const refused=await handlers.projectDelete({projectRoot:target.root,seat:'lead'});assert.equal(refused.ok,false);assert.equal(existsSync(join(dir,'scrum')),true);
-  const reset=await handlers.projectReset({projectRoot:target.root});assert.equal(reset.ok,true,JSON.stringify(reset));
-  assert.equal(existsSync(join(dir,'scrum')),false);
-  assert.deepEqual(['execution.json','lanes.json','scrum-lanes.json'].map(p=>readFileSync(join(dir,p),'utf8')),configBefore);
-  assert.equal(readFileSync(join(otherDir,'scrum/runs/r/evidence'),'utf8'),'owned');
-  mkdirSync(join(dir,'scrum/harness'),{recursive:true});writeFileSync(join(dir,'scrum/harness/prompt'),'second lifecycle');
-  const removed=await handlers.projectDelete({projectRoot:target.root});assert.equal(removed.ok,true,JSON.stringify(removed));
-  assert.equal(existsSync(dir),false);assert.equal(existsSync(target.root),true);
-  assert.equal(readFileSync(join(otherDir,'scrum/harness/prompt'),'utf8'),'owned');
-});
-
-test("idle mode switches retire seats lazily and retain both rosters in SLP snapshots", async t => {
-  const agents: FakeAgent[] = [];
-  const { handlers, stateDir, fake } = makeSurface(t, agents);
-  const project = makeProject(t, "dual-mode");
-  const initial = await handlers.snapshot({ projectRoot: project.root });
-  assert.equal(initial.ok, true);
-  assert.equal(existsSync(join(stateDir, "projects", project.slug, "scrum-lanes.json")), false);
-  agents.push({ id: "old-sup", provider: "pi", status: "idle", cwd: project.root, labels: { seat: "supervisor", project: project.slug } });
-  assert.equal((await handlers.executionSetMode({ projectRoot: project.root, mode: "scrum" })).ok, true);
-  assert.deepEqual(fake.archived, ["old-sup"]);
-  assert.equal(fake.created.length, 0, "a mode switch must not boot replacement seats");
-  assert.equal((await handlers.executionSetMode({ projectRoot: project.root, mode: "slp" })).ok, true);
-  const reply = await handlers.snapshot({ projectRoot: project.root });
-  assert.equal(reply.ok, true);
-  if (reply.ok) {
-    assert.equal(reply.view.execution?.selectedMode, "slp");
-    assert.ok(reply.view.execution?.config?.lanes.pm);
-    assert.ok(reply.view.lanes.worker);
-    assert.equal(reply.view.project?.executionMode, "slp");
-    assert.equal(reply.view.project?.activeScrumPhase, null);
-  }
-});
-
-test("machine Scrum roster editing does not change new-Project default or existing SLP selection", async t => {
-  const { handlers } = makeSurface(t);
-  const project = makeProject(t, "machine-rosters");
-  assert.equal((await handlers.snapshot({ projectRoot: project.root })).ok, true);
-  const reset = await handlers.scrumCommand({ operation: "config.reset", requestId: "seed-machine" });
-  assert.equal(reset.ok, true);
-  assert.equal((await handlers.scrumCommand({ operation: "profile.save", requestId: "save-machine", payload: { id: "roster", name: "Scrum roster" } })).ok, true);
-  assert.equal((await handlers.scrumCommand({ operation: "profile.apply", requestId: "apply-machine", payload: { id: "roster" } })).ok, true);
-  const global = await handlers.snapshot({});
-  assert.equal(global.ok, true);
-  if (global.ok) {
-    assert.equal(global.view.execution?.newProjectDefaultMode, "slp");
-    assert.equal(global.view.execution?.activeProfileId, "scrum:roster");
-    assert.ok(global.view.execution?.config?.lanes.pm);
-  }
-  const selected = await handlers.snapshot({ projectRoot: project.root });
-  assert.equal(selected.ok, true);
-  if (selected.ok) assert.equal(selected.view.execution?.selectedMode, "slp");
-});
-
-test("Scrum roster changes retire live seats across providers and leave frozen runs untouched", async t => {
-  const agents: FakeAgent[] = [];
-  const { handlers, fake } = makeSurface(t, agents);
-  const project = makeProject(t, "scrum-seat-edit");
-  assert.equal((await handlers.executionSetMode({ projectRoot: project.root, mode: "scrum" })).ok, true);
-  const snap = await handlers.snapshot({ projectRoot: project.root });
-  assert.ok(snap.ok);
-  const config = snap.view.execution!.config!;
-  agents.push({ id: "scrum-live", provider: "pi", cwd: project.root, labels: { seat: "supervisor", project: project.slug } });
-  const edited = { ...config, lanes: { ...config.lanes, supervisor: "claude/opus" } };
-  const saved = await handlers.scrumCommand({ projectRoot: project.root, operation: "config.set", requestId: "roster", payload: { config: edited } });
-  assert.equal(saved.ok, true);
-  assert.deepEqual(fake.archived, ["scrum-live"]);
-  assert.equal(fake.created.length, 0);
-  const created = await handlers.scrumCommand({ projectRoot: project.root, operation: "run.create", runId: "frozen-roster", requestId: "create-frozen", payload: { initiativeId: "frozen-roster", track: "small", rationale: "preserve live run", ownedPaths: [] } });
-  assert.equal(created.ok, true);
-  agents.push({ id: "frozen-sup", provider: "claude", cwd: project.root, labels: { seat: "supervisor", project: project.slug } });
-  assert.equal((await handlers.scrumCommand({ projectRoot: project.root, operation: "config.set", requestId: "future-roster", payload: { config } })).ok, true);
-  assert.deepEqual(fake.archived, ["scrum-live"], "future roster edits must not retire the active run's seats");
-  const frozen = await handlers.snapshot({ projectRoot: project.root });
-  assert.ok(frozen.ok);
-  assert.equal(frozen.view.execution?.run?.config.lanes.supervisor, "claude/opus");
-  assert.equal(frozen.view.execution?.config?.lanes.supervisor, config.lanes.supervisor);
-});
-
-test("a damaged Scrum run stays local to execution metadata in snapshots", async t => {
-  const { handlers, stateDir } = makeSurface(t);
-  const project = makeProject(t, "damaged-run");
-  assert.equal((await handlers.executionSetMode({ projectRoot: project.root, mode: "scrum" })).ok, true);
-  assert.equal((await handlers.scrumCommand({ operation: "run.create", projectRoot: project.root, runId: "damaged", requestId: "create", payload: { initiativeId: "damaged", track: "small", rationale: "snapshot isolation", ownedPaths: [] } })).ok, true);
-  writeFileSync(join(stateDir, "projects", project.slug, "scrum/runs/damaged/events.jsonl"), '{"revision":1');
-  const reply = await handlers.snapshot({ projectRoot: project.root });
-  assert.ok(reply.ok);
-  assert.ok(reply.view.execution?.error);
-  assert.ok(reply.view.execution?.busyReason);
-  assert.ok(reply.view.lanes.worker);
-});
-
-test("editing a Scrum profile retains its active identity until explicit reset", async t => {
-  const { handlers } = makeSurface(t);
-  assert.equal((await handlers.scrumCommand({ operation: "config.reset", requestId: "seed" })).ok, true);
-  assert.equal((await handlers.scrumCommand({ operation: "profile.save", requestId: "save", payload: { id: "editable", name: "Editable" } })).ok, true);
-  assert.equal((await handlers.scrumCommand({ operation: "profile.apply", requestId: "apply", payload: { id: "editable" } })).ok, true);
-  const before = await handlers.snapshot({}); assert.ok(before.ok);
-  const config = before.view.execution!.config!;
-  assert.equal((await handlers.scrumCommand({ operation: "config.set", requestId: "edit", payload: { config: { ...config, lanes: { ...config.lanes, pm: "claude/edited" } } } })).ok, true);
-  const edited = await handlers.snapshot({}); assert.ok(edited.ok);
-  assert.equal(edited.view.execution?.activeProfileId, "scrum:editable");
-  assert.equal(edited.view.execution?.activeProfileModified, true);
-  assert.equal((await handlers.scrumCommand({ operation: "config.reset", requestId: "reset" })).ok, true);
-  const reset = await handlers.snapshot({}); assert.ok(reset.ok);
-  assert.equal(reset.view.execution?.activeProfileId, null);
-});
-
-test("mode switches refuse unfinished Tasks in nested Project workspaces", async t => {
-  const { handlers, factory } = makeSurface(t);
-  const project = makeProject(t, "nested-mode-lock");
-  mkdirSync(join(project.root, "pkg"));
-  factory.setContract({ task: "nested-task", workspace: join(project.root, "pkg"), gate: "true" });
-  const snapshot = await handlers.snapshot({ projectRoot: project.root }); assert.ok(snapshot.ok);
-  assert.match(snapshot.view.execution?.busyReason ?? "", /nested-task/);
-  const reply = await handlers.executionSetMode({ projectRoot: project.root, mode: "scrum" });
-  assert.equal(reply.ok, false);
-  if (!reply.ok) assert.equal(reply.code, "execution-mode-busy");
-});
-
-test("mode switches refuse queued non-directive mail for either standing seat", async t => {
-  const { handlers, stateDir } = makeSurface(t);
-  for (const to of ["lead", "supervisor"] as const) {
-    const project = makeProject(t, `queued-${to}`);
-    await handlers.snapshot({ projectRoot: project.root });
-    enqueueLeadMail(join(stateDir, "projects", project.slug, "mailbox.jsonl"), { to, from: "peer", kind: "verdict", task: "finished-task", text: "Review the completed attempt" });
-    const reply = await handlers.executionSetMode({ projectRoot: project.root, mode: "scrum" });
-    assert.equal(reply.ok, false);
-    if (!reply.ok) assert.equal(reply.code, "execution-mode-busy");
-  }
-});
-
 test("pluginsInstall and installDaemonPlugin support switching paseo-factory between GitHub and local checkout", async t => {
   const { handlers, home, pluginInstalls } = makeSurface(t);
   const toGit = await handlers.pluginsInstall({ target: "paseo-factory" });
@@ -5962,21 +5766,6 @@ test("pluginsInstall and installDaemonPlugin support switching paseo-factory bet
   );
 });
 
-test("executionSetMode refuses mode switches when projectRoot is omitted (All projects is view-only)", async (t) => {
-  const { handlers } = makeSurface(t);
-  const noProject = await handlers.executionSetMode({ mode: "scrum" });
-  assert.equal(noProject.ok, false);
-  if (!noProject.ok) {
-    assert.equal(noProject.code, "project-required");
-    assert.match(noProject.error, /All projects is view-only/);
-  }
-  const blankProject = await handlers.executionSetMode({ projectRoot: "   ", mode: "scrum" });
-  assert.equal(blankProject.ok, false);
-  if (!blankProject.ok) {
-    assert.equal(blankProject.code, "project-required");
-  }
-});
-
 
 
 test("v0.0.58 reset retires every duplicate seat and purges correlations and product history", async (t) => {
@@ -5992,7 +5781,7 @@ test("v0.0.58 reset retires every duplicate seat and purges correlations and pro
   for (const role of ["lead", "supervisor", "agent"] as const) registry.issue({ role, projectRoot: project.root, projectSlug: project.slug });
   assert.equal(registry.list().length, 3);
   const projectDir = join(stateDir, "projects", project.slug);
-  for (const file of ["lanes.json", "scrum-lanes.json", "execution.json"]) writeFileSync(join(projectDir, file), "{}\n");
+  for (const file of ["lanes.json", "project-settings.json"]) writeFileSync(join(projectDir, file), "{}\n");
   mkdirSync(join(project.root, ".claude"));
   writeFileSync(join(project.root, ".claude", "CLAUDE.md"), "local rules");
   writeFileSync(join(project.root, ".worktreeinclude"), ".agents/\n");
@@ -6008,7 +5797,7 @@ test("v0.0.58 reset retires every duplicate seat and purges correlations and pro
   assert.deepEqual([...stopped].sort(), [...fake.archived].sort());
   assert.equal(new CorrelationRegistry(stateDir).list().length, 0);
   assert.equal(registry.list().length, 0, "an existing registry cannot retain purged tokens");
-  for (const file of ["lanes.json", "scrum-lanes.json", "execution.json"]) assert.equal(readFileSync(join(projectDir, file), "utf8"), "{}\n");
+  for (const file of ["lanes.json", "project-settings.json"]) assert.equal(readFileSync(join(projectDir, file), "utf8"), "{}\n");
   assert.equal(readFileSync(join(project.root, ".claude", "CLAUDE.md"), "utf8"), "local rules");
   assert.equal(readFileSync(join(project.root, ".worktreeinclude"), "utf8"), ".agents/\n");
   assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: project.root, encoding: "utf8" }), "");
@@ -6118,141 +5907,6 @@ test("v0.0.58 resets a linked-worktree Project without changing the main branch"
   assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: main.root, encoding: "utf8" }), original);
 });
 
-test("snapshot and executionWork omit unaccepted zombie tasks from cancelled Scrum runs while keeping accepted tasks", async (t) => {
-  const project = makeProject(t, "cancelled-scrum-run");
-  const { handlers, factory, stateDir } = makeSurface(t);
-  await handlers.executionSetMode({ projectRoot: project.root, mode: "scrum" });
-  const runId = "run-cancelled-1";
-  const created = await handlers.scrumCommand({
-    projectRoot: project.root,
-    operation: "run.create",
-    runId,
-    requestId: "create-1",
-    payload: { initiativeId: "farm-3d", track: "ui", rationale: "Greenfield" },
-  });
-  assert.ok(created.ok, JSON.stringify(created));
-
-  // Register a task bound to the Scrum run and dispatch it, then cancel the Scrum run without settling the task
-  factory.setContract({
-    task: "zombie-pm-prd",
-    workspace: project.root,
-    gate: "true",
-    artifact: "prd.md",
-    description: "OUTCOME: Write prd.md",
-    by: "lead",
-    execution: { mode: "scrum", runId, role: "pm", policyRevision: "v1", configRevision: 1, artifactRefs: [] },
-  });
-  factory.requestSpawn({
-    task: "zombie-pm-prd",
-    provider: "zai/glm-5.3",
-    arity: 1,
-    worktree: join(stateDir, "projects", project.slug, "worktrees", "zombie-pm-prd"),
-  });
-
-  const rev = (created.data as { revision: number }).revision;
-  const cancelled = await handlers.scrumCommand({
-    projectRoot: project.root,
-    operation: "run.cancel",
-    runId,
-    expectedRevision: rev,
-    requestId: "cancel-1",
-    payload: { reason: "Switch provider from ZAI" },
-  });
-  assert.ok(cancelled.ok, JSON.stringify(cancelled));
-
-  const snapScoped = await handlers.snapshot({ projectRoot: project.root });
-  assert.ok(snapScoped.ok);
-  assert.equal(
-    snapScoped.view.tasks.some((task) => task.task === "zombie-pm-prd"),
-    false,
-    "cancelled Scrum run's unaccepted task does not appear as a zombie In Progress task",
-  );
-  assert.equal(snapScoped.view.kpis.running, 0);
-  assert.equal(snapScoped.view.execution?.busyReason ?? null, null);
-});
-
-test("Scrum supervisorEnsure preserves a UI-created Supervisor session without scrumConfigRevision label and accept auto-commits dirty seat memory/docs while archiving bound Peer agents", async (t) => {
-  const project = makeProject(t, "goal-planner-regression");
-  const agents: FakeAgent[] = [
-    {
-      id: "ui-sup-live",
-      provider: "antigravity",
-      model: "gemini-4-argon",
-      thinkingOptionId: "high",
-      status: "idle",
-      cwd: project.root,
-      title: "Supervisor",
-      labels: {},
-    },
-  ];
-  const { handlers, factory, stateDir, fake } = makeSurface(t, agents);
-  await handlers.executionSetMode({ projectRoot: project.root, mode: "scrum" });
-  const snap = await handlers.snapshot({ projectRoot: project.root });
-  assert.ok(snap.ok);
-  const config = snap.view.execution!.config!;
-  await handlers.scrumCommand({
-    projectRoot: project.root,
-    operation: "config.set",
-    requestId: "set-ag",
-    payload: {
-      config: {
-        ...config,
-        lanes: {
-          ...config.lanes,
-          supervisor: "antigravity/gemini-4-argon-high",
-          lead: "antigravity/gemini-4-argon-high",
-        },
-      },
-    },
-  });
-  // Bind ui-sup-live in project.json as injectSessionEnv does for a UI-started Supervisor chat
-  writeProjectRegistration(stateDir, project.slug, { root: project.root, supervisor: "ui-sup-live" });
-  fake.archived.splice(0);
-
-  const ensuredSup = await handlers.supervisorEnsure({ projectRoot: project.root });
-  assert.ok(ensuredSup.ok, ensuredSup.ok ? "" : ensuredSup.error);
-  assert.equal(ensuredSup.agentId, "ui-sup-live", "UI-created Supervisor without scrumConfigRevision label is reused");
-  assert.deepEqual(fake.archived, [], "UI-created Supervisor is not retired when Lead reports back");
-
-  // Author untracked GLOSSARY.md and docs/adr/0001.md on <project-root> (as Supervisor domain-modeling does)
-  writeFileSync(join(project.root, "GLOSSARY.md"), "# Glossary\n");
-  mkdirSync(join(project.root, "docs", "adr"), { recursive: true });
-  writeFileSync(join(project.root, "docs", "adr", "0001-arch.md"), "# ADR 0001\n");
-
-  // Contract, prepare worktree, spawn Peer, and claim pm-prd
-  factory.setContract({
-    task: "pm-prd",
-    workspace: project.root,
-    gate: "test -f docs/prd/goal-planner-prd.md",
-    artifact: "docs/prd/goal-planner-prd.md",
-    by: "lead",
-  });
-  const wt = prepareTaskWorktree({ stateDir, workspace: project.root, task: "pm-prd" });
-  assert.ok(wt.ok, wt.ok ? "" : wt.reason);
-  mkdirSync(join(wt.path, "docs", "prd"), { recursive: true });
-  writeFileSync(join(wt.path, "docs", "prd", "goal-planner-prd.md"), "# PRD\n");
-  const headSha = gitCommitAll(wt.path, "docs(prd): add goal-planner PRD");
-  factory.requestSpawn({ task: "pm-prd", provider: "antigravity/gemini-4-argon-high", arity: 1, worktree: wt.path });
-  agents.push({
-    id: "peer-pm-prd",
-    provider: "antigravity",
-    status: "idle",
-    cwd: wt.path,
-    title: "PM · pm-prd",
-    labels: { seat: "agent", project: project.slug, task: "pm-prd" },
-  });
-  const claim = await factory.claim({ task: "pm-prd", sha: headSha, agent: "peer-pm-prd", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
-  assert.equal(claim.verdict, "green");
-
-  const accepted = await handlers.accept({ task: "pm-prd", attempt: 1 });
-  assert.ok(accepted.ok, accepted.ok ? "" : accepted.error);
-  assert.match(accepted.summary, /landed into <project-root>/, "auto-committed GLOSSARY.md + docs/adr/0001-arch.md on root so pm-prd lands cleanly");
-  assert.equal(existsSync(join(project.root, "docs", "prd", "goal-planner-prd.md")), true);
-  assert.equal(existsSync(join(project.root, "GLOSSARY.md")), true);
-  assert.ok((fake.archived as string[]).includes("peer-pm-prd"), "bound Peer agent is archived when Task is accepted and landed");
-  assert.equal(existsSync(wt.path), false, "worktree directory is removed after landing");
-});
-
 test("ADR 0036: snapshot surfaces only the Factory Core Skill Pack, pluginsCheckUpdates checks remote versions, and pluginsInstall / pluginsManage install, update, reload, and protect mandatory tools against disable/remove", async (t) => {
   const userHome = makeTempDir("companion-tools-home-");
   disposeDir(t, userHome);
@@ -6264,7 +5918,7 @@ test("ADR 0036: snapshot surfaces only the Factory Core Skill Pack, pluginsCheck
   const factory = createFactory({ stateDir, retroCopilotRunner: retroRunner.runner, retroCopilotProbe: () => true, eyeCliProbe: () => false });
   const fake = fakeDaemon([]);
 
-  const { CORE_SKILL_SOURCES } = await import('../src/scrum/companion-tools.ts');
+  const { CORE_SKILL_SOURCES } = await import('../src/companion-tools.ts');
   const toolCalls: Array<{ command: string; args: string[] }> = [];
   const handlers = createSurfaceHandlers({
     factory,
@@ -6427,7 +6081,7 @@ test('Open Design catalog links offline bundles, detects updates and accepts rem
   assert.equal(execFileSync('git', ['-C', root, 'ls-tree', 'HEAD', 'design/open-design-link.json'], { encoding: 'utf8' }).trim(), '');
 });
 
-test('SLP linked design RPC Studio renders repository artifacts without a Scrum run', async t => {
+test('linked design RPC Studio renders repository artifacts', async t => {
   const f = makeSurface(t); const project = makeProject(t, 'linked-studio');
   mkdirSync(join(project.root, 'design'));
   writeFileSync(join(project.root, 'design/index.html'), '<html><head></head><body>Linked</body></html>');
@@ -6440,7 +6094,7 @@ test('SLP linked design RPC Studio renders repository artifacts without a Scrum 
   assert.ok(result.bundle.files['mockups/screens.html']); assert.match(result.bundle.studioHtml, /Flow Board/);
 });
 
-test('linked designs sync before Lead mail and seed Scrum runs and UX worktrees', async t => {
+test('linked designs sync before Lead mail', async t => {
   const f = makeSurface(t), p = makeProject(t, 'design-aware');
   const source = join(f.dir, 'data/projects/owner'); mkdirSync(source, { recursive: true });
   writeFileSync(join(source, 'index.html'), '<html><head></head><body>Original</body></html>');
@@ -6454,20 +6108,9 @@ test('linked designs sync before Lead mail and seed Scrum runs and UX worktrees'
     return { id: request.id, ok: true, summary: 'queued' };
   } });
   assert.ok((await handlers.leadDispatch({ projectRoot: p.root, message: 'Build the linked screens' })).ok); assert.ok(dispatched);
-  const switched = await handlers.executionSetMode({ projectRoot: p.root, mode: 'scrum' }); assert.ok(switched.ok, JSON.stringify(switched));
-  const created = await handlers.scrumCommand({ projectRoot: p.root, operation: 'run.create', runId: 'linked-run', requestId: 'create', payload: { initiativeId: 'linked-initiative', track: 'standard', rationale: 'Owner design', ownedPaths: [] } }); assert.ok(created.ok, JSON.stringify(created));
-  const run = created.data as import('../src/scrum/run-journal.ts').ScrumRun;
-  assert.match(readFileSync(join(p.root, '.scratch/linked-initiative/mockups/index.html'), 'utf8'), /Latest Owner design/);
-  const { provisionScrumHarness } = await import('../plugin/server/core/scrum/harness.ts');
-  const workspace = join(f.dir, 'ux-worktree'); mkdirSync(workspace);
-  provisionScrumHarness({ state: f.stateDir, slug: p.slug, authority: 'agent', generation: 'g', userHome: join(f.dir, 'user'), workspace, identity: { kind: 'task', task: 'ux', epoch: 1, binding: { mode: 'scrum', role: 'ux', runId: run.runId, configRevision: run.configRevision, policyRevision: run.policyRevision, artifactRefs: [] } } });
-  const seeded = join(workspace, '.scratch/linked-initiative/mockups/index.html'); assert.match(readFileSync(seeded, 'utf8'), /Latest Owner design/);
-  writeFileSync(seeded, 'UX refinement');
-  provisionScrumHarness({ state: f.stateDir, slug: p.slug, authority: 'agent', generation: 'g', userHome: join(f.dir, 'user'), workspace, identity: { kind: 'task', task: 'ux', epoch: 1, binding: { mode: 'scrum', role: 'ux', runId: run.runId, configRevision: run.configRevision, policyRevision: run.policyRevision, artifactRefs: [] } } });
-  assert.equal(readFileSync(seeded, 'utf8'), 'UX refinement');
   writeFileSync(join(source, 'index.html'), '<html><head></head><body>Owner revision two</body></html>');
   const revised = await handlers.openDesignSync({ projectRoot: p.root }); assert.ok(revised.ok, JSON.stringify(revised));
-  assert.match(readFileSync(join(p.root, '.scratch/linked-initiative/mockups/index.html'), 'utf8'), /Owner revision two/);
+  assert.match(readFileSync(join(p.root, 'design/index.html'), 'utf8'), /Owner revision two/);
 });
 
 test('remote dispatch waits for a fresh client source acknowledgement before queuing mail', async t => {
@@ -6525,15 +6168,14 @@ test('Skill Hub RPC imports host skills and persists explicit Project pack overr
   assert.equal(readFileSync(join(userHome, '.agents/skills/asc-iap/SKILL.md'), 'utf8'), '# ASC IAP');
   assert.ok((await handlers.skillsTogglePack({ projectRoot: repo, pack: 'expo', enabled: false })).ok);
   assert.deepEqual(readProjectSettings(stateDir, project.slug).skillPacks, []);
-  factory.setContract({ task: 'qa-iap', workspace: repo, gate: 'true', skills: ['asc-iap'], execution: { mode: 'scrum', runId: 'test-run', role: 'qa', policyRevision: '1', configRevision: 1, artifactRefs: [] } });
+  factory.setContract({ task: 'qa-iap', workspace: repo, gate: 'true', skills: ['asc-iap'] });
   const after = await handlers.snapshot({ projectRoot: repo }); assert.ok(after.ok); if (!after.ok) return;
   assert.equal(after.view.skillHub?.totalInstalled, 1);
   assert.equal(after.view.skillHub?.hostCatalog.find(e => e.id === 'zcode:asc-iap')?.status, 'linked');
   assert.equal(after.view.skillHub?.projectPacks.find(p => p.id === 'expo')?.enabled, false);
-  assert.equal(after.view.skillHub?.roleMatrix.length, 8);
-  assert.ok(after.view.skillHub?.roleMatrix.find(r => r.role === 'qa')?.skills.includes('asc-iap'));
-  assert.ok(after.view.skillHub?.installedSkills.find(s => s.name === 'asc-iap')?.roles.includes('qa'));
-  assert.equal(after.view.skillHub?.roleMatrix.find(r => r.role === 'qa')?.taskGrants[0]?.task, 'qa-iap');
+  assert.deepEqual(after.view.skillHub?.roleMatrix.map(r => r.role), ['supervisor', 'lead', 'peer']);
+  assert.ok(after.view.skillHub?.roleMatrix.find(r => r.role === 'peer')?.skills.includes('asc-iap'));
+  assert.ok(after.view.skillHub?.installedSkills.find(s => s.name === 'asc-iap')?.roles.includes('peer'));
 });
 
 // ---- Seam 1 (v0.0.89, ADR 0045 §1): the Per-Project Factory registry behind the surface RPCs ----

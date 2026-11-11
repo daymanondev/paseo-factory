@@ -16,10 +16,8 @@ Sync copies the bundle into the Project's `design/`, supplies missing device fra
 
 The Header reports updates and provides **Sync**, **Open Design Studio**, and **Unlink**. Before Supervisor or Lead dispatch queues mail, Factory refreshes the source. For a client folder, it requests a fresh read from the Factory Header over Paseo RPC and waits for an acknowledgement. Keep Factory open on the design computer during dispatch. If the source is unavailable, dispatch refuses with `open-design-client-sync-required`; it queues no stale directive. Running agents read their local Git workspace and need no connection to Open Design.
 
-Scrum runs seed `.scratch/<initiativeId>/mockups/`. `open-design-seed.json` records the initial file hashes. Later sync updates untouched seeds; conflicting specialist edits produce `open-design-seed-conflict` and must be reconciled before dispatch. Retries preserve refinements when the Owner source is unchanged.
+Studio probes token-protected HTTP candidates first. `PASEO_FACTORY_PREVIEW_PORT` optionally selects a fixed port. If HTTP cannot be reached or started, the complete Studio opens inside Factory using an RPC bundle. The preview has no approval gate, so its decision buttons are disabled.
 
-Studio probes token-protected HTTP candidates first. `PASEO_FACTORY_PREVIEW_PORT` optionally selects a fixed port. If HTTP cannot be reached or started, the complete Studio opens inside Factory using an RPC bundle. Submitted Scrum designs retain digest/revision-bound approvals, changes, waivers and pinned findings through `design.decide`. SLP and pre-run previews have no approval gate, so their decision buttons are disabled.
-
-The public RPC methods use Paseo's lowercase naming: `factory.open_design.catalog`, `.export`, `.status`, `.sync`, `.unlink`, `.preview`. Scrum uses `factory.scrum.command` with `preview.bundle` and `design.decide`.
+The public RPC methods use Paseo's lowercase naming: `factory.open_design.catalog`, `.export`, `.status`, `.sync`, `.unlink`, `.preview`.
 
 Open Design MCP tools are independently optional: **Plugins → Helper MCP catalog → + Sync to Peer**. Discovery starts disabled. Project design bundles never enter Private vault.

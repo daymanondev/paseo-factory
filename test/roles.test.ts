@@ -1962,7 +1962,7 @@ test("injectSessionEnv materializes an empty directory stub when resuming an arc
 
 test("Peer create refreshes selected OAuth before provider fencing; coordination seats keep only Factory", async (t) => {
   const { syncPeerHelpersBeforeCreate } = await import("../plugin/server/roles.ts");
-  const { selectCatalog } = await import("../src/mcp/catalog.ts");
+  const { catalog } = await import("../src/mcp/catalog.ts");
   const dir = makeTempDir(); disposeDir(t, dir);
   const userHome = join(dir, "user"), stateDir = join(dir, "state");
   mkdirSync(join(userHome, ".gemini/config"), { recursive: true });
@@ -1981,7 +1981,6 @@ test("Peer create refreshes selected OAuth before provider fencing; coordination
     else assert.equal(servers.supabase, undefined);
     if (role === "supervisor" && provider === "opencode") assert.equal((result as any).providerOptions.permission.skill["domain-modeling"], "allow");
   }
-  const catalog = selectCatalog("slp");
   assert.ok(catalog.roles.supervisor.includes("supervisor_accept_task"));
   assert.ok(catalog.roles.lead.includes("lead_repoke_agent"));
   assert.ok(catalog.roles.lead.includes("lead_needs_human"));

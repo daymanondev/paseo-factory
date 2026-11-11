@@ -41,8 +41,7 @@ var SEAT_LABELS = {
   retro: "Retro"
 };
 function seatLabelOf(record) {
-  const base = SEAT_LABELS[record.seat] ?? record.seat;
-  return record.seat === "agent" && record.scrumRole !== void 0 ? `${base} \xB7 ${record.scrumRole}` : base;
+  return SEAT_LABELS[record.seat] ?? record.seat;
 }
 function emptyBuckets() {
   return { turns: 0, sessionCount: 0, inputUncachedTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 0, reasoningTokens: 0, totalTokens: 0, totalCostUsd: null, costSum: 0, costSeen: false };
@@ -93,7 +92,7 @@ function foldProjectUsageSummary(file) {
     const modelRow = models.get(modelKey) ?? { provider: record.provider, harness: String(record.harness), model: record.model, ...emptyBuckets() };
     addTo(modelRow, record);
     models.set(modelKey, modelRow);
-    const seatKey = record.seat === "agent" && record.scrumRole !== void 0 ? `${record.seat}:${record.scrumRole}` : record.seat;
+    const seatKey = record.seat;
     const seatRow = seats.get(seatKey) ?? { seat: record.seat, label: seatLabelOf(record), ...emptyBuckets() };
     addTo(seatRow, record);
     seats.set(seatKey, seatRow);

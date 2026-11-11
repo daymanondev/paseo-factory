@@ -2376,31 +2376,6 @@ test("pumpProjectLead recovers a rotation_pending Project once its Peer stops �
   assert.match(successorSends[0]!.text, /# Pumped rotation handoff/);
 });
 
-test("Scrum-only recovery skips steady Projects and reconciles pending cancellation", async t => {
-  const { factory, stateDir, slug, fake } = makeSpooledRuntime(t);
-  const { switchExecution } = await import("../plugin/server/core/scrum/execution.ts");
-  const { ensureScrumConfig } = await import("../plugin/server/core/scrum/config.ts");
-  const { createScrumRun, commandRun } = await import("../plugin/server/core/scrum/run-journal.ts");
-  const reconciled: string[] = [];
-  const runtime = createLeadMailRuntime({ factory, stateDir, daemon: fake.daemon,
-    ensureLead: async () => { throw new Error("unexpected seat"); },
-    ensureSupervisor: async () => { throw new Error("unexpected seat"); },
-    retireLead: async () => { throw new Error("unexpected retirement"); },
-    reconcileScrum: async project => { reconciled.push(project.slug); },
-  });
-  t.after(() => runtime.stop());
-  await runtime.pumpAll({ reconcileScrumOnly: true });
-  assert.deepEqual(reconciled, []);
-  await switchExecution({ state: stateDir, slug, mode: "scrum", blockers: [], rotate: async () => {} });
-  const config = ensureScrumConfig(stateDir, slug);
-  const run = createScrumRun({ state: stateDir, slug, runId: "pending", initiativeId: "pending", config, configRevision: config.configRevision!, track: "small", rationale: "fixture", requestId: "create", ownedPaths: [] });
-  await runtime.pumpAll({ reconcileScrumOnly: true });
-  assert.deepEqual(reconciled, [], "a steady Scrum run must not enter the reconciliation writer");
-  commandRun(stateDir, slug, run.runId, { type: "cancellation_requested", requestId: "cancel", expectedRevision: run.revision, actor: "owner", reason: "stop" });
-  await runtime.pumpAll({ reconcileScrumOnly: true });
-  assert.deepEqual(reconciled, [slug]);
-});
-
 test('remote linked designs do not require the client source for reports or Peer blockers', { timeout: 3000 }, async t => {
   const f = makeSpooledRuntime(t);
   const path = join(projectStateDir(f.stateDir, f.slug), 'project-settings.json');
@@ -2410,12 +2385,11 @@ test('remote linked designs do not require the client source for reports or Peer
   const blocker = await f.leadMail.dispatchLead({ id: 'offline-blocker', kind: 'lead_dispatch', project: f.slug, from: 'peer', message: 'Peer needs help with a build failure.' });
   assert.ok(blocker.ok, JSON.stringify(blocker));
   assert.ok(f.fake.sent.some(s => s.text.includes('Work verified')));
-  const followup = f.leadMail.dispatchLead({ id: 'new-owner-followup', kind: 'lead_dispatch', project: f.slug, runId: 'existing-run', from: 'owner', message: 'New Owner directive for this run' });
-  const refusedAfterAdmission = assert.rejects(followup, /SLP directive cannot carry a Scrum run/);
+  const followup = f.leadMail.dispatchLead({ id: 'new-owner-followup', kind: 'lead_dispatch', project: f.slug, from: 'owner', message: 'New Owner directive' });
   await new Promise(resolve => setTimeout(resolve, 20));
   const status = await f.surface.openDesignStatus({ projectRoot: f.projectRoot }); assert.ok(status.ok); assert.equal(status.syncRequestId, 'new-owner-followup', 'an explicit runId must still request source freshness');
   assert.ok((await f.surface.openDesignUnlink({ projectRoot: f.projectRoot })).ok);
-  await refusedAfterAdmission;
+  assert.ok((await followup).ok, "the directive proceeds once the link is gone");
 });
 
 test('active work tracks both standing-seat deliveries', async t => {
@@ -2592,138 +2566,6 @@ test("Turn-1 kickoff delivery deduplicates the packet against config.systemPromp
   assert.doesNotMatch(leadTurn1, /Open Design Linked Specification/);
   assert.doesNotMatch(leadTurn1, /- Law: One Bounded Outcome per Task:/, "LEAD_WAVE_LAWS stay in config.systemPrompt only");
   assert.doesNotMatch(leadTurn1, /- Law: 4-Part Brief:/);
-});
-
-async function switchToScrumWithActiveRun(f: ReturnType<typeof makeSpooledRuntime>, runId = "run-kick", initiativeId = "kick-init"): Promise<void> {
-  const { switchExecution } = await import("../plugin/server/core/scrum/execution.ts");
-  const { ensureScrumConfig } = await import("../plugin/server/core/scrum/config.ts");
-  const { createScrumRun } = await import("../plugin/server/core/scrum/run-journal.ts");
-  await switchExecution({ state: f.stateDir, slug: f.slug, mode: "scrum", blockers: [], rotate: async () => {} });
-  const config = ensureScrumConfig(f.stateDir, f.slug);
-  createScrumRun({ state: f.stateDir, slug: f.slug, runId, initiativeId, config, configRevision: config.configRevision!, track: "small", rationale: "kickoff fixture", requestId: `create-${runId}`, ownedPaths: [] });
-}
-
-test("Turn-1 delivery to a Scrum Lead and Supervisor prepends the unified Seat kickoff packet — preflight, Scrum tool table, notebook, bounded run digest — never renderScrumPrompt (v0.2.0, ADR 0049 §2)", async t => {
-  const f = makeSpooledRuntime(t);
-  await switchToScrumWithActiveRun(f);
-
-  // Lead Turn 1 — the fresh seat receives the packet, not renderScrumPrompt + raw JSON.
-  await f.leadMail.dispatchLead({ id: "ld-scrum-kick", kind: "lead_dispatch", workspace: f.projectRoot, message: "Run the sprint" });
-  const leadTurn1 = f.fake.sent[0]!.text;
-  assert.match(leadTurn1, /\[paseo-factory seat kickoff packet · role=lead/);
-  assert.match(leadTurn1, /- Workspace: /, "deterministic repository preflight rides the Scrum Turn-1 packet");
-  assert.match(leadTurn1, /- Git: branch=/);
-  assert.match(leadTurn1, /- Build\/Test commands: /);
-  assert.match(leadTurn1, /- Role MCP tools \(paseo_factory\): `lead_scrum_operation`/, "the Scrum Lead MCP tool table replaces the SLP table");
-  assert.doesNotMatch(leadTurn1, /`lead_verify`/, "the SLP-only lead tool vocabulary never reaches a Scrum seat");
-  assert.match(leadTurn1, /- Project notebook path: .*notebook\.md/, "the Project notebook lines ride the Scrum Turn-1 packet");
-  assert.match(leadTurn1, /- Active Scrum run digest:\nScrum run run-kick \(initiative kick-init\): phase=planning, track=small/, "the bounded formatScrumRunDigest block rides the packet");
-  assert.doesNotMatch(leadTurn1, /paseo-factory scrum 0032-r2/, "no SCRUM_PROMPT_MARK — renderScrumPrompt already rides config.systemPrompt");
-  assert.doesNotMatch(leadTurn1, /Live Scrum state: /, "no raw JSON.stringify(activeRun) dump in the Turn-1 user message");
-
-  // Supervisor Turn 1 — same shared kickoff helper, supervisor-scoped Scrum table.
-  await f.leadMail.dispatchSupervisor({ id: "sd-scrum-kick", kind: "supervisor_dispatch", workspace: f.projectRoot, message: "Check the run" });
-  const supTurn1 = f.fake.sent[1]!.text;
-  assert.match(supTurn1, /\[paseo-factory seat kickoff packet · role=supervisor/);
-  assert.match(supTurn1, /- Workspace: /);
-  assert.match(supTurn1, /- Role MCP tools \(paseo_factory\): `supervisor_dispatch_lead`, `supervisor_scrum_decision`/);
-  assert.doesNotMatch(supTurn1, /`supervisor_read_ledger`/, "the SLP-only supervisor tool vocabulary never reaches a Scrum seat");
-  assert.match(supTurn1, /- Project notebook path: .*notebook\.md/);
-  assert.match(supTurn1, /- Active Scrum run digest:\nScrum run run-kick \(initiative kick-init\): phase=planning, track=small/);
-  assert.doesNotMatch(supTurn1, /paseo-factory scrum 0032-r2/);
-  assert.doesNotMatch(supTurn1, /Live Scrum state: /);
-});
-
-test("128k Lead handoff in Scrum mode names Scrum run continuity in the extraction prompt and embeds the bounded run digest plus notebook in the successor kickoff (v0.2.0, ADR 0049 §2)", async t => {
-  const lead: FakeAgent = { id: "scrum-rot-lead", status: "idle", lastUsage: { contextWindowUsedTokens: 130_000 } };
-  const f = makeSpooledRuntime(t, [lead]);
-  lead.labels = { seat: "lead", project: f.slug };
-  lead.cwd = f.projectRoot;
-  await f.surface.leadEnsure({ projectRoot: f.projectRoot });
-  await switchToScrumWithActiveRun(f, "run-rot", "rot-init");
-
-  // Turn boundary over the 128k threshold: the extraction prompt goes out.
-  await f.leadMail.onLeadTurnEnded({ agentId: lead.id, outcome: { kind: "completed" }, timeline: [] });
-  const extraction = f.fake.sent.find(s => s.agentId === lead.id)!.text;
-  // The SLP fixed five-section deliverable contract stays intact.
-  assert.match(extraction, /1\. Goal & Remaining Roadmap/);
-  assert.match(extraction, /5\. Read-First Files/);
-  assert.match(extraction, /capping it at 8 KB/);
-  // Scrum run-continuity sections are named.
-  assert.match(extraction, /current Sprint stage \(phase and track\)/);
-  assert.match(extraction, /readiness\/UI approval state/);
-  assert.match(extraction, /active specialist tasks/);
-  assert.match(extraction, /QA\/fix-loop state/);
-  assert.match(extraction, /next actions/);
-
-  // The extraction turn completes: the successor's kickoff embeds the Scrum layer.
-  await f.leadMail.onLeadTurnEnded({ agentId: lead.id, outcome: { kind: "completed" }, timeline: [{ type: "assistant_message", text: "# Scrum handoff\nSprint mid-implementation." }] });
-  const successorId = readProjectRegistration(f.stateDir, f.slug)?.lead;
-  assert.ok(successorId && successorId !== lead.id, "the successor Lead was spawned");
-  const kickoff = f.fake.sent.find(s => s.agentId === successorId && s.text.includes("Machine-Verified Active Peer Roster"))!.text;
-  // The three existing layers stay.
-  assert.match(kickoff, /## Machine-Verified Active Peer Roster/);
-  assert.match(kickoff, /## Ledger State Digest/);
-  assert.match(kickoff, /## Outgoing Lead handoff \(lead-handoff\.md\)/);
-  assert.match(kickoff, /# Scrum handoff/);
-  // The machine-verified Scrum continuity layer embeds the bounded digest + notebook reference.
-  assert.match(kickoff, /## Scrum run continuity \(machine-verified\)/);
-  assert.match(kickoff, /Scrum run run-rot \(initiative rot-init\): phase=planning, track=small/);
-  assert.match(kickoff, /- Project notebook: .*notebook\.md/);
-  // No raw JSON.stringify run dump rides the successor kickoff.
-  assert.doesNotMatch(kickoff, /"phase":"planning"/);
-  assert.doesNotMatch(kickoff, /"operationIntents"/);
-});
-
-test("a Scrum directive dispatched through the supervisor path binds against the target Project's Factory (projectFactory(slug)), never the empty root Factory (v0.2.0, ADR 0049 §2)", async t => {
-  const f = makeSpooledRuntime(t);
-  const { switchExecution } = await import("../plugin/server/core/scrum/execution.ts");
-  const { ensureScrumConfig } = await import("../plugin/server/core/scrum/config.ts");
-  const { createScrumRun, listRuns } = await import("../plugin/server/core/scrum/run-journal.ts");
-
-  // The Project's own Factory state holds the active Scrum run; the wired root
-  // Factory's state (deps.stateDir) holds none — the post-isolation split.
-  const projectState = join(f.dir, "project-factory-state", "paseo-factory");
-  await switchExecution({ state: f.stateDir, slug: f.slug, mode: "scrum", blockers: [], rotate: async () => {} });
-  await switchExecution({ state: projectState, slug: f.slug, mode: "scrum", blockers: [], rotate: async () => {} });
-  const config = ensureScrumConfig(projectState, f.slug);
-  createScrumRun({ state: projectState, slug: f.slug, runId: "run-active", initiativeId: "alt-init", config, configRevision: config.configRevision!, track: "small", rationale: "per-Project Factory fixture", requestId: "create-run-active", ownedPaths: [] });
-
-  const projectFactoryInstance = createFactory({ stateDir: projectState });
-  const registry: FactoryRegistry = {
-    stateDir: f.stateDir,
-    root: f.factory,
-    factoryForProject: slug => {
-      if (slug !== f.slug) throw new Error(`unknown project ${slug}`);
-      return projectFactoryInstance;
-    },
-    cachedFactoryFor: slug => (slug === f.slug ? projectFactoryInstance : undefined),
-    slugs: () => [f.slug],
-    factories: () => [{ slug: f.slug, factory: projectFactoryInstance }],
-    projectsOwningTask: () => [],
-    evict: () => undefined,
-    stop: () => {},
-  };
-  const leadMail = createLeadMailRuntime({
-    factory: f.factory,
-    stateDir: f.stateDir,
-    registry,
-    daemon: f.fake.daemon,
-    ensureLead: input => f.surface.leadEnsure(input),
-    ensureSupervisor: input => f.surface.supervisorEnsure(input),
-    retireLead: input => f.surface.leadRotate(input),
-  });
-  t.after(() => leadMail.stop());
-
-  const reply = await leadMail.dispatchSupervisor({ id: "sd-scrum-bind", kind: "supervisor_dispatch", workspace: f.projectRoot, message: "Advance the sprint", seat: "supervisor" });
-  assert.ok(reply.ok, JSON.stringify(reply));
-
-  const queued = readMailboxLines(f.stateDir, f.slug).find(e => e.type === "mail_queued");
-  assert.ok(queued, "the directive was queued");
-  // The admitted directive bound the Project's Factory: the Lead is queued
-  // against the Project's own active run, not a root-minted one.
-  assert.equal((queued!.execution as { runId?: string } | undefined)?.runId, "run-active");
-  assert.equal(listRuns(f.stateDir, f.slug).length, 0, "the empty root state never minted a run");
 });
 
 

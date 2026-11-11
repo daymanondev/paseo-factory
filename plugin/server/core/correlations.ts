@@ -1,4 +1,3 @@
-import type { ScrumHarnessIdentity } from "./scrum/harness.ts";
 /**
  * Unforgeable Correlation token registry (v0.0.26, ADR 0016 §1):
  * Issues a session-scoped `cor_<uuid>` token during `agent.create`, associates
@@ -14,7 +13,6 @@ import { dirname, join } from "node:path";
 export type SeatCorrelationRole = "supervisor" | "lead" | "agent";
 
 export interface SeatCorrelationRecord {
-  execution?: ScrumHarnessIdentity;
   correlationId: string;
   role: SeatCorrelationRole;
   projectSlug: string;
@@ -104,7 +102,6 @@ export class CorrelationRegistry {
         : new Date().toISOString();
     const record: SeatCorrelationRecord = {
       correlationId,
-      ...(input.execution === undefined ? {} : { execution: structuredClone(input.execution) }),
       role: input.role,
       projectSlug: input.projectSlug,
       projectRoot: input.projectRoot,

@@ -966,7 +966,7 @@ test("Cached Pi provenance never opts in servers after their Pi configuration is
 });
 
 test('skill reconciliation retires stale impeccable directories and broken provider links while preserving other skills', async t => {
-  const { ensureProviderSkillSymlinks } = await import('../src/scrum/companion-tools.ts');
+  const { ensureProviderSkillSymlinks } = await import('../src/companion-tools.ts');
   const { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, lstatSync, existsSync, rmSync } = await import('node:fs');
   const { tmpdir } = await import('node:os');
   const home = mkdtempSync(join(tmpdir(), 'retire-skills-')); t.after(() => rmSync(home, { recursive: true, force: true }));

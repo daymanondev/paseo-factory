@@ -5,14 +5,14 @@
  * - structured Brief fields (`outcome`, `invariants`, `exclusions`,
  *   `verification`) synthesize the canonical 4-section `Contract.description`
  *   when `description` is omitted/empty;
- * - in slp mode (`seat === "lead"`, no Scrum `execution` binding) the resolved
+ * - on the Lead seat (`seat === "lead"`) the resolved
  *   description must be non-empty, `<= 2,500` chars, and carry all four
  *   canonical section markers — else `invalid-contract` names the missing
  *   section(s);
  * - `gate` is mandatory for `engineer` and optional (default `""`) for the
  *   read-only three (`scout | architect | reviewer`);
  * - a read-only disposition refuses `artifact` and normalizes `scope` to `[]`;
- * - Owner/Supervisor/Agent seats and Scrum-binding Contracts stay outside the
+ * - Owner/Supervisor/Agent seats stay outside the
  *   4-Part law, and historical gate-only `contract_set` lines replay cleanly.
  *
  * Verified at the two pre-agreed seams (spec Testing Decision Seam 1): the
@@ -212,7 +212,7 @@ test("ticket 01: a read-only disposition refuses artifact and normalizes scope t
   assert.deepEqual(writable.scope, ["src/"]);
 });
 
-test("ticket 01: the 4-Part law scopes to seat lead in slp mode — Supervisor/Agent seats and Scrum bindings never trigger it (spec Implementation Decision 1)", (t) => {
+test("ticket 01: the 4-Part law scopes to seat lead — Owner/Supervisor/Agent seats never trigger it (spec Implementation Decision 1)", (t) => {
   const dir = makeTempDir();
   disposeDir(t, dir);
   const workspace = makeRepo(dir);
@@ -225,17 +225,6 @@ test("ticket 01: the 4-Part law scopes to seat lead in slp mode — Supervisor/A
   // Supervisor and Agent seats with no description at all: no 4-Part refusal.
   factory.setContract({ task: "SCOPE-B", workspace, gate: "true", seat: "supervisor" });
   factory.setContract({ task: "SCOPE-C", workspace, gate: "true", seat: "agent" });
-
-  // A lead seat WITH a Scrum execution binding: the specialist-role workflow is
-  // out of the law's scope (spec Out of Scope) — no 4-Part refusal.
-  factory.setContract({
-    task: "SCOPE-D",
-    workspace,
-    gate: "true",
-    seat: "lead",
-    execution: { mode: "scrum", runId: "run-1", role: "dev", policyRevision: "rev-1", configRevision: 1, artifactRefs: [] },
-  });
-  assert.equal(factory.contractFor("SCOPE-D")?.description, undefined);
 });
 
 test("review: a supplied empty description refuses outside the 4-Part scope — the pre-v0.5.0 non-empty law stands for every other seat (ADR 0054 §1 scope)", (t) => {
@@ -251,18 +240,11 @@ test("review: a supplied empty description refuses outside the 4-Part scope — 
   const blankOwner = invalidContract(() => factory.setContract({ task: "DESC-B", workspace, gate: "true", description: "   " }));
   assert.match(blankOwner.message, /description must be a non-empty string/);
 
-  // A lead seat WITH a Scrum execution binding: outside slp mode, same law.
-  const scrumEmpty = invalidContract(() =>
-    factory.setContract({
-      task: "DESC-C",
-      workspace,
-      gate: "true",
-      seat: "lead",
-      description: "",
-      execution: { mode: "scrum", runId: "run-1", role: "dev", policyRevision: "rev-1", configRevision: 1, artifactRefs: [] },
-    }),
+  // A supervisor seat: outside the 4-Part scope, same law.
+  const supervisorEmpty = invalidContract(() =>
+    factory.setContract({ task: "DESC-C", workspace, gate: "true", seat: "supervisor", description: "" }),
   );
-  assert.match(scrumEmpty.message, /description must be a non-empty string/);
+  assert.match(supervisorEmpty.message, /description must be a non-empty string/);
 
   // Inside the 4-Part scope (lead, no binding) the empty description still
   // reads as omitted — the structured Brief synthesizes, and emptiness with

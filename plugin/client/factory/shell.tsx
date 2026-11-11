@@ -20,7 +20,7 @@ import { Modal, ScrollView, useToast } from "@getpaseo/plugin/client/ui";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Text, View } from "react-native";
 import { z } from "zod";
-import { skillsImport, skillsTogglePack, accept, executionSetMode, scrumCommand, lanesReset, lanesSet, lanesSetBatch, leadRotate, helperMcpsSyncAndProbe, helperMcpsSetEnabled, pluginsInstall, pluginsManage, pluginsCheckUpdates, profilesApply, profilesDelete, profilesSave, projectAdd, projectDelete, projectPickFolder, projectReset, ratifyProposal, retro, snapshot, supervisorRevoke, taskDetail, vaultConfigure, vaultHydrate, vaultImport, vaultSync } from "../../shared/rpc.ts";
+import { skillsImport, skillsTogglePack, accept, lanesReset, lanesSet, lanesSetBatch, leadRotate, helperMcpsSyncAndProbe, helperMcpsSetEnabled, pluginsInstall, pluginsManage, pluginsCheckUpdates, profilesApply, profilesDelete, profilesSave, projectAdd, projectDelete, projectPickFolder, projectReset, ratifyProposal, retro, snapshot, supervisorRevoke, taskDetail, vaultConfigure, vaultHydrate, vaultImport, vaultSync } from "../../shared/rpc.ts";
 import type { ManageablePluginId } from "../../shared/companions.ts";
 import type { FactoryView, LaneName } from "../../shared/view.ts";
 import { Btn, Card, Pill, TabBar } from "../kit/pill.tsx";
@@ -75,8 +75,6 @@ export function FactoryShell({
   panelTab?: PluginTab;
 }) {
   const toast = useToast();
-  const executionSetModeCall = useRpc(executionSetMode);
-  const scrumCommandCall = useRpc(scrumCommand);
   const snapshotCall = useRpc(snapshot);
   const acceptCall = useRpc(accept);
   const retroCall = useRpc(retro);
@@ -137,8 +135,6 @@ export function FactoryShell({
   };
 
   const [bump, setBump] = useState(0);
-  const [optimisticMode, setOptimisticMode] = useState<{ root: string; scope: string | undefined; mode: "slp" | "scrum"; revision: number } | null>(null);
-  const [pendingMode, setPendingMode] = useState<"slp" | "scrum" | null>(null);
   const [busy, setBusy] = useState(false);
   const [busyAct, setBusyAct] = useState<string | null>(null);
   const [checkingUpdates, setCheckingUpdates] = useState(false);
@@ -186,16 +182,7 @@ export function FactoryShell({
   );
   if (poll.value !== null) lastViewRef.current = poll.value;
   const serverView = poll.value ?? lastViewRef.current;
-  const optimistic = optimisticMode && optimisticMode.root === serverView?.project?.root && (serverView.execution?.revision ?? 0) <= optimisticMode.revision ? optimisticMode : null;
-  const view = serverView && optimistic && serverView.execution ? {
-    ...serverView,
-    project: serverView.project ? { ...serverView.project, executionMode: optimistic.mode, activeScrumPhase: null } : null,
-    projects: serverView.projects.map(project => project.root === optimistic.root ? { ...project, executionMode: optimistic.mode, activeScrumPhase: null } : project),
-    execution: { ...serverView.execution, selectedMode: optimistic.mode },
-  } : serverView;
-  useEffect(() => {
-    if (optimisticMode && (scopeRoot !== optimisticMode.scope || (serverView?.execution?.revision ?? 0) > optimisticMode.revision)) setOptimisticMode(null);
-  }, [scopeRoot, serverView?.execution?.revision, optimisticMode]);
+  const view = serverView;
   const now = useNow(1000);
   const elapsedSeconds = activePluginAct === null ? 0 : Math.max(0, Math.floor((now - activePluginAct.startedAt) / 1000));
   useEffect(() => { if (view !== null) setVaultNote(null); }, [view]);
@@ -322,18 +309,6 @@ export function FactoryShell({
   // The Project-scoped acts need a resolved Project — the snapshot's own
   // `project` is the truth (a scope that does not resolve leaves them parked).
   const projectRoot = view.project?.root;
-  const applyMode = (mode: "slp" | "scrum"): void => {
-    setPendingMode(null);
-    if (!projectRoot) return;
-    setOptimisticMode({ root: projectRoot, scope: scopeRoot, mode, revision: serverView?.execution?.revision ?? 0 });
-    void act("Execution mode", () => executionSetModeCall({ mode, projectRoot })).then(ok => { if (!ok) setOptimisticMode(null); });
-  };
-  const requestMode = (mode: "slp" | "scrum"): void => {
-    if (!projectRoot) return;
-    const currentMode = view.execution?.selectedMode ?? "slp";
-    if (mode === currentMode && !view.execution?.pendingMode) return;
-    setPendingMode(mode);
-  };
   // The seat jumps (v0.0.27, ADR 0017 §3): a seat starts only from Paseo's
   // native New Chat picker ("Supervisor (Factory)"), and the Supervisor
   // spawns the Lead itself — so Open is a bare navigation to the live seat's
@@ -424,44 +399,6 @@ export function FactoryShell({
         if (w > 0 && Math.abs(w - containerWidth) >= 4) setContainerWidth(w);
       }}
     >
-      <Modal open={pendingMode !== null && view.project !== null} onOpenChange={open => { if (!open) setPendingMode(null); }} title="Switch Project execution mode?">
-        <Modal.Content>
-          <View style={{ gap: SPACING[3] }}>
-            <Card
-              theme={theme}
-              gap={SPACING[1.5]}
-              style={{
-                borderColor: theme.colors.statusDanger,
-                backgroundColor: theme.colors.surface1,
-              }}
-            >
-              <Text style={text(theme, "rowTitle", "statusDanger")}>
-                {`Project: ${view.project?.name ?? view.project?.slug ?? ""} (${(view.execution?.selectedMode ?? "slp") === "scrum" ? "Agile Scrum" : "SLP"} → ${pendingMode === "scrum" ? "Agile Scrum" : "SLP"})`}
-              </Text>
-              <Text style={text(theme, "meta")}>
-                The live Supervisor and Lead sessions will be archived. The next turn starts with the new mode's instructions.
-              </Text>
-              <Text style={text(theme, "label", "statusWarning")}>
-                Cảnh báo: Chuyển chế độ thực thi của dự án sẽ lưu trữ (archive) phiên chat Supervisor và Lead hiện tại để tạo phiên mới theo chế độ mới.
-              </Text>
-            </Card>
-            <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "flex-end", gap: SPACING[2] }}>
-              <Btn theme={theme} label="Cancel" tone="foregroundMuted" onPress={() => setPendingMode(null)} />
-              <Btn
-                theme={theme}
-                solid
-                icon="AlertTriangle"
-                tone="statusDanger"
-                label="Archive seats & Switch"
-                disabled={busy}
-                onPress={() => {
-                  if (pendingMode) applyMode(pendingMode);
-                }}
-              />
-            </View>
-          </View>
-        </Modal.Content>
-      </Modal>
       <ScrollView
         style={{ flex: 1 }}
         contentContainerStyle={{
@@ -479,7 +416,6 @@ export function FactoryShell({
           actions={{
             refresh,
             designSourceKey: `${serverId ?? 'local'}:${view.project?.root ?? ''}`,
-            setMode: requestMode,
             openSupervisor,
             openLead,
             resetProject,
@@ -559,7 +495,7 @@ export function FactoryShell({
                 </View>
               </View>
               <Text style={text(theme, "meta")}>
-                Factory requires these open-source skills and verification tools on this host before running SLP or Agile Scrum workflows. Click &quot;Install Required Skills &amp; Tools&quot; to install them directly from GitHub and npm, or manage versions in the Plugins tab:
+                Factory requires these open-source skills and verification tools on this host before running SLP workflows. Click &quot;Install Required Skills &amp; Tools&quot; to install them directly from GitHub and npm, or manage versions in the Plugins tab:
               </Text>
               <View style={{ gap: SPACING[1] }}>
                 {incompleteTools.map((tool) => (
@@ -634,14 +570,6 @@ export function FactoryShell({
               pickProject: (root) => {
                 setPickedScope(root, true);
               },
-              scrum: async (operation, payload, runId, expectedRevision, requestId) => {
-                if (projectRoot === undefined) {
-                  return { ok: false, error: "All projects is view-only — select a project first" };
-                }
-                const reply = await scrumCommandCall({ operation, payload, runId, expectedRevision, projectRoot, requestId: requestId ?? `ui-${Date.now()}-${Math.random().toString(36).slice(2)}` });
-                await act(`Scrum ${operation}`, async () => reply);
-                return reply;
-              },
               accept: (task, attempt) => {
                 void act("Accept", () => acceptCall({ task, attempt }));
               },
@@ -654,15 +582,6 @@ export function FactoryShell({
             view={view}
             modelSyncNote={laneNote}
             actions={{
-              setMode: projectRoot ? requestMode : undefined,
-              scrum: async (operation, payload, runId, expectedRevision, requestId) => {
-                if (projectRoot === undefined) {
-                  return { ok: false, error: "All projects is view-only — select a project first" };
-                }
-                const reply = await scrumCommandCall({ operation, payload, runId, expectedRevision, projectRoot, requestId: requestId ?? `ui-${Date.now()}-${Math.random().toString(36).slice(2)}` });
-                await act(`Scrum ${operation}`, async () => reply);
-                return reply;
-              },
               busy,
               openAgent: (agentId) => navigation?.openAgent({ agentId, serverId }),
               revokeSupervisor: () => {

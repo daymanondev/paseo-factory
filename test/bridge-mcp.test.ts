@@ -1947,111 +1947,31 @@ test("background MCP spawn reports the dispatched specialist lane", async t => {
   assert.match(result.content[0].text, /under claude\/pm-frozen/);
 });
 
-test("Scrum MCP spawn defaults to the task's frozen specialist roster", async t => {
-  const home = mkdtempSync(join(tmpdir(), "factory-bridge-scrum-"));
-  const stateDir = join(home, "plugin-state", "paseo-factory"), repo = makeGitRepo();
-  t.after(() => { rmSync(home, { recursive: true, force: true }); rmSync(repo, { recursive: true, force: true }); });
-  const { switchExecution } = await import("../plugin/server/core/scrum/execution.ts");
-  const { ensureScrumConfig, saveScrumConfig } = await import("../plugin/server/core/scrum/config.ts");
-  const { createScrumRun } = await import("../plugin/server/core/scrum/run-journal.ts");
-  const { handleSpoolRequest } = await import("../plugin/server/spool.ts");
-  const factory = createFactory({ stateDir, eyeCliProbe: () => false });
-  const project = ensureProjectRegistered(stateDir, repo); assert.ok(project.ok); if (!project.ok) return;
-  await switchExecution({ state: stateDir, slug: project.slug, mode: "scrum", blockers: [], rotate: async () => {} });
-  const seed = ensureScrumConfig(stateDir, project.slug);
-  const config = saveScrumConfig(stateDir, { ...seed, lanes: { ...seed.lanes, pm: "claude/pm-frozen" } }, project.slug);
-  createScrumRun({ state: stateDir, slug: project.slug, runId: "r", initiativeId: "mcp", config, configRevision: config.configRevision!, track: "backend", rationale: "API", requestId: "create", ownedPaths: [".scratch/mcp/prd.md", ".scratch/mcp/decisions/plan.jsonl"] });
-  // v0.0.92 production parity: the registry routes the contract and the spawn
-  // onto the Project's isolated ledger; the assertion reads the Project's Factory.
-  const factoryRegistry = createFactoryRegistry({ stateDir, root: factory });
-  const contract = await handleSpoolRequest(factory, { id: "contract", kind: "contract", task: "plan", workspace: repo, gate: "true", role: "pm", runId: "r", submitter: "owner" }, {}, factoryRegistry);
-  assert.ok(contract.ok, JSON.stringify(contract));
-  const correlation = new CorrelationRegistry(stateDir).issue({ role: "lead", projectSlug: project.slug, projectRoot: repo, agentId: "scrum-lead" });
-  const spool = startSpool(stateDir, factory, { registry: factoryRegistry, pollMs: 20 }); t.after(() => spool.stop());
-  const responses = await runMcpSession({ cwd: repo, args: ["--home", home, "--state-dir", stateDir, "--correlation", correlation.correlationId], requests: [{ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_dispatch_agent", arguments: { tasks: ["plan"] } } }] });
-  assert.ok(responses[0].result, JSON.stringify(responses));
-  const result = responses[0].result as { isError?: boolean; content: { text: string }[] };
-  assert.notEqual(result.isError, true, result.content[0].text);
-  assert.match(result.content[0].text, /claude\/pm-frozen/);
-  assert.equal(factoryRegistry.factoryForProject(project.slug).ledger.events.findLast(e => e.event === "spawn_dispatched")?.provider, "claude/pm-frozen");
-  assert.equal(existsSync(join(stateDir, "ledger.jsonl")), false, "no root ledger exists");
-});
-
-test("mode-scoped MCP catalogs isolate schemas and reject cross-mode calls", async () => {
+test("the MCP catalog is SLP-only: a stale `--mode scrum` argument still serves the SLP schemas and Scrum tools are refused (ADR 0056)", async () => {
   const state = mkdtempSync(join(tmpdir(), "bridge-modes-"));
   try {
     for (const role of ["supervisor", "lead"]) {
-      for (const mode of ["slp", "scrum"]) {
+      for (const extraArgs of [[], ["--mode", "slp"], ["--mode", "scrum"]]) {
         const onlyScrum = role === "lead" ? "lead_scrum_operation" : "supervisor_scrum_decision";
-        const responses = await runMcpSession({ args: ["--state-dir", state, "--role", role, "--mode", mode], requests: [
+        const responses = await runMcpSession({ args: ["--state-dir", state, "--role", role, ...extraArgs], requests: [
           { jsonrpc: "2.0", id: 1, method: "tools/list" },
-          ...(mode === "slp" ? [{ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: onlyScrum, arguments: {} } }] : []),
+          { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: onlyScrum, arguments: {} } },
         ] });
         const tools = (responses[0].result as { tools: { name: string; inputSchema: { properties: Record<string, unknown> } }[] }).tools;
-        assert.equal(tools.some(t => t.name === onlyScrum), mode === "scrum");
+        assert.equal(tools.some(t => /scrum/.test(t.name)), false, `${role} ${extraArgs.join(" ")}: no Scrum tool is listed`);
         const properties = tools.find(t => t.name === (role === "lead" ? "lead_set_contract" : "supervisor_dispatch_lead"))!.inputSchema.properties;
-        assert.equal("runId" in properties, mode === "scrum");
+        assert.equal("runId" in properties, false);
         if (role === "lead") {
           assert.ok("scope" in properties);
-          assert.equal("role" in properties, mode === "scrum");
-          assert.equal("artifactRefs" in properties, mode === "scrum");
-          assert.equal("mutationMode" in properties, mode === "slp");
+          assert.equal("role" in properties, false);
+          assert.equal("artifactRefs" in properties, false);
+          assert.ok("mutationMode" in properties);
         }
-        if (mode === "slp") {
-          assert.equal((responses[1].result as { isError: boolean }).isError, true);
-          assert.match(JSON.stringify(responses[1]), /in mode/);
-        }
+        assert.equal((responses[1].result as { isError: boolean }).isError, true);
+        assert.match(JSON.stringify(responses[1]), /not permitted/);
       }
     }
   } finally { rmSync(state, { recursive: true, force: true }); }
-});
-
-test("Scrum MCP decisions default the active design identity and keep Lead unable to approve", async t => {
-  const stateDir = mkdtempSync(join(tmpdir(), "scrum-mcp-decision-")), repo = makeGitRepo();
-  t.after(() => { rmSync(stateDir, { recursive: true, force: true }); rmSync(repo, { recursive: true, force: true }); });
-  const { switchExecution } = await import("../plugin/server/core/scrum/execution.ts");
-  const { ensureScrumConfig } = await import("../plugin/server/core/scrum/config.ts");
-  const { createScrumRun, commandRun, readRun } = await import("../plugin/server/core/scrum/run-journal.ts");
-  const { artifactAt, designDigest } = await import("../plugin/server/core/scrum/artifacts.ts");
-  const { scrumOperation } = await import("../plugin/server/core/scrum/controller.ts");
-  const project = ensureProjectRegistered(stateDir, repo); assert.ok(project.ok);
-  await switchExecution({ state: stateDir, slug: project.slug, mode: "scrum", blockers: [], rotate: async () => {} });
-  const { openDesignBundle } = await import('./fixtures/open-design.ts');
-  const bundle = openDesignBundle('.scratch/review/');
-  bundle['mockups/index.html'] = String(bundle['mockups/index.html']).replace('Shop', 'Farm');
-  const paths = Object.keys(bundle).map(path => '.scratch/review/' + path);
-  for (const [path, bytes] of Object.entries(bundle)) {
-    mkdirSync(join(repo, '.scratch/review', path, '..'), {recursive:true});
-    writeFileSync(join(repo, '.scratch/review', path), bytes);
-  }
-  execFileSync("git", ["add", "."], { cwd: repo }); execFileSync("git", ["commit", "-m", "design fixture"], { cwd: repo });
-  const sha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim();
-  const refs = paths.filter(path=>!path.endsWith("browser.json")).map(path => artifactAt(repo, sha, path));
-  let run = createScrumRun({ state: stateDir, slug: project.slug, runId: "review", initiativeId: "review", config: ensureScrumConfig(stateDir, project.slug), configRevision: 1, track: "ui", rationale: "fixture", ownedPaths: paths, requestId: "create" });
-  run = commandRun(stateDir, project.slug, run.runId, { type: "design_review_requested", requestId: "design", expectedRevision: run.revision, design: { revision: 1, digest: designDigest(refs), refs, browserEvidence: [artifactAt(repo, sha, ".scratch/review/mockups/browser.json")] } });
-  const factory = createFactory({ stateDir });
-  // v0.0.92 production parity: the registry routes every Scrum command onto the
-  // Project's isolated ledger — the scrumCommand handler receives the Project's Factory.
-  const factoryRegistry = createFactoryRegistry({ stateDir, root: factory });
-  const registry = new CorrelationRegistry(stateDir);
-  const supervisor = registry.issue({ role: "supervisor", projectSlug: project.slug, projectRoot: repo });
-  const lead = registry.issue({ role: "lead", projectSlug: project.slug, projectRoot: repo });
-  const spool = startSpool(stateDir, factory, { registry: factoryRegistry, pollMs: 10, scrumCommand: async (request, caller) => ({ id: request.id, ok: true, summary: "Scrum", data: await scrumOperation(request, { factory: factoryRegistry.factoryForProject(project.slug), root: repo, slug: project.slug, ...caller, activeAgents: [], pendingDirectives: false }) }) });
-  t.after(() => spool.stop());
-  const call = async (correlation: string, name: string, args: Record<string, unknown>) => (await runMcpSession({ args: ["--state-dir", stateDir, "--correlation", correlation], cwd: repo, requests: [{ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }] }))[0].result as { isError?: boolean; content: { text: string }[] };
-  assert.equal((await call(lead.correlationId, "supervisor_scrum_decision", { decision: "approved", rationale: "spoof" })).isError, true);
-  const approved = await call(supervisor.correlationId, "supervisor_scrum_decision", { decision: "approved", rationale: "Owner approved this preview" });
-  assert.notEqual(approved.isError, true, JSON.stringify(approved));
-  assert.equal(readRun(stateDir, project.slug, run.runId).design?.decision, "approved");
-  assert.equal(readRun(stateDir, project.slug, run.runId).design?.decidedBy, "owner");
-  const snapshot = await call(lead.correlationId, "lead_scrum_operation", { action: "get" }); assert.notEqual(snapshot.isError, true);
-  const preview = await call(lead.correlationId, "lead_scrum_operation", { action: "preview", subpath: "mockups/index.html", port: 0 }); assert.notEqual(preview.isError, true, JSON.stringify(preview));
-  const previewUrl = JSON.parse(preview.content[0].text).data.url;
-  assert.match(previewUrl, /^http:\/\/127\.0\.0\.1:\d+\/\?token=[a-f0-9]{64}$/);
-  const mockupUrl = new URL(previewUrl); mockupUrl.pathname='/mockup';
-  assert.match(await (await fetch(mockupUrl)).text(), /Farm/);
-  const reserve = await call(lead.correlationId, "lead_scrum_operation", { action: "fix.reserve", task: "farm-fix" }); assert.notEqual(reserve.isError, true, JSON.stringify(reserve));
-  assert.equal(readRun(stateDir, project.slug, run.runId).fixRounds, 1);
 });
 
 test("v0.0.93 quiet-point regression: Lead dispatches a Peer then crosses 128k — the rotation holds in rotation_pending (outgoing Lead live, Peer untouched, no successor) until the Peer's verdict pump begins the handoff and the Successor Lead receives Turn 1 immediately", async () => {

@@ -1815,136 +1815,61 @@ test("Copilot/ACP apply_patch edit asks extract target file paths instead of jud
   const dir = makeTempDir();
   disposeDir(t, dir);
   const workspace = join(dir, "ws");
-  const worktree = join(dir, "state", "projects", "goal-planner", "worktrees", "arch-spec");
+  const engineerTree = join(dir, "state", "projects", "goal-planner", "worktrees", "eng-spec");
+  const architectTree = join(dir, "state", "projects", "goal-planner", "worktrees", "arch-spec");
   mkdirSync(workspace, { recursive: true });
-  mkdirSync(worktree, { recursive: true });
+  mkdirSync(engineerTree, { recursive: true });
+  mkdirSync(architectTree, { recursive: true });
   writeFileSync(join(workspace, "README.md"), "init\n");
   gitCommitAll(workspace);
 
   const factory = createFactory({ stateDir: join(dir, "state") });
-  factory.setContract({
-    task: "arch-spec",
-    workspace,
-    gate: "true",
-    artifact: ".scratch/init/architecture.md",
-    scope: [".scratch/init/architecture.md", ".scratch/init/decisions/arch-spec.jsonl"],
-    execution: {
-      mode: "scrum",
-      contractRequestId: "req-arch-1",
-      runId: "run-1",
-      role: "architect",
-      policyRevision: "0032-r2",
-      configRevision: 1,
-      artifactRefs: [],
-    },
-  });
-  factory.requestSpawn({ task: "arch-spec", provider: "copilot/gpt-6-sol:high", arity: 1, worktree });
+  factory.setContract({ task: "eng-spec", workspace, gate: "true", artifact: ".scratch/init/architecture.md", scope: [".scratch/init/architecture.md"] });
+  factory.requestSpawn({ task: "eng-spec", provider: "copilot/gpt-6-sol:high", arity: 1, worktree: engineerTree });
+  // The read-only architect disposition (ADR 0053 §3): no gate, no scope — every write under its tree is fenced.
+  factory.setContract({ task: "arch-spec", workspace, gate: "", disposition: "architect" });
+  factory.requestSpawn({ task: "arch-spec", provider: "copilot/gpt-6-sol:high", arity: 1, worktree: architectTree });
 
   const choke = createChoke({ factory, homeDir: dir });
+  const applyPatchAsk = (tree: string, id: string, patch: string): never => ({
+    agent: { id: `agent-${id}`, cwd: tree, provider: "copilot" },
+    request: {
+      id,
+      provider: "copilot",
+      name: "edit",
+      title: "apply_patch",
+      kind: "tool",
+      // The adapter's `detail.filePath` fell back to the literal tool title.
+      detail: { type: "edit", filePath: "apply_patch" },
+      metadata: {
+        toolCallId: `call-${id}`,
+        rawRequest: { toolCall: { toolCallId: `call-${id}`, title: "apply_patch", kind: "edit", rawInput: patch } },
+      },
+    },
+  }) as never;
+  const respond = (sink: { behavior?: string }) => ({ agents: { ref: () => ({ respondToPermission: async ({ response }: { response: { behavior: string } }) => { sink.behavior = response.behavior; } }) } });
 
-  // 1) In-scope architecture.md via apply_patch (where detail.filePath fell back to "apply_patch")
-  let allowedBehavior: string | undefined;
-  await choke.onPermissionAsked(
-    {
-      agent: { id: "agent-arch", cwd: worktree, provider: "copilot" },
-      request: {
-        id: "req-allow",
-        provider: "copilot",
-        name: "edit",
-        title: "apply_patch",
-        kind: "tool",
-        detail: {
-          type: "edit",
-          filePath: "apply_patch",
-        },
-        metadata: {
-          toolCallId: "custom_call_1",
-          rawRequest: {
-            toolCall: {
-              toolCallId: "custom_call_1",
-              title: "apply_patch",
-              kind: "edit",
-              rawInput: "*** Begin Patch\n*** Add File: .scratch/init/architecture.md\n+# Architecture\n",
-            },
-            permissionRequest: {
-              kind: "write",
-              fileName: join(worktree, ".scratch/init/architecture.md"),
-              diff: `\ndiff --git a/${join(worktree, ".scratch/init/architecture.md").slice(1)} b/${join(worktree, ".scratch/init/architecture.md").slice(1)}\n--- a/dev/null\n+++ b/${join(worktree, ".scratch/init/architecture.md").slice(1)}\n@@ -1,0 +1,1 @@\n+# Architecture\n`,
-            },
-          },
-        },
-      },
-    },
-    {
-      agents: {
-        ref: () => ({
-          respondToPermission: async ({ response }) => {
-            allowedBehavior = response.behavior;
-          },
-        }),
-      },
-    },
-  );
-  assert.equal(allowedBehavior, "allow");
+  // 1) An engineer Peer's in-scope write through apply_patch is allowed.
+  const allowed: { behavior?: string } = {};
+  await choke.onPermissionAsked(applyPatchAsk(engineerTree, "req-allow", "*** Begin Patch\n*** Add File: .scratch/init/architecture.md\n+# Architecture\n"), respond(allowed));
+  assert.equal(allowed.behavior, "allow");
 
-  // 2) Out-of-scope product source edit via apply_patch denies with policy:scrum-artifact-only
-  let deniedBehavior: string | undefined;
-  await choke.onPermissionAsked(
-    {
-      agent: { id: "agent-arch", cwd: worktree, provider: "copilot" },
-      request: {
-        id: "req-deny",
-        provider: "copilot",
-        name: "edit",
-        title: "apply_patch",
-        kind: "tool",
-        detail: {
-          type: "edit",
-          filePath: "apply_patch",
-        },
-        metadata: {
-          toolCallId: "custom_call_2",
-          rawRequest: {
-            toolCall: {
-              toolCallId: "custom_call_2",
-              title: "apply_patch",
-              kind: "edit",
-              rawInput: "*** Begin Patch\n*** Add File: .scratch/init/architecture.md\n+# Architecture\n*** Add File: src/index.ts\n+export const x = 1;\n",
-            },
-          },
-        },
-      },
-    },
-    {
-      agents: {
-        ref: () => ({
-          respondToPermission: async ({ response }) => {
-            deniedBehavior = response.behavior;
-          },
-        }),
-      },
-    },
-  );
-  assert.equal(deniedBehavior, "deny");
+  // 2) The read-only architect's apply_patch is judged on the extracted path, not the literal title — and denied by the disposition fence.
+  const denied: { behavior?: string } = {};
+  await choke.onPermissionAsked(applyPatchAsk(architectTree, "req-deny", "*** Begin Patch\n*** Add File: src/index.ts\n+export const x = 1;\n"), respond(denied));
+  assert.equal(denied.behavior, "deny");
   const lastEvent = factory.ledger.events.at(-1);
   assert.equal(lastEvent?.event, "permit_denied");
   if (lastEvent?.event === "permit_denied") {
-    assert.equal(lastEvent.rule, "policy:scrum-artifact-only");
+    assert.equal(lastEvent.rule, "read-only-disposition-fence");
     assert.equal(lastEvent.command, "src/index.ts");
   }
 
-  // 3) Shell command with 2>&1 fd redirection under artifactOnly: true is allowed (not treated as writing to file "&1")
-  const roots = writableRootsFor(worktree, factory.stateDir, dir);
-  const fdDecision = judgeShellCommand("node script.js 2>&1 | head -20", roots, {
-    workspace,
-    worktree,
-    scope: [".scratch/init/architecture.md"],
-    artifactOnly: true,
-    scrumRole: "architect",
-  });
+  // 3) A shell command with 2>&1 fd redirection is not treated as writing to a file named "&1".
+  const roots = writableRootsFor(architectTree, factory.stateDir, dir);
+  const fdDecision = judgeShellCommand("node script.js 2>&1 | head -20", roots, { workspace, worktree: architectTree, scope: [], disposition: "architect" });
   assert.equal(fdDecision.behavior, "allow");
 });
-
 
 test("worktree test-process signals pass ask-time policy while daemon targets remain denied", () => {
   const worktree = "/Users/owner/.paseo/plugin-state/paseo-factory/projects/demo/worktrees/T-04";

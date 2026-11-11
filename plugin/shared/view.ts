@@ -126,7 +126,6 @@ export const TaskStatusSchema = z.enum(["accepted", "closed", "needs-human", "ru
 export type TaskStatus = z.infer<typeof TaskStatusSchema>;
 
 export const TaskViewSchema = z.object({
-  execution: z.object({ mode: z.literal("scrum"), runId: z.string(), role: z.enum(["pm", "ux", "architect", "dev", "qa"]), configRevision: z.number() }).optional(),
   task: z.string(),
   workspace: z.string(),
   description: z.string().nullable(),
@@ -210,8 +209,6 @@ export const ProjectViewSchema = z.object({
   supervisorId: z.string().nullable().optional(),
   leadId: z.string().nullable().optional(),
   activeTaskCount: z.number().int().optional(),
-  executionMode: z.enum(["slp", "scrum"]).optional(),
-  activeScrumPhase: z.string().nullable().optional(),
   /** The Project's Ledger could not be opened for the snapshot (v0.0.89) — its stream renders empty; additive, older clients ignore it. */
   ledgerError: z.string().optional(),
 });
@@ -371,7 +368,7 @@ export const ModelUsageRowSchema = z.object({
 }).extend(UsageBucketsSchema.shape);
 export type ModelUsageRowView = z.infer<typeof ModelUsageRowSchema>;
 
-/** One seat row of the By Seat / Role breakdown — `Peer · dev` carries the Scrum specialization. */
+/** One seat row of the By Seat / Role breakdown. */
 export const SeatUsageRowSchema = z.object({
   seat: z.enum(["supervisor", "lead", "agent", "watch", "retro"]),
   label: z.string(),
@@ -397,100 +394,10 @@ export const ProjectUsageViewSchema = z.object({
 export type ProjectUsageView = z.infer<typeof ProjectUsageViewSchema>;
 
 /** The whole Factory surface snapshot — one RPC answer, one render. */
-export const ScrumConfigSchema = z.object({ configRevision: z.number().int().optional(), schemaVersion: z.literal(1), requireUiApproval: z.boolean(), lanes: z.object({ supervisor: z.string(), lead: z.string(), pm: z.string(), ux: z.string(), architect: z.string(), dev: z.string(), qa: z.string(), watch: z.string(), retro: z.string() }) });
-
-/**
- * One Scrum `Owner wait` as the run journal records it (ADR 0038) — a
- * question or design review that stays pending until the Owner responds.
- * Named so `ScrumRunViewSchema` and its run journal share the one shape.
- */
-export const OwnerRequestViewSchema = z.object({
-  id: z.string(),
-  kind: z.enum(["question", "design"]),
-  question: z.string(),
-  affected: z.array(z.object({ kind: z.enum(["task", "stage"]), id: z.string() })),
-  origin: z.object({ actor: z.string(), role: z.string() }),
-  status: z.enum(["pending", "answered", "cancelled"]),
-  createdAt: z.string(),
-  design: z.object({ revision: z.number(), digest: z.string() }).optional(),
-  resolution: z.object({ actor: z.string(), outcome: z.string(), rationale: z.string(), requestId: z.string() }).optional(),
-});
-export type OwnerRequestView = z.infer<typeof OwnerRequestViewSchema>;
-
-export const ScrumRunViewSchema = z.object({
-  runId: z.string(),
-  phase: z.string(),
-  track: z.enum(["small", "backend", "ui", "quick", "standard", "enterprise"]).optional(),
-  cancellation: z.object({ reason: z.string() }).optional(),
-  revision: z.number(),
-  configRevision: z.number(),
-  config: ScrumConfigSchema,
-  qaResult: z
-    .object({
-      status: z.string(),
-      productSha: z.string(),
-      confirmedDefects: z.number(),
-    })
-    .optional(),
-  fixRounds: z.number(),
-  budgets: z.object({ maxTasks: z.number().optional(), maxQaFixRounds: z.number() }).optional(),
-  createdAt: z.string().optional(),
-  tasks: z.array(z.object({ task: z.string(), role: z.string() })).optional(),
-  blockerDetails: z.array(z.object({ id: z.string(), reason: z.string(), causes: z.array(z.string()) })).optional(),
-  ownerRequests: z.array(OwnerRequestViewSchema).optional(),
-  allowanceGrants: z.array(z.object({ requestId: z.string(), actor: z.string(), dimension: z.enum(["tasks", "qaFixRounds"]), amount: z.number(), rationale: z.string() })).optional(),
-  skippedPhases: z
-    .array(z.object({ phase: z.string(), reason: z.string() }))
-    .optional(),
-  blockers: z.array(z.string()).optional(),
-  decisions: z.number(),
-  design: z
-    .object({
-      revision: z.number(),
-      digest: z.string(),
-      decision: z.string().optional(),
-    })
-    .optional(),
-});
-export type ScrumRunView = z.infer<typeof ScrumRunViewSchema>;
 export const OpenDesignProjectLinkSchema = z.object({
   projectId: z.string(), projectName: z.string(), designSystemId: z.string().nullable().optional(), directionId: z.string().nullable().optional(),
   sourceUpdatedAt: z.number(), syncedAt: z.string(), digest: z.string(), screenCount: z.number(), files: z.array(z.string()),
 });
-export const ExecutionViewSchema = z.object({
-  selectedMode: z.enum(["slp", "scrum"]),
-  openDesignLink: OpenDesignProjectLinkSchema.optional(),
-  revision: z.number(),
-  scope: z.enum(["global", "project"]).optional(),
-  project: z.string().nullable().optional(),
-  newProjectDefaultMode: z.enum(["slp", "scrum"]).optional(),
-  activeProfileId: z.string().nullable().optional(),
-  activeProfileModified: z.boolean().optional(),
-  busyReason: z.string().nullable().optional(),
-  machineConfig: ScrumConfigSchema.optional(),
-  pendingMode: z.enum(["slp", "scrum"]).optional(),
-  pendingSwitch: z
-    .object({ from: z.enum(["slp", "scrum"]), to: z.enum(["slp", "scrum"]) })
-    .nullable()
-    .optional(),
-  error: z.string().optional(),
-  config: ScrumConfigSchema.optional(),
-  profiles: z
-    .array(
-      z.object({
-        id: z.string(),
-        name: z.string(),
-        config: ScrumConfigSchema,
-        updatedAt: z.string(),
-      }),
-    )
-    .optional(),
-  // Keep `run` for older surfaces consuming the v3 view.
-  run: ScrumRunViewSchema.optional(),
-  activeRun: ScrumRunViewSchema.optional(),
-});
-export type ExecutionView = z.infer<typeof ExecutionViewSchema>;
-
 /** Credential-free Helper MCP status displayed to the Owner and coordination seats. */
 export const HelperMcpViewSchema = z.object({
   name: z.string(), transport: z.enum(["stdio", "http"]), enabled: z.boolean(),
@@ -524,15 +431,13 @@ export const SkillHubViewSchema = z.object({
   projectPacks: z.array(ProjectSkillPackViewSchema),
   hostCatalog: z.array(HostEcosystemItemViewSchema),
   roleMatrix: z.array(z.object({
-    role: z.string(), mode: z.string(), skills: z.array(z.string()),
-    taskGrants: z.array(z.object({ task: z.string(), role: z.string(), skills: z.array(z.string()) })),
+    role: z.string(), skills: z.array(z.string()),
   })),
 });
 export type SkillHubView = z.infer<typeof SkillHubViewSchema>;
 
 export const FactoryViewSchema = z.object({
   skillHub: SkillHubViewSchema.optional(),
-  execution: ExecutionViewSchema.optional(),
   version: z.literal(FACTORY_VIEW_VERSION),
   stateDir: z.string(),
   generatedAt: z.string(),

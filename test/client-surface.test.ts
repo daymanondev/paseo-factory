@@ -1200,60 +1200,20 @@ test("PluginsPane and FactoryShell support 1-click Switch to GitHub and Switch s
   assert.match(shell, /action: "install"/, "FactoryShell transitions to restarting-core with action: install when switching paseo-factory source");
 });
 
-test("All projects is strictly view-only and selected projects always open the confirmation Modal before switching execution mode", () => {
-  const shell = read("plugin/client/factory/shell.tsx");
+test("All projects is strictly view-only", () => {
   const header = read("plugin/client/factory/header.tsx");
   const seats = read("plugin/client/factory/seats.tsx");
-
-  assert.match(
-    shell,
-    /const requestMode = \(mode: "slp" \| "scrum"\): void => \{\s*if \(!projectRoot\) return;\s*const currentMode = view\.execution\?\.selectedMode \?\? "slp";\s*if \(mode === currentMode && !view\.execution\?\.pendingMode\) return;\s*setPendingMode\(mode\);\s*\};/,
-    "requestMode blocks mode switches in All projects (!projectRoot) and always opens the confirmation Modal (setPendingMode) for any selected project",
-  );
-  assert.match(
-    shell,
-    /title="Switch Project execution mode\?"/,
-    "FactoryShell renders the execution mode switch confirmation Modal",
-  );
-  assert.match(
-    shell,
-    /label="Archive seats & Switch"/,
-    "the confirmation Modal uses the explicit danger CTA 'Archive seats & Switch'",
-  );
   assert.match(header, /All projects · View-only/, "Header displays All projects · View-only pill when no project is selected");
   assert.match(seats, /All projects · View-only/, "SeatsPane displays All projects · View-only card when no project is selected");
   assert.ok(!seats.includes("New-Project Default Execution Mode"), "SeatsPane no longer exposes a global mode switcher in All projects");
 });
 
-test("KanbanCard renders a dedicated horizontal wrapping badges row and TasksPane surfaces ScrumWorkflowPipeline and active Scrum banners", () => {
+test("KanbanCard renders a dedicated horizontal wrapping badges row", () => {
   const tasks = read("plugin/client/factory/tasks.tsx");
-  const scrum = read("plugin/client/factory/scrum.tsx");
-  const header = read("plugin/client/factory/header.tsx");
-
   assert.match(
     tasks,
     /Row 1\.5: Horizontal wrapping badges/,
     "KanbanCard separates Project/Role/Lane pills into a dedicated horizontal flexWrap row so pills never stack vertically beside #task-id",
-  );
-  assert.match(
-    tasks,
-    /<ScrumWorkflowPipeline/,
-    "TasksPane renders ScrumWorkflowPipeline directly on the default Tasks tab when a Scrum project has an active run",
-  );
-  assert.match(
-    tasks,
-    /Active Agile Scrum Runs/,
-    "TasksPane renders an Active Agile Scrum Runs banner in All projects view with a direct jump to Review UI Mockup / Open Scrum Pipeline",
-  );
-  assert.match(
-    scrum,
-    /export function ScrumWorkflowPipeline/,
-    "scrum.tsx exports ScrumWorkflowPipeline with full-width MockupApproval card above the 5 stage cards",
-  );
-  assert.match(
-    header,
-    /UI mockup awaiting your approval/,
-    "Header headline surfaces awaiting-ui-approval Scrum runs immediately",
   );
 });
 
@@ -1307,7 +1267,7 @@ test('PluginsPane SSR renders Skill Hub inventory and Project pack controls', as
   const { createRequire } = await import('node:module');
   const { createElement } = await import('react');
   const { renderToStaticMarkup } = await import('react-dom/server');
-  const { inspectSkillHub } = await import('../src/scrum/companion-tools.ts');
+  const { inspectSkillHub } = await import('../src/companion-tools.ts');
   const { makeTempDir } = await import('./helpers.ts');
   const { rmSync } = await import('node:fs');
   const home = makeTempDir();

@@ -643,16 +643,13 @@ export function SkillHubCard({
             </>
           ) : (
             <View style={{ flexDirection: "row", flexWrap: "wrap", gap: SPACING[3] }}>
-              {(["slp", "scrum"] as const).map((mode) => (
+              {(["slp"] as const).map((mode) => (
                 <View key={mode} style={{ flex: 1, minWidth: 280, gap: SPACING[1.5] }}>
                   <View style={{ flexDirection: "row", alignItems: "center", gap: SPACING[1.5] }}>
-                    <Icon name={mode === "slp" ? "Shield" : "Layers"} size={14} color={theme.colors.accent} />
-                    <Text style={text(theme, "section")}>
-                      {mode === "slp" ? "SLP Roles (Supervisor · Lead · Peer)" : "Agile Scrum Roles (PM · UX · Arch · Dev · QA)"}
-                    </Text>
+                    <Icon name="Shield" size={14} color={theme.colors.accent} />
+                    <Text style={text(theme, "section")}>SLP Roles (Supervisor · Lead · Peer)</Text>
                   </View>
                   {hub.roleMatrix
-                    .filter((r) => r.mode === mode)
                     .map((r) => {
                       const isExpanded = expandedRoles[r.role] === true;
                       const visibleSkills = isExpanded ? r.skills : r.skills.slice(0, 10);
@@ -696,15 +693,6 @@ export function SkillHubCard({
                               />
                             ) : null}
                           </View>
-
-                          {r.taskGrants.map((g) => (
-                            <View key={g.task} style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[1] }}>
-                              <Pill theme={theme} label={`Task ${g.task}`} tone="accent" lit />
-                              {g.skills.map((sk) => (
-                                <Pill key={sk} theme={theme} label={sk} tone="accent" mono />
-                              ))}
-                            </View>
-                          ))}
                         </View>
                       );
                     })}

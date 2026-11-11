@@ -195,5 +195,3 @@ export { migrateLegacyRootState, compactedContractStub } from "./ledger-migratio
 export type { LegacyRootMigrationOptions, LegacyRootMigrationProject, LegacyRootMigrationResult, LegacyRootMigrationExtras } from "./ledger-migration.ts";
 export { readLocalWriterIdentity, localWriterPath } from "./writer-identity.ts";
 
-/** Opt-in orchestration; existing SLP exports and configuration stay unchanged. */
-export * as scrum from "./scrum/index.ts";

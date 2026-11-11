@@ -26,8 +26,6 @@ const targets = [
   ["src/usage-status.ts", "plugin/bin/usage-status.mjs"],
   ["src/agy-transcript.ts", "plugin/bin/agy-transcript.mjs"],
   ["src/open-design/open-design-cli.ts", "plugin/bin/open-design.mjs"],
-  ["src/scrum/cli.ts", "plugin/bin/scrum-doc.mjs"],
-  ["src/scrum/config.ts", "plugin/bin/scrum-config.mjs"],
   ["src/vault.ts", "plugin/bin/vault.mjs"],
   ["src/task-status.ts", "plugin/bin/task-status.mjs"],
   ["src/history-upgrade.ts", "plugin/bin/history-upgrade.mjs"],

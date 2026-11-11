@@ -1,15 +1,9 @@
 import { prepareOpenDesignDispatch } from "./core/open-design/open-design-link.ts";
-import { seedActiveScrumRuns } from "./core/scrum/open-design-seed.ts";
 import { discoverHelperMcps } from "./core/helper-mcp-sync.ts";
 import { resolveVaultUserHome } from "./core/vault-materialization.ts";
 import { liveSeatCandidates } from "./seats.ts";
-import { bindProjectDirective } from "./execution-adapters.ts";
-import { bindScrumBlocker } from "./scrum.ts";
-import { withExecutionLane } from "./core/scrum/execution.ts";
-import { readExecution } from "./core/scrum/config.ts";
+import { withExecutionLane } from "./core/execution-lane.ts";
 import { atomicJson, readOptionalJson } from "./core/json-store.ts";
-import { readRun, listRuns, commandRun, terminalRun } from "./core/scrum/run-journal.ts";
-import { formatScrumRunDigest } from "./core/scrum/run-digest.ts";
 import { commitSeatMemoryOnRoot } from "./core/workspace.ts";
 /**
  * The Lead mailbox runtime (v0.0.20, ADR 0013 Decisions 3–5): the plugin-side
@@ -74,7 +68,7 @@ import type { Factory } from "./core/factory.ts";
 import { readCorrelations } from "./core/correlations.ts";
 import { MAX_ATTEMPTS } from "./core/events.ts";
 import type { LedgerEvent } from "./core/events.ts";
-import { ensureProjectRegistered, listProjectRegistrations, projectNotebookPath, projectStateDir, readProjectRegistration, resolveProject, writeProjectRegistration } from "./core/project.ts";
+import { ensureProjectRegistered, listProjectRegistrations, projectStateDir, readProjectRegistration, resolveProject, writeProjectRegistration } from "./core/project.ts";
 import type { LeadRotationState, ProjectRegistration } from "./core/project.ts";
 import { loadLanes } from "./core/lanes.ts";
 import { buildSeatKickoffPacket } from "./core/preflight.ts";
@@ -332,7 +326,6 @@ export interface LeadMailRuntimeDeps {
    * Optional override for the `handing_over` extraction fuse timeout in ms
    * (v0.0.28, ADR 0018 §3; defaults to `HANDOFF_EXTRACTION_TIMEOUT_MS = 180_000`).
    */
-  reconcileScrum?: (project: { slug: string; root: string }) => Promise<void>;
   handoffTimeoutMs?: number;
   onLog?: (message: string) => void;
   logger?: { warn?: (message: string) => void; info?: (message: string) => void; error?: (message: string) => void };
@@ -368,7 +361,7 @@ export interface LeadMailRuntime {
    * an early spool drain (before `paseoApi` arrived) delivers immediately
    * instead of waiting for the next dispatch.
    */
-  pumpAll(options?: { reconcileScrumOnly?: boolean }): Promise<void>;
+  pumpAll(): Promise<void>;
   /** Periodic Peer context observation without retrying unrelated seat mail. */
   sweepPeers(): Promise<void>;
   /**
@@ -656,8 +649,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
         events,
       });
       const digest = renderLedgerDigest(events);
-      const scrumLayer = scrumHandoffLayer(slug);
-      pendingHandoff = renderSuccessorKickoff({ slug, roster, digest, handoffText: diskHandoffText, stale: readExtraction(slug)?.stale, ...(scrumLayer === undefined ? {} : { scrum: scrumLayer }) });
+      pendingHandoff = renderSuccessorKickoff({ slug, roster, digest, handoffText: diskHandoffText, stale: readExtraction(slug)?.stale });
     }
     // v0.0.93 (ADR 0031 Quiet-Point Succession): a Successor Lead's Turn-1
     // kickoff delivers immediately — never held on `projectPeerInFlight`, the
@@ -692,14 +684,6 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     if (hasSeatReceivedFirstTurn(agent)) return prompt;
     const reg = readProjectRegistration(deps.stateDir, slug);
     const loadedLanes = loadLanes(deps.stateDir, slug);
-    const selection = readExecution(deps.stateDir, slug);
-    const activeRun = selection.mode === "scrum" ? listRuns(deps.stateDir, slug).find(r => !terminalRun(r)) : undefined;
-    // v0.2.0 (ADR 0049 §2): Scrum Turn-1 kickoffs ride the same unified
-    // buildSeatKickoffPacket as SLP — the <50ms repository preflight, the
-    // Scrum-scoped MCP tool table, the Project notebook, and the bounded
-    // formatScrumRunDigest block — never a second copy of renderScrumPrompt
-    // (it already rides config.systemPrompt via appendContract) and never a
-    // raw JSON.stringify(activeRun) dump.
     const kickoff = buildSeatKickoffPacket({
       role,
       projectSlug: slug,
@@ -716,23 +700,8 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       // dynamic repository preflight facts, never a second copy of the linked
       // design specification, helper MCP roster, or wave laws.
       omitSystemPromptDuplicates: true,
-      mode: selection.mode,
-      ...(activeRun === undefined ? {} : { scrumRunDigest: formatScrumRunDigest(activeRun) }),
     });
     return `${kickoff}\n${prompt}`;
-  };
-
-  /**
-   * The Scrum half of the `128k` `Lead handoff` (v0.2.0, ADR 0049 §2): the
-   * bounded `formatScrumRunDigest(activeRun)` block plus the
-   * `<projectStateDir>/notebook.md` reference the successor kickoff embeds as
-   * its machine-verified continuity layer — `undefined` in SLP mode (or when
-   * no active run remains), keeping the SLP handoff byte-identical.
-   */
-  const scrumHandoffLayer = (slug: string): { runDigest: string; notebookPath: string } | undefined => {
-    if (readExecution(deps.stateDir, slug).mode !== "scrum") return undefined;
-    const activeRun = listRuns(deps.stateDir, slug).find(r => !terminalRun(r));
-    return activeRun === undefined ? undefined : { runDigest: formatScrumRunDigest(activeRun), notebookPath: projectNotebookPath(deps.stateDir, slug) };
   };
 
   /**
@@ -1152,7 +1121,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       return;
     }
     try {
-      await resolveDaemon().agents.ref(lead.id).send(renderHandoffExtractionPrompt(slug, readExecution(deps.stateDir, slug).mode));
+      await resolveDaemon().agents.ref(lead.id).send(renderHandoffExtractionPrompt(slug));
     } catch (err) {
       log(`lead-mailbox: ${slug} handoff extraction send failed (${messageOf(err)}) — completing handoff immediately`);
       await completeHandoff(slug, root, {
@@ -1263,8 +1232,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       log(`lead-mailbox: handoff of ${slug} could not spawn the successor (${ensured.code}: ${ensured.error}) — the mailbox stays locked, mail holds queued`);
       return;
     }
-    const scrumLayer = scrumHandoffLayer(slug);
-    const handoffBundle = renderSuccessorKickoff({ slug, roster, digest, handoffText, stale, ...(scrumLayer === undefined ? {} : { scrum: scrumLayer }) });
+    const handoffBundle = renderSuccessorKickoff({ slug, roster, digest, handoffText, stale });
     pendingHandoffByAgentId.set(ensured.agentId, handoffBundle);
     handingOverBySlug.delete(slug);
     writeRotationState(slug, root, { rotationState: "normal", handoffRequestedAt: null });
@@ -1377,7 +1345,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
         return;
       }
       try {
-        await resolveDaemon().agents.ref(lead.id).send(renderHandoffExtractionPrompt(slug, readExecution(deps.stateDir, slug).mode));
+        await resolveDaemon().agents.ref(lead.id).send(renderHandoffExtractionPrompt(slug));
       } catch (err) {
         log(`lead-mailbox: ${slug} handoff extraction re-send failed (${messageOf(err)}) — completing handoff immediately`);
         await complete("extraction-send-failed");
@@ -1548,7 +1516,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     const target = resolveTargetProject(request, "lead dispatch");
     if (!target.ok) return target;
     const { root, slug } = target;
-    if (request.from !== "peer" && !options?.existingDesignSnapshot) await prepareOpenDesignDispatch({ state: deps.stateDir, slug, root, requestId: request.id, userHome: deps.home ? resolveVaultUserHome(deps.home) : undefined, seedRuns: () => seedActiveScrumRuns(deps.stateDir, slug, root) });
+    if (request.from !== "peer" && !options?.existingDesignSnapshot) await prepareOpenDesignDispatch({ state: deps.stateDir, slug, root, requestId: request.id, userHome: deps.home ? resolveVaultUserHome(deps.home) : undefined });
     // The auto-ensure and the queue land as ONE lane job — the single-writer
     // law this module's header claims: two concurrent dispatches serialize,
     // so the second sees the first's Lead and never double-creates the seat,
@@ -1560,19 +1528,11 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
         if (request.from === "supervisor") {
           commitSeatMemoryOnRoot(root);
         }
-        // The blocker's Factory follows its task (v0.0.89): the Project's own
-        // first, the wired root bridge second — bindScrumBlocker resolves the
-        // caller's task the same way (correlation first, the field second).
+        // The blocker's task is the caller's own (correlation first, the
+        // field second).
         const blockerTask =
           request.task ??
           readCorrelations(deps.stateDir).find((r) => r.correlationId === request.submitter || r.agentId === request.submitter)?.task;
-        const bound = request.from === "peer"
-          ? bindScrumBlocker(taskFactoryOf(slug, blockerTask), slug, request)
-          // v0.2.0 (ADR 0049 §2): directive admission binds the TARGET
-          // Project's Factory — supervisor-origin and Owner dispatches alike
-          // read the Project's own runs/ledger, never the post-isolation
-          // empty root Factory (v0.0.89, ADR 0045 §1).
-          : bindProjectDirective(projectFactory(slug), root, slug, request);
         const ensured = await deps.ensureLead({ projectRoot: root });
         if (!ensured.ok) return ensured;
         const from = request.from ?? "owner";
@@ -1583,7 +1543,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
         // mislabeled `needs_human` (that Ledger fact is the Lead's alone to
         // record through `lead_needs_human`).
         const kind = from === "peer" ? "peer_challenge" : "directive";
-        const queued = appendMailQueued(mailboxPath(slug), { ...(bound.execution === undefined ? {} : { requestId: request.id }), ...(from === "peer" ? { to: "lead" as const } : {}), from, kind, ...(from === "peer" && blockerTask !== undefined ? { task: blockerTask } : {}), text: bound.packet ? `${bound.packet}\n${request.message}` : request.message, ...(bound.execution === undefined ? {} : { execution: bound.execution }) });
+        const queued = appendMailQueued(mailboxPath(slug), { ...(from === "peer" ? { to: "lead" as const } : {}), from, kind, ...(from === "peer" && blockerTask !== undefined ? { task: blockerTask } : {}), text: request.message });
         return { ok: true, agentId: ensured.agentId, mailId: queued.mailId };
       },
     );
@@ -1618,8 +1578,6 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       const leadReply = await dispatchLead({
         id: request.id,
         kind: "lead_dispatch",
-        ...(request.runId === undefined ? {} : { runId: request.runId }),
-        ...(request.scrum === undefined ? {} : { scrum: request.scrum }),
         ...(request.project === undefined ? {} : { project: request.project }),
         ...(request.workspace === undefined ? {} : { workspace: request.workspace }),
         from: "supervisor",
@@ -1635,7 +1593,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     const target = resolveTargetProject(request, "supervisor dispatch");
     if (!target.ok) return target;
     const { root, slug } = target;
-    await prepareOpenDesignDispatch({ state: deps.stateDir, slug, root, requestId: request.id, userHome: deps.home ? resolveVaultUserHome(deps.home) : undefined, seedRuns: () => seedActiveScrumRuns(deps.stateDir, slug, root) });
+    await prepareOpenDesignDispatch({ state: deps.stateDir, slug, root, requestId: request.id, userHome: deps.home ? resolveVaultUserHome(deps.home) : undefined });
     const laneOutcome = await projectLane(
       slug,
       async (): Promise<{ ok: true; agentId: string; mailId: string } | { ok: false; code: string; error: string }> => {
@@ -1690,12 +1648,6 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     const target = resolveTargetProject(request, "supervisor report");
     if (!target.ok) return target;
     const { root, slug } = target;
-    if (request.reportType !== undefined) {
-      if (typeof request.scrum?.runId !== "string") return { id: request.id, ok: false, code: "execution-mode-mismatch", message: "structured Scrum report needs explicit Scrum run" };
-      const run = readRun(deps.stateDir, slug, request.scrum.runId);
-      if (request.reportType === "completed" && run.phase !== "completed") return { id: request.id, ok: false, code: "scrum-completion-blocked", message: "run controller has not verified completion" };
-      if (request.reportType === "ui-review" && (!run.design || run.design.digest !== request.scrum.digest || run.design.revision !== request.scrum.designRevision)) return { id: request.id, ok: false, code: "stale-design-decision", message: "report must pin current design digest and revision" };
-    }
     const laneOutcome = await projectLane(
       slug,
       async (): Promise<{ ok: true; agentId: string; mailId: string } | { ok: false; code: string; error: string }> => {
@@ -1705,14 +1657,8 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
           to: "supervisor",
           from: "lead",
           kind: "report",
-          ...(request.reportType === undefined ? {} : { reportType: request.reportType, scrum: request.scrum, requestId: request.id }),
-          ...(typeof request.scrum?.runId === "string" ? { requestId: request.id, scrum: request.scrum } : {}),
           text: request.message,
         });
-        if (request.reportType === "completed" && typeof request.scrum?.runId === "string") {
-          const completed = readRun(deps.stateDir, slug, request.scrum.runId);
-          if (!completed.completionReported) commandRun(deps.stateDir, slug, completed.runId, { type: "completion_reported", requestId: `${completed.completionRequest?.requestId ?? request.id}:reported`, expectedRevision: completed.revision, mailId: queued.mailId });
-        }
         return { ok: true, agentId: ensured.agentId, mailId: queued.mailId };
       },
     );
@@ -1804,20 +1750,8 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
    * API is captured at boot, so mail requeued by `startupRecovery()` or queued
    * by an early spool drain (before `paseoApi` arrived) delivers immediately.
    */
-  const pumpAll = async (options: { reconcileScrumOnly?: boolean } = {}): Promise<void> => {
+  const pumpAll = async (): Promise<void> => {
     for (const registration of listProjectRegistrations(deps.stateDir)) {
-      if (options.reconcileScrumOnly) {
-        try {
-          if (readExecution(deps.stateDir, registration.slug).mode !== "scrum") continue;
-          const pending = listRuns(deps.stateDir, registration.slug).some(run =>
-            (!terminalRun(run) && (run.cancellation !== undefined || run.completionRequest !== undefined || run.wakeups?.some(w => !w.delivered))) ||
-            (run.phase === "completed" && run.completionRequest !== undefined && !run.completionReported));
-          if (!pending) continue;
-        }
-        catch (error) { log(`scrum selection of ${registration.slug} deferred: ${messageOf(error)}`); continue; }
-      }
-      try { await deps.reconcileScrum?.(registration); } catch (error) { log(`scrum recovery of ${registration.slug} deferred: ${messageOf(error)}`); }
-      if (options.reconcileScrumOnly) continue;
       try { await pumpProjectLead(registration.slug); } catch (error) { log(`lead mailbox of ${registration.slug} deferred: ${messageOf(error)}`); }
       try { await pumpProjectSupervisor(registration.slug); } catch (error) { log(`supervisor mailbox of ${registration.slug} deferred: ${messageOf(error)}`); }
     }
@@ -1934,11 +1868,9 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
 
 /**
  * The one bounded Handoff Extraction prompt — fixed sections, fixed ceiling, no
- * new work. In Scrum mode (v0.2.0, ADR 0049 §2) the same five-section contract
- * gains the Scrum run-continuity asks; SLP mode renders byte-identically to
- * the original prompt.
+ * new work.
  */
-function renderHandoffExtractionPrompt(slug: string, mode: "slp" | "scrum" = "slp"): string {
+function renderHandoffExtractionPrompt(slug: string): string {
   return [
     `# Lead handoff extraction — project ${slug}`,
     "",
@@ -1952,32 +1884,20 @@ function renderHandoffExtractionPrompt(slug: string, mode: "slp" | "scrum" = "sl
     "4. Open Questions",
     "5. Read-First Files",
     "",
-    ...(mode === "scrum"
-      ? [
-          "This is an Agile Scrum project: fold the active Scrum run's continuity into the five sections above — the current Sprint stage (phase and track), the readiness/UI approval state, active specialist tasks (task, role, epoch, status), the QA/fix-loop state (latest audit verdict, fix reservations, pending Owner requests), and the next actions for the successor Scrum Lead. The successor's kickoff already carries the machine-verified Scrum run digest and Project notebook — extract what only you know, never raw run JSON.",
-          "",
-        ]
-      : []),
     "Start no new tasks, spawn no agents, set no contracts, and accept nothing — the handoff reply is this turn's only deliverable. End your turn after the complete Markdown document.",
   ].join("\n");
 }
 
 /**
  * The successor's three-layer kickoff — roster, digest, and the outgoing
- * Lead's handoff text. In Scrum mode (v0.2.0, ADR 0049 §2) a fourth,
- * machine-verified Scrum run continuity layer (the bounded
- * `formatScrumRunDigest(activeRun)` block plus the `<projectStateDir>/notebook.md`
- * reference) joins them; SLP mode renders byte-identically to the original
- * three-layer kickoff.
+ * Lead's handoff text.
  */
-function renderSuccessorKickoff(input: { slug: string; roster: string; digest: string; handoffText: string | null; stale?: boolean; scrum?: { runDigest: string; notebookPath: string } }): string {
+function renderSuccessorKickoff(input: { slug: string; roster: string; digest: string; handoffText: string | null; stale?: boolean }): string {
   return [
     `# Lead handoff — project ${input.slug}`,
     ...(input.stale ? ["Staleness notice: the latest extraction did not complete; the last-known-good handoff is shown below the authoritative live Machine-Verified Active Peer Roster and Ledger State Digest."] : []),
     "",
-    input.scrum === undefined
-      ? "You are the fresh successor Lead of this project, spawned at 0% context after the outgoing Lead crossed the 128,000-token rotation threshold. Three layers of continuity follow — the first two are machine-verified, built by the plugin from the live daemon and the ledger, never from prose:"
-      : "You are the fresh successor Scrum Lead of this project, spawned at 0% context after the outgoing Lead crossed the 128,000-token rotation threshold. Four layers of continuity follow — the first three are machine-verified, built by the plugin from the live daemon, the ledger, and the Scrum run journal, never from prose:",
+    "You are the fresh successor Lead of this project, spawned at 0% context after the outgoing Lead crossed the 128,000-token rotation threshold. Three layers of continuity follow — the first two are machine-verified, built by the plugin from the live daemon and the ledger, never from prose:",
     "",
     "## Machine-Verified Active Peer Roster",
     "",
@@ -1986,16 +1906,6 @@ function renderSuccessorKickoff(input: { slug: string; roster: string; digest: s
     "## Ledger State Digest",
     "",
     input.digest,
-    ...(input.scrum === undefined
-      ? []
-      : [
-          "",
-          "## Scrum run continuity (machine-verified)",
-          "",
-          input.scrum.runDigest,
-          "",
-          `- Project notebook: ${input.scrum.notebookPath}`,
-        ]),
     "",
     "## Outgoing Lead handoff (lead-handoff.md)",
     "",
