@@ -402,8 +402,7 @@ export const ScrumConfigSchema = z.object({ configRevision: z.number().int().opt
 /**
  * One Scrum `Owner wait` as the run journal records it (ADR 0038) — a
  * question or design review that stays pending until the Owner responds.
- * Named (T-05) so the cross-Project inbox read and `ScrumRunViewSchema`
- * share the one shape; the wire form is unchanged.
+ * Named so `ScrumRunViewSchema` and its run journal share the one shape.
  */
 export const OwnerRequestViewSchema = z.object({
   id: z.string(),
