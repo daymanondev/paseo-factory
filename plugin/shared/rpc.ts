@@ -235,22 +235,70 @@ export const projectReset = defineRpc({
   ]),
 });
 
-export const projectAdd = defineRpc({
-  name: "factory.project.add",
+// The onboarding wizard's two doors (v0.6.0 W7, ADR 0056 + the ADR 0017
+// amendment), replacing the folder picker and the pasted path. `inspect` is the
+// read-only look at the workspace's folder the first two steps render — Git,
+// commits, a Lead or Supervisor already running there, the prerequisite
+// status; it never writes. `commit` is the last step's Start: it registers the
+// Project, initialises Git only when asked, persists the model choices and the
+// Open Design link, and starts the Supervisor (never a Lead) with the Owner's
+// optional first directive as its first message.
+export const OnboardingPrerequisiteSchema = z.object({
+  id: z.string(),
+  title: z.string(),
+  ready: z.boolean(),
+  /** What is wrong with a prerequisite that is not ready; null when it is. */
+  detail: z.string().nullable(),
+});
+export type OnboardingPrerequisite = z.infer<typeof OnboardingPrerequisiteSchema>;
+
+export const onboardingInspect = defineRpc({
+  name: "factory.onboarding.inspect",
   input: z.object({
-    projectRoot: z.string().min(1).optional(),
-    path: z.string().min(1).optional(),
+    /** The workspace panel's folder — never browsed for, never pasted. */
+    folder: z.string(),
   }),
   output: z.union([
     z.object({
       ok: z.literal(true),
-      path: z.string(),
+      /** The folder as the server resolved it (absolute, symlinks resolved). */
+      folder: z.string(),
+      gitRepo: z.boolean(),
+      hasCommits: z.boolean(),
+      /** A Project is already registered for the folder's repository. */
+      registered: z.boolean(),
+      existingLead: z.boolean(),
+      existingSupervisor: z.boolean(),
+      prerequisites: z.array(OnboardingPrerequisiteSchema),
+      /** The titles of the prerequisites that are not ready — what Install all would fix. */
+      missingPrerequisites: z.array(z.string()),
+    }),
+    Failure,
+  ]),
+});
+
+export const onboardingCommit = defineRpc({
+  name: "factory.onboarding.commit",
+  input: z.object({
+    folder: z.string(),
+    /** Initialise Git when the folder is not a repository; without it a non-Git folder is refused. */
+    initGit: z.boolean().optional(),
+    /** The step-3 choices; only lanes that differ from the machine defaults persist as the Project's override. */
+    models: z.object({ supervisor: z.string().optional(), lead: z.string().optional(), worker: z.string().optional() }).optional(),
+    /** An Open Design project id from the host catalog to link before the Supervisor starts. */
+    openDesignProjectId: z.string().optional(),
+    /** The Owner's optional first directive — the Supervisor's first user message. */
+    directive: z.string().optional(),
+  }),
+  output: z.union([
+    z.object({
+      ok: z.literal(true),
+      agentId: z.string(),
       projectRoot: z.string(),
       slug: z.string(),
-      project: ProjectViewSchema,
+      /** Git was initialised as part of this commit. */
       bootstrapped: z.boolean(),
       summary: z.string(),
-      view: FactoryViewSchema.optional(),
     }),
     Failure,
   ]),

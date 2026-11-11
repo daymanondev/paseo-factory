@@ -33,8 +33,9 @@ import type { DaemonPluginItem } from "../plugin/server/daemon-cli.ts";
 import { foldCompanions, foldCorePlugin, foldTasks } from "../plugin/server/view.ts";
 import { factoryEnvFor, injectRoleOnCreate, injectSessionEnv, renderAgentContract, renderSeatBootstrap, renderSeatContract } from "../plugin/server/roles.ts";
 import type { AgentCreateRequest } from "../plugin/server/roles.ts";
-import { discoverProjects, readProjectRegistration, writeProjectRegistration } from "../plugin/server/projects.ts";
-import { writeProjectSettings } from "../plugin/server/core/project-settings.ts";
+import { discoverProjects, listProjectRegistrations, readProjectRegistration, writeProjectRegistration } from "../plugin/server/projects.ts";
+import { readProjectSettings, writeProjectSettings } from "../plugin/server/core/project-settings.ts";
+import { DatabaseSync } from "node:sqlite";
 import { lanesPath, loadLanes, saveLanes } from "../src/lanes.ts";
 import { CORE_FACTORY_SKILLS } from "../plugin/server/core/companion-tools.ts";
 import { FACTORY_ROLE_PROVIDERS } from "../src/role-providers.ts";
@@ -4678,7 +4679,7 @@ test("v0.0.34 seam 1.5 — batch Update All orders paseo-factory last so Compani
   assert.equal(res.summary, "updated factory-burn-lab (7f8a5cc → a91c3f2) · updated paseo-factory (0285a1c → 383385c)");
 });
 
-test("Seam 1.1: projectAdd bootstraps greenfield non-Git folders and discoverProjects / snapshot include live factory-supervisor & factory-lead Role-provider sessions even without labels.seat (v0.0.35, ADR 0024)", async (t) => {
+test("Seam 1.1: the onboarding commit bootstraps greenfield non-Git folders and discoverProjects / snapshot include live factory-supervisor & factory-lead Role-provider sessions even without labels.seat (v0.0.35, ADR 0024)", async (t) => {
   const roleSupRepo = makeProject(t, "role-sup-repo");
   const roleLeadRepo = makeProject(t, "role-lead-repo");
   const rolePeerRepo = makeProject(t, "role-peer-repo");
@@ -4705,31 +4706,33 @@ test("Seam 1.1: projectAdd bootstraps greenfield non-Git folders and discoverPro
     }),
   };
 
-  // 1. projectAdd on a plain greenfield directory without .git
+  // 1. the onboarding commit on a plain greenfield directory without .git
   const greenfieldDir = join(dir, "greenfield-project");
   mkdirSync(greenfieldDir, { recursive: true });
   assert.equal(existsSync(join(greenfieldDir, ".git")), false);
 
-  const addRes = await handlers.projectAdd({ projectRoot: greenfieldDir });
+  const addRes = await handlers.onboardingCommit({ folder: greenfieldDir, initGit: true });
   assert.ok(addRes.ok, addRes.ok ? "" : addRes.error);
   assert.equal(addRes.bootstrapped, true);
-  assert.equal(existsSync(join(greenfieldDir, ".git")), true, "projectAdd initialized .git");
+  assert.equal(existsSync(join(greenfieldDir, ".git")), true, "onboarding commit initialized .git");
   const headSha = execFileSync("git", ["rev-parse", "--verify", "HEAD"], { cwd: greenfieldDir, encoding: "utf8" }).trim();
-  assert.match(headSha, /^[0-9a-f]{40}$/, "projectAdd created initial empty commit");
+  assert.match(headSha, /^[0-9a-f]{40}$/, "onboarding commit created initial empty commit");
   const reg = readProjectRegistration(stateDir, addRes.slug);
-  assert.ok(reg !== undefined, "projectAdd registered project.json in stateDir");
+  assert.ok(reg !== undefined, "onboarding commit registered project.json in stateDir");
   assert.equal(reg.root, addRes.projectRoot);
-  assert.equal(reg.name, "greenfield-project", "projectAdd persisted name in project.json");
-  assert.equal(reg.workspaceId, "wks-greenfield-1", "projectAdd synchronized workspaceId via daemon.workspaces.open");
-  assert.equal(reg.paseoProjectId, "prj-greenfield-1", "projectAdd synchronized paseoProjectId via daemon.workspaces.open");
+  assert.equal(reg.name, "greenfield-project", "onboarding commit persisted name in project.json");
+  assert.equal(reg.workspaceId, "wks-greenfield-1", "onboarding commit synchronized workspaceId via daemon.workspaces.open");
+  assert.equal(reg.paseoProjectId, "prj-greenfield-1", "onboarding commit synchronized paseoProjectId via daemon.workspaces.open");
   assert.deepEqual(openedCwds, [addRes.projectRoot]);
-  assert.equal(addRes.view?.project?.slug, addRes.slug);
+  const addedSnap = await handlers.snapshot({ projectRoot: addRes.projectRoot });
+  assert.ok(addedSnap.ok, addedSnap.ok ? "" : addedSnap.error);
+  assert.equal(addedSnap.view.project?.slug, addRes.slug);
 
   // Refuses bootstrapping inside paseoHome (deps.home)
   const insidePaseoHome = join(home, "sub-workspace");
   mkdirSync(insidePaseoHome, { recursive: true });
-  const refusedPaseoSub = await handlers.projectAdd({ projectRoot: insidePaseoHome });
-  assert.equal(refusedPaseoSub.ok, false, "projectAdd refuses directories inside paseoHome");
+  const refusedPaseoSub = await handlers.onboardingCommit({ folder: insidePaseoHome, initGit: true });
+  assert.equal(refusedPaseoSub.ok, false, "onboarding commit refuses directories inside paseoHome");
   if (!refusedPaseoSub.ok) assert.equal(refusedPaseoSub.code, "unsafe-directory");
 
   // 2. Also seed a git Paseo workspace and a non-Git Paseo workspace in <home>/projects/projects.json
@@ -6545,4 +6548,257 @@ test("supervisor.start: a revoked Supervisor leaves the seat vacant and Start wo
   const unknown = await handlers.supervisorStart({ projectRoot: outside });
   assert.ok(!unknown.ok);
   assert.equal(unknown.code, "unknown-project");
+});
+
+// ---- v0.6.0 W7 (ADR 0056, ADR 0017 amendment): the onboarding wizard's two doors ----------------
+
+/** A fake daemon whose workspace registry opens `ws-onboard` and creates agents wherever the test says. */
+function wireWorkspaces(fake: ReturnType<typeof fakeDaemon>, cwdOf: () => string): { opened: string[]; created: { workspaceId: string; provider: string; title: string; labels: Record<string, string> }[] } {
+  const opened: string[] = [];
+  const created: { workspaceId: string; provider: string; title: string; labels: Record<string, string> }[] = [];
+  fake.daemon.workspaces = {
+    open: async ({ cwd }) => {
+      opened.push(cwd);
+      return { id: "ws-onboard", projectId: "prj-onboard" };
+    },
+    create: async () => ({ id: "ws-unused", projectId: null }),
+    archive: async () => ({ archivedAt: new Date().toISOString() }),
+    ref: (workspaceId: string) => ({
+      agents: {
+        create: async (options) => {
+          created.push({ workspaceId, provider: options.config.provider, title: options.title, labels: options.labels });
+          return fake.daemon.agents.create({ ...options, cwd: cwdOf() });
+        },
+      },
+    }),
+  };
+  return { opened, created };
+}
+
+function makeOpenDesignSource(t: TestContext, root: string, id: string, name: string): void {
+  const data = join(root, "open-design");
+  const source = join(data, "projects", id);
+  mkdirSync(source, { recursive: true });
+  writeFileSync(join(source, "index.html"), '<main data-screen="home">Owner design</main>');
+  writeFileSync(join(source, "screens.html"), '<section data-screen="home" data-title="Home"></section>');
+  const db = new DatabaseSync(join(data, "app.sqlite"));
+  db.exec("CREATE TABLE projects (id TEXT, name TEXT, skill_id TEXT, design_system_id TEXT, metadata_json TEXT, created_at INTEGER, updated_at INTEGER, custom_instructions TEXT)");
+  db.prepare("INSERT INTO projects VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(id, name, "editorial-monocle", null, "{}", 1, 2, "");
+  db.close();
+  const previous = process.env.OPEN_DESIGN_DATA_DIR;
+  process.env.OPEN_DESIGN_DATA_DIR = data;
+  t.after(() => { if (previous === undefined) delete process.env.OPEN_DESIGN_DATA_DIR; else process.env.OPEN_DESIGN_DATA_DIR = previous; });
+}
+
+test("onboarding.inspect: a committed Git folder with no Project and no seats is ready — nothing is written, nothing is registered", async (t) => {
+  const project = makeProject(t, "inspect-ready");
+  const { handlers, stateDir, home } = makeSurface(t);
+  seedCorePack(home);
+  const reply = await handlers.onboardingInspect({ folder: project.root });
+  assert.ok(reply.ok, reply.ok ? "" : reply.error);
+  assert.equal(reply.folder, project.root);
+  assert.equal(reply.gitRepo, true);
+  assert.equal(reply.hasCommits, true);
+  assert.equal(reply.registered, false);
+  assert.equal(reply.existingLead, false);
+  assert.equal(reply.existingSupervisor, false);
+  assert.deepEqual(reply.missingPrerequisites, []);
+  assert.ok(reply.prerequisites.length > 0 && reply.prerequisites.every((item) => item.ready), "every required prerequisite is reported ready");
+  assert.equal(readProjectRegistration(stateDir, project.slug), undefined, "an inspection never registers a Project");
+});
+
+test("onboarding.inspect: a plain folder is not a Git repo and the inspection never runs git init; an unborn repo reports no commits", async (t) => {
+  const plain = makeTempDir();
+  disposeDir(t, plain);
+  const unborn = makeTempDir();
+  disposeDir(t, unborn);
+  execFileSync("git", ["init", "-q"], { cwd: unborn });
+  const { handlers } = makeSurface(t);
+  const a = await handlers.onboardingInspect({ folder: plain });
+  assert.ok(a.ok, a.ok ? "" : a.error);
+  assert.equal(a.gitRepo, false);
+  assert.equal(a.hasCommits, false);
+  assert.equal(existsSync(join(plain, ".git")), false, "inspect is read-only");
+  const b = await handlers.onboardingInspect({ folder: unborn });
+  assert.ok(b.ok, b.ok ? "" : b.error);
+  assert.equal(b.gitRepo, true);
+  assert.equal(b.hasCommits, false);
+});
+
+test("onboarding.inspect: missing prerequisites are named; a missing or non-directory folder is a named refusal with the fix", async (t) => {
+  const project = makeProject(t, "inspect-missing");
+  const { handlers, dir } = makeSurface(t);
+  const reply = await handlers.onboardingInspect({ folder: project.root });
+  assert.ok(reply.ok, reply.ok ? "" : reply.error);
+  assert.ok(reply.missingPrerequisites.length > 0, "no core pack seeded, so the required skills are missing");
+  assert.ok(reply.prerequisites.some((item) => !item.ready));
+  assert.deepEqual(reply.missingPrerequisites, reply.prerequisites.filter((item) => !item.ready).map((item) => item.title));
+
+  const gone = await handlers.onboardingInspect({ folder: join(dir, "no-such-folder") });
+  assert.ok(!gone.ok);
+  assert.equal(gone.code, "missing-directory");
+  const file = join(dir, "a-file.txt");
+  writeFileSync(file, "x");
+  const notDir = await handlers.onboardingInspect({ folder: file });
+  assert.ok(!notDir.ok);
+  assert.equal(notDir.code, "missing-directory");
+  const empty = await handlers.onboardingInspect({ folder: "   " });
+  assert.ok(!empty.ok);
+  assert.equal(empty.code, "missing-directory");
+});
+
+test("onboarding.inspect: an existing Lead or live Supervisor in the folder is reported, labelled or native-bound", async (t) => {
+  const withLead = makeProject(t, "inspect-lead");
+  const lead = makeSurface(t, [{ id: "agent-lead-1", labels: { seat: "lead", project: withLead.slug }, title: "Lead", cwd: withLead.root }]);
+  const a = await lead.handlers.onboardingInspect({ folder: withLead.root });
+  assert.ok(a.ok, a.ok ? "" : a.error);
+  assert.equal(a.existingLead, true);
+  assert.equal(a.existingSupervisor, false);
+
+  const withSup = makeProject(t, "inspect-sup");
+  const sup = makeSurface(t, [{ id: "native-sup-1", provider: "factory-supervisor", title: "first message", cwd: withSup.root }]);
+  writeProjectRegistration(sup.stateDir, withSup.slug, { root: withSup.root, supervisor: "native-sup-1" });
+  const b = await sup.handlers.onboardingInspect({ folder: withSup.root });
+  assert.ok(b.ok, b.ok ? "" : b.error);
+  assert.equal(b.existingSupervisor, true);
+  assert.equal(b.existingLead, false);
+  assert.equal(b.registered, true);
+});
+
+test("onboarding.commit: a plain folder with initGit is initialised and registered, the Supervisor is created through the role provider with the directive as its first message, and no Lead exists", async (t) => {
+  const { handlers, fake, stateDir, dir } = makeSurface(t, []);
+  writeLanes(stateDir, { supervisor: "claude/opus-4-8", lead: "opencode/glm-5.1" });
+  const folder = join(dir, "greenfield");
+  mkdirSync(folder, { recursive: true });
+  const wired = wireWorkspaces(fake, () => folder);
+
+  const reply = await handlers.onboardingCommit({ folder, initGit: true, directive: "Build the login page." });
+  assert.ok(reply.ok, reply.ok ? "" : reply.error);
+  assert.equal(reply.bootstrapped, true, "git init ran");
+  assert.equal(existsSync(join(folder, ".git")), true);
+  assert.match(execFileSync("git", ["rev-parse", "--verify", "HEAD"], { cwd: folder, encoding: "utf8" }).trim(), /^[0-9a-f]{40}$/, "an unborn repo gets its first commit so worktrees can branch");
+  const reg = readProjectRegistration(stateDir, reply.slug);
+  assert.ok(reg !== undefined, "the Project is registered");
+  assert.equal(reg.root, reply.projectRoot);
+  assert.equal(reg.workspaceId, "ws-onboard");
+  assert.equal(reg.paseoProjectId, "prj-onboard");
+  assert.equal(reg.supervisor, reply.agentId, "the Supervisor is bound like a native-picker seat");
+  assert.equal(reg.lead ?? null, null, "no Lead binding");
+  assert.equal(wired.created.length, 1);
+  assert.equal(wired.created[0]!.provider, "factory-supervisor", "the role provider path");
+  assert.equal(wired.created[0]!.workspaceId, "ws-onboard");
+  assert.deepEqual(fake.sent, [{ agentId: reply.agentId, text: "Build the login page." }], "the directive is the first user message");
+  assert.equal(fake.created.length, 1);
+  assert.equal(fake.created.some((agent) => agent.labels?.seat === "lead"), false, "onboarding never creates a Lead");
+
+  const snap = await handlers.snapshot({ projectRoot: folder });
+  assert.ok(snap.ok, snap.ok ? "" : snap.error);
+  assert.equal(snap.view.panel.isProject, true, "the workspace is now a Project");
+});
+
+test("onboarding.commit: a committed repo starts the Supervisor with no directive — nothing is sent — and a blank directive counts as none", async (t) => {
+  const project = makeProject(t, "commit-silent");
+  const { handlers, fake, stateDir } = makeSurface(t, []);
+  const reply = await handlers.onboardingCommit({ folder: project.root, directive: "  \n" });
+  assert.ok(reply.ok, reply.ok ? "" : reply.error);
+  assert.equal(reply.bootstrapped, false, "an existing repo is never re-initialised");
+  assert.equal(fake.created.length, 1);
+  assert.deepEqual(fake.sent, []);
+  assert.equal(readProjectRegistration(stateDir, project.slug)?.supervisor, reply.agentId);
+});
+
+test("onboarding.commit: a non-Git folder without initGit is refused with the fix, and nothing is created, registered or written", async (t) => {
+  const { handlers, fake, stateDir, dir } = makeSurface(t, []);
+  const folder = join(dir, "plain");
+  mkdirSync(folder, { recursive: true });
+  const reply = await handlers.onboardingCommit({ folder, directive: "Go" });
+  assert.ok(!reply.ok);
+  assert.equal(reply.code, "not-a-git-repo");
+  assert.match(reply.error, /initiali[sz]e/i, "the refusal says how to fix it");
+  assert.equal(existsSync(join(folder, ".git")), false);
+  assert.equal(fake.created.length, 0);
+  assert.deepEqual(fake.sent, []);
+  assert.deepEqual(listProjectRegistrations(stateDir), []);
+});
+
+test("onboarding.commit: refuses a folder that already has a Lead or a live Supervisor — before writing anything", async (t) => {
+  const withLead = makeProject(t, "commit-lead");
+  const lead = makeSurface(t, [{ id: "agent-lead-1", labels: { seat: "lead", project: withLead.slug }, title: "Lead", cwd: withLead.root }]);
+  const a = await lead.handlers.onboardingCommit({ folder: withLead.root, models: { worker: "pi/zai/glm-5.3" }, directive: "Go" });
+  assert.ok(!a.ok);
+  assert.equal(a.code, "lead-live");
+  assert.equal(lead.fake.created.length, 0);
+  assert.deepEqual(lead.fake.sent, []);
+  assert.equal(existsSync(lanesPath(join(lead.stateDir, "projects", withLead.slug))), false, "a refused commit persists no model choice");
+  assert.equal(readProjectRegistration(lead.stateDir, withLead.slug), undefined, "a refused commit registers no Project");
+
+  const withSup = makeProject(t, "commit-sup");
+  const sup = makeSurface(t, [{ id: "agent-sup-live", labels: { seat: "supervisor", project: withSup.slug }, title: "Supervisor", cwd: withSup.root }]);
+  const b = await sup.handlers.onboardingCommit({ folder: withSup.root, directive: "Go" });
+  assert.ok(!b.ok);
+  assert.equal(b.code, "supervisor-live");
+  assert.equal(sup.fake.created.length, 0);
+  assert.deepEqual(sup.fake.sent, []);
+});
+
+test("onboarding.commit: only model choices that differ from the machine defaults persist as the Project's override", async (t) => {
+  const project = makeProject(t, "commit-models");
+  const { handlers, stateDir, fake } = makeSurface(t, []);
+  writeLanes(stateDir, { supervisor: "claude/opus-4-8", lead: "pi/zcode/glm-5.3", worker: "pi/zcode/glm-5.3" });
+  const reply = await handlers.onboardingCommit({
+    folder: project.root,
+    models: { supervisor: "claude/opus-4-8", lead: "pi/zcode/glm-5.3:high", worker: "pi/zcode/glm-5.3" },
+  });
+  assert.ok(reply.ok, reply.ok ? "" : reply.error);
+  const projectLanes = loadLanes(stateDir, project.slug);
+  assert.ok(projectLanes.ok);
+  assert.equal(projectLanes.lanes.lead, "pi/zcode/glm-5.3:high", "the changed lane persists");
+  assert.equal(projectLanes.lanes.supervisor, "claude/opus-4-8");
+  const written = JSON.parse(readFileSync(lanesPath(join(stateDir, "projects", project.slug)), "utf8")) as Record<string, string>;
+  assert.deepEqual(Object.keys(written), ["lead"], "unchanged lanes keep inheriting the machine table");
+  assert.equal(fake.created[0]!.config.provider, "factory-supervisor");
+
+  const plain = makeProject(t, "commit-models-none");
+  const none = await handlers.onboardingCommit({ folder: plain.root, models: { supervisor: "claude/opus-4-8", lead: "pi/zcode/glm-5.3", worker: "pi/zcode/glm-5.3" } });
+  assert.ok(none.ok, none.ok ? "" : none.error);
+  assert.equal(existsSync(lanesPath(join(stateDir, "projects", plain.slug))), false, "choosing the defaults writes no override file");
+});
+
+test("onboarding.commit: an Open Design choice links the design to the new Project before the Supervisor starts", async (t) => {
+  const project = makeProject(t, "commit-od");
+  const f = makeSurface(t, []);
+  makeOpenDesignSource(t, f.dir, "owner-design", "Owner screens");
+  const reply = await f.handlers.onboardingCommit({ folder: project.root, openDesignProjectId: "owner-design", directive: "Implement the design." });
+  assert.ok(reply.ok, reply.ok ? "" : reply.error);
+  const status = await f.handlers.openDesignStatus({ projectRoot: project.root });
+  assert.ok(status.ok, status.ok ? "" : status.error);
+  assert.equal(status.link?.projectId, "owner-design");
+  assert.equal(readProjectSettings(f.stateDir, project.slug).openDesignLink?.projectName, "Owner screens", "the link is persisted in the Project settings record");
+  assert.ok(existsSync(join(project.root, "design", "index.html")), "the design is staged in the repository");
+  assert.deepEqual(f.fake.sent, [{ agentId: reply.agentId, text: "Implement the design." }]);
+});
+
+test("onboarding.commit: a failed Open Design link is a named refusal that starts no Supervisor, and the same commit succeeds once the design exists", async (t) => {
+  const project = makeProject(t, "commit-od-fail");
+  const f = makeSurface(t, []);
+  makeOpenDesignSource(t, f.dir, "owner-design", "Owner screens");
+  const failed = await f.handlers.onboardingCommit({ folder: project.root, openDesignProjectId: "no-such-design", directive: "Go" });
+  assert.ok(!failed.ok);
+  assert.equal(failed.code, "open-design-failed");
+  assert.match(failed.error, /Open Design/);
+  assert.equal(f.fake.created.length, 0, "no Supervisor starts over a half-configured Project");
+  assert.deepEqual(f.fake.sent, []);
+
+  const retried = await f.handlers.onboardingCommit({ folder: project.root, openDesignProjectId: "owner-design", directive: "Go" });
+  assert.ok(retried.ok, retried.ok ? "" : retried.error);
+  assert.equal(f.fake.created.length, 1);
+});
+
+test("onboarding.commit: an unusable lane is a named refusal that starts no Supervisor", async (t) => {
+  const project = makeProject(t, "commit-bad-lane");
+  const { handlers, fake } = makeSurface(t, []);
+  const reply = await handlers.onboardingCommit({ folder: project.root, models: { lead: "not a lane" } });
+  assert.ok(!reply.ok);
+  assert.equal(reply.code, "invalid-lane");
+  assert.equal(fake.created.length, 0);
 });

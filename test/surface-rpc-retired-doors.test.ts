@@ -86,3 +86,18 @@ test("v0.6.0 W4: the handler set carries no Retro / ratify / accept / task-detai
     assert.equal(gone in handlers, false, `handlers.${gone} must be gone`);
   }
 });
+
+test("v0.6.0 W7: the paste-path door (factory.project.add) is gone; onboarding rides inspect + commit, and no Lead-start door exists beside them", (t) => {
+  const names = registeredMethods(t);
+  assert.equal(names.includes("factory.project.add"), false, "a pasted path or picked folder no longer adds a Project");
+  assert.ok(names.includes("factory.onboarding.inspect"), "the read-only folder inspection");
+  assert.ok(names.includes("factory.onboarding.commit"), "the wizard's Start");
+  assert.equal(names.includes("factory.lead.start"), false);
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const home = join(dir, "paseo-home");
+  const stateDir = join(home, "plugin-state", "paseo-factory");
+  const factory = createFactory({ stateDir, eyeCliProbe: () => false });
+  const handlers = createSurfaceHandlers({ factory, stateDir, home, daemon: {} as never }) as unknown as Record<string, unknown>;
+  assert.equal("projectAdd" in handlers, false);
+});
