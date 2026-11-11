@@ -13,6 +13,9 @@
  * shell supplies (project-menu.tsx). There is NO Accept and NO Lead start —
  * a vacant Lead only says to ask the Supervisor. Mobile keeps Open, Rotate and
  * Revoke; Start Supervisor, Sync/Studio and the menu's writes are desktop only.
+ * A workspace that is not yet a Project shows the onboarding wizard the Shell
+ * supplies (W7, onboarding-wizard.tsx) on desktop, and only "set this Project
+ * up on Paseo Desktop" on mobile.
  * Test hooks: `factory-panel-needs-you`, `factory-panel-seat-<role>`,
  * `factory-panel-od`, `factory-panel-open-<role|peer-T>`,
  * `factory-panel-rotate-lead`, `factory-panel-supervisor-menu`,
@@ -311,20 +314,21 @@ function OpenDesign({ theme, openDesign, now, desktopActions }: { theme: PluginT
   );
 }
 
-/** A workspace that is not yet a Project: mobile points at Desktop; desktop shows what the folder has. */
-function NotAProject({ theme, panel, mobile }: { theme: PluginTheme; panel: PanelView; mobile: boolean }) {
-  const onboarding = panel.onboarding;
+/**
+ * A workspace that is not yet a Project: mobile points at Desktop (the wizard
+ * cannot finish there and is never mounted); desktop shows the onboarding
+ * wizard the Shell supplies (W7, onboarding-wizard.tsx) under "Set up Factory
+ * for this folder".
+ */
+function NotAProject({ theme, mobile, wizard }: { theme: PluginTheme; mobile: boolean; wizard: ReactNode }) {
   return (
     <Block theme={theme} testID="factory-panel-onboarding">
       {mobile ? (
         <Text style={text(theme, "meta")}>Set this Project up on Paseo Desktop.</Text>
       ) : (
-        <View style={{ gap: SPACING[1] }}>
-          {onboarding?.folder != null ? <Text style={text(theme, "code", "foregroundMuted")} numberOfLines={1}>{onboarding.folder}</Text> : null}
-          <Text style={text(theme, "meta")}>Git repository: {onboarding?.gitRepo === true ? "yes" : "no"}</Text>
-          {onboarding?.gitRepo === true && !onboarding.hasCommits ? <Text style={text(theme, "meta", "statusWarning")}>No commits yet — worktrees may not branch until there is one.</Text> : null}
-          {onboarding?.existingLead === true ? <Text style={text(theme, "meta", "statusWarning")}>A Lead is already running in this folder.</Text> : null}
-          <Text style={text(theme, "meta")}>Start “Supervisor (Factory)” from New Chat to begin.</Text>
+        <View style={{ gap: SPACING[2] }}>
+          <Text style={text(theme, "rowTitle")}>Set up Factory for this folder</Text>
+          {wizard}
         </View>
       )}
     </Block>
@@ -340,6 +344,7 @@ export function ProjectPanel({
   actions,
   openDesignActions = null,
   menu = null,
+  onboarding = null,
   initialUi,
 }: {
   theme: PluginTheme;
@@ -353,6 +358,8 @@ export function ProjectPanel({
   openDesignActions?: ReactNode;
   /** The header `⋯` menu's content (project-menu.tsx), supplied by the Shell for a Project; no menu, no `⋯`. */
   menu?: ReactNode;
+  /** The onboarding wizard (onboarding-wizard.tsx) for a workspace that is not a Project — supplied by the Shell on desktop only; mobile never mounts it. */
+  onboarding?: ReactNode;
   /** Seeds UI-only state (open menus, directive draft) — hosts and tests; never data. */
   initialUi?: ProjectPanelInitialUi;
 }) {
@@ -378,7 +385,7 @@ export function ProjectPanel({
           {panel.openDesign !== null ? <OpenDesign theme={theme} openDesign={panel.openDesign} now={now} desktopActions={mobile ? null : openDesignActions} /> : null}
         </>
       ) : (
-        <NotAProject theme={theme} panel={panel} mobile={mobile} />
+        <NotAProject theme={theme} mobile={mobile} wizard={onboarding} />
       )}
     </View>
   );

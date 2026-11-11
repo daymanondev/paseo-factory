@@ -24,7 +24,7 @@ import { ScrollView, useToast } from "@getpaseo/plugin/client/ui";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Text, View } from "react-native";
 import { z } from "zod";
-import { skillsImport, skillsTogglePack, lanesReset, lanesSet, lanesSetBatch, leadRotate, helperMcpsSyncAndProbe, helperMcpsSetEnabled, pluginsInstall, pluginsManage, pluginsCheckUpdates, profilesApply, profilesDelete, profilesSave, projectDelete, projectReset, snapshot, supervisorRevoke, supervisorStart, vaultConfigure, vaultHydrate, vaultImport, vaultSync } from "../../shared/rpc.ts";
+import { skillsImport, skillsTogglePack, lanesReset, lanesSet, lanesSetBatch, leadRotate, onboardingCommit, onboardingInspect, openDesignCatalog, helperMcpsSyncAndProbe, helperMcpsSetEnabled, pluginsInstall, pluginsManage, pluginsCheckUpdates, profilesApply, profilesDelete, profilesSave, projectDelete, projectReset, snapshot, supervisorRevoke, supervisorStart, vaultConfigure, vaultHydrate, vaultImport, vaultSync } from "../../shared/rpc.ts";
 import type { ManageablePluginId } from "../../shared/companions.ts";
 import type { FactoryView, LaneName } from "../../shared/view.ts";
 import { Btn, Card, Pill, TabBar } from "../kit/pill.tsx";
@@ -34,6 +34,8 @@ import { useNow, usePoll, pollEvery } from "../kit/poll.ts";
 import { OpenDesignControl } from "./open-design.tsx";
 import { ProjectPanel } from "./project-panel.tsx";
 import { ProjectMenu } from "./project-menu.tsx";
+import { OnboardingWizard } from "./onboarding-wizard.tsx";
+import type { CommitInput } from "./onboarding-state.ts";
 import { VaultPane, isVaultActName } from "./vault.tsx";
 import type { VaultNote } from "./vault.tsx";
 import { actionFeedback, createResponseOrder } from "./vault-feedback.ts";
@@ -86,6 +88,10 @@ export function FactoryShell({
   const leadRotateCall = useRpc(leadRotate);
   const supervisorRevokeCall = useRpc(supervisorRevoke);
   const supervisorStartCall = useRpc(supervisorStart);
+  // The onboarding wizard's doors (v0.6.0 W7): a read-only folder inspection, the Start commit, and the Open Design catalog.
+  const onboardingInspectCall = useRpc(onboardingInspect);
+  const onboardingCommitCall = useRpc(onboardingCommit);
+  const openDesignCatalogCall = useRpc(openDesignCatalog);
   const projectResetCall = useRpc(projectReset);
   const projectDeleteCall = useRpc(projectDelete);
   // The v0.0.38 lane acts (ADR 0026 §2/§5): one useRpc per contract, every
@@ -324,15 +330,17 @@ export function FactoryShell({
   const incompleteTools = (view.companionTools ?? []).filter((t) => t.status !== "running" || t.error !== null);
   const isInstallingPrereqs = activePluginAct !== null && activePluginAct.kind === "install" && activePluginAct.target === "all";
   /** Installs every required skill & tool — the Needs-you item's action and the Settings banner's button. */
-  const installPrerequisites = (): void => {
+  const installPrerequisitesResult = async (): Promise<{ ok: true } | { ok: false; error: string }> => {
     clearPluginCardError("all");
     setActivePluginAct({ kind: "install", target: "all", action: "install", startedAt: Date.now() });
-    void act("Install Required Skills & Tools", async () => {
+    let failure: string | null = null;
+    const ok = await act("Install Required Skills & Tools", async () => {
       try {
         const reply = await pluginsInstallCall({ target: "all", includeTools: true });
         if (reply.ok) {
           setPluginsNote({ text: reply.summary, tone: "statusSuccess", pluginId: "all" });
         } else {
+          failure = reply.error;
           recordPluginActFailure("Install Required Skills & Tools", "all", reply.error);
         }
         return reply;
@@ -340,6 +348,19 @@ export function FactoryShell({
         setActivePluginAct(null);
       }
     });
+    return ok ? { ok: true } : { ok: false, error: failure ?? "the install did not finish" };
+  };
+  const installPrerequisites = (): void => {
+    void installPrerequisitesResult();
+  };
+  /** The onboarding wizard's Start: commit, then open the Supervisor conversation when a directive was sent (else finish on the Project panel). */
+  const startOnboarding = async (input: CommitInput): Promise<{ ok: true } | { ok: false; error: string }> => {
+    const reply = await onboardingCommitCall(input);
+    if (!reply.ok) return { ok: false, error: reply.error };
+    toast.show(reply.summary, { variant: "success" });
+    if ((input.directive ?? "") !== "") navigation?.openAgent({ agentId: reply.agentId, serverId });
+    refresh();
+    return { ok: true };
   };
   /** Settings-type panes: always on the Settings screen; beneath the panel on desktop only (mobile mounts no settings writes). */
   const showPanes = !panelHost || !mobile;
@@ -395,6 +416,27 @@ export function FactoryShell({
             openDesignActions={
               !mobile && view.project !== null && view.project.missingRoot !== true ? (
                 <OpenDesignControl key={view.project.root} part="card" theme={theme} root={view.project.root} sourceKey={`${serverId ?? "local"}:${view.project.root}`} onChanged={refresh} />
+              ) : null
+            }
+            onboarding={
+              // Desktop only: the wizard cannot finish on mobile, which shows "set this Project up on Paseo Desktop".
+              !mobile && !view.panel.isProject ? (
+                <OnboardingWizard
+                  theme={theme}
+                  view={view}
+                  folder={scopeRoot ?? view.panel.onboarding?.folder ?? null}
+                  actions={{
+                    inspect: (folder) => onboardingInspectCall({ folder }),
+                    installPrerequisites: installPrerequisitesResult,
+                    listDesigns: async () => {
+                      const reply = await openDesignCatalogCall({});
+                      return reply.ok
+                        ? { ok: true as const, projects: reply.projects.map((p) => ({ projectId: p.projectId, projectName: p.projectName, screenCount: p.screenCount })) }
+                        : { ok: false as const, error: reply.error };
+                    },
+                    start: startOnboarding,
+                  }}
+                />
               ) : null
             }
             menu={
