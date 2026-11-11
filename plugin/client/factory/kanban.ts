@@ -85,7 +85,7 @@ export function kanbanColumnForStatus(status: KanbanTaskStatus): KanbanColumnId 
       return "ready_to_accept";
     case "accepted":
     // A clean retirement (v0.5.0, ADR 0054 §5) is terminal history like an
-    // acceptance — the same column law as web/src/view-model.ts.
+    // acceptance.
     case "closed":
       return "accepted";
   }
