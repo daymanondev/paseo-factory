@@ -388,12 +388,12 @@ test("the panel is one column — the root stacks vertically with no horizontal 
   assert.doesNotMatch(panel, /horizontal/, "nothing scrolls sideways at narrow widths");
 });
 
-test("the shell reads mobile from the host layout platform, mounts the panel on the workspace panel host only, and hides the interim settings panes on mobile", () => {
+test("the shell reads mobile from the host layout platform, mounts the panel on the workspace panel host only, and mounts no settings write on mobile", () => {
   const shell = read("plugin/client/factory/shell.tsx");
   assert.match(shell, /layout\?\.platform === "ios" \|\| layout\?\.platform === "android"/);
   assert.match(shell, /<ProjectPanel/);
   assert.match(shell, /panel=\{view\.panel\}/, "the panel renders the server's projection, never a client re-derivation");
-  assert.match(shell, /const showPanes = !panelHost \|\| !mobile;/);
+  assert.match(shell, /mobile\s*\?\s*\{\s*models: <SettingsReadOnly/, "on mobile every Settings section is the read-only summary");
   const entries = read("plugin/client/factory/entries.tsx");
   assert.match(entries, /surface="settings"/, "the settings screen is the other host");
 });

@@ -1,7 +1,7 @@
 # 0038 — Scrum Owner waits and count-based work limits
 
 - **Date:** 2026-10-31
-- **Status:** Accepted — Owner confirmed all interview decisions on 2026-10-31. Implemented in v0.0.74.
+- **Status:** Superseded by [ADR 0056](0056-slim-factory-panel-slp-only-and-guided-onboarding.md) — Agile Scrum mode is deleted in v0.6.0, so Owner waits, Task allowances and Owner allowance grants no longer exist. (Originally: Accepted — Owner confirmed all interview decisions on 2026-10-31. Implemented in v0.0.74.)
 - **Amends:** ADR 0032's elapsed-time admission limit and pre-start-only allowance changes. Preserves its verification, approval and immutable-history requirements.
 
 ## Context

@@ -967,23 +967,8 @@ export function SeatsPane({
     setNaming(false);
   };
 
-  const readOnly = view.project === null;
-  const effectiveActions: SeatsActions = readOnly ? { ...actions, busy: true } : actions;
-  const machineControls = view.project === null ? (
-    <Card theme={theme} gap={SPACING[2.5]}>
-      <View style={{ flexDirection: "row", alignItems: "center", gap: SPACING[1.5], flexWrap: "wrap" }}>
-        <Pill theme={theme} label="No Project · View-only" tone="statusWarning" lit />
-        <Text style={text(theme, "section")}>Read-only machine defaults</Text>
-      </View>
-      <Text style={text(theme, "meta")}>
-        This workspace is not a Factory Project yet. Lane/profile edits apply to a Project — open the Factory panel inside a Project's workspace to change its lanes.
-      </Text>
-    </Card>
-  ) : null;
-
   return (
     <View style={{ gap: SPACING[4] }}>
-      {machineControls}
       {/* Section 1: Lane Switcher Grid */}
       <View style={{ gap: SPACING[2.5] }}>
         <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: SPACING[2] }}>
@@ -991,7 +976,7 @@ export function SeatsPane({
             <Text style={text(theme, "section")}>Model & Thinking Lanes</Text>
             <Text style={text(theme, "label")}>
               {view.project === null
-                ? "Read-only machine default lanes — open a Project's workspace to configure project lanes."
+                ? "Machine default lanes — every new Project starts on these. A Project overrides them from its panel's ⋯ menu."
                 : `Configure provider, model, and thinking level per role (project override: ${view.project.slug}).`}
             </Text>
           </View>
@@ -1001,19 +986,16 @@ export function SeatsPane({
         <LaneProfilesBar
           theme={theme}
           view={view}
-          actions={effectiveActions}
+          actions={actions}
           deletingProfileId={deletingProfileId}
           onRequestDelete={setDeletingProfileId}
           onApplyProfile={(profile) => {
-            if (readOnly) return;
             requestLaneChange(profile.lanes, () => actions.applyProfile(profile.id));
           }}
           onUpdateProfile={(profile) => {
-            if (readOnly) return;
             actions.updateProfile(profile.id, profile.name);
           }}
           onSaveAsProfile={() => {
-            if (readOnly) return;
             openSaveAsProfile();
           }}
           onResetLanes={requestResetLanes}
@@ -1088,7 +1070,7 @@ export function SeatsPane({
                   <Text style={{ ...text(theme, "code"), fontSize: 11, color: theme.colors.foregroundMuted }} numberOfLines={1}>
                     {card.lanes.join(" + ")}
                   </Text>
-                  <Btn theme={theme} small icon="Sliders" label="Configure" disabled={actions.busy || readOnly} onPress={() => { if (!readOnly) setEditing(card); }} />
+                  <Btn theme={theme} small icon="Sliders" label="Configure" disabled={actions.busy} onPress={() => setEditing(card)} />
                 </View>
               </Card>
             );

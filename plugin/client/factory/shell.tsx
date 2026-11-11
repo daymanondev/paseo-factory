@@ -3,9 +3,9 @@
  * v0.6.0 W5, ADR 0056): the workspace panel and the settings screen — one
  * component, two hosts. The workspace panel renders the server-projected
  * Project panel (project-panel.tsx — a pure render of `view.panel`); the
- * Vault / Plugins / Models panes stay reachable beneath it (desktop only)
- * until the Settings screen (W8) relocates them. The panel's actions (v0.6.0
- * W6): Rotate Lead, Revoke Supervisor, Start Supervisor (opens the seat it
+ * panel carries no machine-wide pane: the Settings screen (settings.tsx, v0.6.0
+ * W8) hosts models, skills & tools, plugins, Vault and diagnostics. The
+ * panel's actions (v0.6.0 W6): Rotate Lead, Revoke Supervisor, Start Supervisor (opens the seat it
  * creates) and the header `⋯` Project menu (per-Project models, skill packs,
  * Open Design link, two-step Reset / Delete) — all RPC wiring lives here; on
  * mobile the menu is view-only and Start / Sync / Studio never mount. The shell owns the snapshot poll and every RPC action (lanes.set,
@@ -18,18 +18,14 @@
  * Function components only — no class syntax reaches the Hermes bundle.
  */
 import type { PluginTheme } from "@getpaseo/plugin";
-import type { PluginTab } from "@getpaseo/plugin/client";
-import { useRpc, useTabState } from "@getpaseo/plugin/client";
+import { useRpc } from "@getpaseo/plugin/client";
 import { ScrollView, useToast } from "@getpaseo/plugin/client/ui";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Text, View } from "react-native";
-import { z } from "zod";
 import { skillsImport, skillsTogglePack, lanesReset, lanesSet, lanesSetBatch, leadRotate, onboardingCommit, onboardingInspect, openDesignCatalog, helperMcpsSyncAndProbe, helperMcpsSetEnabled, pluginsInstall, pluginsManage, pluginsCheckUpdates, profilesApply, profilesDelete, profilesSave, projectDelete, projectReset, snapshot, supervisorRevoke, supervisorStart, vaultConfigure, vaultHydrate, vaultImport, vaultSync } from "../../shared/rpc.ts";
 import type { ManageablePluginId } from "../../shared/companions.ts";
 import type { FactoryView, LaneName } from "../../shared/view.ts";
-import { Btn, Card, Pill, TabBar } from "../kit/pill.tsx";
-import type { TabId } from "../kit/pill.tsx";
-import { RADIUS, SPACING, text, tint } from "../kit/theme.ts";
+import { SPACING, text } from "../kit/theme.ts";
 import { useNow, usePoll, pollEvery } from "../kit/poll.ts";
 import { OpenDesignControl } from "./open-design.tsx";
 import { ProjectPanel } from "./project-panel.tsx";
@@ -41,7 +37,10 @@ import type { VaultNote } from "./vault.tsx";
 import { actionFeedback, createResponseOrder } from "./vault-feedback.ts";
 import type { VaultStatusView } from "../../shared/view.ts";
 import { ProjectModelOverrides, SeatsPane } from "./seats.tsx";
-import { PluginsPane } from "./plugins.tsx";
+import { PluginsPane, SkillsToolsPane } from "./plugins.tsx";
+import type { PluginsActions } from "./plugins.tsx";
+import { DiagnosticsBody, PrerequisiteSetupCard, SettingsReadOnly, SettingsScreen } from "./settings.tsx";
+import { settingsWarnings } from "./settings-state.ts";
 import { isCoreSelfRestartError, resolveCoreRestartWatch } from "./plugin-feedback.ts";
 import type { ActivePluginAct, PluginsNote } from "./plugin-feedback.ts";
 
@@ -50,21 +49,13 @@ export interface Navigation {
   openAgent(input: { agentId: string; serverId?: string }): void;
 }
 
-/** `none` keeps the interim panes collapsed beneath the Project panel. */
-const FactoryTabStateSchema = z.object({
-  tab: z.enum(["none", "seats", "vault", "plugins"]),
-});
-
 export function FactoryShell({
   theme,
   layout,
   dir,
   navigation,
   serverId,
-  initialTab,
-  showDiagnostics = false,
   surface = "panel",
-  panelTab,
 }: {
   theme: PluginTheme;
   layout?: { compact: boolean; platform?: "ios" | "android" | "web" };
@@ -72,12 +63,8 @@ export function FactoryShell({
   dir?: string;
   navigation?: Navigation;
   serverId?: string;
-  initialTab?: TabId | "none";
-  showDiagnostics?: boolean;
   /** Which entry hosts the shell: the workspace panel (the Project panel) or the settings screen. */
   surface?: "panel" | "settings";
-  /** Paseo 0.13 persisted workspace panel tab handle (`useTabState`). */
-  panelTab?: PluginTab;
 }) {
   const toast = useToast();
   const snapshotCall = useRpc(snapshot);
@@ -116,26 +103,6 @@ export function FactoryShell({
   const vaultHydrateCall = useRpc(vaultHydrate);
   const vaultSyncCall = useRpc(vaultSync);
   const vaultImportCall = useRpc(vaultImport);
-
-  const [localTabState, setLocalTabState] = useState<unknown>(undefined);
-  const fallbackPluginTab: PluginTab = useMemo(
-    () => ({
-      state: localTabState,
-      setState: (next) => setLocalTabState(next),
-      setModified: () => {},
-    }),
-    [localTabState],
-  );
-  const [persistedState, setPersistedState] = useTabState(
-    panelTab ?? fallbackPluginTab,
-    FactoryTabStateSchema,
-    { tab: initialTab ?? (surface === "settings" ? "seats" : "none") },
-  );
-  const tab = persistedState.tab;
-  /** Picking the open tab again collapses it. */
-  const setTab = (nextTab: TabId): void => {
-    setPersistedState({ ...persistedState, tab: nextTab === tab ? "none" : nextTab });
-  };
 
   const [bump, setBump] = useState(0);
   const [busy, setBusy] = useState(false);
@@ -234,13 +201,11 @@ export function FactoryShell({
     }
   }, [activePluginAct, poll.value, poll.error, poll.at, now]);
 
-  // Automatically check for plugin updates once when the Owner opens the Plugins tab
-  // if update status has never been checked or is older than 5 minutes (v0.0.25, ADR 0012 §4).
+  // Automatically check for plugin updates once when the Owner opens the Settings screen (desktop)
+  // if update status has never been checked or is older than 5 minutes (v0.0.25, ADR 0012 §4) —
+  // the Plugins section's warning depends on it.
   useEffect(() => {
-    if (tab !== "plugins") {
-      setAutoCheckedPlugins(false);
-      return;
-    }
+    if (panelHost || mobile) return;
     if (view === null || checkingUpdates || autoCheckedPlugins) return;
     const stale = view.pluginsCheckedAt === null || Date.now() - Date.parse(view.pluginsCheckedAt) > 300_000;
     if (!stale) return;
@@ -250,7 +215,7 @@ export function FactoryShell({
       setCheckingUpdates(false);
       refresh();
     });
-  }, [tab, view?.pluginsCheckedAt, checkingUpdates, autoCheckedPlugins]);
+  }, [panelHost, mobile, view?.pluginsCheckedAt, checkingUpdates, autoCheckedPlugins]);
 
   const act = async (name: string, run: () => Promise<{ ok: boolean; error?: string | null; summary?: string; historyImports?: VaultStatusView["historyImports"]; vault?: VaultStatusView }>): Promise<boolean> => {
     setBusy(true);
@@ -362,8 +327,180 @@ export function FactoryShell({
     refresh();
     return { ok: true };
   };
-  /** Settings-type panes: always on the Settings screen; beneath the panel on desktop only (mobile mounts no settings writes). */
-  const showPanes = !panelHost || !mobile;
+  const pluginActions: PluginsActions = {
+    busy: busy || activePluginAct !== null,
+    checkingUpdates,
+    importSkill: id => { void act('Import Skill', () => skillsImportCall({ id })); },
+    togglePack: (pack, enabled) => { if (view.project) void act('Project Skill Pack', () => skillsTogglePackCall({ projectRoot: view.project!.root, pack: pack as 'expo' | 'firebase' | 'zcode-3d' | 'science', enabled })); },
+    syncHelpers: () => { void act("Check Connectivity", async () => {
+      const reply = await helperMcpsSyncCall({});
+      if (reply.ok) setPluginsNote({ text: "Connectivity checks completed for synced Peer MCPs.", tone: "statusSuccess", pluginId: "all" });
+      return reply;
+    }); },
+    setHelperConfig: (name, config) => { void act("Update Peer MCP", () => helperMcpsEnableCall({ name, ...config })); },
+    checkUpdates: () => {
+      setActivePluginAct({ kind: "check", target: "all", startedAt: Date.now() });
+      void act("Check Updates", async () => {
+        setCheckingUpdates(true);
+        try {
+          const reply = await pluginsCheckUpdatesCall({});
+          if (reply.ok) {
+            setPluginsNote({
+              text: reply.summary,
+              tone: reply.updatesAvailable.length > 0 ? "statusWarning" : "statusSuccess",
+              pluginId: "all",
+            });
+          } else {
+            recordPluginActFailure("Check Updates", "all", reply.error);
+          }
+          return reply;
+        } catch (error) {
+          recordPluginActFailure("Check Updates", "all", String(error));
+          throw error;
+        } finally {
+          setCheckingUpdates(false);
+          setActivePluginAct(null);
+        }
+      });
+    },
+    install: (target, source, ref) => {
+      const coreTargeted = target === "paseo-factory";
+      clearPluginCardError(target);
+      setActivePluginAct({ kind: "install", target, action: "install", startedAt: Date.now() });
+      void act("Install", async () => {
+        let restartingCore = false;
+        const enterCoreRestart = () => {
+          restartingCore = true;
+          setActivePluginAct({
+            kind: "restarting-core",
+            target: "paseo-factory",
+            action: "install",
+            startedAt: Date.now(),
+            fromRevision: view.corePlugin.currentRevision,
+            targetRevision: null,
+          });
+          setPluginsNote({
+            text: "Reloading Core (paseo-factory)…",
+            tone: "statusWarning",
+            pluginId: "paseo-factory",
+          });
+        };
+        try {
+          const reply = await pluginsInstallCall({
+            target,
+            source,
+            ref,
+            ...(target === "all" ? { includeTools: true } : {}),
+          });
+          if (reply.ok) {
+            setPluginsNote({ text: reply.summary, tone: "statusSuccess", pluginId: target });
+          } else {
+            if (isCoreSelfRestartError({ target, action: "install", errorMessage: reply.error, coreTargeted })) {
+              enterCoreRestart();
+              return { ok: true, summary: "" };
+            }
+            recordPluginActFailure("Install", target, reply.error);
+          }
+          return reply;
+        } catch (error) {
+          const msg = error instanceof Error ? error.message : String(error);
+          if (isCoreSelfRestartError({ target, action: "install", errorMessage: msg, coreTargeted })) {
+            enterCoreRestart();
+            return { ok: true, summary: "" };
+          }
+          recordPluginActFailure("Install", target, msg);
+          throw error;
+        } finally {
+          if (!restartingCore) {
+            setActivePluginAct(null);
+          }
+        }
+      });
+    },
+    manage: (pluginId, action) => {
+      // The toast names the act — "Update: …", "Remove: …" (the act() law).
+      const actName = `${action[0]!.toUpperCase()}${action.slice(1)}`;
+      const allPlugins = [view.corePlugin, ...view.companions, ...(view.companionTools ?? [])];
+      const targetPlugin = pluginId === "all" ? null : (allPlugins.find((p) => p.id === pluginId) ?? null);
+      const coreTargeted =
+        pluginId === "paseo-factory" ||
+        (pluginId === "all" &&
+          action === "update" &&
+          (view.corePlugin.installKind === "git" || view.corePlugin.installKind === "npm") &&
+          view.corePlugin.updateAvailable === true);
+      const fromRevision = coreTargeted ? view.corePlugin.currentRevision : (targetPlugin?.currentRevision ?? null);
+      const targetRevision =
+        action === "update"
+          ? coreTargeted
+            ? (view.corePlugin.latestRevision ?? view.corePlugin.currentRevision)
+            : (targetPlugin?.latestRevision ?? null)
+          : action === "reload" && coreTargeted
+            ? view.corePlugin.currentRevision
+            : null;
+
+      clearPluginCardError(pluginId);
+
+      setActivePluginAct({
+        kind: "manage",
+        target: pluginId,
+        action,
+        startedAt: Date.now(),
+        fromRevision,
+        targetRevision,
+      });
+
+      void act(actName, async () => {
+        let restartingCore = false;
+        const enterCoreRestart = () => {
+          restartingCore = true;
+          setActivePluginAct({
+            kind: "restarting-core",
+            target: "paseo-factory",
+            action,
+            startedAt: Date.now(),
+            fromRevision: view.corePlugin.currentRevision,
+            targetRevision,
+          });
+          setPluginsNote({
+            text: `Reloading Core (paseo-factory)${targetRevision ? ` → ${targetRevision.slice(0, 7)}` : ""}…`,
+            tone: "statusWarning",
+            pluginId: "paseo-factory",
+          });
+        };
+
+        try {
+          const reply = await pluginsManageCall({
+            pluginId,
+            action,
+            ...(pluginId === "all" ? { includeTools: true } : {}),
+          });
+          if (!reply.ok) {
+            if (isCoreSelfRestartError({ target: pluginId, action, errorMessage: reply.error, coreTargeted })) {
+              enterCoreRestart();
+              return { ok: true, summary: "" };
+            }
+            recordPluginActFailure(actName, pluginId, reply.error);
+            return reply;
+          }
+          setPluginsNote({ text: reply.summary, tone: "statusSuccess", pluginId });
+          return reply;
+        } catch (error) {
+          const msg = error instanceof Error ? error.message : String(error);
+          if (isCoreSelfRestartError({ target: pluginId, action, errorMessage: msg, coreTargeted })) {
+            enterCoreRestart();
+            return { ok: true, summary: "" };
+          }
+          recordPluginActFailure(actName, pluginId, msg);
+          throw error;
+        } finally {
+          if (!restartingCore) {
+            setActivePluginAct(null);
+          }
+        }
+      });
+    },
+  };
+
   const vaultPane = (
     <VaultPane
       theme={theme}
@@ -386,6 +523,105 @@ export function FactoryShell({
         );
       }}
       onRefresh={refresh}
+    />
+  );
+
+  // The Settings screen (v0.6.0 W8, ADR 0056 §7): the machine-wide panes,
+  // unscoped — lane and profile acts write the machine table (no projectRoot).
+  // On Paseo mobile every section is the read-only summary: no write is mounted.
+  const settingsScreen = panelHost ? null : (
+    <SettingsScreen
+      theme={theme}
+      warnings={settingsWarnings(view)}
+      slots={
+        mobile
+          ? {
+              models: <SettingsReadOnly theme={theme} view={view} section="models" />,
+              "skills-tools": <SettingsReadOnly theme={theme} view={view} section="skills-tools" />,
+              plugins: <SettingsReadOnly theme={theme} view={view} section="plugins" />,
+              vault: <SettingsReadOnly theme={theme} view={view} section="vault" />,
+              diagnostics: <SettingsReadOnly theme={theme} view={view} section="diagnostics" />,
+            }
+          : {
+              models: (
+                <SeatsPane
+                  theme={theme}
+                  view={view}
+                  modelSyncNote={laneNote}
+                  actions={{
+                    busy,
+                    setLane: (lane: LaneName, value) => {
+                      void act("Lane", async () => {
+                        const reply = await lanesSetCall({ lane, value });
+                        if (reply.ok) setLaneNote(`${lane} → ${reply.lanes[lane]} (${reply.modelSync})`);
+                        return reply;
+                      });
+                    },
+                    // One atomic batch RPC for a multi-lane card (v0.0.38, ADR 0026 §5).
+                    setLanesBatch: (lanes: LaneName[], value) => {
+                      void act("Lane Batch", async () => {
+                        const update: Partial<Record<LaneName, string>> = {};
+                        for (const lane of lanes) update[lane] = value;
+                        const reply = await lanesSetBatchCall({ lanes: update });
+                        if (reply.ok) setLaneNote(`${lanes.join(" + ")} → ${value} (${reply.modelSync})`);
+                        return reply;
+                      });
+                    },
+                    saveProfile: (name, description) => {
+                      void act("Save Profile", () => profilesSaveCall({ name, ...(description === undefined ? {} : { description }), lanes: view.lanes }));
+                    },
+                    updateProfile: (profileId, name) => {
+                      void act("Update Profile", () => profilesSaveCall({ id: profileId, name, lanes: view.lanes }));
+                    },
+                    applyProfile: (profileId) => {
+                      void act("Apply Profile", () => profilesApplyCall({ profileId }));
+                    },
+                    deleteProfile: (profileId) => {
+                      void act("Delete Profile", () => profilesDeleteCall({ profileId }));
+                    },
+                    // The machine table has no override to reset — the control is a Project-panel act.
+                    resetLanes: () => {},
+                  }}
+                />
+              ),
+              "skills-tools": (
+                <>
+                  <PrerequisiteSetupCard
+                    theme={theme}
+                    tools={incompleteTools}
+                    installing={isInstallingPrereqs}
+                    elapsedSeconds={elapsedSeconds}
+                    busy={busy || activePluginAct !== null}
+                    onInstall={installPrerequisites}
+                  />
+                  <SkillsToolsPane
+                    theme={theme}
+                    view={view}
+                    activeAct={activePluginAct}
+                    elapsedSeconds={elapsedSeconds}
+                    cardErrors={pluginCardErrors}
+                    dismissCardError={(id) => clearPluginCardError(id as ManageablePluginId)}
+                    actions={pluginActions}
+                  />
+                </>
+              ),
+              plugins: (
+                <PluginsPane
+                  theme={theme}
+                  view={view}
+                  activeAct={activePluginAct}
+                  elapsedSeconds={elapsedSeconds}
+                  pluginsNote={pluginsNote}
+                  cardErrors={pluginCardErrors}
+                  dismissNote={() => setPluginsNote(null)}
+                  dismissCardError={(id) => clearPluginCardError(id as ManageablePluginId)}
+                  actions={pluginActions}
+                />
+              ),
+              vault: vaultPane,
+              diagnostics: <DiagnosticsBody theme={theme} view={view} serverId={serverId} />,
+            }
+      }
     />
   );
 
@@ -485,366 +721,9 @@ export function FactoryShell({
               ) : null
             }
           />
-        ) : null}
-        {(() => {
-          // The panel's Needs-you list carries the prerequisite item; the
-          // banner stays on the Settings screen until W8 moves Skills & Tools.
-          if (panelHost) return null;
-          if (incompleteTools.length === 0) return null;
-          return (
-            <Card
-              theme={theme}
-              gap={SPACING[2]}
-              style={{
-                borderColor: tint(theme.colors.statusWarning, "88"),
-                backgroundColor: tint(theme.colors.statusWarning, "10"),
-              }}
-            >
-              <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: SPACING[2] }}>
-                <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[1.5], flexShrink: 1 }}>
-                  <Pill theme={theme} label="PREREQUISITE SETUP GATE" tone="statusWarning" lit />
-                  <Text style={text(theme, "rowTitle")}>Required Factory Skills & Tools Setup</Text>
-                  <Pill
-                    theme={theme}
-                    label={`${incompleteTools.length} required component${incompleteTools.length === 1 ? "" : "s"} missing or incomplete`}
-                    tone="statusWarning"
-                  />
-                </View>
-                <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[1.5] }}>
-                  <Btn
-                    theme={theme}
-                    small
-                    solid
-                    label={
-                      isInstallingPrereqs
-                        ? `Installing Prerequisites… (${elapsedSeconds}s)`
-                        : "Install Required Skills & Tools"
-                    }
-                    disabled={busy || activePluginAct !== null}
-                    onPress={installPrerequisites}
-                  />
-                  {tab !== "plugins" ? (
-                    <Btn
-                      theme={theme}
-                      small
-                      label="Open Plugins & Version Manager"
-                      tone="foregroundMuted"
-                      onPress={() => setTab("plugins")}
-                    />
-                  ) : null}
-                </View>
-              </View>
-              <Text style={text(theme, "meta")}>
-                Factory requires these open-source skills and verification tools on this host before running SLP workflows. Click &quot;Install Required Skills &amp; Tools&quot; to install them directly from GitHub and npm, or manage versions in the Plugins tab:
-              </Text>
-              <View style={{ gap: SPACING[1] }}>
-                {incompleteTools.map((tool) => (
-                  <View
-                    key={tool.id}
-                    style={{
-                      flexDirection: "row",
-                      alignItems: "center",
-                      justifyContent: "space-between",
-                      flexWrap: "wrap",
-                      gap: SPACING[1.5],
-                      borderWidth: 1,
-                      borderColor: theme.colors.border,
-                      borderRadius: RADIUS.md,
-                      backgroundColor: theme.colors.surface0,
-                      paddingHorizontal: SPACING[2.5],
-                      paddingVertical: SPACING[1.5],
-                    }}
-                  >
-                    <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[1.5], flexShrink: 1 }}>
-                      <Text style={text(theme, "label")}>{tool.title}</Text>
-                      <Pill theme={theme} label={tool.canonicalSource} mono />
-                      {tool.error !== null ? (
-                        <Text style={{ ...text(theme, "meta", "statusDanger"), flexShrink: 1 }}>{tool.error}</Text>
-                      ) : (
-                        <Pill theme={theme} label="Not Installed" tone="statusWarning" />
-                      )}
-                    </View>
-                  </View>
-                ))}
-              </View>
-            </Card>
-          );
-        })()}
-        {showDiagnostics ? (
-          <>
-            <Card theme={theme} gap={SPACING[1]}>
-              <Text style={text(theme, "section")}>Daemon & State Diagnostics</Text>
-              <Text style={text(theme, "code")}>stateDir: {view.stateDir}</Text>
-              <Text style={text(theme, "code")}>serverId: {serverId ?? "local"}</Text>
-              <Text style={text(theme, "code")}>daemon: {view.daemonError ?? "healthy"}</Text>
-              <Text style={text(theme, "code")}>project: {view.project === null ? "(unscoped)" : `${view.project.slug} · ${view.project.root}`}</Text>
-            </Card>
-            {tab !== "vault" ? vaultPane : null}
-          </>
-        ) : null}
-        {showPanes ? (
-          <TabBar
-            theme={theme}
-            active={tab === "none" ? null : tab}
-            onPick={setTab}
-            compact={isCompact}
-            counts={{
-              seats: view.agents.length,
-              vault: view.vault.hydratedApps.length,
-              plugins: view.companions.filter((c) => c.status === "running").length,
-            }}
-          />
-        ) : null}
-        {showPanes && tab === "vault" ? vaultPane : null}
-        {showPanes && tab === "seats" ? (
-          <SeatsPane
-            theme={theme}
-            view={view}
-            modelSyncNote={laneNote}
-            actions={{
-              busy,
-              setLane: (lane: LaneName, value) => {
-                if (projectRoot === undefined) return;
-                void act("Lane", async () => {
-                  const reply = await lanesSetCall({ lane, value, projectRoot });
-                  if (reply.ok) setLaneNote(`${lane} → ${reply.lanes[lane]} (${reply.modelSync})`);
-                  return reply;
-                });
-              },
-              // One atomic batch RPC for a multi-lane card (v0.0.38, ADR 0026
-              // §5) — the SeatsPane gates it behind the live-seat modal.
-              setLanesBatch: (lanes: LaneName[], value) => {
-                if (projectRoot === undefined) return;
-                void act("Lane Batch", async () => {
-                  const update: Partial<Record<LaneName, string>> = {};
-                  for (const lane of lanes) update[lane] = value;
-                  const reply = await lanesSetBatchCall({ lanes: update, ...(projectRoot === undefined ? {} : { projectRoot }) });
-                  if (reply.ok) setLaneNote(`${lanes.join(" + ")} → ${value} (${reply.modelSync})`);
-                  return reply;
-                });
-              },
-              saveProfile: (name, description) => {
-                if (projectRoot === undefined) return;
-                void act("Save Profile", () =>
-                  profilesSaveCall({
-                    name,
-                    ...(description === undefined ? {} : { description }),
-                    lanes: view.lanes,
-                    ...(projectRoot === undefined ? {} : { projectRoot }),
-                  }),
-                );
-              },
-              updateProfile: (profileId, name) => {
-                if (projectRoot === undefined) return;
-                void act("Update Profile", () =>
-                  profilesSaveCall({
-                    id: profileId,
-                    name,
-                    lanes: view.lanes,
-                    ...(projectRoot === undefined ? {} : { projectRoot }),
-                  }),
-                );
-              },
-              applyProfile: (profileId) => {
-                if (projectRoot === undefined) return;
-                void act("Apply Profile", () => profilesApplyCall({ profileId, ...(projectRoot === undefined ? {} : { projectRoot }) }));
-              },
-              deleteProfile: (profileId) => {
-                if (projectRoot === undefined) return;
-                void act("Delete Profile", () => profilesDeleteCall({ profileId }));
-              },
-              resetLanes: () => {
-                if (projectRoot === undefined) return;
-                void act("Reset to Machine Default", () => lanesResetCall({ projectRoot }));
-              },
-            }}
-          />
-        ) : null}
-        {showPanes && tab === "plugins" ? (
-          <PluginsPane
-            theme={theme}
-            view={view}
-            activeAct={activePluginAct}
-            elapsedSeconds={elapsedSeconds}
-            pluginsNote={pluginsNote}
-            cardErrors={pluginCardErrors}
-            dismissNote={() => setPluginsNote(null)}
-            dismissCardError={(id) => clearPluginCardError(id as ManageablePluginId)}
-            actions={{
-              busy: busy || activePluginAct !== null,
-              checkingUpdates,
-              importSkill: id => { void act('Import Skill', () => skillsImportCall({ id })); },
-              togglePack: (pack, enabled) => { if (view.project) void act('Project Skill Pack', () => skillsTogglePackCall({ projectRoot: view.project!.root, pack: pack as 'expo' | 'firebase' | 'zcode-3d' | 'science', enabled })); },
-              syncHelpers: () => { void act("Check Connectivity", async () => {
-                const reply = await helperMcpsSyncCall({});
-                if (reply.ok) setPluginsNote({ text: "Connectivity checks completed for synced Peer MCPs.", tone: "statusSuccess", pluginId: "all" });
-                return reply;
-              }); },
-              setHelperConfig: (name, config) => { void act("Update Peer MCP", () => helperMcpsEnableCall({ name, ...config })); },
-              checkUpdates: () => {
-                setActivePluginAct({ kind: "check", target: "all", startedAt: Date.now() });
-                void act("Check Updates", async () => {
-                  setCheckingUpdates(true);
-                  try {
-                    const reply = await pluginsCheckUpdatesCall({});
-                    if (reply.ok) {
-                      setPluginsNote({
-                        text: reply.summary,
-                        tone: reply.updatesAvailable.length > 0 ? "statusWarning" : "statusSuccess",
-                        pluginId: "all",
-                      });
-                    } else {
-                      recordPluginActFailure("Check Updates", "all", reply.error);
-                    }
-                    return reply;
-                  } catch (error) {
-                    recordPluginActFailure("Check Updates", "all", String(error));
-                    throw error;
-                  } finally {
-                    setCheckingUpdates(false);
-                    setActivePluginAct(null);
-                  }
-                });
-              },
-              install: (target, source, ref) => {
-                const coreTargeted = target === "paseo-factory";
-                clearPluginCardError(target);
-                setActivePluginAct({ kind: "install", target, action: "install", startedAt: Date.now() });
-                void act("Install", async () => {
-                  let restartingCore = false;
-                  const enterCoreRestart = () => {
-                    restartingCore = true;
-                    setActivePluginAct({
-                      kind: "restarting-core",
-                      target: "paseo-factory",
-                      action: "install",
-                      startedAt: Date.now(),
-                      fromRevision: view.corePlugin.currentRevision,
-                      targetRevision: null,
-                    });
-                    setPluginsNote({
-                      text: "Reloading Core (paseo-factory)…",
-                      tone: "statusWarning",
-                      pluginId: "paseo-factory",
-                    });
-                  };
-                  try {
-                    const reply = await pluginsInstallCall({
-                      target,
-                      source,
-                      ref,
-                      ...(target === "all" ? { includeTools: true } : {}),
-                    });
-                    if (reply.ok) {
-                      setPluginsNote({ text: reply.summary, tone: "statusSuccess", pluginId: target });
-                    } else {
-                      if (isCoreSelfRestartError({ target, action: "install", errorMessage: reply.error, coreTargeted })) {
-                        enterCoreRestart();
-                        return { ok: true, summary: "" };
-                      }
-                      recordPluginActFailure("Install", target, reply.error);
-                    }
-                    return reply;
-                  } catch (error) {
-                    const msg = error instanceof Error ? error.message : String(error);
-                    if (isCoreSelfRestartError({ target, action: "install", errorMessage: msg, coreTargeted })) {
-                      enterCoreRestart();
-                      return { ok: true, summary: "" };
-                    }
-                    recordPluginActFailure("Install", target, msg);
-                    throw error;
-                  } finally {
-                    if (!restartingCore) {
-                      setActivePluginAct(null);
-                    }
-                  }
-                });
-              },
-              manage: (pluginId, action) => {
-                // The toast names the act — "Update: …", "Remove: …" (the act() law).
-                const actName = `${action[0]!.toUpperCase()}${action.slice(1)}`;
-                const allPlugins = [view.corePlugin, ...view.companions, ...(view.companionTools ?? [])];
-                const targetPlugin = pluginId === "all" ? null : (allPlugins.find((p) => p.id === pluginId) ?? null);
-                const coreTargeted =
-                  pluginId === "paseo-factory" ||
-                  (pluginId === "all" &&
-                    action === "update" &&
-                    (view.corePlugin.installKind === "git" || view.corePlugin.installKind === "npm") &&
-                    view.corePlugin.updateAvailable === true);
-                const fromRevision = coreTargeted ? view.corePlugin.currentRevision : (targetPlugin?.currentRevision ?? null);
-                const targetRevision =
-                  action === "update"
-                    ? coreTargeted
-                      ? (view.corePlugin.latestRevision ?? view.corePlugin.currentRevision)
-                      : (targetPlugin?.latestRevision ?? null)
-                    : action === "reload" && coreTargeted
-                      ? view.corePlugin.currentRevision
-                      : null;
-
-                clearPluginCardError(pluginId);
-
-                setActivePluginAct({
-                  kind: "manage",
-                  target: pluginId,
-                  action,
-                  startedAt: Date.now(),
-                  fromRevision,
-                  targetRevision,
-                });
-
-                void act(actName, async () => {
-                  let restartingCore = false;
-                  const enterCoreRestart = () => {
-                    restartingCore = true;
-                    setActivePluginAct({
-                      kind: "restarting-core",
-                      target: "paseo-factory",
-                      action,
-                      startedAt: Date.now(),
-                      fromRevision: view.corePlugin.currentRevision,
-                      targetRevision,
-                    });
-                    setPluginsNote({
-                      text: `Reloading Core (paseo-factory)${targetRevision ? ` → ${targetRevision.slice(0, 7)}` : ""}…`,
-                      tone: "statusWarning",
-                      pluginId: "paseo-factory",
-                    });
-                  };
-
-                  try {
-                    const reply = await pluginsManageCall({
-                      pluginId,
-                      action,
-                      ...(pluginId === "all" ? { includeTools: true } : {}),
-                    });
-                    if (!reply.ok) {
-                      if (isCoreSelfRestartError({ target: pluginId, action, errorMessage: reply.error, coreTargeted })) {
-                        enterCoreRestart();
-                        return { ok: true, summary: "" };
-                      }
-                      recordPluginActFailure(actName, pluginId, reply.error);
-                      return reply;
-                    }
-                    setPluginsNote({ text: reply.summary, tone: "statusSuccess", pluginId });
-                    return reply;
-                  } catch (error) {
-                    const msg = error instanceof Error ? error.message : String(error);
-                    if (isCoreSelfRestartError({ target: pluginId, action, errorMessage: msg, coreTargeted })) {
-                      enterCoreRestart();
-                      return { ok: true, summary: "" };
-                    }
-                    recordPluginActFailure(actName, pluginId, msg);
-                    throw error;
-                  } finally {
-                    if (!restartingCore) {
-                      setActivePluginAct(null);
-                    }
-                  }
-                });
-              },
-            }}
-          />
-        ) : null}
+        ) : (
+          settingsScreen
+        )}
       </ScrollView>
 
     </View>

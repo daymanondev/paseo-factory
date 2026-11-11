@@ -10,8 +10,8 @@ claims the task is finished at a specific commit, and the factory — never the
 agent — runs the gate and records every step in an append-only ledger it
 cannot edit. A green verdict is evidence, not acceptance.
 
-**Status: v0.5.1.** The verification core and installed plugin are covered by
-1066 tests on Node 22 and 24. The Paseo 0.13 plugin owns the Ledger as its single
+**Status: v0.6.0.** The verification core and installed plugin are covered by
+1370 tests on Node 22 and 24. The Paseo 0.13 plugin owns the Ledger as its single
 writer and serves CLI, MCP and surface RPC entrances. Acceptance uses trusted
 caller authority and shared Task/Attempt state; Vault history is staged before
 writer-owned admission, preserving local evidence addresses.
@@ -20,8 +20,8 @@ Lead owns semantic review: after a GREEN Gate, inspect `git show --stat "<sha>"`
 and `git diff "<sha>^" "<sha>"` against the Contract, then accept or re-contract.
 Fresh-eyes is off by default for all callers and never blocks Lead acceptance;
 legacy explicit CLI opt-ins, configuration and Ledger evidence remain supported.
-Seats & Models exposes the five active lanes: supervisor, lead, worker, watch
-and retro. Headless Pi passes default to thinking off unless their lane specifies
+The Settings screen's Default models & Lane profiles section exposes the five
+lanes: supervisor, lead, worker, watch and freshEyes. Headless Pi passes default to thinking off unless their lane specifies
 an explicit level. MCP Spool requests wait up to ten minutes for a reply.
 
 Persistent history upgrades are explicit: inspect the
@@ -116,15 +116,15 @@ reads that need no running plugin:
 npm run factory -- --home ~/.paseo-factory run T1 --provider claude/sonnet-5
 npm run factory -- --home ~/.paseo-factory status
 npm run factory -- --home ~/.paseo-factory cost
-npm run factory -- --home ~/.paseo-factory retro
 ```
 
-`retro` (v0.0.7) is the Owner's on-demand pass: it distills the whole ledger
-into a per-task digest and hands it to a fresh-context model whose one job is
-to *propose* — new Gate checks for repeated-error patterns, draft Contract
-pieces for knowledge holes, every proposal citing its ledger seq — writing
-one `retro_written` line and a dated proposals file. Nothing becomes law
-until the Owner ratifies it as ordinary repo work.
+A repeated failure earns a fix while the run is in flight: the Lead's
+Recurrence Guard records a first occurrence as `observed`, a second moves it to
+`recurred` and triggers Wave Hardening, and any change to repository prose
+reaches the Owner as a Proposal through the Supervisor — nothing becomes law
+until the Owner ratifies it as ordinary repo work. (The on-demand Retro pass of
+v0.0.7 was removed in v0.6.0, ADR 0056; its historical ledger lines stay
+readable.)
 
 Since v0.0.9 those Owner acts may arrive through a conversation instead of a
 terminal. The **Supervisor seat** (ADR 0006) is the Owner seat delegated to
@@ -199,25 +199,27 @@ dispatched `respawn_dispatched`, and watched Agent 2 to a green Attempt 1
 one turn, recorded `needs_human ("attempt-ceiling")` at Attempt 3, and
 refused both post-run negative probes (`factory-claim` #4 and `factory run`).
 
-v0.0.13 brings the **Factory surface** into Paseo Desktop and unifies every
-model-backed seat and pass under `<stateDir>/lanes.json` (ADR 0009). One JSON
-file (`supervisor`, `worker`, `watch`, `retro`, `freshEyes`, each defaulting to
-`"pi/zai/glm-5.3"`) governs all five lanes, editable from the Paseo UI (**Seats
-& Models** tab) or `factory lanes set <lane> <provider/model>` — with `Lead`
-kept outside `lanes.json` because it is a zero-model deterministic rider.
-`Watch`, `Retro`, and `Fresh-eyes` all route through a shared tool-less CLI
-runner (`runLaneCli` across `pi --no-tools -p`, `copilot -p --available-tools=""`,
-and `claude -p --tools ""`, while `freshEyes: "eye.json"` retains the direct
-HTTP path), eliminating the hardcoded Copilot quota bottleneck. Inside Paseo,
-the `Factory` sidebar screen, workspace panel, and settings view render three
-tabs — **Tasks** (verification line with Attempt 1/2/3 ladder, Gate/Eye/Watch
-badges, inline `Accept #n`, and markdown/diff/gate-log detail modal), **Seats &
-Models** (interactive lane cards, model selector modal, and orthogonal Seat
-Graph), and **Timeline & Retro** (multi-lane swimlane, one-click `Run Retro`,
-and searchable Ledger stream) — plus the **Open Supervisor** / **Quick
-Dispatch** header bar that creates or reuses the tagged `seat=supervisor`
-agent, writes `<home>-supervisor/AGENTS.md` with exact `factory.mjs` recipes,
-and opens the native Paseo chat drawer in one click.
+Since v0.0.13 every model-backed seat and pass reads `<stateDir>/lanes.json`
+(ADR 0009): one JSON file whose five lanes — `supervisor`, `lead`, `worker`,
+`watch` and `freshEyes` — are editable from the Paseo Settings screen or with
+`factory lanes set <lane> <provider/model>`. `Watch` and `Fresh-eyes` route
+through a shared tool-less CLI runner (`runLaneCli` across `pi --no-tools -p`,
+`copilot -p --available-tools=""`, and `claude -p --tools ""`, while
+`freshEyes: "eye.json"` retains the direct HTTP path).
+
+Since v0.6.0 (ADR 0056) the **Factory surface** is the Paseo plugin client alone
+and it is small. A workspace panel shows the one Project that workspace serves:
+what needs the Owner (only when something does), the Supervisor, the Lead with
+its context bar and handoff state, the live Peers, and the Open Design link. A
+folder that is not yet a Project opens a four-step onboarding wizard (Folder,
+Prerequisites, Models, Start) that ends by starting the Supervisor with the
+Owner's first directive. The Settings screen holds everything machine-wide —
+default models and Lane profiles, skills and tools, plugins, the Private vault
+and diagnostics — in collapsible sections, and there is one Command Center
+action, "Open Factory Panel". On Paseo mobile the panel is a monitor with quick
+actions (Open, Rotate, Revoke) and Settings is view-only. SLP is the only
+workflow; the Agile Scrum mode, the standalone Web Console and the Daily Retro
+were removed in the same release.
 
 The **Agent** gets one command, `factory-claim --task T1 --sha <commit>`, on its
 PATH automatically. It prints the Verdict, the gate note, and the report path;
@@ -268,5 +270,3 @@ that ride agent PATHs.
 ## License
 
 MIT.
-
-Opt-in [Agile Scrum execution](docs/runbooks/scrum.md) adds isolated specialist rosters, durable design decisions and QA evidence while preserving the default SLP workflow.

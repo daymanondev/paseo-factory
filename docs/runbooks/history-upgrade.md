@@ -2,7 +2,7 @@
 
 This runbook supports readable legacy/schema-1 Ledgers and identified schema-2 Ledgers. Upgrade adds stable event and Contract-epoch identity, preserves every existing sequence/address and historical attribution, and appends a schema fence that older shipped writers reject. Historical legacy writer provenance remains unknown. Unsupported versions, malformed complete records, ambiguous identity/reference plans and contradictory queued/cached evidence require inspection; the upgrade does not guess repairs.
 
-Boot never migrates state. Apply, resume and restore require the live Factory owner and exclusive maintenance admission. Other Gates/review/Watch/Report/landing/Retro operations settle first. Queued work remains queued. An offline CLI cannot take over a writer or rewrite state: a timeout leaves its request durable and asks the caller to stop retrying.
+Boot never migrates state. Apply, resume and restore require the live Factory owner and exclusive maintenance admission. Other Gates/review/Watch/Report/landing operations settle first. Queued work remains queued. An offline CLI cannot take over a writer or rewrite state: a timeout leaves its request durable and asks the caller to stop retrying.
 
 For trial validation use only `~/.paseo-factory` and a registered disposable Project. Leave the real trial root Ledger in its existing format. Production `~/.paseo` is outside this runbook's validation scope. Follow [the live-run runbook](live-run.md) to verify the trial daemon and create/select the disposable Project.
 
