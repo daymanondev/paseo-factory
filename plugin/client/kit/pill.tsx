@@ -71,6 +71,7 @@ export function Btn({
   small = false,
   icon,
   solid = false,
+  testID,
 }: {
   theme: PluginTheme;
   label: string;
@@ -80,12 +81,15 @@ export function Btn({
   small?: boolean;
   icon?: string;
   solid?: boolean;
+  /** The E2E / structural-test hook (the panel names its actions up front). */
+  testID?: string;
 }) {
   const colour = theme.colors[tone];
   const isMuted = tone === "foregroundMuted";
   return (
     <Pressable
       accessibilityRole="button"
+      {...(testID === undefined ? {} : { testID })}
       disabled={disabled}
       onPress={onPress}
       style={(state) => {

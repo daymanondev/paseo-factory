@@ -64,7 +64,7 @@ import { setAgentModelViaCli, setAgentThinkingViaCli, stopAgentViaCli } from "./
 import { checkDaemonPluginUpdates, cleanupDaemonWorkspacesAndProjectsViaWs, getCachedPluginUpdateStatus, installDaemonPlugin, isPaseoWorkspaceArchivedOnDisk, listDaemonPlugins, manageDaemonPlugin, prunePaseoProjectRegistry, reloadDaemonConfigViaWs, restoreDaemonWorkspaceViaWs } from "./daemon-cli.ts";
 import type { DaemonPluginAction, DaemonPluginItem, DaemonPluginSourceStatus, DaemonPluginUpdateRow, DaemonReply } from "./daemon-cli.ts";
 import { effectiveLanesForReconcile, reconcilePaseoRoleProviders } from "./core/role-providers.ts";
-import { SEAT_TITLES, inferRoleFromProviderId, resolveEffectiveProviderFamily } from "./roles.ts";
+import { FACTORY_SEAT_PROVIDER_IDS, SEAT_TITLES, inferRoleFromProviderId, resolveEffectiveProviderFamily } from "./roles.ts";
 import type { SeatName } from "./roles.ts";
 import { ensureProjectRegistered, writeProjectRegistration, resolveTargetProject } from "./projects.ts";
 import type { FactoryRegistry } from "./projects.ts";
@@ -95,6 +95,7 @@ import {
   snapshot,
   supervisorEnsure,
   supervisorRevoke,
+  supervisorStart,
   vaultConfigure,
   vaultHydrate,
   vaultImport,
@@ -869,6 +870,38 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     if (!project.ok) return Promise.resolve(project);
     return serializeSeat(`${project.slug}:${seat}`, () => ensureSeatUnlocked(seat, input, context));
   };
+  /**
+   * The Supervisor seat start (v0.6.0 W6, ADR 0056 amending ADR 0017 §4) —
+   * shared by the vacant Supervisor row's Start Supervisor and the onboarding
+   * commit. It is `ensureSeatUnlocked` with two differences: it REFUSES while a
+   * Supervisor is live (a start never adopts or retires an existing seat), and
+   * it creates the agent through the `factory-supervisor` role provider — the
+   * id Paseo's native picker launches — so `server.before("agent.create")`
+   * recognises, fences and Lane-rewrites it exactly like a native Supervisor.
+   * The directive, when non-blank, is the seat's first user message. Never a Lead.
+   */
+  const startSupervisor = (input: { projectRoot: string; directive?: string }, context?: SurfaceCallContext) => {
+    const project = projectOrRefusal(input.projectRoot);
+    if (!project.ok) return Promise.resolve(project);
+    return serializeSeat(`${project.slug}:supervisor`, async () => {
+      let live: SurfaceAgentSnapshot | undefined;
+      try {
+        live = await seatOf(resolveDaemon(context), "supervisor", project.slug);
+      } catch (err) {
+        return failure("daemon-unavailable", `cannot read the daemon's agents: ${messageOf(err)}`);
+      }
+      if (live !== undefined) {
+        return failure("supervisor-live", `a Supervisor is already live for this Project (${live.id}) — open it, or revoke it before starting another`);
+      }
+      const directive = input.directive?.trim();
+      return ensureSeatUnlocked(
+        "supervisor",
+        { projectRoot: input.projectRoot, ...(directive !== undefined && directive !== "" ? { message: directive } : {}) },
+        context,
+        { roleProvider: true },
+      );
+    });
+  };
   const retireSeat = (seat: SeatName, slug: string | undefined, root: string | undefined, context?: SurfaceCallContext) =>
     serializeSeat(`${slug}:${seat}`, () => retireSeatUnlocked(seat, slug, root, context));
 
@@ -876,6 +909,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     seat: SeatName,
     input: { projectRoot: string; message?: string },
     context?: SurfaceCallContext,
+    options?: { roleProvider?: boolean },
   ): Promise<{ ok: true; agentId: string; created: boolean; projectRoot: string; slug: string } | { ok: false; code: string; error: string }> => {
     const project = projectOrRefusal(input.projectRoot);
     if (!project.ok) return project;
@@ -1000,8 +1034,11 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       // under <project-root> is written (the <home>-supervisor folder and
       // its AGENTS.md overwrite are retired; roles.ts owns the injection).
       const title = SEAT_TITLES[seat];
-      const config =
-        parsed?.thinking !== undefined
+      // A role-provider start (ADR 0056) names only the `factory-<seat>` id:
+      // the before-create hook rewrites it onto this Project's own lane.
+      const config = options?.roleProvider === true
+        ? { provider: FACTORY_SEAT_PROVIDER_IDS[seat === "supervisor" ? "supervisor" : "lead"] }
+        : parsed?.thinking !== undefined
           ? { provider: `${parsed.provider}/${parsed.model}`, thinkingOptionId: parsed.thinking }
           : { provider: lane };
       const parent = seat === "lead" ? supervisorSnapshot?.id : undefined;
@@ -2303,6 +2340,10 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       return ensureSeat("supervisor", input, context);
     },
 
+    async supervisorStart(input: { projectRoot: string; directive?: string }, context?: SurfaceCallContext) {
+      return startSupervisor(input, context);
+    },
+
     async leadEnsure(input: { projectRoot: string; message?: string }, context?: SurfaceCallContext) {
       return ensureSeat("lead", input, context);
     },
@@ -3272,6 +3313,7 @@ export function registerSurfaceRpc(
   server.handle(profilesApply, (input, context) => handlers.profilesApply(input, pass(context)));
   server.handle(profilesDelete, (input, context) => handlers.profilesDelete(input, pass(context)));
   server.handle(supervisorEnsure, (input, context) => handlers.supervisorEnsure(input, pass(context)));
+  server.handle(supervisorStart, (input, context) => handlers.supervisorStart(input, pass(context)));
   server.handle(supervisorRevoke, (input, context) => handlers.supervisorRevoke(input, pass(context)));
   server.handle(leadEnsure, (input, context) => handlers.leadEnsure(input, pass(context)));
   server.handle(leadRotate, (input, context) => handlers.leadRotate(input, pass(context)));

@@ -54,6 +54,16 @@ test("v0.6.0 W4: the Retro, task-detail, accept and host-folder-picker doors are
   }
 });
 
+test("v0.6.0 W6: Start Supervisor is a registered door — and the surface still has no Lead-start or accept door for the Owner's UI", (t) => {
+  const names = registeredMethods(t);
+  assert.ok(names.includes("factory.supervisor.start"), "the vacant Supervisor row's Start Supervisor door");
+  for (const kept of ["factory.lead.rotate", "factory.supervisor.revoke", "factory.project.reset", "factory.project.delete", "factory.lanes.set", "factory.skills.toggle_pack", "factory.open_design.unlink", "factory.open_design.sync"]) {
+    assert.ok(names.includes(kept), `${kept} stays registered`);
+  }
+  assert.equal(names.includes("factory.lead.start"), false);
+  assert.equal(names.includes("factory.accept"), false);
+});
+
 test("v0.6.0 W4: `factory retro` is an unknown command and the help no longer advertises the Retro", (t) => {
   const home = makeTempDir();
   disposeDir(t, home);

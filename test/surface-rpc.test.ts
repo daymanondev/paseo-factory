@@ -6461,3 +6461,88 @@ test("panel: Open Design is unlinked, linked, or broken — a recorded link whos
   assert.deepEqual(linked.openDesign, { state: "linked", projectName: "Mobile Redesign", syncedAt: "2026-10-01T00:00:00.000Z", detail: null });
   assert.deepEqual(linked.needsYou, [], "a healthy link needs nothing from the Owner");
 });
+
+// ---- v0.6.0 W6 (ADR 0056, ADR 0017 amendment): Start Supervisor on a vacant seat ----------------
+
+test("supervisor.start: a vacant seat starts through the role provider — recognised, bound to the workspace, directive is the first message, no Lead ever created", async (t) => {
+  const project = makeProject(t, "start-sup");
+  const { stateDir, handlers, fake } = makeSurface(t, []);
+  writeLanes(stateDir, { supervisor: "claude/opus-4-8", lead: "opencode/glm-5.1" });
+  const wsCreated: { workspaceId: string; provider: string; title: string; labels: Record<string, string>; parent?: string }[] = [];
+  fake.daemon.workspaces = {
+    open: async () => ({ id: "ws-panel-main", projectId: "prj-panel-main" }),
+    create: async () => ({ id: "ws-unused", projectId: null }),
+    archive: async () => ({ archivedAt: new Date().toISOString() }),
+    ref: (workspaceId: string) => ({
+      agents: {
+        create: async (options) => {
+          wsCreated.push({ workspaceId, provider: options.config.provider, title: options.title, labels: options.labels, ...(options.parent === undefined ? {} : { parent: options.parent }) });
+          return fake.daemon.agents.create({ ...options, cwd: project.root });
+        },
+      },
+    }),
+  };
+
+  const reply = await handlers.supervisorStart({ projectRoot: project.root, directive: "Build the login page." });
+  assert.ok(reply.ok, reply.ok ? "" : reply.error);
+  assert.equal(reply.slug, project.slug);
+  assert.equal(reply.projectRoot, project.root);
+
+  assert.equal(wsCreated.length, 1, "the seat is created inside the Project's Paseo workspace");
+  assert.equal(wsCreated[0]!.workspaceId, "ws-panel-main");
+  assert.equal(wsCreated[0]!.provider, "factory-supervisor", "the role provider path — the same id Paseo's native picker launches");
+  assert.equal(wsCreated[0]!.title, "Supervisor");
+  assert.deepEqual(wsCreated[0]!.labels, { seat: "supervisor", project: project.slug });
+  assert.equal(wsCreated[0]!.parent, undefined);
+  assert.deepEqual(fake.sent, [{ agentId: reply.agentId, text: "Build the login page." }], "the directive is the seat's first user message");
+  assert.equal(fake.created.length, 1, "exactly one agent exists — a Lead is never created by a Supervisor start");
+  assert.equal(fake.created.some((agent) => agent.labels?.seat === "lead"), false);
+
+  const reg = readProjectRegistration(stateDir, project.slug);
+  assert.equal(reg?.supervisor, reply.agentId, "the seat is bound like a native-picker Supervisor");
+  assert.equal(reg?.workspaceId, "ws-panel-main");
+  assert.equal(reg?.paseoProjectId, "prj-panel-main");
+  assert.equal(reg?.lead ?? null, null, "no Lead binding appears");
+});
+
+test("supervisor.start: an empty or blank directive starts the seat silently — nothing is sent", async (t) => {
+  const project = makeProject(t, "start-sup-silent");
+  const { handlers, fake } = makeSurface(t, []);
+  const blank = await handlers.supervisorStart({ projectRoot: project.root, directive: "   \n" });
+  assert.ok(blank.ok, blank.ok ? "" : blank.error);
+  assert.equal(fake.created.length, 1);
+  assert.deepEqual(fake.sent, []);
+});
+
+test("supervisor.start: refuses while a Supervisor is live — labelled or native-bound — and creates nothing", async (t) => {
+  const project = makeProject(t, "start-sup-live");
+  const labelled = makeSurface(t, [{ id: "agent-sup-live", labels: { seat: "supervisor", project: project.slug }, title: "Supervisor", cwd: project.root }]);
+  const refusal = await labelled.handlers.supervisorStart({ projectRoot: project.root, directive: "Go" });
+  assert.ok(!refusal.ok);
+  assert.equal(refusal.code, "supervisor-live");
+  assert.equal(labelled.fake.created.length, 0);
+  assert.deepEqual(labelled.fake.sent, [], "a refused start never reaches the live seat with a directive");
+
+  const native = makeSurface(t, [{ id: "native-sup-1", provider: "factory-supervisor", title: "first message", cwd: project.root }]);
+  writeProjectRegistration(native.stateDir, project.slug, { root: project.root, supervisor: "native-sup-1" });
+  const nativeRefusal = await native.handlers.supervisorStart({ projectRoot: project.root });
+  assert.ok(!nativeRefusal.ok);
+  assert.equal(nativeRefusal.code, "supervisor-live");
+  assert.equal(native.fake.created.length, 0);
+});
+
+test("supervisor.start: a revoked Supervisor leaves the seat vacant and Start works again; an unresolvable root is a named refusal", async (t) => {
+  const project = makeProject(t, "start-sup-revoked");
+  const { handlers, fake } = makeSurface(t, [{ id: "agent-sup-old", labels: { seat: "supervisor", project: project.slug }, title: "Supervisor", cwd: project.root }]);
+  assert.ok((await handlers.supervisorRevoke({ projectRoot: project.root })).ok);
+  const started = await handlers.supervisorStart({ projectRoot: project.root, directive: "Resume." });
+  assert.ok(started.ok, started.ok ? "" : started.error);
+  assert.notEqual(started.agentId, "agent-sup-old");
+  assert.equal(fake.created.length, 1);
+
+  const outside = makeTempDir();
+  disposeDir(t, outside);
+  const unknown = await handlers.supervisorStart({ projectRoot: outside });
+  assert.ok(!unknown.ok);
+  assert.equal(unknown.code, "unknown-project");
+});

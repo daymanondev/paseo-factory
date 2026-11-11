@@ -795,6 +795,93 @@ export function ProjectUsageCard({ theme, usage }: { theme: PluginTheme; usage: 
   );
 }
 
+/** The three lanes a Project may override from its panel's `⋯` menu (v0.6.0 W6, ADR 0056). */
+const PROJECT_OVERRIDE_CARDS: LaneCard[] = LANE_CARDS.filter((card) => card.id === "supervisor" || card.id === "lead" || card.id === "worker");
+
+/**
+ * Per-Project Supervisor / Lead / Worker model overrides — the Project menu's
+ * Models section (v0.6.0 W6, ADR 0056). Compact rows over the same picker
+ * modal, Live-Seat Transition Law gate and `lanes.set` act the Models pane
+ * uses; every write targets the Project's own override file. `readOnly` is the
+ * mobile form: the effective models are listed, nothing is editable.
+ */
+export function ProjectModelOverrides({
+  theme,
+  view,
+  actions,
+  modelSyncNote,
+  readOnly,
+}: {
+  theme: PluginTheme;
+  view: FactoryView;
+  actions: Pick<SeatsActions, "setLane" | "resetLanes" | "busy">;
+  modelSyncNote: string | null;
+  readOnly: boolean;
+}) {
+  const [editing, setEditing] = useState<LaneCard | null>(null);
+  const [pending, setPending] = useState<PendingLaneAct | null>(null);
+  const requestLaneChange = (nextLanes: Lanes, run: () => void): void => {
+    const transitions = planLiveSeatTransitions(view.lanes, nextLanes, { supervisor: view.supervisor, lead: view.lead });
+    if (transitions.length === 0) run();
+    else setPending({ transitions, run });
+  };
+  const save = (card: LaneCard, value: string): void => {
+    const lane = card.lanes[0]!;
+    requestLaneChange({ ...view.lanes, [lane]: value }, () => actions.setLane(lane, value));
+    setEditing(null);
+  };
+  return (
+    <View testID="factory-panel-menu-lanes" style={{ gap: SPACING[1.5] }}>
+      {PROJECT_OVERRIDE_CARDS.map((card) => {
+        const raw = card.value(view.lanes);
+        return (
+          <View key={card.id} testID={`factory-panel-lane-${card.id}`} style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[2] }}>
+            <Text style={{ ...text(theme, "label"), minWidth: 76 }}>{card.title}</Text>
+            <Text style={{ ...text(theme, "code"), flexShrink: 1 }} numberOfLines={1}>{raw}</Text>
+            {readOnly ? null : (
+              <Btn theme={theme} small testID={`factory-panel-lane-change-${card.id}`} label="Change" tone="foregroundMuted" disabled={actions.busy} onPress={() => setEditing(card)} />
+            )}
+          </View>
+        );
+      })}
+      {modelSyncNote !== null ? <Text style={text(theme, "meta")}>{modelSyncNote}</Text> : null}
+      <Text style={text(theme, "meta")}>
+        {view.hasProjectLaneOverride ? "This Project overrides the machine defaults." : "Inheriting the machine defaults."}
+      </Text>
+      {!readOnly && view.hasProjectLaneOverride ? (
+        <Btn theme={theme} small testID="factory-panel-lane-reset" label="Reset to machine default" tone="foregroundMuted" disabled={actions.busy} onPress={() => requestLaneChange(view.machineLanes, actions.resetLanes)} />
+      ) : null}
+      {readOnly ? null : (
+        <>
+          <Modal
+            open={editing !== null}
+            onOpenChange={(open) => (open ? undefined : setEditing(null))}
+            title={editing === null ? "" : `Configure ${editing.title} Lane`}
+            icon={undefined}
+          >
+            <Modal.Content>
+              {editing === null ? null : (
+                <LaneModalBody theme={theme} view={view} card={editing} busy={actions.busy} onSave={(value) => save(editing, value)} onClose={() => setEditing(null)} />
+              )}
+            </Modal.Content>
+          </Modal>
+          <LiveSeatConfirmModal
+            theme={theme}
+            pending={pending}
+            busy={actions.busy}
+            onConfirm={() => {
+              const run = pending?.run;
+              setPending(null);
+              if (run !== undefined) run();
+            }}
+            onCancel={() => setPending(null)}
+          />
+        </>
+      )}
+    </View>
+  );
+}
+
 export function SeatsPane({
   theme,
   view,

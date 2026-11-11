@@ -4,8 +4,11 @@
  * component, two hosts. The workspace panel renders the server-projected
  * Project panel (project-panel.tsx — a pure render of `view.panel`); the
  * Vault / Plugins / Models panes stay reachable beneath it (desktop only)
- * until the Settings screen (W8) and the panel's `⋯` menu (W6) relocate
- * them. The shell owns the snapshot poll and every RPC action (lanes.set,
+ * until the Settings screen (W8) relocates them. The panel's actions (v0.6.0
+ * W6): Rotate Lead, Revoke Supervisor, Start Supervisor (opens the seat it
+ * creates) and the header `⋯` Project menu (per-Project models, skill packs,
+ * Open Design link, two-step Reset / Delete) — all RPC wiring lives here; on
+ * mobile the menu is view-only and Start / Sync / Studio never mount. The shell owns the snapshot poll and every RPC action (lanes.set,
  * the v0.0.38 batch/profile/reset lane acts — lanes.setBatch, lanes.reset,
  * profiles.save/apply/delete (ADR 0026 §2/§5) — plugins, Vault, Skill Hub);
  * the panes are pure renders of the view plus action callbacks. The Project
@@ -21,7 +24,7 @@ import { ScrollView, useToast } from "@getpaseo/plugin/client/ui";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Text, View } from "react-native";
 import { z } from "zod";
-import { skillsImport, skillsTogglePack, lanesReset, lanesSet, lanesSetBatch, helperMcpsSyncAndProbe, helperMcpsSetEnabled, pluginsInstall, pluginsManage, pluginsCheckUpdates, profilesApply, profilesDelete, profilesSave, snapshot, vaultConfigure, vaultHydrate, vaultImport, vaultSync } from "../../shared/rpc.ts";
+import { skillsImport, skillsTogglePack, lanesReset, lanesSet, lanesSetBatch, leadRotate, helperMcpsSyncAndProbe, helperMcpsSetEnabled, pluginsInstall, pluginsManage, pluginsCheckUpdates, profilesApply, profilesDelete, profilesSave, projectDelete, projectReset, snapshot, supervisorRevoke, supervisorStart, vaultConfigure, vaultHydrate, vaultImport, vaultSync } from "../../shared/rpc.ts";
 import type { ManageablePluginId } from "../../shared/companions.ts";
 import type { FactoryView, LaneName } from "../../shared/view.ts";
 import { Btn, Card, Pill, TabBar } from "../kit/pill.tsx";
@@ -30,11 +33,12 @@ import { RADIUS, SPACING, text, tint } from "../kit/theme.ts";
 import { useNow, usePoll, pollEvery } from "../kit/poll.ts";
 import { OpenDesignControl } from "./open-design.tsx";
 import { ProjectPanel } from "./project-panel.tsx";
+import { ProjectMenu } from "./project-menu.tsx";
 import { VaultPane, isVaultActName } from "./vault.tsx";
 import type { VaultNote } from "./vault.tsx";
 import { actionFeedback, createResponseOrder } from "./vault-feedback.ts";
 import type { VaultStatusView } from "../../shared/view.ts";
-import { SeatsPane } from "./seats.tsx";
+import { ProjectModelOverrides, SeatsPane } from "./seats.tsx";
 import { PluginsPane } from "./plugins.tsx";
 import { isCoreSelfRestartError, resolveCoreRestartWatch } from "./plugin-feedback.ts";
 import type { ActivePluginAct, PluginsNote } from "./plugin-feedback.ts";
@@ -76,6 +80,14 @@ export function FactoryShell({
   const toast = useToast();
   const snapshotCall = useRpc(snapshot);
   const lanesSetCall = useRpc(lanesSet);
+  // The panel's seat and Project acts (v0.6.0 W6, ADR 0056): Rotate, Revoke,
+  // Start Supervisor (the ADR 0017 amendment — the only seat the plugin may
+  // create), Reset and Delete. There is no Lead start and no accept RPC here.
+  const leadRotateCall = useRpc(leadRotate);
+  const supervisorRevokeCall = useRpc(supervisorRevoke);
+  const supervisorStartCall = useRpc(supervisorStart);
+  const projectResetCall = useRpc(projectReset);
+  const projectDeleteCall = useRpc(projectDelete);
   // The v0.0.38 lane acts (ADR 0026 §2/§5): one useRpc per contract, every
   // dispatch through act() — the SeatsPane stays a pure render of the view
   // plus action callbacks (the panes' law).
@@ -282,6 +294,33 @@ export function FactoryShell({
   const openAgent = (agentId: string): void => {
     navigation?.openAgent({ agentId, serverId });
   };
+  const rotateLead = (): void => {
+    if (projectRoot === undefined) return;
+    void act("Rotate Lead", () => leadRotateCall({ projectRoot }));
+  };
+  const revokeSupervisor = (): void => {
+    if (projectRoot === undefined) return;
+    void act("Revoke Supervisor", () => supervisorRevokeCall({ projectRoot }));
+  };
+  /** Start Supervisor on a vacant seat; success opens the conversation it created (desktop only). */
+  const startSupervisor = (directive: string): void => {
+    if (projectRoot === undefined || mobile) return;
+    const trimmed = directive.trim();
+    void act("Start Supervisor", async () => {
+      const reply = await supervisorStartCall({ projectRoot, ...(trimmed === "" ? {} : { directive: trimmed }) });
+      if (reply.ok) navigation?.openAgent({ agentId: reply.agentId, serverId });
+      return reply;
+    });
+  };
+  const resetProject = (): void => {
+    if (projectRoot === undefined) return;
+    void act("Reset Project", () => projectResetCall({ projectRoot }));
+  };
+  const deleteProject = (): void => {
+    const target = view.project;
+    if (target === null) return;
+    void act("Delete Project", () => projectDeleteCall({ projectRoot: target.root, projectSlug: target.slug, project: target.slug }));
+  };
   const incompleteTools = (view.companionTools ?? []).filter((t) => t.status !== "running" || t.error !== null);
   const isInstallingPrereqs = activePluginAct !== null && activePluginAct.kind === "install" && activePluginAct.target === "all";
   /** Installs every required skill & tool — the Needs-you item's action and the Settings banner's button. */
@@ -352,10 +391,55 @@ export function FactoryShell({
             mobile={mobile}
             now={now}
             daemonError={view.daemonError}
-            actions={{ openAgent, installPrerequisites, busy: busy || activePluginAct !== null }}
+            actions={{ openAgent, installPrerequisites, rotateLead, revokeSupervisor, startSupervisor, busy: busy || activePluginAct !== null }}
             openDesignActions={
-              view.project !== null && view.project.missingRoot !== true ? (
-                <OpenDesignControl key={view.project.root} theme={theme} root={view.project.root} sourceKey={`${serverId ?? "local"}:${view.project.root}`} onChanged={refresh} />
+              !mobile && view.project !== null && view.project.missingRoot !== true ? (
+                <OpenDesignControl key={view.project.root} part="card" theme={theme} root={view.project.root} sourceKey={`${serverId ?? "local"}:${view.project.root}`} onChanged={refresh} />
+              ) : null
+            }
+            menu={
+              view.panel.isProject && view.project !== null ? (
+                <ProjectMenu
+                  theme={theme}
+                  mobile={mobile}
+                  busy={busy || activePluginAct !== null}
+                  missingRoot={view.project.missingRoot === true}
+                  modelsSlot={
+                    <ProjectModelOverrides
+                      theme={theme}
+                      view={view}
+                      modelSyncNote={laneNote}
+                      readOnly={mobile}
+                      actions={{
+                        busy,
+                        setLane: (lane: LaneName, value) => {
+                          if (projectRoot === undefined) return;
+                          void act("Lane", async () => {
+                            const reply = await lanesSetCall({ lane, value, projectRoot });
+                            if (reply.ok) setLaneNote(`${lane} → ${reply.lanes[lane]} (${reply.modelSync})`);
+                            return reply;
+                          });
+                        },
+                        resetLanes: () => {
+                          if (projectRoot === undefined) return;
+                          void act("Reset to Machine Default", () => lanesResetCall({ projectRoot }));
+                        },
+                      }}
+                    />
+                  }
+                  openDesignSlot={
+                    mobile ? null : (
+                      <OpenDesignControl key={view.project.root} part="menu" theme={theme} root={view.project.root} sourceKey={`${serverId ?? "local"}:${view.project.root}`} onChanged={refresh} />
+                    )
+                  }
+                  skillPacks={view.skillHub?.projectPacks ?? []}
+                  togglePack={(id, enabled) => {
+                    if (projectRoot === undefined) return;
+                    void act("Project Skill Pack", () => skillsTogglePackCall({ projectRoot, pack: id as "expo" | "firebase" | "zcode-3d" | "science", enabled }));
+                  }}
+                  resetProject={resetProject}
+                  deleteProject={deleteProject}
+                />
               ) : null
             }
           />
