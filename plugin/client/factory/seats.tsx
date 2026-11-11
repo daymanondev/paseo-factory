@@ -51,7 +51,7 @@ function seatLabel(seat: "supervisor" | "lead"): string {
 }
 
 /** Which lanes a card covers — one value written to every lane the card names. */
-interface LaneCard {
+export interface LaneCard {
   id: string;
   title: string;
   icon: string;
@@ -61,7 +61,7 @@ interface LaneCard {
   value: (lanes: Lanes) => string;
 }
 
-const LANE_CARDS: LaneCard[] = [
+export const LANE_CARDS: LaneCard[] = [
   {
     id: "supervisor",
     title: "Supervisor",
@@ -136,7 +136,7 @@ function modelPrefixOf(modelId: string): string | null {
 }
 
 /** The live picker: provider buttons, searchable/grouped model list, thinking level selector, and preview. */
-function LaneModalBody({
+export function LaneModalBody({
   theme,
   view,
   card,
@@ -796,7 +796,7 @@ export function ProjectUsageCard({ theme, usage }: { theme: PluginTheme; usage: 
 }
 
 /** The three lanes a Project may override from its panel's `⋯` menu (v0.6.0 W6, ADR 0056). */
-const PROJECT_OVERRIDE_CARDS: LaneCard[] = LANE_CARDS.filter((card) => card.id === "supervisor" || card.id === "lead" || card.id === "worker");
+export const PROJECT_OVERRIDE_CARDS: LaneCard[] = LANE_CARDS.filter((card) => card.id === "supervisor" || card.id === "lead" || card.id === "worker");
 
 /**
  * Per-Project Supervisor / Lead / Worker model overrides — the Project menu's

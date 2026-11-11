@@ -211,7 +211,7 @@ test("mobile hides the prerequisite install (a settings write) but keeps convers
   assert.doesNotMatch(mobile, />Install</);
 });
 
-test("a workspace that is not a Project says to set it up on Desktop on mobile, and shows folder readiness on desktop", async () => {
+test("a workspace that is not a Project says to set it up on Desktop on mobile, and mounts the onboarding wizard on desktop", async () => {
   const notProject = makePanel({
     isProject: false, name: null, summary: "Not a Factory Project yet", seats: null, openDesign: null,
     onboarding: { folder: "/work/new-app", gitRepo: true, hasCommits: false, existingLead: false },
@@ -220,8 +220,7 @@ test("a workspace that is not a Project says to set it up on Desktop on mobile, 
   assert.ok(hasHook(mobile, "factory-panel-onboarding"));
   assert.match(mobile, /Set this Project up on Paseo Desktop\./);
   const desktop = await render(notProject, { mobile: false });
-  assert.match(desktop, /\/work\/new-app/);
-  assert.match(desktop, /No commits yet/);
+  assert.match(desktop, /Set up Factory for this folder/);
   assert.doesNotMatch(desktop, /Set this Project up on Paseo Desktop/);
   assert.equal(hasHook(desktop, "factory-panel-needs-you") || hasHook(desktop, "factory-panel-seat-lead") || hasHook(desktop, "factory-panel-od"), false, "no Project, no panel sections");
 });

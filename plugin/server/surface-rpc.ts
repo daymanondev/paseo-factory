@@ -34,12 +34,12 @@ export { acceptanceSummary, archiveAcceptedTaskWorkspace } from "./commands.ts";
  */
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
 import { CorrelationRegistry } from "./core/correlations.ts";
 import { FactoryError } from "./core/errors.ts";
 import type { Factory } from "./core/factory.ts";
 import { readLeadMailbox } from "./core/mailbox.ts";
-import { LANE_NAMES, loadLanes, parseLane, saveLanes, projectLanesPath, listLaneProfiles, getLaneProfile, readLaneProfilesFile, saveLaneProfile, deleteLaneProfile, applyLaneProfile, saveLanesBatch, resetProjectLanes } from "./core/lanes.ts";
+import { LANE_NAMES, laneError, loadLanes, migrateLegacyZcodeLane, parseLane, saveLanes, projectLanesPath, listLaneProfiles, getLaneProfile, readLaneProfilesFile, saveLaneProfile, deleteLaneProfile, applyLaneProfile, saveLanesBatch, resetProjectLanes } from "./core/lanes.ts";
 import type { LaneProfile } from "./core/lanes.ts";
 import { listProjectRegistrations, projectNotebookPath, projectStateDir, readProjectRegistration, resolveOrBootstrapProject, resolveProject } from "./core/project.ts";
 import type { ProjectResolution } from "./core/project.ts";
@@ -89,7 +89,8 @@ import {
   profilesApply,
   profilesDelete,
   profilesSave,
-  projectAdd,
+  onboardingCommit,
+  onboardingInspect,
   projectDelete,
   projectReset,
   snapshot,
@@ -1739,6 +1740,49 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     return installOrUpdateExpoSkillPack({ userHome, action: 'update', runner: deps.companionToolRunner });
   };
 
+  /**
+   * Registers the Project a folder names (the onboarding commit's first write):
+   * `resolveOrBootstrapProject` initialises Git when the folder is not a
+   * repository (the caller has already refused that unless the Owner asked for
+   * it) and gives an unborn repository its first commit; `project.json` is
+   * written; and, when the daemon exposes it, Paseo's workspace registry is
+   * synchronised so the Supervisor seat lands in the folder's own workspace.
+   */
+  const registerProjectFolder = async (
+    folder: string,
+    context?: SurfaceCallContext,
+  ): Promise<
+    | { ok: true; slug: string; root: string; name: string; bootstrapped: boolean }
+    | { ok: false; code: string; error: string }
+  > => {
+    const resolved = resolveOrBootstrapProject(folder, { stateDir: deps.stateDir, paseoHome: deps.home });
+    if (!resolved.ok) {
+      return failure(resolved.code, `${resolved.reason} — open the Factory panel from a different workspace folder`);
+    }
+    ensureProjectRegistered(deps.stateDir, resolved);
+    const daemon = resolveDaemon(context);
+    const existingReg = readProjectRegistration(deps.stateDir, resolved.slug);
+    let workspaceId = existingReg?.workspaceId;
+    let paseoProjectId = existingReg?.paseoProjectId;
+    if (daemon.workspaces?.open !== undefined && (workspaceId === undefined || paseoProjectId === undefined)) {
+      try {
+        const opened = await daemon.workspaces.open({ cwd: resolved.root });
+        if (workspaceId === undefined && typeof opened?.id === "string" && opened.id !== "") workspaceId = opened.id;
+        if (paseoProjectId === undefined && typeof opened?.projectId === "string" && opened.projectId !== "") paseoProjectId = opened.projectId;
+        if (workspaceId !== undefined || paseoProjectId !== undefined) {
+          writeProjectRegistration(deps.stateDir, resolved.slug, {
+            root: resolved.root,
+            ...(workspaceId !== undefined ? { workspaceId } : {}),
+            ...(paseoProjectId !== undefined ? { paseoProjectId } : {}),
+          });
+        }
+      } catch (err) {
+        log(`onboarding: workspaces.open(${resolved.root}) did not resolve (${messageOf(err)})`);
+      }
+    }
+    return { ok: true, slug: resolved.slug, root: resolved.root, name: resolved.name, bootstrapped: resolved.bootstrapped };
+  };
+
   const handlers = {
     async openDesignCatalog(_input: {}) {
       try { return { ok: true as const, projects: discoverOpenDesignProjects(resolveSurfaceUserHome()) }; }
@@ -2398,78 +2442,148 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     },
 
     /**
-     * Add or select a Project directory from the Factory surface (v0.0.35, ADR 0024):
-     * automatically bootstraps Git (`git init` + initial empty commit) when given an
-     * existing non-Git folder (or an unborn Git repo without `HEAD`), registers
-     * `<stateDir>/projects/<slug>/project.json`, synchronizes Paseo's workspace
-     * registry when `daemon.workspaces.open` is available, and returns the scoped snapshot.
+     * The onboarding wizard's read-only look at the workspace's folder (v0.6.0
+     * W7, ADR 0056): Git repository yes/no, whether it holds a commit, whether a
+     * Project is already registered for it, a Lead or Supervisor already live
+     * there, and the prerequisite status the Install-all step reads. It uses the
+     * folder the panel is bound to — no Finder dialog, no pasted path — and it
+     * never writes: no `git init`, no registration, no state directory.
      */
-    async projectAdd(
-      input: { projectRoot?: string; path?: string },
-      context?: SurfaceCallContext,
-    ) {
-      const rawPath = (input.projectRoot ?? input.path ?? "").trim();
-      if (rawPath === "") {
-        return failure("missing-directory", "project directory path cannot be empty");
+    async onboardingInspect(input: { folder: string }, context?: SurfaceCallContext) {
+      const raw = (input.folder ?? "").trim();
+      if (raw === "") {
+        return failure("missing-directory", "there is no folder to inspect — open the Factory panel from a workspace folder");
       }
-      const resolved = resolveOrBootstrapProject(rawPath, {
-        stateDir: deps.stateDir,
-        paseoHome: deps.home,
-      });
-      if (!resolved.ok) {
-        return failure(resolved.code, resolved.reason);
+      const abs = resolve(raw);
+      let isDirectory = false;
+      try {
+        isDirectory = statSync(abs).isDirectory();
+      } catch {
+        return failure("missing-directory", `${abs} does not exist on disk — open the Factory panel from an existing workspace folder`);
       }
-      ensureProjectRegistered(deps.stateDir, resolved);
-      const daemon = resolveDaemon(context);
-      const existingReg = readProjectRegistration(deps.stateDir, resolved.slug);
-      let workspaceId = existingReg?.workspaceId;
-      let paseoProjectId = existingReg?.paseoProjectId;
-      if (daemon.workspaces?.open !== undefined && (workspaceId === undefined || paseoProjectId === undefined)) {
+      if (!isDirectory) {
+        return failure("missing-directory", `${abs} is not a folder — open the Factory panel from a workspace folder`);
+      }
+      const folder = realpathSafe(abs);
+      const git = inspectGitReadiness(folder);
+      let registered = false;
+      let existingLead = false;
+      let existingSupervisor = false;
+      const project = git.gitRepo ? resolveProject(folder) : undefined;
+      if (project !== undefined && project.ok) {
+        registered = readProjectRegistration(deps.stateDir, project.slug) !== undefined;
         try {
-          const opened = await daemon.workspaces.open({ cwd: resolved.root });
-          if (workspaceId === undefined && typeof opened?.id === "string" && opened.id !== "") {
-            workspaceId = opened.id;
-          }
-          if (paseoProjectId === undefined && typeof opened?.projectId === "string" && opened.projectId !== "") {
-            paseoProjectId = opened.projectId;
-          }
-          if (workspaceId !== undefined || paseoProjectId !== undefined) {
-            writeProjectRegistration(deps.stateDir, resolved.slug, {
-              root: resolved.root,
-              ...(workspaceId !== undefined ? { workspaceId } : {}),
-              ...(paseoProjectId !== undefined ? { paseoProjectId } : {}),
-            });
-          }
+          const daemon = resolveDaemon(context);
+          existingLead = (await seatOf(daemon, "lead", project.slug)) !== undefined;
+          existingSupervisor = (await seatOf(daemon, "supervisor", project.slug)) !== undefined;
         } catch (err) {
-          log(`project.add: workspaces.open(${resolved.root}) did not resolve (${messageOf(err)})`);
+          return failure("daemon-unavailable", `cannot read the daemon's agents to look for a running Lead — ${messageOf(err)}; check that Paseo is running, then try again`);
         }
       }
-      const snap = await this.snapshot({ projectRoot: resolved.root }, context);
-      const project: ProjectView =
-        snap.ok && snap.view.project !== null
-          ? { ...snap.view.project, missingRoot: false }
-          : {
-              slug: resolved.slug,
-              root: resolved.root,
-              name: resolved.name,
-              commonDir: resolved.gitCommonDir,
-              missingRoot: false,
-              supervisorId: null,
-              leadId: null,
-            };
-      const summary = resolved.bootstrapped
-        ? `Initialized Git repository and added project ${resolved.name} (${resolved.slug}).`
-        : `Added project ${resolved.name} (${resolved.slug}).`;
-      log(`project.add: ${summary}`);
+      const prerequisites = buildCompanionToolsView().map((tool) => {
+        const ready = tool.status === "running" && tool.error === null;
+        return { id: tool.id, title: tool.title, ready, detail: ready ? null : (tool.error ?? "not installed") };
+      });
       return {
         ok: true as const,
-        path: resolved.root,
-        projectRoot: resolved.root,
-        slug: resolved.slug,
-        project,
-        bootstrapped: resolved.bootstrapped,
+        folder,
+        gitRepo: git.gitRepo,
+        hasCommits: git.hasCommits,
+        registered,
+        existingLead,
+        existingSupervisor,
+        prerequisites,
+        missingPrerequisites: prerequisites.filter((item) => !item.ready).map((item) => item.title),
+      };
+    },
+
+    /**
+     * The onboarding Start (v0.6.0 W7, ADR 0056 + the ADR 0017 amendment). Every
+     * refusal that can be decided up front is decided BEFORE anything is written
+     * — a live Lead or Supervisor, a non-Git folder without `initGit`, an
+     * unusable lane — so a refused commit changes nothing. Then, in an order a
+     * retry survives: register the Project (initialising Git only when asked, the
+     * same bootstrap law `resolveOrBootstrapProject` always applied), persist the
+     * model choices that differ from the machine defaults, link the Open Design
+     * project, and last start the Supervisor through the shared seat-start path
+     * with the directive as its first message. It never creates a Lead.
+     */
+    async onboardingCommit(
+      input: { folder: string; initGit?: boolean; models?: { supervisor?: string; lead?: string; worker?: string }; openDesignProjectId?: string; directive?: string },
+      context?: SurfaceCallContext,
+    ) {
+      const inspected = await this.onboardingInspect({ folder: input.folder }, context);
+      if (!inspected.ok) return inspected;
+      if (inspected.existingLead) {
+        return failure("lead-live", `A Lead is already running in ${inspected.folder} — onboarding never creates a second chain over a live one; ask that Project's Supervisor to retire it, or open a different folder`);
+      }
+      if (inspected.existingSupervisor) {
+        return failure("supervisor-live", `A Supervisor is already live in ${inspected.folder} — open it from Paseo, or revoke it first, then set the Project up again`);
+      }
+      if (!inspected.gitRepo && input.initGit !== true) {
+        return failure("not-a-git-repo", `${inspected.folder} is not a Git repository — choose "Initialise Git" in step 1 (worktrees and the Gate need one), then Start again`);
+      }
+      let providers: ProviderEntry[] = [];
+      try {
+        providers = await resolveProviders(resolveDaemon(context));
+      } catch {
+        // best-effort provider catalog lookup
+      }
+      const chosen: Partial<Record<LaneName, string>> = {};
+      for (const lane of ["supervisor", "lead", "worker"] as const) {
+        const value = input.models?.[lane]?.trim();
+        if (value === undefined || value === "") continue;
+        const sanitized = migrateLegacyZcodeLane(sanitizeLaneWithProviders(value, providers));
+        const problem = laneError(lane, sanitized);
+        if (problem !== undefined) {
+          return failure("invalid-lane", `${problem} — go back to step 3 and pick a provider and model for the ${lane}`);
+        }
+        chosen[lane] = sanitized;
+      }
+
+      const registered = await registerProjectFolder(inspected.folder, context);
+      if (!registered.ok) return registered;
+
+      const effective = loadLanes(deps.stateDir, registered.slug);
+      if (!effective.ok) return failure("lanes-unreadable", `${effective.reason} — repair lanes.json, then Start again`);
+      const changed: Partial<Record<LaneName, string>> = {};
+      for (const lane of Object.keys(chosen) as LaneName[]) {
+        if (chosen[lane] !== effective.lanes[lane]) changed[lane] = chosen[lane];
+      }
+      if (Object.keys(changed).length > 0) {
+        try {
+          saveLanesBatch(deps.stateDir, changed, registered.slug);
+        } catch (err) {
+          return failure(codeOf(err), `${messageOf(err)} — the Project is registered; fix the model in step 3 and Start again`);
+        }
+      }
+
+      if (input.openDesignProjectId !== undefined && input.openDesignProjectId.trim() !== "") {
+        const linked = await this.openDesignSync({ projectRoot: registered.root, projectId: input.openDesignProjectId.trim() });
+        if (!linked.ok) {
+          return failure("open-design-failed", `Open Design link failed: ${linked.error} — check the design project still exists in Open Design, then Start again (or clear the Open Design choice to start without one)`);
+        }
+      }
+
+      const directive = input.directive?.trim();
+      const started = await startSupervisor(
+        { projectRoot: registered.root, ...(directive !== undefined && directive !== "" ? { directive } : {}) },
+        context,
+      );
+      if (!started.ok) {
+        return failure(started.code, `${started.error} — the Project is registered, so the panel now offers Start Supervisor; or Start again here`);
+      }
+      const summary = registered.bootstrapped
+        ? `Initialised Git and set up ${registered.name} (${registered.slug}); the Supervisor is running.`
+        : `Set up ${registered.name} (${registered.slug}); the Supervisor is running.`;
+      log(`onboarding: ${summary}`);
+      return {
+        ok: true as const,
+        agentId: started.agentId,
+        projectRoot: registered.root,
+        slug: registered.slug,
+        bootstrapped: registered.bootstrapped,
         summary,
-        ...(snap.ok ? { view: snap.view } : {}),
       };
     },
 
@@ -3317,7 +3431,8 @@ export function registerSurfaceRpc(
   server.handle(supervisorRevoke, (input, context) => handlers.supervisorRevoke(input, pass(context)));
   server.handle(leadEnsure, (input, context) => handlers.leadEnsure(input, pass(context)));
   server.handle(leadRotate, (input, context) => handlers.leadRotate(input, pass(context)));
-  server.handle(projectAdd, (input, context) => handlers.projectAdd(input, pass(context)));
+  server.handle(onboardingInspect, (input, context) => handlers.onboardingInspect(input, pass(context)));
+  server.handle(onboardingCommit, (input, context) => handlers.onboardingCommit(input, pass(context)));
   server.handle(projectDelete, (input, context) => handlers.projectDelete(input, pass(context)));
   server.handle(projectReset, (input, context) => handlers.projectReset(input, pass(context)));
   server.handle(leadDispatch, (input, context) => handlers.leadDispatch(input, pass(context)));
