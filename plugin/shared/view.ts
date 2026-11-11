@@ -10,7 +10,7 @@
 import { z } from "zod";
 
 /** Bump when the shape changes in a way an older client cannot render. */
-export const FACTORY_VIEW_VERSION = 3 as const;
+export const FACTORY_VIEW_VERSION = 4 as const;
 
 /** The five model-bearing roles — mirrors src/lanes.ts (kept by test/lanes.test.ts). */
 export const LaneNameSchema = z.enum(["supervisor", "lead", "worker", "watch", "freshEyes"]);
@@ -153,6 +153,8 @@ export const TaskViewSchema = z.object({
    */
   usageModel: z.string().nullable().optional(),
   needsHumanReason: z.string().nullable(),
+  /** The Peer's SLP disposition from the Contract (ADR 0053 §3); `engineer` when the Contract names none. */
+  disposition: z.enum(["engineer", "architect", "reviewer", "scout"]).optional(),
   /** Choke counts for the Evidence Pills: allowed / denied / git blocks. */
   choke: z.object({ allowed: z.number().int(), denied: z.number().int(), blocked: z.number().int() }),
   attempts: z.array(AttemptViewSchema),
@@ -191,6 +193,10 @@ export const AgentViewSchema = z.object({
   /** How many mail items wait queued in the Project's `mailbox.jsonl` fold — Lead-only. */
   queuedMailCount: z.number().optional(),
   requiresAttention: z.boolean().nullable(),
+  /** Why the daemon flags the agent for attention (`permission`, `error`, `finished`, …) — the panel reads `permission` as a stuck seat. */
+  attentionReason: z.string().nullable().optional(),
+  /** The daemon's last error line for the agent, when it reported one. */
+  lastError: z.string().nullable().optional(),
   cwd: z.string().nullable(),
 });
 export type AgentView = z.infer<typeof AgentViewSchema>;
@@ -409,7 +415,96 @@ export const SkillHubViewSchema = z.object({
 });
 export type SkillHubView = z.infer<typeof SkillHubViewSchema>;
 
+// ---- the Project panel view-model (v0.6.0, ADR 0056 §5) ---------------------------------------------
+
+/** The one primary action a Needs-you item carries — a target the client maps to a jump, never an Accept. */
+export const PanelNeedsYouActionSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("open-agent"), agentId: z.string(), label: z.string() }),
+  z.object({ kind: z.literal("install-prerequisites"), label: z.string() }),
+  z.object({ kind: z.literal("open-design"), label: z.string() }),
+]);
+export type PanelNeedsYouAction = z.infer<typeof PanelNeedsYouActionSchema>;
+
+/** The Owner-actionable item kinds, in the order the list shows them. */
+export const PANEL_NEEDS_YOU_KINDS = ["needs-human", "attempt-ceiling", "seat-stuck", "handoff-stuck", "prerequisites", "open-design-broken"] as const;
+
+export const PanelNeedsYouItemSchema = z.object({
+  key: z.string(),
+  kind: z.enum(PANEL_NEEDS_YOU_KINDS),
+  title: z.string(),
+  /** A needs-human question, a gate note, a daemon error line — null when the title says it all. */
+  detail: z.string().nullable(),
+  /** Null only when the seat that resolves the item is vacant (the vacant row carries the way forward). */
+  action: PanelNeedsYouActionSchema.nullable(),
+});
+export type PanelNeedsYouItem = z.infer<typeof PanelNeedsYouItemSchema>;
+
+/** Colour is for exceptions: `normal` draws no pill, `waiting` is amber, `error` is red. */
+export const PanelToneSchema = z.enum(["normal", "waiting", "error"]);
+export type PanelTone = z.infer<typeof PanelToneSchema>;
+
+export const PanelSeatRowSchema = z.object({
+  role: z.enum(["supervisor", "lead"]),
+  vacant: z.boolean(),
+  agentId: z.string().nullable(),
+  /** Plain-language status — working, idle, error, waiting for permission. */
+  statusLabel: z.string(),
+  tone: PanelToneSchema,
+  model: z.string().nullable(),
+  /** The vacancy sentence (or a daemon error line for a live seat); null otherwise. */
+  hint: z.string().nullable(),
+  /** The Lead's context-window reading against the 128k handoff mark — Lead only. */
+  context: z.object({ usedTokens: z.number().nullable(), markTokens: z.number(), label: z.string(), fraction: z.number().nullable() }).nullable(),
+  /** The Lead handoff state in words, with the queued mail count — Lead only. */
+  handoff: z.object({ state: z.enum(["normal", "rotation_pending", "handing_over"]), label: z.string(), queuedMailCount: z.number().int() }).nullable(),
+});
+export type PanelSeatRow = z.infer<typeof PanelSeatRowSchema>;
+
+export const PanelPeerRowSchema = z.object({
+  agentId: z.string(),
+  task: z.string(),
+  /** `Peer · T-08` — the name the Owner reads. */
+  title: z.string(),
+  disposition: z.enum(["engineer", "architect", "reviewer", "scout"]),
+  statusLabel: z.string(),
+  tone: PanelToneSchema,
+  model: z.string().nullable(),
+});
+export type PanelPeerRow = z.infer<typeof PanelPeerRowSchema>;
+
+export const PanelOpenDesignSchema = z.object({
+  state: z.enum(["unlinked", "linked", "broken"]),
+  projectName: z.string().nullable(),
+  syncedAt: z.string().nullable(),
+  /** Why a link is broken. */
+  detail: z.string().nullable(),
+});
+export type PanelOpenDesign = z.infer<typeof PanelOpenDesignSchema>;
+
+/** What the onboarding wizard needs to know about a folder that is not yet a Project. */
+export const PanelOnboardingSchema = z.object({
+  folder: z.string().nullable(),
+  gitRepo: z.boolean(),
+  hasCommits: z.boolean(),
+  existingLead: z.boolean(),
+});
+export type PanelOnboarding = z.infer<typeof PanelOnboardingSchema>;
+
+/** The workspace panel's whole world: header, Needs you, Seats, Open Design — or the not-a-Project readiness. */
+export const PanelViewSchema = z.object({
+  isProject: z.boolean(),
+  name: z.string().nullable(),
+  summary: z.string(),
+  needsYou: z.array(PanelNeedsYouItemSchema),
+  seats: z.object({ supervisor: PanelSeatRowSchema, lead: PanelSeatRowSchema, peers: z.array(PanelPeerRowSchema) }).nullable(),
+  openDesign: PanelOpenDesignSchema.nullable(),
+  onboarding: PanelOnboardingSchema.nullable(),
+});
+export type PanelView = z.infer<typeof PanelViewSchema>;
+
 export const FactoryViewSchema = z.object({
+  /** The Project panel's view-model, projected server-side — the client only renders it (v0.6.0, ADR 0056). */
+  panel: PanelViewSchema,
   skillHub: SkillHubViewSchema.optional(),
   version: z.literal(FACTORY_VIEW_VERSION),
   stateDir: z.string(),

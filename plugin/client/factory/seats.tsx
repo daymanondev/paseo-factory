@@ -1,14 +1,11 @@
-import { SeatNode, AgentCard } from "./seat-card.tsx";
 /**
- * Tab 2 — Seats & Models (ADR 0009 §2; the Lead lane and live Lead seat
- * arrive in v0.0.14, ADR 0010 §2): the Lane Profiles bar (v0.0.38, ADR 0026
- * §2) above four Lane Cards (Supervisor, Lead, Default Worker, Watch)
- * opening the live provider/model/thinking picker modal, and below them the
- * standing seats — Supervisor, Lead, working Agents — with Open
- * (navigation.openAgent), Revoke Supervisor, and Rotate Lead on live seats
- * (v0.0.27, ADR 0017 §3); vacant seats carry their picker hints — the
- * Supervisor starts from Paseo's native New Chat picker, the Lead is spawned
- * automatically by the Supervisor. A multi-lane card saves through ONE
+ * Models pane — the interim Seats & Models tab (ADR 0009 §2; v0.6.0 W5,
+ * ADR 0056): the Lane Profiles bar (v0.0.38, ADR 0026 §2) above four Lane
+ * Cards (Supervisor, Lead, Default Worker, Watch) opening the live
+ * provider/model/thinking picker modal, plus the Project usage card. The
+ * standing seats moved onto the Project panel's seat rows (project-panel.tsx);
+ * the Settings screen (W8) and the panel's `⋯` menu (W6) relocate this pane.
+ * A multi-lane card saves through ONE
  * atomic setLanesBatch RPC (v0.0.38, ADR 0026 §5 — the dual-RPC race is
  * gone), and any lane act that moves a live Supervisor/Lead seat crosses
  * the Live-Seat Transition Law first (ADR 0026 §3): no impact → straight
@@ -42,10 +39,6 @@ export interface SeatsActions {
   deleteProfile(profileId: string): void;
   /** Remove the Project's lane override so it inherits the machine table again. */
   resetLanes(): void;
-  /** Retire the Project's Lead (cancel + archive) so the next dispatch starts fresh. */
-  rotateLead(): void;
-  revokeSupervisor(): void;
-  openAgent(agentId: string): void;
   busy: boolean;
 }
 
@@ -822,7 +815,6 @@ export function SeatsPane({
   const [deletingProfileId, setDeletingProfileId] = useState<string | null>(null);
   /** The Live-Seat Transition Law's parked act (v0.0.38, ADR 0026 §3). */
   const [pending, setPending] = useState<PendingLaneAct | null>(null);
-  const workers = view.agents.filter((agent) => agent.id !== view.supervisor?.id && agent.id !== view.lead?.id);
 
   // The two-step confirm auto-rearms after 5s — the header's Reset/Delete law.
   useEffect(() => {
@@ -1015,63 +1007,6 @@ export function SeatsPane({
             );
           })}
         </View>
-      </View>
-
-      {/* Section 2: the standing seats */}
-      <View style={{ gap: SPACING[1.5] }}>
-        <View style={{ gap: 2, paddingBottom: SPACING[1] }}>
-          <Text style={text(theme, "section")}>Seats</Text>
-          <Text style={text(theme, "label")}>Supervisor, Lead and the working Agents of this Project.</Text>
-        </View>
-        {view.supervisor !== null ? (
-          <AgentCard
-            theme={theme}
-            agent={view.supervisor}
-            actions={effectiveActions}
-            retireLabel="Revoke Supervisor"
-            onRetire={actions.revokeSupervisor}
-          />
-        ) : (
-          <SeatNode
-            theme={theme}
-            title="Supervisor — not started"
-            icon="Shield"
-            subtitle={'Select "Supervisor (Factory)" in New Chat to start'}
-            pills={[{ label: "seat=supervisor", tone: "foregroundMuted" }, { label: view.lanes.supervisor, mono: true }]}
-          />
-        )}
-        {view.lead !== null ? (
-          <AgentCard
-            theme={theme}
-            agent={view.lead}
-            actions={effectiveActions}
-            retireLabel="Rotate Lead"
-            onRetire={actions.rotateLead}
-          />
-        ) : (
-          <SeatNode
-            theme={theme}
-            title="Lead — not started"
-            icon="Compass"
-            subtitle="Spawned automatically by Supervisor"
-            pills={[{ label: "seat=lead", tone: "foregroundMuted" }, { label: view.lanes.lead, mono: true }]}
-          />
-        )}
-        {workers.length === 0 ? (
-          <SeatNode
-            theme={theme}
-            title="Working Agents — none active"
-            icon="Cpu"
-            subtitle="Spawned task agents appear here as the ledger binds them."
-            pills={[{ label: view.lanes.worker, mono: true }]}
-          />
-        ) : (
-          <View style={{ gap: SPACING[2] }}>
-            {workers.map((agent) => (
-              <AgentCard key={agent.id} theme={theme} agent={agent} actions={actions} />
-            ))}
-          </View>
-        )}
       </View>
 
       <Modal

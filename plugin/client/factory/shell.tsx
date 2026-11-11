@@ -1,16 +1,17 @@
 /**
  * The one `<FactoryShell />` the surface entries render (ADR 0009 §1;
- * v0.6.0 W4, ADR 0056): the workspace panel and the settings screen — one
- * component, two hosts, until the Project panel (W5) and the Settings screen
- * (W8) replace it. It owns the snapshot poll and every RPC action (lanes.set,
+ * v0.6.0 W5, ADR 0056): the workspace panel and the settings screen — one
+ * component, two hosts. The workspace panel renders the server-projected
+ * Project panel (project-panel.tsx — a pure render of `view.panel`); the
+ * Vault / Plugins / Models panes stay reachable beneath it (desktop only)
+ * until the Settings screen (W8) and the panel's `⋯` menu (W6) relocate
+ * them. The shell owns the snapshot poll and every RPC action (lanes.set,
  * the v0.0.38 batch/profile/reset lane acts — lanes.setBatch, lanes.reset,
- * profiles.save/apply/delete (ADR 0026 §2/§5) — Revoke Supervisor, Rotate
- * Lead, Reset/Delete Project, plugins, Vault, Skill Hub); the three panes are
- * pure renders of the view plus action callbacks. The Project scope is the
- * workspace panel's directory — the snapshot rides it; there is no Project
- * Switcher. Seats start only from Paseo's native New Chat picker (v0.0.27,
- * ADR 0017 §3) — the shell's Open actions are pure navigation jumps to a
- * live seat's conversation.
+ * profiles.save/apply/delete (ADR 0026 §2/§5) — plugins, Vault, Skill Hub);
+ * the panes are pure renders of the view plus action callbacks. The Project
+ * scope is the workspace panel's directory — the snapshot rides it; there is
+ * no Project Switcher. Mobile (the host layout platform is iOS/Android) is a
+ * monitor: it renders the panel read-only and mounts no settings writes.
  * Function components only — no class syntax reaches the Hermes bundle.
  */
 import type { PluginTheme } from "@getpaseo/plugin";
@@ -20,14 +21,15 @@ import { ScrollView, useToast } from "@getpaseo/plugin/client/ui";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Text, View } from "react-native";
 import { z } from "zod";
-import { skillsImport, skillsTogglePack, lanesReset, lanesSet, lanesSetBatch, leadRotate, helperMcpsSyncAndProbe, helperMcpsSetEnabled, pluginsInstall, pluginsManage, pluginsCheckUpdates, profilesApply, profilesDelete, profilesSave, projectDelete, projectReset, snapshot, supervisorRevoke, vaultConfigure, vaultHydrate, vaultImport, vaultSync } from "../../shared/rpc.ts";
+import { skillsImport, skillsTogglePack, lanesReset, lanesSet, lanesSetBatch, helperMcpsSyncAndProbe, helperMcpsSetEnabled, pluginsInstall, pluginsManage, pluginsCheckUpdates, profilesApply, profilesDelete, profilesSave, snapshot, vaultConfigure, vaultHydrate, vaultImport, vaultSync } from "../../shared/rpc.ts";
 import type { ManageablePluginId } from "../../shared/companions.ts";
 import type { FactoryView, LaneName } from "../../shared/view.ts";
 import { Btn, Card, Pill, TabBar } from "../kit/pill.tsx";
 import type { TabId } from "../kit/pill.tsx";
 import { RADIUS, SPACING, text, tint } from "../kit/theme.ts";
 import { useNow, usePoll, pollEvery } from "../kit/poll.ts";
-import { Header } from "./header.tsx";
+import { OpenDesignControl } from "./open-design.tsx";
+import { ProjectPanel } from "./project-panel.tsx";
 import { VaultPane, isVaultActName } from "./vault.tsx";
 import type { VaultNote } from "./vault.tsx";
 import { actionFeedback, createResponseOrder } from "./vault-feedback.ts";
@@ -42,8 +44,9 @@ export interface Navigation {
   openAgent(input: { agentId: string; serverId?: string }): void;
 }
 
+/** `none` keeps the interim panes collapsed beneath the Project panel. */
 const FactoryTabStateSchema = z.object({
-  tab: z.enum(["seats", "vault", "plugins"]),
+  tab: z.enum(["none", "seats", "vault", "plugins"]),
 });
 
 export function FactoryShell({
@@ -52,8 +55,9 @@ export function FactoryShell({
   dir,
   navigation,
   serverId,
-  initialTab = "seats",
+  initialTab,
   showDiagnostics = false,
+  surface = "panel",
   panelTab,
 }: {
   theme: PluginTheme;
@@ -62,8 +66,10 @@ export function FactoryShell({
   dir?: string;
   navigation?: Navigation;
   serverId?: string;
-  initialTab?: TabId;
+  initialTab?: TabId | "none";
   showDiagnostics?: boolean;
+  /** Which entry hosts the shell: the workspace panel (the Project panel) or the settings screen. */
+  surface?: "panel" | "settings";
   /** Paseo 0.13 persisted workspace panel tab handle (`useTabState`). */
   panelTab?: PluginTab;
 }) {
@@ -78,10 +84,6 @@ export function FactoryShell({
   const profilesSaveCall = useRpc(profilesSave);
   const profilesApplyCall = useRpc(profilesApply);
   const profilesDeleteCall = useRpc(profilesDelete);
-  const revokeCall = useRpc(supervisorRevoke);
-  const leadRotateCall = useRpc(leadRotate);
-  const projectResetCall = useRpc(projectReset);
-  const projectDeleteCall = useRpc(projectDelete);
 
   const helperMcpsSyncCall = useRpc(helperMcpsSyncAndProbe);
   const helperMcpsEnableCall = useRpc(helperMcpsSetEnabled);
@@ -109,11 +111,12 @@ export function FactoryShell({
   const [persistedState, setPersistedState] = useTabState(
     panelTab ?? fallbackPluginTab,
     FactoryTabStateSchema,
-    { tab: initialTab },
+    { tab: initialTab ?? (surface === "settings" ? "seats" : "none") },
   );
   const tab = persistedState.tab;
+  /** Picking the open tab again collapses it. */
   const setTab = (nextTab: TabId): void => {
-    setPersistedState({ ...persistedState, tab: nextTab });
+    setPersistedState({ ...persistedState, tab: nextTab === tab ? "none" : nextTab });
   };
 
   const [bump, setBump] = useState(0);
@@ -134,6 +137,9 @@ export function FactoryShell({
   // The active Project scope: the workspace panel's directory (auto-bound).
   const scopeRoot = dir;
   const isCompact = layout?.compact === true || (containerWidth > 0 && containerWidth < 640);
+  const panelHost = surface === "panel";
+  /** Paseo mobile: a monitor with quick actions — no settings writes, no desktop-only panes. */
+  const mobile = layout?.platform === "ios" || layout?.platform === "android";
 
   const poll = usePoll(
     async () => {
@@ -272,36 +278,32 @@ export function FactoryShell({
   // The Project-scoped acts need a resolved Project — the snapshot's own
   // `project` is the truth (a scope that does not resolve leaves them parked).
   const projectRoot = view.project?.root;
-  // The seat jumps (v0.0.27, ADR 0017 §3): a seat starts only from Paseo's
-  // native New Chat picker ("Supervisor (Factory)"), and the Supervisor
-  // spawns the Lead itself — so Open is a bare navigation to the live seat's
-  // conversation, with no ensure-or-dispatch RPC behind it.
-  const openSupervisor = (): void => {
-    const agentId = view.supervisor?.id;
-    if (agentId === undefined) return;
+  /** A Needs-you item's primary action: a bare navigation jump to the agent's conversation. */
+  const openAgent = (agentId: string): void => {
     navigation?.openAgent({ agentId, serverId });
   };
-  const openLead = (): void => {
-    const agentId = view.lead?.id;
-    if (agentId === undefined) return;
-    navigation?.openAgent({ agentId, serverId });
-  };
-  const resetProject = (): void => {
-    if (projectRoot === undefined) return;
-    void act("Reset Project", () => projectResetCall({ projectRoot }));
-  };
-  const deleteProject = (target?: { root?: string; slug?: string }): void => {
-    const targetRoot = target?.root ?? projectRoot;
-    const targetSlug = target?.slug ?? view.project?.slug;
-    if (targetRoot === undefined && targetSlug === undefined) return;
-    void act("Delete Project", async () => {
-      const reply = await projectDeleteCall({
-        ...(targetRoot === undefined ? {} : { projectRoot: targetRoot }),
-        ...(targetSlug === undefined ? {} : { projectSlug: targetSlug, project: targetSlug }),
-      });
-      return reply;
+  const incompleteTools = (view.companionTools ?? []).filter((t) => t.status !== "running" || t.error !== null);
+  const isInstallingPrereqs = activePluginAct !== null && activePluginAct.kind === "install" && activePluginAct.target === "all";
+  /** Installs every required skill & tool — the Needs-you item's action and the Settings banner's button. */
+  const installPrerequisites = (): void => {
+    clearPluginCardError("all");
+    setActivePluginAct({ kind: "install", target: "all", action: "install", startedAt: Date.now() });
+    void act("Install Required Skills & Tools", async () => {
+      try {
+        const reply = await pluginsInstallCall({ target: "all", includeTools: true });
+        if (reply.ok) {
+          setPluginsNote({ text: reply.summary, tone: "statusSuccess", pluginId: "all" });
+        } else {
+          recordPluginActFailure("Install Required Skills & Tools", "all", reply.error);
+        }
+        return reply;
+      } finally {
+        setActivePluginAct(null);
+      }
     });
   };
+  /** Settings-type panes: always on the Settings screen; beneath the panel on desktop only (mobile mounts no settings writes). */
+  const showPanes = !panelHost || !mobile;
   const vaultPane = (
     <VaultPane
       theme={theme}
@@ -343,29 +345,26 @@ export function FactoryShell({
           gap: isCompact ? SPACING[3] : SPACING[4],
         }}
       >
-        <Header
-          theme={theme}
-          view={view}
-          at={poll.at}
-          now={now}
-          compact={isCompact}
-          actions={{
-            refresh,
-            designSourceKey: `${serverId ?? 'local'}:${view.project?.root ?? ''}`,
-            openSupervisor,
-            openLead,
-            resetProject,
-            deleteProject,
-            busy,
-          }}
-        />
+        {panelHost ? (
+          <ProjectPanel
+            theme={theme}
+            panel={view.panel}
+            mobile={mobile}
+            now={now}
+            daemonError={view.daemonError}
+            actions={{ openAgent, installPrerequisites, busy: busy || activePluginAct !== null }}
+            openDesignActions={
+              view.project !== null && view.project.missingRoot !== true ? (
+                <OpenDesignControl key={view.project.root} theme={theme} root={view.project.root} sourceKey={`${serverId ?? "local"}:${view.project.root}`} onChanged={refresh} />
+              ) : null
+            }
+          />
+        ) : null}
         {(() => {
-          const incompleteTools = (view.companionTools ?? []).filter(
-            (t) => t.status !== "running" || t.error !== null,
-          );
+          // The panel's Needs-you list carries the prerequisite item; the
+          // banner stays on the Settings screen until W8 moves Skills & Tools.
+          if (panelHost) return null;
           if (incompleteTools.length === 0) return null;
-          const isInstallingPrereqs =
-            activePluginAct !== null && activePluginAct.kind === "install" && activePluginAct.target === "all";
           return (
             <Card
               theme={theme}
@@ -396,23 +395,7 @@ export function FactoryShell({
                         : "Install Required Skills & Tools"
                     }
                     disabled={busy || activePluginAct !== null}
-                    onPress={() => {
-                      clearPluginCardError("all");
-                      setActivePluginAct({ kind: "install", target: "all", action: "install", startedAt: Date.now() });
-                      void act("Install Required Skills & Tools", async () => {
-                        try {
-                          const reply = await pluginsInstallCall({ target: "all", includeTools: true });
-                          if (reply.ok) {
-                            setPluginsNote({ text: reply.summary, tone: "statusSuccess", pluginId: "all" });
-                          } else {
-                            recordPluginActFailure("Install Required Skills & Tools", "all", reply.error);
-                          }
-                          return reply;
-                        } finally {
-                          setActivePluginAct(null);
-                        }
-                      });
-                    }}
+                    onPress={installPrerequisites}
                   />
                   {tab !== "plugins" ? (
                     <Btn
@@ -473,34 +456,27 @@ export function FactoryShell({
             {tab !== "vault" ? vaultPane : null}
           </>
         ) : null}
-        <TabBar
-          theme={theme}
-          active={tab}
-          onPick={setTab}
-          compact={isCompact}
-          counts={{
-            seats: view.agents.length,
-            vault: view.vault.hydratedApps.length,
-            plugins: view.companions.filter((c) => c.status === "running").length,
-          }}
-        />
-        {tab === "vault" ? vaultPane : null}
-        {tab === "seats" ? (
+        {showPanes ? (
+          <TabBar
+            theme={theme}
+            active={tab === "none" ? null : tab}
+            onPick={setTab}
+            compact={isCompact}
+            counts={{
+              seats: view.agents.length,
+              vault: view.vault.hydratedApps.length,
+              plugins: view.companions.filter((c) => c.status === "running").length,
+            }}
+          />
+        ) : null}
+        {showPanes && tab === "vault" ? vaultPane : null}
+        {showPanes && tab === "seats" ? (
           <SeatsPane
             theme={theme}
             view={view}
             modelSyncNote={laneNote}
             actions={{
               busy,
-              openAgent: (agentId) => navigation?.openAgent({ agentId, serverId }),
-              revokeSupervisor: () => {
-                if (projectRoot === undefined) return;
-                void act("Revoke Supervisor", () => revokeCall({ projectRoot }));
-              },
-              rotateLead: () => {
-                if (projectRoot === undefined) return;
-                void act("Rotate Lead", () => leadRotateCall({ projectRoot }));
-              },
               setLane: (lane: LaneName, value) => {
                 if (projectRoot === undefined) return;
                 void act("Lane", async () => {
@@ -558,7 +534,7 @@ export function FactoryShell({
             }}
           />
         ) : null}
-        {tab === "plugins" ? (
+        {showPanes && tab === "plugins" ? (
           <PluginsPane
             theme={theme}
             view={view}

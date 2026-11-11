@@ -57,6 +57,7 @@ import {
 import type { CompanionToolRunner, CompanionToolUpdateStatus } from "./core/companion-tools.ts";
 import { basename, join, resolve } from "node:path";
 import { foldView } from "./view.ts";
+import { inspectGitReadiness, probeOpenDesign } from "./panel.ts";
 import type { ProjectEventStream } from "./view.ts";
 import type { LedgerEvent } from "./core/events.ts";
 import { setAgentModelViaCli, setAgentThinkingViaCli, stopAgentViaCli } from "./daemon-cli.ts";
@@ -748,6 +749,8 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       task,
       ...leadTelemetryOf(agent),
       requiresAttention: agent.requiresAttention,
+      attentionReason: agent.attentionReason,
+      ...(agent.lastError === undefined ? {} : { lastError: agent.lastError }),
       cwd: agent.cwd,
     };
   };
@@ -1793,23 +1796,13 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
               ...(matched.commonDir !== undefined ? { commonDir: matched.commonDir } : {}),
               ...(missing ? { missingRoot: true } : {}),
             };
-          } else if (existsSync(rawRoot)) {
-            const bootstrapped = resolveOrBootstrapProject(rawRoot, {
-              stateDir: deps.stateDir,
-              paseoHome: deps.home,
-            });
-            if (bootstrapped.ok) {
-              ensureProjectRegistered(deps.stateDir, bootstrapped);
-              project = {
-                slug: bootstrapped.slug,
-                root: bootstrapped.root,
-                name: bootstrapped.name,
-                commonDir: bootstrapped.gitCommonDir,
-              };
-            }
           }
+          // Since v0.6.0 (ADR 0056) a read never bootstraps: a folder Git cannot
+          // answer for and no registration names is simply not a Project yet —
+          // onboarding (W7) offers `git init`, the snapshot never does.
         }
       }
+      const panelFolder = input.projectRoot !== undefined && input.projectRoot.trim() !== "" ? input.projectRoot.trim() : null;
       const lanes = loadLanes(deps.stateDir, project?.slug);
       if (!lanes.ok) return failure("lanes-unreadable", lanes.reason);
       // The machine-only table (v0.0.38, ADR 0026 §3): what a Reset to
@@ -1967,6 +1960,12 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           log(`usage: rollup read of ${enrichedProject.slug} deferred — ${messageOf(error)}`);
         }
       }
+      // The Project panel view-model (v0.6.0, ADR 0056 §5), projected here from
+      // the same gathered halves the fold read — the client only renders it.
+      const panelRegistration = enrichedProject === null ? undefined : readProjectRegistration(deps.stateDir, enrichedProject.slug);
+      const panelMissingPrerequisites = buildCompanionToolsView()
+        .filter((tool) => tool.status !== "running" || tool.error !== null)
+        .map((tool) => tool.title);
       const view = foldView({
         stateDir: deps.stateDir,
         generatedAt: new Date().toISOString(),
@@ -1986,6 +1985,17 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         // degrades inside the view's own `error` field, never a refusal.
         vault: await vaultStatusOf(),
         project: enrichedProject,
+        panel: {
+          project: enrichedProject,
+          registered: panelRegistration !== undefined,
+          folder: panelFolder,
+          git: inspectGitReadiness(panelFolder),
+          missingPrerequisites: panelMissingPrerequisites,
+          openDesign: enrichedProject === null || enrichedProject.missingRoot === true ? null : probeOpenDesign(deps.stateDir, enrichedProject.slug, enrichedProject.root),
+          rotationState: panelRegistration?.rotationState ?? null,
+          handoffRequestedAt: panelRegistration?.handoffRequestedAt ?? null,
+          now: Date.now(),
+        },
       });
       // v0.0.38 (ADR 0026 §5): the Lane profile half — the gatherer-owned
       // filesystem probe layered over the fold (the vault-status precedent),

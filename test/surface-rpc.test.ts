@@ -34,7 +34,9 @@ import { foldCompanions, foldCorePlugin, foldTasks } from "../plugin/server/view
 import { factoryEnvFor, injectRoleOnCreate, injectSessionEnv, renderAgentContract, renderSeatBootstrap, renderSeatContract } from "../plugin/server/roles.ts";
 import type { AgentCreateRequest } from "../plugin/server/roles.ts";
 import { discoverProjects, readProjectRegistration, writeProjectRegistration } from "../plugin/server/projects.ts";
+import { writeProjectSettings } from "../plugin/server/core/project-settings.ts";
 import { lanesPath, loadLanes, saveLanes } from "../src/lanes.ts";
+import { CORE_FACTORY_SKILLS } from "../plugin/server/core/companion-tools.ts";
 import { FACTORY_ROLE_PROVIDERS } from "../src/role-providers.ts";
 import { prepareTaskWorktree } from "../src/workspace.ts";
 import { deliverLeadMail, enqueueLeadMail } from "../src/mailbox.ts";
@@ -60,6 +62,7 @@ interface FakeAgent {
   thinkingOptionId?: string | null;
   lastError?: string | null;
   labels?: Record<string, string>;
+  attentionReason?: string | null;
   requiresAttention?: boolean;
   seqEnd?: number;
   cwd?: string;
@@ -100,7 +103,7 @@ function fakeDaemon(agents: FakeAgent[]) {
               labels: agent.labels ?? {},
               archivedAt: null,
               requiresAttention: agent.requiresAttention ?? false,
-              attentionReason: null,
+              attentionReason: agent.attentionReason ?? null,
               updatedAt: agent.updatedAt ?? "2026-10-15T00:00:00.000Z",
               cwd: agent.cwd ?? "/tmp",
               ...(agent.workspaceId === undefined ? {} : { workspaceId: agent.workspaceId }),
@@ -255,7 +258,7 @@ test("snapshot: versioned view folding ledger + lanes + daemon agents + provider
   const snap = await handlers.snapshot({});
   assert.ok(snap.ok, snap.ok ? "" : snap.error);
   const view = snap.view;
-  assert.equal(view.version, 3);
+  assert.equal(view.version, 4);
   assert.equal(view.lanes.worker, "pi/zcode/glm-5.3", "the lanes table rides the snapshot");
   assert.equal(view.kpis.readyToAccept, 1, "one green unaccepted task");
   assert.equal(view.kpis.accepted, 0);
@@ -830,7 +833,7 @@ test("snapshot: a projectRoot scopes lanes, seats, and the task counts to the Pr
   const snap = await handlers.snapshot({ projectRoot: project.root });
   assert.ok(snap.ok, snap.ok ? "" : snap.error);
   const view = snap.view;
-  assert.equal(view.version, 3);
+  assert.equal(view.version, 4);
   assert.deepEqual(view.project, {
     slug: project.slug,
     name: basename(project.root),
@@ -4759,12 +4762,14 @@ test("Seam 1.1: projectAdd bootstraps greenfield non-Git folders and discoverPro
   const nonGitEntry = discoveredProjects.find((p) => p.name === "paseo-nongit-ws");
   assert.ok(nonGitEntry !== undefined, "non-Git Paseo workspace is discovered");
 
-  // 4. Selecting the discovered non-Git Paseo workspace via snapshot({ projectRoot }) auto-bootstraps Git and selects it
+  // 4. Since v0.6.0 (ADR 0056) a read never bootstraps: scoping the snapshot to the non-Git Paseo workspace
+  //    leaves the folder untouched and reports it as not-yet-a-Project (onboarding offers the Git init).
   const selectNonGit = await handlers.snapshot({ projectRoot: nonGitEntry.root! });
   assert.ok(selectNonGit.ok, selectNonGit.ok ? "" : selectNonGit.error);
-  assert.ok(selectNonGit.view.project !== null, "selecting a non-Git Paseo workspace resolves view.project instead of null");
-  assert.equal(selectNonGit.view.project?.name, "paseo-nongit-ws");
-  assert.equal(existsSync(join(paseoNonGitDir, ".git")), true, "snapshot({ projectRoot }) initialized .git on non-Git Paseo workspace");
+  assert.equal(selectNonGit.view.project, null, "a non-Git folder no registration names resolves no Project");
+  assert.equal(selectNonGit.view.panel.isProject, false);
+  assert.equal(selectNonGit.view.panel.onboarding?.gitRepo, false);
+  assert.equal(existsSync(join(paseoNonGitDir, ".git")), false, "snapshot({ projectRoot }) never initialises Git");
 });
 
 test("Seam 1.2: deleting a registered Project's folder on disk marks it missingRoot: true and snapshot({ projectRoot }) resolves view.project from persisted registration instead of returning null (v0.0.35, ADR 0024)", async (t) => {
@@ -6073,4 +6078,386 @@ test("Seam 1: project delete on a missingRoot Project evicts its Factory and lea
   assert.ok(registry.factoryForProject(slugA) !== evicted, "the evicted Factory is not reused");
   // project-b keeps serving through its own untouched Factory.
   assert.ok(registry.factoryForProject(slugB).contractFor("T-01") !== undefined, "project-b's contract survives the neighbor's delete");
+});
+
+// ---- the Project panel view-model (v0.6.0 W5, ADR 0056) ---------------------------------------
+//
+// The server computes the panel; the client only renders it. Every test below
+// drives `factory.snapshot` and asserts on `view.panel` — the one door the
+// Owner's surface reads.
+
+/** Seeds the host skill pack so the prerequisite probe is satisfied — a Needs-you item must come from the case under test, never from a bare fixture home. */
+function seedCorePack(userHome: string): void {
+  for (const name of CORE_FACTORY_SKILLS) {
+    mkdirSync(join(userHome, ".agents", "skills", name), { recursive: true });
+    writeFileSync(join(userHome, ".agents", "skills", name, "SKILL.md"), `# ${name}\n`);
+  }
+}
+
+/** A surface whose host prerequisites are complete, over a registered Project with the given live agents. */
+function makePanelSurface(t: TestContext, agentsFor: (project: { root: string; slug: string }) => FakeAgent[] = () => [], name = "panel-proj") {
+  const project = makeProject(t, name);
+  const agents: FakeAgent[] = [];
+  const surface = makeSurface(t, agents);
+  seedCorePack(surface.home);
+  writeProjectRegistration(surface.stateDir, project.slug, { root: project.root, name });
+  agents.push(...agentsFor(project));
+  return { ...surface, project };
+}
+
+const seatLabels = (project: { slug: string }, seat: "supervisor" | "lead") => ({ seat, project: project.slug });
+
+test("panel: a git folder no Project owns is not a Project — the flag is false, onboarding readiness rides, and nothing is registered or initialised", async (t) => {
+  const project = makeProject(t, "unregistered");
+  const { handlers, stateDir } = makeSurface(t);
+  const snap = await handlers.snapshot({ projectRoot: project.root });
+  assert.ok(snap.ok, snap.ok ? "" : snap.error);
+  const panel = snap.view.panel;
+  assert.equal(panel.isProject, false);
+  assert.equal(panel.summary, "Not a Factory Project yet");
+  assert.deepEqual(panel.needsYou, [], "no Needs-you list before a Project exists");
+  assert.equal(panel.seats, null);
+  assert.equal(panel.openDesign, null);
+  assert.deepEqual(panel.onboarding, { folder: project.root, gitRepo: true, hasCommits: true, existingLead: false });
+  assert.equal(readProjectRegistration(stateDir, project.slug), undefined, "a read never registers a Project");
+});
+
+test("panel: a plain folder reports no Git repository and the read never initialises Git; an unborn repository reports no commits", async (t) => {
+  const plain = makeTempDir();
+  disposeDir(t, plain);
+  const { handlers } = makeSurface(t);
+  const snap = await handlers.snapshot({ projectRoot: plain });
+  assert.ok(snap.ok, snap.ok ? "" : snap.error);
+  assert.equal(snap.view.project, null, "a folder Git cannot answer for scopes no Project");
+  assert.equal(snap.view.panel.isProject, false);
+  assert.deepEqual(snap.view.panel.onboarding, { folder: plain, gitRepo: false, hasCommits: false, existingLead: false });
+  assert.equal(existsSync(join(plain, ".git")), false, "snapshot must not initialise Git — onboarding offers it");
+
+  const unborn = makeTempDir();
+  disposeDir(t, unborn);
+  execFileSync("git", ["init", "-q"], { cwd: unborn });
+  const second = await handlers.snapshot({ projectRoot: unborn });
+  assert.ok(second.ok, second.ok ? "" : second.error);
+  assert.deepEqual(second.view.panel.onboarding, { folder: unborn, gitRepo: true, hasCommits: false, existingLead: false });
+});
+
+test("panel: a workspace with a live Lead but no Project registration reports existingLead so onboarding can refuse a second chain", async (t) => {
+  const project = makeProject(t, "live-lead-unregistered");
+  const { handlers } = makeSurface(t, [{ id: "agent-lead-x", labels: seatLabels(project, "lead"), cwd: project.root }]);
+  const snap = await handlers.snapshot({ projectRoot: project.root });
+  assert.ok(snap.ok, snap.ok ? "" : snap.error);
+  assert.equal(snap.view.panel.onboarding?.existingLead, true);
+});
+
+test("panel: the summary reads like plain language — Lead state, live Peers, and what needs the Owner", async (t) => {
+  const { handlers, factory, project } = makePanelSurface(t, (p) => [
+    { id: "agent-sup", labels: seatLabels(p, "supervisor"), cwd: p.root },
+    { id: "agent-lead", labels: seatLabels(p, "lead"), status: "running", cwd: p.root },
+    { id: "agent-peer-1", status: "running", cwd: join(p.root, "wt-1") },
+    { id: "agent-peer-2", status: "running", cwd: join(p.root, "wt-2") },
+  ]);
+  factory.ledger.append({ event: "contract_set", task: "T-01", workspace: join(project.root, "wt-1"), gate: "true", artifact: "a" });
+  factory.ledger.append({ event: "claim_reported", task: "T-01", attempt: 1, sha: "s", agent: "agent-peer-1" });
+  factory.ledger.append({ event: "contract_set", task: "T-02", workspace: join(project.root, "wt-2"), gate: "true", artifact: "b" });
+  factory.ledger.append({ event: "claim_reported", task: "T-02", attempt: 1, sha: "s", agent: "agent-peer-2" });
+  const snap = await handlers.snapshot({ projectRoot: project.root });
+  assert.ok(snap.ok, snap.ok ? "" : snap.error);
+  assert.equal(snap.view.panel.isProject, true);
+  assert.equal(snap.view.panel.name, basename(project.root), "the Project is named by its folder, never by slug or id");
+  assert.equal(snap.view.panel.summary, "Lead working · 2 Peers · nothing needs you");
+});
+
+// ---- Needs you ------------------------------------------------------------------------------
+
+/** Seeds a Task red through `attempts` consecutive gate verdicts. */
+function seedRedTask(factory: ReturnType<typeof createFactory>, task: string, workspace: string, attempts: number): void {
+  factory.ledger.append({ event: "contract_set", task, workspace, gate: "true", artifact: "a" });
+  for (let n = 1; n <= attempts; n += 1) {
+    factory.ledger.append({ event: "claim_reported", task, attempt: n, sha: `s${n}` });
+    factory.ledger.append({ event: "gate_finished", task, attempt: n, exit: 1, verdict: "red", note: `gate failed #${n}` });
+    factory.ledger.append({ event: "report_written", task, attempt: n, path: "/r" });
+  }
+}
+
+test("panel: a healthy Project has an empty Needs-you list and says nothing needs the Owner", async (t) => {
+  const { handlers, project } = makePanelSurface(t, (p) => [
+    { id: "agent-sup", labels: seatLabels(p, "supervisor"), cwd: p.root },
+    { id: "agent-lead", labels: seatLabels(p, "lead"), cwd: p.root },
+  ]);
+  const snap = await handlers.snapshot({ projectRoot: project.root });
+  assert.ok(snap.ok, snap.ok ? "" : snap.error);
+  assert.deepEqual(snap.view.panel.needsYou, []);
+  assert.equal(snap.view.panel.summary, "Lead idle · nothing needs you");
+});
+
+test("panel: a needs-human Task is a Needs-you item with its plain-language reason and one action — Open the Supervisor", async (t) => {
+  const { handlers, factory, project } = makePanelSurface(t, (p) => [
+    { id: "agent-sup", labels: seatLabels(p, "supervisor"), cwd: p.root },
+    { id: "agent-lead", labels: seatLabels(p, "lead"), cwd: p.root },
+  ]);
+  factory.ledger.append({ event: "contract_set", task: "T-08", workspace: join(project.root, "wt"), gate: "true", artifact: "a" });
+  factory.ledger.append({ event: "repoke_dispatched", task: "T-08", agent: "ag" });
+  factory.ledger.append({ event: "needs_human", task: "T-08", reason: "silent-after-repoke", evidence: { denial: 2, repoke: 1 } });
+  const snap = await handlers.snapshot({ projectRoot: project.root });
+  assert.ok(snap.ok, snap.ok ? "" : snap.error);
+  assert.deepEqual(snap.view.panel.needsYou, [
+    {
+      key: "needs-human:T-08",
+      kind: "needs-human",
+      title: "T-08 needs your decision",
+      detail: "The Peer stayed silent after a re-poke.",
+      action: { kind: "open-agent", agentId: "agent-sup", label: "Open Supervisor" },
+    },
+  ]);
+  assert.equal(snap.view.panel.summary, "Lead idle · 1 needs you");
+});
+
+test("panel: a Task still red after the last allowed Attempt needs the Owner; a red Task with Attempts left does not", async (t) => {
+  const { handlers, factory, project } = makePanelSurface(t, (p) => [
+    { id: "agent-sup", labels: seatLabels(p, "supervisor"), cwd: p.root },
+  ]);
+  seedRedTask(factory, "T-CEIL", join(project.root, "wt-a"), 3);
+  seedRedTask(factory, "T-ROOM", join(project.root, "wt-b"), 2);
+  const snap = await handlers.snapshot({ projectRoot: project.root });
+  assert.ok(snap.ok, snap.ok ? "" : snap.error);
+  assert.deepEqual(snap.view.panel.needsYou.map((item) => item.key), ["attempt-ceiling:T-CEIL"]);
+  const [item] = snap.view.panel.needsYou;
+  assert.equal(item!.title, "T-CEIL stayed red after 3 attempts");
+  assert.equal(item!.detail, "gate failed #3");
+});
+
+test("panel: an errored seat and a seat stuck on a permission prompt each need the Owner — and open that seat's conversation", async (t) => {
+  const { handlers, project } = makePanelSurface(t, (p) => [
+    { id: "agent-sup", labels: seatLabels(p, "supervisor"), status: "error", lastError: "provider quota exhausted", cwd: p.root },
+    { id: "agent-lead", labels: seatLabels(p, "lead"), status: "running", requiresAttention: true, attentionReason: "permission", cwd: p.root },
+  ]);
+  const snap = await handlers.snapshot({ projectRoot: project.root });
+  assert.ok(snap.ok, snap.ok ? "" : snap.error);
+  assert.deepEqual(snap.view.panel.needsYou, [
+    { key: "seat-stuck:supervisor", kind: "seat-stuck", title: "Supervisor errored", detail: "provider quota exhausted", action: { kind: "open-agent", agentId: "agent-sup", label: "Open Supervisor" } },
+    { key: "seat-stuck:lead", kind: "seat-stuck", title: "Lead is waiting on a permission prompt", detail: null, action: { kind: "open-agent", agentId: "agent-lead", label: "Open Lead" } },
+  ]);
+});
+
+test("panel: a Lead handoff past its extraction window is a stuck-handoff item; a fresh handoff is not", async (t) => {
+  const { handlers, stateDir, project } = makePanelSurface(t, (p) => [
+    { id: "agent-sup", labels: seatLabels(p, "supervisor"), cwd: p.root },
+    { id: "agent-lead", labels: seatLabels(p, "lead"), status: "running", cwd: p.root },
+  ]);
+  writeProjectRegistration(stateDir, project.slug, { root: project.root, lead: "agent-lead", rotationState: "handing_over", handoffRequestedAt: new Date().toISOString() });
+  const fresh = await handlers.snapshot({ projectRoot: project.root });
+  assert.ok(fresh.ok, fresh.ok ? "" : fresh.error);
+  assert.deepEqual(fresh.view.panel.needsYou, [], "a handoff inside its window is working, not stuck");
+
+  writeProjectRegistration(stateDir, project.slug, { root: project.root, handoffRequestedAt: "2026-01-01T00:00:00.000Z" });
+  const stale = await handlers.snapshot({ projectRoot: project.root });
+  assert.ok(stale.ok, stale.ok ? "" : stale.error);
+  assert.deepEqual(stale.view.panel.needsYou.map((item) => item.kind), ["handoff-stuck"]);
+  assert.deepEqual(stale.view.panel.needsYou[0]!.action, { kind: "open-agent", agentId: "agent-lead", label: "Open Lead" });
+});
+
+test("panel: a handoff whose outgoing Lead vanished is stuck at once, and points at the Supervisor", async (t) => {
+  const { handlers, stateDir, project } = makePanelSurface(t, (p) => [{ id: "agent-sup", labels: seatLabels(p, "supervisor"), cwd: p.root }]);
+  writeProjectRegistration(stateDir, project.slug, { root: project.root, rotationState: "handing_over", handoffRequestedAt: new Date().toISOString() });
+  const snap = await handlers.snapshot({ projectRoot: project.root });
+  assert.ok(snap.ok, snap.ok ? "" : snap.error);
+  assert.deepEqual(snap.view.panel.needsYou.map((item) => item.kind), ["handoff-stuck"]);
+  assert.deepEqual(snap.view.panel.needsYou[0]!.action, { kind: "open-agent", agentId: "agent-sup", label: "Open Supervisor" });
+});
+
+test("panel: missing prerequisite tools are a Needs-you item whose action installs them", async (t) => {
+  const project = makeProject(t, "prereq");
+  const { handlers, stateDir } = makeSurface(t); // no skill pack seeded
+  writeProjectRegistration(stateDir, project.slug, { root: project.root });
+  const snap = await handlers.snapshot({ projectRoot: project.root });
+  assert.ok(snap.ok, snap.ok ? "" : snap.error);
+  assert.deepEqual(snap.view.panel.needsYou.map((item) => item.kind), ["prerequisites"]);
+  const [item] = snap.view.panel.needsYou;
+  assert.deepEqual(item!.action, { kind: "install-prerequisites", label: "Install" });
+  assert.match(item!.detail ?? "", /\S/, "the missing tools are named");
+});
+
+test("panel: Peer challenge signals queued to the Lead mailbox never reach Needs you", async (t) => {
+  const { handlers, stateDir, project } = makePanelSurface(t, (p) => [
+    { id: "agent-sup", labels: seatLabels(p, "supervisor"), cwd: p.root },
+    { id: "agent-lead", labels: seatLabels(p, "lead"), cwd: p.root },
+  ]);
+  const mailbox = join(stateDir, "projects", project.slug, "mailbox.jsonl");
+  enqueueLeadMail(mailbox, { from: "peer", kind: "peer_challenge", task: "T-03", text: "REOPEN_REQUEST (API): the Brief's premise does not hold." });
+  enqueueLeadMail(mailbox, { from: "peer", kind: "peer_challenge", task: "T-04", text: "DEPENDENCY_REQUEST: an unowned prerequisite." });
+  enqueueLeadMail(mailbox, { from: "peer", kind: "peer_challenge", task: "T-05", text: "BLOCKED: external blocker." });
+  const snap = await handlers.snapshot({ projectRoot: project.root });
+  assert.ok(snap.ok, snap.ok ? "" : snap.error);
+  assert.deepEqual(snap.view.panel.needsYou, [], "challenges are the Lead's to rule on, not the Owner's");
+  assert.equal(snap.view.panel.summary, "Lead idle · nothing needs you");
+});
+
+test("panel: Needs you lists every kind in the ADR order — needs-human, ceiling, seat, handoff, prerequisites, Open Design", async (t) => {
+  const project = makeProject(t, "ordered");
+  const agents: FakeAgent[] = [
+    { id: "agent-sup", labels: seatLabels(project, "supervisor"), status: "error", cwd: project.root },
+    { id: "agent-lead", labels: seatLabels(project, "lead"), status: "running", cwd: project.root },
+  ];
+  const { handlers, factory, stateDir } = makeSurface(t, agents); // no skill pack seeded
+  writeProjectRegistration(stateDir, project.slug, { root: project.root, lead: "agent-lead", rotationState: "handing_over", handoffRequestedAt: "2026-01-01T00:00:00.000Z" });
+  writeProjectSettings(stateDir, project.slug, { schemaVersion: 1, revision: 1, openDesignLink: { projectId: "od-1", projectName: "Mobile Redesign", sourceUpdatedAt: 1, syncedAt: "2026-10-01T00:00:00.000Z", digest: "d", screenCount: 3, files: ["index.html"] } });
+  factory.ledger.append({ event: "contract_set", task: "T-HUM", workspace: join(project.root, "wt-h"), gate: "true", artifact: "a" });
+  factory.ledger.append({ event: "repoke_dispatched", task: "T-HUM", agent: "ag" });
+  factory.ledger.append({ event: "needs_human", task: "T-HUM", reason: "denied-again", evidence: { denial: 2, repoke: 1 } });
+  seedRedTask(factory, "T-CEIL", join(project.root, "wt-c"), 3);
+  const snap = await handlers.snapshot({ projectRoot: project.root });
+  assert.ok(snap.ok, snap.ok ? "" : snap.error);
+  assert.deepEqual(
+    snap.view.panel.needsYou.map((item) => item.kind),
+    ["needs-human", "attempt-ceiling", "seat-stuck", "handoff-stuck", "prerequisites", "open-design-broken"],
+  );
+  assert.equal(snap.view.panel.summary, "Lead handing over · 6 need you");
+});
+
+// ---- Seats ----------------------------------------------------------------------------------
+
+test("panel: seat rows carry plain-language status and model, draw no colour for healthy seats, and tint only waiting and error", async (t) => {
+  const { handlers, project } = makePanelSurface(t, (p) => [
+    { id: "agent-sup", labels: seatLabels(p, "supervisor"), status: "idle", provider: "claude", model: "opus-4-8", cwd: p.root },
+    { id: "agent-lead", labels: seatLabels(p, "lead"), status: "running", provider: "pi/zai/glm-5.3", model: "glm-5.3", thinkingOptionId: "high", cwd: p.root },
+  ]);
+  const snap = await handlers.snapshot({ projectRoot: project.root });
+  assert.ok(snap.ok, snap.ok ? "" : snap.error);
+  const seats = snap.view.panel.seats!;
+  assert.deepEqual(
+    { vacant: seats.supervisor.vacant, agentId: seats.supervisor.agentId, statusLabel: seats.supervisor.statusLabel, tone: seats.supervisor.tone, model: seats.supervisor.model },
+    { vacant: false, agentId: "agent-sup", statusLabel: "idle", tone: "normal", model: "opus-4-8" },
+  );
+  assert.deepEqual(
+    { vacant: seats.lead.vacant, agentId: seats.lead.agentId, statusLabel: seats.lead.statusLabel, tone: seats.lead.tone, model: seats.lead.model },
+    { vacant: false, agentId: "agent-lead", statusLabel: "working", tone: "normal", model: "glm-5.3 · high" },
+  );
+  assert.equal(seats.supervisor.context, null, "only the Lead carries a context bar");
+  assert.equal(seats.supervisor.handoff, null, "only the Lead carries a handoff state");
+});
+
+test("panel: a waiting seat is amber and an errored seat is red", async (t) => {
+  const { handlers, project } = makePanelSurface(t, (p) => [
+    { id: "agent-sup", labels: seatLabels(p, "supervisor"), status: "running", attentionReason: "permission", requiresAttention: true, cwd: p.root },
+    { id: "agent-lead", labels: seatLabels(p, "lead"), status: "error", lastError: "adapter crashed", cwd: p.root },
+  ]);
+  const snap = await handlers.snapshot({ projectRoot: project.root });
+  assert.ok(snap.ok, snap.ok ? "" : snap.error);
+  const seats = snap.view.panel.seats!;
+  assert.deepEqual({ label: seats.supervisor.statusLabel, tone: seats.supervisor.tone }, { label: "waiting for permission", tone: "waiting" });
+  assert.deepEqual({ label: seats.lead.statusLabel, tone: seats.lead.tone, hint: seats.lead.hint }, { label: "error", tone: "error", hint: "adapter crashed" });
+});
+
+test("panel: a vacant Supervisor says so (Start Supervisor is the W6 action); a vacant Lead says to ask the Supervisor and offers nothing", async (t) => {
+  const { handlers, project } = makePanelSurface(t);
+  const snap = await handlers.snapshot({ projectRoot: project.root });
+  assert.ok(snap.ok, snap.ok ? "" : snap.error);
+  const seats = snap.view.panel.seats!;
+  assert.deepEqual(
+    { vacant: seats.supervisor.vacant, agentId: seats.supervisor.agentId, statusLabel: seats.supervisor.statusLabel, hint: seats.supervisor.hint },
+    { vacant: true, agentId: null, statusLabel: "vacant", hint: "No Supervisor is running." },
+  );
+  assert.deepEqual(
+    { vacant: seats.lead.vacant, agentId: seats.lead.agentId, hint: seats.lead.hint, context: seats.lead.context, handoff: seats.lead.handoff },
+    { vacant: true, agentId: null, hint: "No Lead is running — ask your Supervisor.", context: null, handoff: null },
+  );
+  assert.equal(snap.view.panel.summary, "No Supervisor · No Lead · nothing needs you");
+});
+
+test("panel: the Lead row shows context against the 128k mark and the handoff state in words with the queued mail count", async (t) => {
+  const { handlers, stateDir, project } = makePanelSurface(t, (p) => [
+    { id: "agent-lead", labels: seatLabels(p, "lead"), cwd: p.root, lastUsage: { contextWindowUsedTokens: 94_400, contextWindowMaxTokens: 200_000 } },
+  ]);
+  const read = async () => {
+    const snap = await handlers.snapshot({ projectRoot: project.root });
+    assert.ok(snap.ok, snap.ok ? "" : snap.error);
+    return snap.view.panel.seats!.lead;
+  };
+
+  const normal = await read();
+  assert.deepEqual(normal.context, { usedTokens: 94_400, markTokens: 128_000, label: "94k / 128k", fraction: 94_400 / 128_000 });
+  assert.deepEqual(normal.handoff, { state: "normal", label: "normal", queuedMailCount: 0 });
+
+  const mailbox = join(stateDir, "projects", project.slug, "mailbox.jsonl");
+  enqueueLeadMail(mailbox, { from: "supervisor", kind: "directive", text: "One." });
+  enqueueLeadMail(mailbox, { from: "owner", kind: "directive", text: "Two." });
+  writeProjectRegistration(stateDir, project.slug, { root: project.root, lead: "agent-lead", rotationState: "rotation_pending" });
+  const pending = await read();
+  assert.deepEqual(pending.handoff, { state: "rotation_pending", label: "will hand off at the next quiet point · 2 queued mail", queuedMailCount: 2 });
+
+  writeProjectRegistration(stateDir, project.slug, { root: project.root, rotationState: "handing_over", handoffRequestedAt: new Date().toISOString() });
+  const handing = await read();
+  assert.deepEqual(handing.handoff, { state: "handing_over", label: "handing over to a new Lead · 2 queued mail", queuedMailCount: 2 });
+});
+
+test("panel: the Lead context bar is honest without a reading and never exceeds full", async (t) => {
+  const { handlers, project } = makePanelSurface(t, (p) => [{ id: "agent-lead", labels: seatLabels(p, "lead"), cwd: p.root }]);
+  const none = await handlers.snapshot({ projectRoot: project.root });
+  assert.ok(none.ok, none.ok ? "" : none.error);
+  assert.deepEqual(none.view.panel.seats!.lead.context, { usedTokens: null, markTokens: 128_000, label: "— / 128k", fraction: null });
+
+  const over = makePanelSurface(t, (p) => [{ id: "agent-lead", labels: seatLabels(p, "lead"), cwd: p.root, lastUsage: { contextWindowUsedTokens: 150_000, contextWindowMaxTokens: 200_000 } }], "over");
+  const snap = await over.handlers.snapshot({ projectRoot: over.project.root });
+  assert.ok(snap.ok, snap.ok ? "" : snap.error);
+  assert.equal(snap.view.panel.seats!.lead.context!.fraction, 1);
+});
+
+test("panel: live Peers get one row each — `Peer · <Task>`, disposition, status — and a finished Task's agent is not listed", async (t) => {
+  const { handlers, factory, project } = makePanelSurface(t, (p) => [
+    { id: "agent-sup", labels: seatLabels(p, "supervisor"), cwd: p.root },
+    { id: "agent-lead", labels: seatLabels(p, "lead"), cwd: p.root },
+    { id: "agent-eng", status: "running", provider: "pi/zai/glm-5.3", model: "glm-5.3", cwd: join(p.root, "wt-eng") },
+    { id: "agent-rev", status: "idle", cwd: join(p.root, "wt-rev") },
+    { id: "agent-done", status: "idle", cwd: join(p.root, "wt-done") },
+  ]);
+  factory.ledger.append({ event: "contract_set", task: "T-ENG", workspace: join(project.root, "wt-eng"), gate: "true", artifact: "a" });
+  factory.ledger.append({ event: "claim_reported", task: "T-ENG", attempt: 1, sha: "s", agent: "agent-eng" });
+  factory.ledger.append({ event: "contract_set", task: "T-REV", workspace: join(project.root, "wt-rev"), gate: "true", artifact: "a", disposition: "reviewer" });
+  factory.ledger.append({ event: "claim_reported", task: "T-REV", attempt: 1, sha: "s", agent: "agent-rev" });
+  factory.ledger.append({ event: "contract_set", task: "T-DONE", workspace: join(project.root, "wt-done"), gate: "true", artifact: "a" });
+  factory.ledger.append({ event: "claim_reported", task: "T-DONE", attempt: 1, sha: "s", agent: "agent-done" });
+  factory.ledger.append({ event: "gate_finished", task: "T-DONE", attempt: 1, exit: 0, verdict: "green", note: "" });
+  factory.ledger.append({ event: "report_written", task: "T-DONE", attempt: 1, path: "/r" });
+  factory.ledger.append({ event: "attempt_accepted", task: "T-DONE", attempt: 1, accepted_by: "lead" });
+  const snap = await handlers.snapshot({ projectRoot: project.root });
+  assert.ok(snap.ok, snap.ok ? "" : snap.error);
+  assert.deepEqual(snap.view.panel.seats!.peers, [
+    { agentId: "agent-eng", task: "T-ENG", title: "Peer · T-ENG", disposition: "engineer", statusLabel: "working", tone: "normal", model: "glm-5.3" },
+    { agentId: "agent-rev", task: "T-REV", title: "Peer · T-REV", disposition: "reviewer", statusLabel: "idle", tone: "normal", model: "pi/zai/glm-5.3" },
+  ]);
+  assert.equal(snap.view.panel.summary, "Lead idle · 2 Peers · nothing needs you");
+});
+
+test("panel: with no Peer running the Peers list is empty and the summary names none", async (t) => {
+  const { handlers, project } = makePanelSurface(t, (p) => [{ id: "agent-lead", labels: seatLabels(p, "lead"), cwd: p.root }]);
+  const snap = await handlers.snapshot({ projectRoot: project.root });
+  assert.ok(snap.ok, snap.ok ? "" : snap.error);
+  assert.deepEqual(snap.view.panel.seats!.peers, []);
+  assert.doesNotMatch(snap.view.panel.summary, /Peer/);
+});
+
+// ---- Open Design ------------------------------------------------------------------------------
+
+test("panel: Open Design is unlinked, linked, or broken — a recorded link whose staged bundle is gone is the broken state", async (t) => {
+  const { handlers, stateDir, project } = makePanelSurface(t);
+  const read = async () => {
+    const snap = await handlers.snapshot({ projectRoot: project.root });
+    assert.ok(snap.ok, snap.ok ? "" : snap.error);
+    return snap.view.panel;
+  };
+  assert.deepEqual((await read()).openDesign, { state: "unlinked", projectName: null, syncedAt: null, detail: null });
+
+  const link = { projectId: "od-1", projectName: "Mobile Redesign", sourceUpdatedAt: 1, syncedAt: "2026-10-01T00:00:00.000Z", digest: "d", screenCount: 3, files: ["index.html"] };
+  writeProjectSettings(stateDir, project.slug, { schemaVersion: 1, revision: 1, openDesignLink: link });
+  const broken = await read();
+  assert.equal(broken.openDesign!.state, "broken");
+  assert.equal(broken.openDesign!.projectName, "Mobile Redesign");
+  assert.deepEqual(broken.needsYou.map((item) => item.kind), ["open-design-broken"]);
+  assert.deepEqual(broken.needsYou[0]!.action, { kind: "open-design", label: "Open Design" });
+
+  mkdirSync(join(project.root, "design"), { recursive: true });
+  writeFileSync(join(project.root, "design", "index.html"), "<html></html>");
+  const linked = await read();
+  assert.deepEqual(linked.openDesign, { state: "linked", projectName: "Mobile Redesign", syncedAt: "2026-10-01T00:00:00.000Z", detail: null });
+  assert.deepEqual(linked.needsYou, [], "a healthy link needs nothing from the Owner");
 });
