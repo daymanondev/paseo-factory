@@ -143,81 +143,20 @@ test("v0.6.0 W4 (ADR 0056): the surface registers only the Workspace panel, the 
 
 // ---- native seat starts & live seat states (v0.0.27, ADR 0017 §3) ---------------------------
 
-test("v0.0.27 (ADR 0017 §3): the Header renders no Start Supervisor / Start Lead buttons — a live seat shows its state plus an Open jump, a vacant seat shows the picker hint", () => {
-  const header = read("plugin/client/factory/header.tsx");
-  assert.ok(!header.includes("Start Supervisor"), "the Start Supervisor button is gone from the persistent Header");
-  assert.ok(!header.includes("Start Lead"), "the Start Lead button is gone from the persistent Header");
-  assert.match(header, /view\.supervisor !== null \?/, "the Supervisor controls render only while the seat lives (agentId !== null)");
-  assert.match(header, /view\.lead !== null \?/, "the Lead controls render only while the seat lives (agentId !== null)");
-  assert.match(header, /label="Open Supervisor"/, "a live Supervisor renders the Open Supervisor jump");
-  assert.match(header, /label="Open Lead"/, "a live Lead renders the Open Lead jump");
-  assert.match(header, /onPress=\{\(\) => actions\.openSupervisor\(\)\}/, "Open Supervisor rides the bare navigation action");
-  assert.match(header, /onPress=\{\(\) => actions\.openLead\(\)\}/, "Open Lead rides the bare navigation action");
-  assert.match(header, /name="Supervisor" status=\{view\.supervisor\.status\}/, "the live Supervisor's daemon state (running / idle) renders beside the jump");
-  assert.match(header, /name="Lead" status=\{view\.lead\.status\}/, "the live Lead's daemon state renders beside the jump");
-  assert.ok(header.includes('Select "Supervisor (Factory)" in New Chat to start'), "the vacant Supervisor hint is verbatim from Implementation Decision 3");
-  assert.ok(header.includes("Spawned automatically by Supervisor"), "the vacant Lead hint is verbatim from Implementation Decision 3");
-});
-
-test("v0.0.27 (ADR 0017 §3): Seats & Models renders no Start Supervisor / Start Lead buttons — vacant seats carry the picker hints, live seats keep Open / Rotate / Revoke", () => {
-  const seats = read("plugin/client/factory/seats.tsx") + read("plugin/client/factory/seat-card.tsx");
-  assert.ok(!seats.includes("Start Supervisor"), "the Seats & Models view renders no Start Supervisor button");
-  assert.ok(!seats.includes("Start Lead"), "the Seats & Models view renders no Start Lead button");
-  assert.match(seats, /title="Supervisor — not started"/, "the vacant Supervisor node names its not-started state");
-  assert.match(seats, /title="Lead — not started"/, "the vacant Lead node names its not-started state");
-  assert.ok(seats.includes('Select "Supervisor (Factory)" in New Chat to start'), "the vacant Supervisor node carries the verbatim picker hint");
-  assert.ok(seats.includes("Spawned automatically by Supervisor"), "the vacant Lead node carries the verbatim spawned-by-Supervisor hint");
-  assert.match(seats, /label="Open"/, "a live seat's card keeps its Open jump link");
-  assert.match(seats, /actions\.openAgent\(agent\.id\)/, "the Open link rides navigation to the live agent's conversation");
-  assert.match(seats, /retireLabel="Revoke Supervisor"/, "a live Supervisor keeps its Revoke action");
-  assert.match(seats, /retireLabel="Rotate Lead"/, "a live Lead keeps its Rotate action");
-  assert.match(seats, /onRetire=\{actions\.revokeSupervisor\}/, "Revoke rides the revokeSupervisor action");
-  assert.match(seats, /onRetire=\{actions\.rotateLead\}/, "Rotate rides the rotateLead action");
-});
-
 test("v0.0.27 (ADR 0017 §3): FactoryShell drops the ensure/dispatch seat wiring — Open jumps navigate straight to the live seat's conversation", () => {
   const shell = read("plugin/client/factory/shell.tsx");
   assert.ok(!shell.includes("supervisorEnsure"), "the supervisorEnsure RPC import and binding are gone");
   assert.ok(!shell.includes("leadEnsure"), "the leadEnsure RPC import and binding are gone");
   assert.ok(!shell.includes("leadDispatch"), "the leadDispatch RPC import and binding are gone");
-  assert.match(shell, /const agentId = view\.supervisor\?\.id;/, "Open Supervisor resolves the live Supervisor's agentId from the snapshot");
-  assert.match(shell, /const agentId = view\.lead\?\.id;/, "Open Lead resolves the live Lead's agentId from the snapshot");
-  assert.match(shell, /navigation\?\.openAgent\(\{ agentId, serverId \}\)/, "both jumps ride navigation.openAgent — no act() and no RPC behind them");
+  assert.match(shell, /navigation\?\.openAgent\(\{ agentId, serverId \}\)/, "the Needs-you jump rides navigation.openAgent — no act() and no RPC behind it");
   assert.ok(!shell.includes("supervisorLive") && !shell.includes("leadLive"), "the dead live-boolean props are deleted, not left dangling");
 });
 
 // ---- the Lead telemetry trio (v0.0.20, ADR 0013 §6) ----------------
 
-test("the Lead card renders the 128k telemetry trio — usage pill, rotationState badge, queued mail count", () => {
-  const seats = read("plugin/client/factory/seat-card.tsx").replace(/\s+/g, " ");
-  assert.match(
-    seats,
-    /label=\{`\$\{Math\.round\(agent\.contextUsedTokens \/ 1000\)\}k \/ 128k handoff`\}/,
-    "the usage pill renders <used>k against the fixed 128k handoff mark (e.g. 94k / 128k handoff)",
-  );
-  assert.match(seats, /agent\.contextUsedTokens !== undefined && agent\.contextUsedTokens !== null/, "the pill appears only when the daemon answered usage");
-  assert.match(seats, /label=\{agent\.rotationState\}/, "the rotationState badge renders the state itself");
-  assert.match(
-    seats,
-    /agent\.rotationState === "handing_over" \? "accent" : agent\.rotationState === "rotation_pending" \? "statusWarning" : "foregroundMuted"/,
-    "the badge's tone vocabulary — handing_over accent, rotation_pending warning, normal muted",
-  );
-  assert.match(
-    seats,
-    /label=\{`\$\{agent\.queuedMailCount\} queued`\}/,
-    "the queued-mail pill renders N queued",
-  );
-  assert.match(seats, /agent\.queuedMailCount !== undefined && agent\.queuedMailCount > 0/, "the queued pill appears only when mail actually waits");
-});
-
 // ---- Dedicated Vault Tab & De-cluttered Header (v0.0.35 Seam 2.1, ADR 0025, amending ADR 0009/0014) ----
 
 test("v0.0.35 Seam 2.1: VaultPane / VaultSyncBar moves out of Header into the dedicated Vault tab (tab === \"vault\") and Settings screen with 3-state gh onboarding, Sync Vault, + Import Key drawer, and ⚙ drawer, while Header drops <VaultSyncBar and KPI StatTile cards", () => {
-  const header = read("plugin/client/factory/header.tsx");
-  assert.ok(!header.includes("<VaultSyncBar"), "Header no longer renders VaultSyncBar above the TabBar");
-  assert.ok(!header.includes("function StatTile("), "Header no longer defines the 5 KPI StatTile cards");
-  assert.ok(!header.includes("<StatTile"), "Header no longer renders KPI StatTile cards above the TabBar");
-
   const vault = read("plugin/client/factory/vault.tsx");
   assert.match(vault, /export function VaultSyncBar\(/, "VaultSyncBar is exported from vault.tsx");
   assert.match(vault, /export function VaultPane\(/, "VaultPane is exported from vault.tsx");
@@ -250,7 +189,13 @@ test("v0.0.35 Seam 2.1: VaultPane / VaultSyncBar moves out of Header into the de
   assert.match(shell, /<VaultPane/, "FactoryShell mounts VaultPane");
   assert.equal((shell.match(/<VaultPane/g) ?? []).length, 1, "FactoryShell defines a single shared <VaultPane element rather than duplicating JSX");
   assert.match(vault, /export function readAgo\(/, "vault.tsx exports shared readAgo helper");
-  assert.ok(!header.includes("function readAgo("), "header.tsx imports readAgo from vault.tsx instead of duplicating it");
+});
+
+test("v0.6.0 W5 (ADR 0056): the Header and the seat-card salvage are replaced by the Project panel — entries still forward the host layout so the shell can read the platform", () => {
+  assert.throws(() => read("plugin/client/factory/header.tsx"), "header.tsx is deleted");
+  assert.throws(() => read("plugin/client/factory/seat-card.tsx"), "seat-card.tsx is deleted");
+  const entries = read("plugin/client/factory/entries.tsx");
+  assert.match(entries, /layout=\{layout\}/, "entries.tsx forwards Paseo's layout prop to FactoryShell");
 });
 
 test("FactoryShell removes PrivateVaultCard from the Plugins tab, wires vaultSync & vaultImport, and provides 3-layer feedback in act()", () => {
@@ -279,54 +224,6 @@ test("v0.0.24 (ADR 0015 §1): Seats & Models lane modal distinguishes thinkingOp
 });
 
 // ---- Owner-Only Project Reset & Delete + Project-Centered Header (v0.0.24 ADR 0015 §6; v0.0.35 Seam 2.2, ADR 0024/0025) ----
-
-test("v0.0.24 (ADR 0015 §6): Header renders two-step Reset Project -> Confirm Reset + Cancel with 5s auto-cancel, wired to projectReset RPC in FactoryShell", () => {
-  const header = read("plugin/client/factory/header.tsx");
-  assert.match(header, /resetProject\?:\s*\(\)\s*=>\s*void|resetProject\(\):\s*void/, "HeaderActions declares resetProject()");
-  assert.match(header, /label="Reset Project"/, "Header renders Reset Project button when a project is selected");
-  assert.match(header, /label="Confirm Reset"/, "first click flips to Confirm Reset");
-  assert.match(header, /tone="statusDanger"/, "Confirm Reset is danger-styled");
-  assert.match(header, /5000/, "auto-cancels confirmation state after 5 seconds");
-  assert.match(header, /actions\.resetProject/, "Confirm Reset invokes actions.resetProject()");
-
-  const shell = read("plugin/client/factory/shell.tsx");
-  assert.match(shell, /projectReset/, "FactoryShell imports projectReset RPC");
-  assert.match(shell, /useRpc\(projectReset\)/, "FactoryShell binds useRpc(projectReset)");
-  assert.match(shell, /resetProject/, "FactoryShell passes resetProject action to Header");
-});
-
-test("v0.6.0 W4 (ADR 0056): Header keeps the Missing folder badge and two-step Delete Project wired to projectDelete — and carries no Project Switcher, All projects, folder picker or path paste", () => {
-  const header = read("plugin/client/factory/header.tsx");
-  assert.doesNotMatch(header, /PROJECT SWITCHER|Project Switcher/i, "the Project Switcher is gone");
-  assert.doesNotMatch(header, /All projects/, "the All projects view is gone");
-  assert.doesNotMatch(header, /Add Project|Paste path|pickProjectFolder|addProject|pickProject\b/, "the folder picker and path paste are gone");
-  assert.match(header, /label="Missing folder"/, "Header renders Missing folder badge when missingRoot is true");
-  assert.match(header, /Folder deleted on disk/, "Header warns when the project folder was deleted on disk");
-  assert.match(header, /!project\.missingRoot/, "Reset Project is hidden when project.missingRoot === true");
-  assert.match(header, /deleteProject\(target\?:/, "HeaderActions declares deleteProject()");
-  assert.match(header, /label="Delete Project"/, "Header renders Delete Project button when a project is selected");
-  assert.match(header, /label="Confirm Delete"/, "first click on Delete Project flips to Confirm Delete");
-  assert.match(header, /actions\.deleteProject/, "Confirm Delete invokes actions.deleteProject()");
-  assert.match(
-    header,
-    /!project\.missingRoot[\s\S]*Select "Supervisor \(Factory\)" in New Chat to start/,
-    "Vacant seat startup hints are suppressed when the active project has missingRoot === true",
-  );
-
-  const shell = read("plugin/client/factory/shell.tsx");
-  assert.match(shell, /projectDelete/, "FactoryShell imports projectDelete RPC");
-  assert.match(shell, /useRpc\(projectDelete\)/, "FactoryShell binds useRpc(projectDelete)");
-  assert.match(shell, /deleteProject/, "FactoryShell wires deleteProject into Header actions");
-  assert.doesNotMatch(shell, /projectPickFolder|hasPickedScope|pickedRoot|useRpc\(projectAdd\)/, "no folder picker and no picked scope");
-  assert.match(
-    shell,
-    /target\?:\s*\{\s*root\?:\s*string;\s*slug\?:\s*string\s*\}/,
-    "FactoryShell deleteProject accepts an explicit { root, slug } target",
-  );
-
-  const entries = read("plugin/client/factory/entries.tsx");
-  assert.match(entries, /layout=\{layout\}/, "entries.tsx forwards Paseo's layout prop to FactoryShell");
-});
 
 // ---- Compact Plugins Tab, Core Card, Version Pills & On-Demand Update Check (v0.0.25, ADR 0012 §1–§4) ----
 

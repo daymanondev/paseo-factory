@@ -241,7 +241,7 @@ export function TabBar({
   compact = false,
 }: {
   theme: PluginTheme;
-  active: TabId;
+  active: TabId | null;
   onPick: (tab: TabId) => void;
   counts?: Partial<Record<TabId, number>>;
   compact?: boolean;

@@ -12,7 +12,7 @@ export const PANEL_ID = "paseo-factory";
 
 /** The settings screen: lane config, supervisor controls, diagnostics — opens on Seats & Models. */
 export function FactorySettings({ theme, layout, navigation, host }: PluginSurfaceProps) {
-  return <FactoryShell theme={theme} layout={layout} navigation={navigation} serverId={host.id} initialTab="seats" showDiagnostics />;
+  return <FactoryShell theme={theme} layout={layout} navigation={navigation} serverId={host.id} initialTab="seats" showDiagnostics surface="settings" />;
 }
 
 /** The workspace panel: the shell scoped to this workspace's directory, with Paseo 0.13 persisted tab state. */

@@ -101,15 +101,8 @@ import type { UsageRuntime } from "./usage-rollup.ts";
 import { factoryRegistryFor } from "./projects.ts";
 import type { FactoryRegistry } from "./projects.ts";
 export { PEER_HANDOFF_TOKENS } from "./peer-handoff.ts";
-
-/**
- * The fixed `Lead handoff` threshold (ADR 0013 §5): 128,000 tokens, a
- * constant — never a per-model percentage formula (spec §Out of Scope). The
- * successor rotates before context degradation sets in across any
- * `200k`–`1M` model lane.
- */
-export const LEAD_ROTATE_TOKENS = 128_000;
-
+import { HANDOFF_EXTRACTION_MAX_SENDS, HANDOFF_EXTRACTION_TIMEOUT_MS, LEAD_ROTATE_TOKENS } from "./handoff-limits.ts";
+export { HANDOFF_EXTRACTION_MAX_SENDS, HANDOFF_EXTRACTION_TIMEOUT_MS, LEAD_ROTATE_TOKENS };
 /**
  * The `lead-handoff.md` byte ceiling (v0.0.97, ADR 0047 §3.3, amending ADR 0044):
  * 8,192 bytes (8 KB). The handoff is a lean ~2k-token tactical baton — the
@@ -118,25 +111,6 @@ export const LEAD_ROTATE_TOKENS = 128_000;
  */
 export const LEAD_HANDOFF_MAX_BYTES = 8 * 1024;
 
-/**
- * The Dual-Fuse `Lead handoff` extraction window (v0.0.28, ADR 0018 §3;
- * pause-aware since v0.2.2, ADR 0050 Decision 3): 180,000 ms (180 seconds)
- * per extraction send. When the window elapses, the runtime trips Fuse 2 only
- * over a genuinely dead or hung Lead (absent, `error`, or still `running`) —
- * an alive `idle`/`closed` Lead (the paused-mid-extraction shape) is re-sent
- * the fixed prompt within `HANDOFF_EXTRACTION_MAX_SENDS` instead, and the
- * window resets with each send.
- */
-export const HANDOFF_EXTRACTION_TIMEOUT_MS = 180_000;
-
-/**
- * The per-`handing_over`-episode extraction send ceiling (v0.2.2, ADR 0050
- * Decision 2): the original prompt plus at most 2 re-sends. A repeatedly
- * stopped extraction can never ping-pong forever — at the ceiling the
- * runtime completes the handoff via the degraded path instead of sending
- * again.
- */
-export const HANDOFF_EXTRACTION_MAX_SENDS = 3;
 
 const INTERRUPTED_HANDOFF_EXTRACTION_NOTE =
   "(the outgoing Lead was interrupted during handoff extraction — rely on the Machine-Verified Active Peer Roster and Ledger State Digest above)";

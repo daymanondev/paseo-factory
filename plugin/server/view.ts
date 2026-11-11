@@ -19,6 +19,8 @@ import type { CompanionCatalogEntry, CorePluginCatalogEntry } from "../shared/co
 import { readPluginVersionFromDisk } from "./daemon-cli.ts";
 import type { DaemonPluginSourceStatus } from "./daemon-cli.ts";
 import type { LedgerEvent } from "./core/events.ts";
+import { foldPanel } from "./panel.ts";
+import type { PanelInput } from "./panel.ts";
 
 type AnyEvent = LedgerEvent;
 
@@ -207,6 +209,7 @@ export function foldTasks(events: readonly AnyEvent[]): TaskView[] {
       costUsd: dollars ?? null,
       totalTokens,
       needsHumanReason: state.needs?.reason ?? null,
+      disposition: contract?.disposition ?? "engineer",
       choke: { allowed, denied, blocked },
       attempts,
       lastSeq: slice.reduce((max, evt) => Math.max(max, evt.seq), 0),
@@ -539,9 +542,12 @@ export function foldView(input: {
    * fold stays pure over its inputs.
    */
   vault: VaultStatusView;
+  /** The gathered probes the Project panel folds with the Task views and seat rows (v0.6.0, ADR 0056 §5). */
+  panel: Omit<PanelInput, "tasks" | "agents" | "supervisor" | "lead">;
 }): FactoryViewFold {
   const tasks = enrichTaskUsage(foldTasks(input.events), input.usage);
   return {
+    panel: foldPanel({ ...input.panel, tasks, agents: input.daemon.agents, supervisor: input.daemon.supervisor, lead: input.daemon.lead }),
     version: FACTORY_VIEW_VERSION,
     stateDir: input.stateDir,
     generatedAt: input.generatedAt,
