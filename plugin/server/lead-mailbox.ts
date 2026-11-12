@@ -279,12 +279,6 @@ export interface LeadMailRuntimeDeps {
    */
   ensureLead: (input: { projectRoot: string; message?: string }) => Promise<EnsureLeadResult>;
   /**
-   * Auto-ensure a Project's Supervisor seat (v0.0.23, ADR 0015 §3/§5): the
-   * surface handlers' `supervisorEnsure` is the implementation — find-or-create
-   * the standing `seat=supervisor` agent at the Project's root under its lane.
-   */
-  ensureSupervisor?: (input: { projectRoot: string; message?: string }) => Promise<LeadSeatEnsureResult>;
-  /**
    * Retire a Project's Lead (v0.0.20, ADR 0013 §5): the surface handlers'
    * `leadRotate` is the implementation — the `retireSeat` sequence of
    * best-effort cancel, `archive()`, and registration `lead: null`. The
@@ -719,12 +713,19 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
   };
 
   /**
-   * The Supervisor drain (v0.0.23, ADR 0015 §3): when `supervisorQueued` has
-   * waiting items and `supervisorInFlight === null`, ensures `Supervisor` (if
-   * `ensureSupervisor` is wired), waits if `Supervisor` is `running` or
-   * `initializing` (or requires attention), and otherwise formats the batch
-   * (`renderSupervisorMailBatch`), sends it to `Supervisor`, and appends
-   * `mail_delivered` (`to: "supervisor"`).
+   * The Supervisor drain (v0.0.23, ADR 0015 §3; v0.6.1, ADR 0057 §5): when
+   * `supervisorQueued` has waiting items and `supervisorInFlight === null`,
+   * re-resolves the Project's live Supervisor at THIS send (the recipient is
+   * never carried over from an earlier queue), waits if `Supervisor` is
+   * `running` or `initializing` (or requires attention), and otherwise formats
+   * the batch (`renderSupervisorMailBatch`), sends it to `Supervisor`, and
+   * appends `mail_delivered` (`to: "supervisor"`).
+   *
+   * v0.6.1 (ADR 0057 §5): no Supervisor is ever created here. With no live
+   * Supervisor the mail simply stays queued — holding is the safe state — and
+   * the panel's Needs you says "No Supervisor · N reports waiting". The next
+   * Supervisor chat the Owner opens (or adopts) receives the held batch after
+   * its Seat kickoff packet.
    */
   const drainSupervisorMailbox = async (slug: string): Promise<void> => {
     const path = mailboxPath(slug);
@@ -738,23 +739,10 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       log(`lead-mailbox: cannot read the daemon's supervisor for ${slug} — holding ${state.supervisorQueued.length} item(s) queued (${messageOf(err)})`);
       return;
     }
-    if (supervisor === undefined || supervisor.status === "error") {
-      const registration = readProjectRegistration(deps.stateDir, slug);
-      if (deps.ensureSupervisor !== undefined && registration?.root !== undefined) {
-        const ensured = await deps.ensureSupervisor({ projectRoot: registration.root });
-        if (!ensured.ok) {
-          log(`lead-mailbox: cannot ensure supervisor for ${slug} (${ensured.code}: ${ensured.error}) — holding ${state.supervisorQueued.length} item(s)`);
-          return;
-        }
-        try {
-          supervisor = await liveSupervisorAgent(daemon, slug);
-        } catch (err) {
-          log(`lead-mailbox: cannot read the daemon's supervisor for ${slug} — holding ${state.supervisorQueued.length} item(s) queued (${messageOf(err)})`);
-          return;
-        }
-      }
+    if (supervisor === undefined) {
+      log(`lead-mailbox: no live Supervisor for ${slug} — holding ${state.supervisorQueued.length} item(s) queued for the next Supervisor (never creating one)`);
+      return;
     }
-    if (supervisor === undefined) return;
     if (!isSeatReadyForMail(supervisor)) return;
     const isFirstTurn = !hasSeatReceivedFirstTurn(supervisor);
     const prompt = prependKickoffPacketIfFirstTurn("supervisor", slug, supervisor, renderSupervisorMailBatch(state.supervisorQueued));
@@ -949,7 +937,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       }
     }
     if (ownedSupervisor !== undefined) {
-      const { slug, root } = ownedSupervisor;
+      const { slug } = ownedSupervisor;
       await projectLane(slug, async () => {
         try {
           const path = mailboxPath(slug);
@@ -988,9 +976,9 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
           if (input.outcome.kind !== "completed" && !retryingFailedSupervisorBatch) {
             return;
           }
-          if (retryingFailedSupervisorBatch && root) {
-            await ensureSupervisorInLane(slug, root);
-          }
+          // v0.6.1 (ADR 0057 §5): a failed Supervisor turn requeues and retries
+          // the batch against the re-resolved live Supervisor — it never
+          // creates a replacement seat; with none live the mail holds queued.
           await drainSupervisorMailbox(slug);
         } catch (err) {
           log(`lead-mailbox: turn boundary of ${slug}'s supervisor failed — the state stands, mail is held (${messageOf(err)})`);
@@ -1510,21 +1498,6 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     };
   };
 
-  /** Ensure or look up the Project's Supervisor inside a lane job. */
-  const ensureSupervisorInLane = async (
-    slug: string,
-    root: string,
-  ): Promise<{ ok: true; agentId: string } | { ok: false; code: string; error: string }> => {
-    if (deps.ensureSupervisor !== undefined) {
-      const ensured = await deps.ensureSupervisor({ projectRoot: root });
-      if (!ensured.ok) return ensured;
-      return { ok: true, agentId: ensured.agentId };
-    }
-    const existing = await liveSupervisorAgent(resolveDaemon(), slug);
-    if (existing !== undefined) return { ok: true, agentId: existing.id };
-    return { ok: false, code: "no-supervisor", error: `no supervisor seat available for project ${slug}` };
-  };
-
   /** The spool's `lead_dispatch` handler (ADR 0013 Decision 4, bullet 3). */
   const dispatchLead = async (request: SpoolLeadDispatchRequest, options?: { existingDesignSnapshot: true }): Promise<SpoolReply> => {
     const target = resolveTargetProject(request, "lead dispatch");
@@ -1579,13 +1552,16 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
   };
 
   /**
-   * The spool's `supervisor_dispatch` handler (v0.0.23, ADR 0015 §5):
+   * The spool's `supervisor_dispatch` handler (v0.0.23, ADR 0015 §5; v0.6.1,
+   * ADR 0057 §5):
    * - If `request.seat === "supervisor"`, routes transparently to `dispatchLead`
    *   (`to: "lead"`, `from: "supervisor"`) and tells `Supervisor` to end its
    *   turn immediately and wait for `Lead`'s report.
-   * - Otherwise ensures `Supervisor`, enqueues `to: "supervisor"`
-   *   (`from: "owner"`, `kind: "directive"`), pumps `Supervisor`, and tells the
-   *   normal chat caller to stop its turn immediately without editing files.
+   * - Otherwise enqueues `to: "supervisor"` (`from: "owner"`, `kind:
+   *   "directive"`), pumps `Supervisor`, and tells the normal chat caller to
+   *   stop its turn immediately without editing files. The plugin never
+   *   creates a Supervisor here (v0.6.1, ADR 0057 §5): with no live Supervisor
+   *   the directive is held for the next one, and the reply says so.
    */
   const dispatchSupervisor = async (request: SpoolSupervisorDispatchRequest): Promise<SpoolReply> => {
     if (request.seat === "supervisor") {
@@ -1608,85 +1584,107 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     if (!target.ok) return target;
     const { root, slug } = target;
     await prepareOpenDesignDispatch({ state: deps.stateDir, slug, root, requestId: request.id, userHome: deps.home ? resolveVaultUserHome(deps.home) : undefined });
-    const laneOutcome = await projectLane(
-      slug,
-      async (): Promise<{ ok: true; agentId: string; mailId: string } | { ok: false; code: string; error: string }> => {
-        const ensured = await ensureSupervisorInLane(slug, root);
-        if (!ensured.ok) return ensured;
-        const submitter = typeof request.submitter === "string" ? request.submitter.trim() : "";
-        if (
-          submitter !== "" &&
-          submitter !== "owner" &&
-          submitter !== "supervisor" &&
-          submitter !== "lead" &&
-          submitter !== "agent" &&
-          submitter !== "ui"
-        ) {
-          const reg = readProjectRegistration(deps.stateDir, slug);
-          if (submitter !== ensured.agentId && submitter !== reg?.supervisor && submitter !== reg?.lead) {
-            writeProjectRegistration(deps.stateDir, slug, {
-              root: reg?.root ?? root,
-              dispatchers: [submitter],
-            });
-          }
+    const laneOutcome = await projectLane(slug, async (): Promise<{ ok: true; mailId: string } | { ok: false; code: string; error: string }> => {
+      // v0.6.1 (ADR 0057 §5): resolve-only. An absent Supervisor holds the mail;
+      // the queue-time resolution below is informational — every send re-resolves.
+      let live: SurfaceAgentSnapshot | undefined;
+      try {
+        live = await liveSupervisorAgent(resolveDaemon(), slug);
+      } catch {
+        live = undefined;
+      }
+      const submitter = typeof request.submitter === "string" ? request.submitter.trim() : "";
+      if (
+        submitter !== "" &&
+        submitter !== "owner" &&
+        submitter !== "supervisor" &&
+        submitter !== "lead" &&
+        submitter !== "agent" &&
+        submitter !== "ui"
+      ) {
+        const reg = readProjectRegistration(deps.stateDir, slug);
+        if (submitter !== live?.id && submitter !== reg?.supervisor && submitter !== reg?.lead) {
+          writeProjectRegistration(deps.stateDir, slug, {
+            root: reg?.root ?? root,
+            dispatchers: [submitter],
+          });
         }
-        const queued = appendMailQueued(mailboxPath(slug), {
-          to: "supervisor",
-          from: "owner",
-          kind: "directive",
-          text: request.message,
-        });
-        return { ok: true, agentId: ensured.agentId, mailId: queued.mailId };
-      },
-    );
+      }
+      const queued = appendMailQueued(mailboxPath(slug), {
+        to: "supervisor",
+        from: "owner",
+        kind: "directive",
+        text: request.message,
+      });
+      return { ok: true, mailId: queued.mailId };
+    });
     if (!laneOutcome.ok) return { id: request.id, ok: false, code: laneOutcome.code, message: laneOutcome.error };
-    const { agentId, mailId } = laneOutcome;
+    const { mailId } = laneOutcome;
     await pumpProjectSupervisor(slug);
-    return {
-      id: request.id,
-      ok: true,
-      summary: `directive routed to Supervisor (${agentId}) — stop this turn immediately without editing files and open the Supervisor session`,
-      project: slug,
-      supervisorAgentId: agentId,
-      mailId,
-    };
+    // The recipient is re-resolved after the pump — the id that holds the
+    // batch now, never a stale binding (ADR 0057 §5, "re-resolved at every send").
+    const routed = await liveSupervisorAgent(resolveDaemon(), slug).catch(() => undefined);
+    return routed === undefined
+      ? {
+          id: request.id,
+          ok: true,
+          summary: `directive held for Supervisor — none is live for ${slug}; it delivers to the next Supervisor (the Factory panel's Needs you says so) — stop this turn immediately without editing files`,
+          project: slug,
+          mailId,
+        }
+      : {
+          id: request.id,
+          ok: true,
+          summary: `directive routed to Supervisor (${routed.id}) — stop this turn immediately without editing files and open the Supervisor session`,
+          project: slug,
+          supervisorAgentId: routed.id,
+          mailId,
+        };
   };
 
   /**
-   * The spool's `supervisor_report` handler (v0.0.23, ADR 0015 §3):
-   * Ensures `Supervisor`, enqueues `to: "supervisor"` (`from: "lead"`,
-   * `kind: "report"`), pumps `Supervisor`, and returns `supervisorAgentId` +
-   * `mailId`.
+   * The spool's `supervisor_report` handler (v0.0.23, ADR 0015 §3; v0.6.1,
+   * ADR 0057 §5): enqueues `to: "supervisor"` (`from: "lead"`, `kind:
+   * "report"`), pumps `Supervisor`, and returns `supervisorAgentId` + `mailId`.
+   * The plugin never creates a Supervisor from a Lead report (v0.6.1, ADR
+   * 0057 §5): with no live Supervisor the report is held for the next one and
+   * the reply says so — the Lead's report never vanishes and never spawns a
+   * hidden seat.
    */
   const reportSupervisor = async (request: SpoolSupervisorReportRequest): Promise<SpoolReply> => {
     const target = resolveTargetProject(request, "supervisor report");
     if (!target.ok) return target;
-    const { root, slug } = target;
-    const laneOutcome = await projectLane(
-      slug,
-      async (): Promise<{ ok: true; agentId: string; mailId: string } | { ok: false; code: string; error: string }> => {
-        const ensured = await ensureSupervisorInLane(slug, root);
-        if (!ensured.ok) return ensured;
-        const queued = appendMailQueued(mailboxPath(slug), {
-          to: "supervisor",
-          from: "lead",
-          kind: "report",
-          text: request.message,
-        });
-        return { ok: true, agentId: ensured.agentId, mailId: queued.mailId };
-      },
-    );
+    const { slug } = target;
+    const laneOutcome = await projectLane(slug, async (): Promise<{ ok: true; mailId: string } | { ok: false; code: string; error: string }> => {
+      const queued = appendMailQueued(mailboxPath(slug), {
+        to: "supervisor",
+        from: "lead",
+        kind: "report",
+        text: request.message,
+      });
+      return { ok: true, mailId: queued.mailId };
+    });
     if (!laneOutcome.ok) return { id: request.id, ok: false, code: laneOutcome.code, message: laneOutcome.error };
-    const { agentId, mailId } = laneOutcome;
+    const { mailId } = laneOutcome;
     await pumpProjectSupervisor(slug);
-    return {
-      id: request.id,
-      ok: true,
-      summary: `report queued for Supervisor (${agentId}) — end your turn`,
-      project: slug,
-      supervisorAgentId: agentId,
-      mailId,
-    };
+    // Re-resolved after the pump — the seat that holds the report now.
+    const routed = await liveSupervisorAgent(resolveDaemon(), slug).catch(() => undefined);
+    return routed === undefined
+      ? {
+          id: request.id,
+          ok: true,
+          summary: `report held for Supervisor — none is live for ${slug}; it delivers to the next Supervisor after its kickoff — end your turn`,
+          project: slug,
+          mailId,
+        }
+      : {
+          id: request.id,
+          ok: true,
+          summary: `report queued for Supervisor (${routed.id}) — end your turn`,
+          project: slug,
+          supervisorAgentId: routed.id,
+          mailId,
+        };
   };
 
   /**

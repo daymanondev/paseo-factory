@@ -142,7 +142,6 @@ function makeSpooledRuntime(t: TestContext, agents: FakeAgent[] = [], options?: 
     stateDir,
     daemon: fake.daemon,
     ensureLead: (input) => surface.leadEnsure(input),
-    ensureSupervisor: (input) => surface.supervisorEnsure(input),
     retireLead: (input) => surface.leadRotate(input),
     ...(options?.handoffTimeoutMs === undefined ? {} : { handoffTimeoutMs: options.handoffTimeoutMs }),
     onLog: (msg) => logs.push(msg),
@@ -244,9 +243,37 @@ test("parseSpoolRequest and handleSpoolRequest validate supervisor_dispatch and 
   if (!agentReport.ok) assert.equal(agentReport.code, "agent-cannot-orchestrate");
 });
 
-test("supervisor_dispatch from normal chat ensures Supervisor, delivers to=supervisor, and tells caller to stop turn immediately", async (t) => {
-  const { stateDir, slug, projectRoot, fake } = makeSpooledRuntime(t);
+test("supervisor_dispatch from normal chat never creates a Supervisor — with a live seat it routes, with none it holds and says so (v0.6.1 W2, ADR 0057 §5)", async (t) => {
+  const held = makeSpooledRuntime(t);
+  const heldSpool = spoolRootFor(held.stateDir);
+
+  // No live Supervisor: the directive is admitted and HELD — never a hidden seat.
+  dropRequest(heldSpool, {
+    id: "sup-disp-held",
+    kind: "supervisor_dispatch",
+    workspace: held.projectRoot,
+    message: "Design and build the 2D platformer",
+  });
+  await until(() => {
+    assert.equal(readReply(heldSpool, "sup-disp-held").ok, true);
+  });
+  const heldReply = readReply(heldSpool, "sup-disp-held");
+  assert.equal(heldReply.supervisorAgentId, undefined);
+  assert.match(String(heldReply.summary), /directive held for Supervisor — none is live/);
+  assert.equal(held.fake.created.length, 0, "the dispatch creates no Supervisor");
+  assert.equal(held.fake.sent.length, 0);
+  assert.deepEqual(
+    readMailboxLines(held.stateDir, held.slug).map((e) => e.type),
+    ["mail_queued"],
+  );
+  assert.equal(readMailboxLines(held.stateDir, held.slug)[0]?.to, "supervisor");
+
+  // With a live Supervisor (started explicitly, the Owner's act): the same
+  // dispatch routes to the seat and tells the caller to stop its turn.
+  const { stateDir, slug, projectRoot, surface, fake } = makeSpooledRuntime(t);
   const spoolRoot = spoolRootFor(stateDir);
+  const started = await surface.supervisorStart({ projectRoot });
+  assert.ok(started.ok, started.ok ? "" : started.error);
 
   dropRequest(spoolRoot, {
     id: "sup-disp-1",
@@ -260,8 +287,8 @@ test("supervisor_dispatch from normal chat ensures Supervisor, delivers to=super
   const reply = readReply(spoolRoot, "sup-disp-1");
 
   assert.equal(reply.project, slug);
-  assert.equal(reply.supervisorAgentId, "agent-created-1");
-  assert.match(String(reply.summary), /directive routed to Supervisor \(agent-created-1\)/);
+  assert.equal(reply.supervisorAgentId, started.ok ? started.agentId : "");
+  assert.match(String(reply.summary), new RegExp(`directive routed to Supervisor \\(${started.ok ? started.agentId : ""}\\)`));
   assert.match(String(reply.summary), /stop this turn immediately without editing files/);
 
   assert.equal(fake.created.length, 1);
@@ -273,17 +300,21 @@ test("supervisor_dispatch from normal chat ensures Supervisor, delivers to=super
   assert.equal(events[0]?.from, "owner");
   assert.equal(events[0]?.kind, "directive");
   assert.equal(events[1]?.to, "supervisor");
-  assert.equal(events[1]?.toAgentId, "agent-created-1");
+  assert.equal(events[1]?.toAgentId, started.ok ? started.agentId : "");
 
   assert.equal(fake.sent.length, 1);
-  assert.equal(fake.sent[0]?.agentId, "agent-created-1");
+  assert.equal(fake.sent[0]?.agentId, started.ok ? started.agentId : "");
   assert.ok(fake.sent[0]?.text.includes("# Supervisor mailbox — 1 item"));
   assert.ok(fake.sent[0]?.text.includes("Design and build the 2D platformer"));
 });
 
 test("supervisor_dispatch from a normal chat agent records submitter in project.json dispatchers (deduplicated) and ignores reserved/seat submitters (v0.0.24, T-03)", async (t) => {
-  const { stateDir, slug, projectRoot } = makeSpooledRuntime(t);
+  const { stateDir, slug, projectRoot, surface } = makeSpooledRuntime(t);
   const spoolRoot = spoolRootFor(stateDir);
+  // v0.6.1 (ADR 0057 §5): a live Supervisor the dispatches route to and the
+  // seat-submitter arm can name — started explicitly, never dispatched into being.
+  const started = await surface.supervisorStart({ projectRoot });
+  assert.ok(started.ok, started.ok ? "" : started.error);
 
   // 1. Normal chat session agent dispatches -> recorded in reg.dispatchers
   dropRequest(spoolRoot, {
@@ -319,7 +350,7 @@ test("supervisor_dispatch from a normal chat agent records submitter in project.
     kind: "supervisor_dispatch",
     workspace: projectRoot,
     message: "Supervisor self-id",
-    submitter: reg?.supervisor ?? "agent-created-1",
+    submitter: started.ok ? started.agentId : "supervisor",
   });
   await until(() => {
     assert.equal(readReply(spoolRoot, "sup-disp-chat-2").ok, true);
@@ -369,8 +400,10 @@ test("supervisor_report queues to=supervisor while Supervisor is busy, delivers 
     status: "running",
     labels: {},
   };
-  const { stateDir, slug, projectRoot, leadMail, fake } = makeSpooledRuntime(t, [supervisor]);
+  const { stateDir, slug, projectRoot, surface, leadMail, fake } = makeSpooledRuntime(t, [supervisor]);
   supervisor.labels = { seat: "supervisor", project: slug };
+  // v0.6.1 (ADR 0057 §5): the seat is started/bound explicitly — the report below never creates one.
+  await surface.supervisorEnsure({ projectRoot });
   const spoolRoot = spoolRootFor(stateDir);
   const mailboxPath = join(projectStateDir(stateDir, slug), "mailbox.jsonl");
 
@@ -587,7 +620,7 @@ test("isBlockedByAttention and mailbox drains only block on attentionReason='per
 });
 
 test("onLeadTurnEnded performs a bounded 1-shot self-healing retry per mailId for both Lead and Supervisor and stops on a second failure (v0.0.24, T-02)", async (t) => {
-  const { stateDir, slug, projectRoot, leadMail, fake, warnings } = makeSpooledRuntime(t);
+  const { stateDir, slug, projectRoot, surface, leadMail, fake, warnings } = makeSpooledRuntime(t);
   const mailboxPath = join(projectStateDir(stateDir, slug), "mailbox.jsonl");
 
   // --- Lead 1-shot self-healing retry ---
@@ -633,7 +666,12 @@ test("onLeadTurnEnded performs a bounded 1-shot self-healing retry per mailId fo
   assert.equal(fake.sent.length, 2, "no third send occurred");
   assert.equal(warnings.length, 1, "logged a warning when retry limit was reached");
 
-  // --- Supervisor 1-shot self-healing retry ---
+  // --- Supervisor retry: v0.6.1 (ADR 0057 §5) — a failed Supervisor turn never creates a replacement ---
+  const startedSup = await surface.supervisorStart({ projectRoot });
+  assert.ok(startedSup.ok, startedSup.ok ? "" : startedSup.error);
+  const supId1 = startedSup.ok ? startedSup.agentId : "";
+  assert.equal(fake.created.length, 3, "the Supervisor was started explicitly — the dispatch below creates nothing");
+
   const supDisp = await leadMail.dispatchSupervisor({
     id: "sd-retry-1",
     kind: "supervisor_dispatch",
@@ -641,11 +679,11 @@ test("onLeadTurnEnded performs a bounded 1-shot self-healing retry per mailId fo
     message: "Plan the architecture",
   });
   assert.equal(supDisp.ok, true);
-  const supId1 = supDisp.ok ? supDisp.supervisorAgentId ?? "" : "";
-  assert.equal(supId1, "agent-created-3");
-  assert.equal(fake.sent.length, 3);
+  assert.equal(supDisp.ok ? supDisp.supervisorAgentId : "", supId1);
+  assert.equal(fake.sent.length, 3, "the directive delivered to the started Supervisor");
 
-  // First Supervisor turn fails and leaves the Supervisor seat in status="error" -> ensureSupervisor self-heals before drainSupervisorMailbox
+  // First Supervisor turn fails and leaves the seat in status="error": the
+  // batch requeues and the 1-shot retry drain HOLDS — no replacement seat.
   const supAgentObj = fake.agents.find((a) => a.id === supId1);
   assert.ok(supAgentObj);
   supAgentObj.status = "error";
@@ -655,62 +693,26 @@ test("onLeadTurnEnded performs a bounded 1-shot self-healing retry per mailId fo
     timeline: [],
   });
   state = readLeadMailbox(mailboxPath);
-  assert.equal(state.supervisorQueued.length, 0);
-  assert.ok(state.supervisorInFlight !== null, "first Supervisor failure retried once");
-  assert.equal(state.supervisorInFlight?.toAgentId, "agent-created-4", "ensureSupervisor replaced the errored Supervisor seat on retry");
-  assert.equal(fake.sent.length, 4);
+  assert.equal(state.supervisorInFlight, null, "the failed batch requeued, nothing in flight");
+  assert.equal(state.supervisorQueued.length, 1, "the directive waits on the Supervisor slice");
+  assert.equal(fake.created.length, 3, "no Supervisor was created to heal the errored seat");
+  assert.equal(fake.sent.length, 3, "nothing re-sent — an errored Supervisor is never delivered into");
 
-  // Second Supervisor turn fails on the same mailId -> requeues and holds WITHOUT re-pumping
-  const supIdAfterFirstRetry = state.supervisorInFlight!.toAgentId;
-  await leadMail.onLeadTurnEnded({
-    agentId: supIdAfterFirstRetry,
-    outcome: { kind: "failed", error: { message: "Supervisor crash 2" } },
-    timeline: [],
-  });
+  // The seat recovers (the Owner reopens it): the next pump delivers the held batch.
+  supAgentObj.status = "idle";
+  await leadMail.pumpProjectSupervisor(slug);
   state = readLeadMailbox(mailboxPath);
-  assert.equal(state.supervisorInFlight, null, "second Supervisor failure did NOT re-deliver");
-  assert.equal(state.supervisorQueued.length, 1, "Supervisor mail stays queued after exhausting 1-shot retry");
-  assert.equal(fake.sent.length, 4, "no fifth send occurred");
-  assert.equal(warnings.length, 2, "logged a warning when Supervisor retry limit was reached");
-
-  // Direct order check: on a failed Supervisor turn, ensureSupervisor is invoked BEFORE drainSupervisorMailbox lists/sends
-  const callOrder: string[] = [];
-  const orderRuntime = createLeadMailRuntime({
-    factory: createFactory({ stateDir: join(makeTempDir(), "order-state") }),
-    stateDir,
-    daemon: {
-      ...fake.daemon,
-      agents: {
-        ...fake.daemon.agents,
-        list: async (opts) => {
-          callOrder.push("drainSupervisorMailbox:list");
-          return fake.daemon.agents.list(opts);
-        },
-      },
-    },
-    ensureLead: async () => ({ ok: true, agentId: "lead-x", created: false, projectRoot, slug }),
-    ensureSupervisor: async () => {
-      callOrder.push("ensureSupervisor");
-      return { ok: true, agentId: supIdAfterFirstRetry, created: false, projectRoot, slug };
-    },
-    retireLead: async () => ({ ok: true, agentId: "lead-x" }),
-  });
-  await orderRuntime.enqueueLeadMail(slug, { to: "supervisor", from: "owner", kind: "directive", text: "Order check directive" });
-  await orderRuntime.pumpProjectSupervisor(slug);
-  callOrder.length = 0;
-  await orderRuntime.onLeadTurnEnded({
-    agentId: supIdAfterFirstRetry,
-    outcome: { kind: "failed", error: { message: "Order check failure" } },
-    timeline: [],
-  });
-  assert.equal(callOrder[0], "ensureSupervisor", "onLeadTurnEnded invokes ensureSupervisor before drainSupervisorMailbox on 1-shot retry");
-  assert.ok(callOrder.includes("drainSupervisorMailbox:list"), "drainSupervisorMailbox ran after ensureSupervisor");
+  assert.ok(state.supervisorInFlight !== null, "the recovered Supervisor receives the held batch");
+  assert.equal(state.supervisorInFlight?.toAgentId, supId1);
+  assert.equal(fake.sent.length, 4);
 });
 
 test("pumpAll pumps a registered Project's queued Lead and Supervisor mail exactly once (v0.0.31, ADR 0017 §5/§6)", async (t) => {
   const lead: FakeAgent = { id: "agent-lead-1", title: "Lead", status: "idle", labels: {} };
-  const { stateDir, slug, leadMail, fake } = makeSpooledRuntime(t, [lead]);
+  const { stateDir, slug, surface, leadMail, fake } = makeSpooledRuntime(t, [lead]);
   lead.labels = { seat: "lead", project: slug };
+  // v0.6.1 (ADR 0057 §5): the Supervisor lane pumps against a started seat — the pump never creates one.
+  await surface.supervisorStart({ projectRoot: readProjectRegistration(stateDir, slug)!.root! });
 
   // Queued mail with no pump: enqueueLeadMail only appends mail_queued.
   await leadMail.enqueueLeadMail(slug, { from: "supervisor", kind: "directive", text: "pumpAll lead directive" });
@@ -831,6 +833,8 @@ test("drainSupervisorMailbox and drainLeadMailbox prepend the Seat kickoff packe
   writeFileSync(join(projectStateDir(stateDir, slug), "notebook.md"), "## 1. Verification & Run Recipe\n- Gate: npm test\n");
 
   // 1. First Supervisor delivery includes the Seat kickoff packet
+  // (v0.6.1, ADR 0057 §5: the seat is started explicitly — the dispatch never creates one.)
+  await surface.supervisorStart({ projectRoot });
   await leadMail.dispatchSupervisor({
     id: "sd-kickoff-1",
     kind: "supervisor_dispatch",
@@ -1138,7 +1142,10 @@ test("completeHandoff delivers Seat kickoff packet + Lead handoff bundle in a si
   });
   const supSends = fake.sent.filter((s) => s.agentId === supId);
   assert.equal(supSends.length, 2);
-  assert.equal(supSends[0]!.text, "Explicit ratify message");
+  // v0.6.1 (ADR 0057 §5): an explicit first message to a fresh Supervisor seat
+  // carries the Seat kickoff packet with it — same law as Start Supervisor.
+  assert.match(supSends[0]!.text, /\[paseo-factory seat kickoff packet · role=supervisor/);
+  assert.ok(supSends[0]!.text.endsWith("Explicit ratify message"));
   assert.doesNotMatch(supSends[1]!.text, /\[paseo-factory seat kickoff packet/, "onSeatKickoffSent marked Supervisor kickoff sent");
   assert.match(supSends[1]!.text, /Supervisor follow-up/);
 });
@@ -2291,7 +2298,6 @@ test("quiet-point Lead rotation (ADR 0031, v0.0.93): rotation_pending holds the 
     stateDir,
     daemon: fake.daemon,
     ensureLead: (input) => surface.leadEnsure(input),
-    ensureSupervisor: (input) => surface.supervisorEnsure(input),
     retireLead: (input) => surface.leadRotate(input),
   });
   t.after(() => restartedRuntime.stop());
@@ -2558,6 +2564,7 @@ test('remote linked designs do not require the client source for reports or Peer
   const f = makeSpooledRuntime(t);
   const path = join(projectStateDir(f.stateDir, f.slug), 'project-settings.json');
   writeFileSync(path, JSON.stringify({ schemaVersion: 1, revision: 1, openDesignSource: { kind: 'client' }, openDesignLink: { projectId: 'owner', projectName: 'Owner', sourceUpdatedAt: 1, syncedAt: new Date().toISOString(), digest: 'a'.repeat(64), screenCount: 1, files: ['index.html'] } }));
+  await f.surface.supervisorStart({ projectRoot: f.projectRoot }); // v0.6.1 (ADR 0057 §5): reports never create the seat
   const report = await f.leadMail.reportSupervisor({ id: 'offline-report', kind: 'supervisor_report', project: f.slug, message: 'Work verified while the design computer is disconnected.' });
   assert.ok(report.ok, JSON.stringify(report));
   const blocker = await f.leadMail.dispatchLead({ id: 'offline-blocker', kind: 'lead_dispatch', project: f.slug, from: 'peer', message: 'Peer needs help with a build failure.' });
@@ -2571,12 +2578,15 @@ test('remote linked designs do not require the client source for reports or Peer
 });
 
 test('active work tracks both standing-seat deliveries', async t => {
-  const { leadMail, projectRoot, stateDir, slug } = makeSpooledRuntime(t);
+  const { leadMail, surface, projectRoot, stateDir, slug } = makeSpooledRuntime(t);
   assert.equal(await leadMail.hasActiveWork(), false);
+  // v0.6.1 (ADR 0057 §5): the Supervisor seat is started explicitly — a dispatch never creates one.
+  await surface.supervisorStart({ projectRoot });
   for (const seat of ['supervisor', 'lead'] as const) {
     const reply = seat === 'supervisor'
       ? await leadMail.dispatchSupervisor({ id: `sleep-${seat}`, kind: 'supervisor_dispatch', workspace: projectRoot, message: 'Inspect the project' })
       : await leadMail.dispatchLead({ id: `sleep-${seat}`, kind: 'lead_dispatch', workspace: projectRoot, message: 'Inspect the project' });
+
     assert.ok(reply.ok);
     assert.equal(await leadMail.hasActiveWork(), true);
     const agentId = readProjectRegistration(stateDir, slug)?.[seat];
@@ -2719,9 +2729,11 @@ test("Machine-Verified Active Peer Roster reports '- active unaccepted tasks: no
 });
 
 test("Turn-1 kickoff delivery deduplicates the packet against config.systemPrompt: no linked design spec, helper-MCP roster, or wave-law repetition (v0.0.97, ADR 0047 §1.2)", async t => {
-  const { projectRoot, leadMail, fake } = makeSpooledRuntime(t);
+  const { projectRoot, surface, leadMail, fake } = makeSpooledRuntime(t);
 
   // Supervisor Turn 1 — prependKickoffPacketIfFirstTurn serves both seat call sites
+  // (v0.6.1, ADR 0057 §5: the seat is started explicitly — the dispatch never creates one.)
+  await surface.supervisorStart({ projectRoot });
   await leadMail.dispatchSupervisor({ id: "sd-dedup-1", kind: "supervisor_dispatch", workspace: projectRoot, message: "First Supervisor directive" });
   const supTurn1 = fake.sent[0]!.text;
   assert.match(supTurn1, /\[paseo-factory seat kickoff packet · role=supervisor/);
@@ -2797,6 +2809,9 @@ test("Lead extraction waits the full 180-second fuse before retiring a stuck sea
   lead.labels = { seat: "lead", project: f.slug };
   lead.cwd = f.projectRoot;
   await f.surface.leadEnsure({ projectRoot: f.projectRoot });
+  // v0.6.1 (ADR 0057 §5): the Supervisor that receives the degraded-completion
+  // notice is started explicitly — the notice itself never creates one.
+  await f.surface.supervisorStart({ projectRoot: f.projectRoot });
   await f.leadMail.onLeadTurnEnded({ agentId: lead.id, outcome: { kind: "completed" }, timeline: [] });
   // The hung-stream shape (v0.2.2, ADR 0050 Decision 3): only a Lead still
   // `running` at the elapsed window trips — an alive idle Lead would re-send.
@@ -2804,7 +2819,7 @@ test("Lead extraction waits the full 180-second fuse before retiring a stuck sea
   t.mock.timers.tick(179_999);
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(readProjectRegistration(f.stateDir, f.slug)?.rotationState, "handing_over");
-  assert.equal(f.fake.created.length, 0);
+  assert.equal(f.fake.created.length, 1, "only the started Supervisor exists — the fuse creates no successor yet");
   t.mock.timers.tick(1);
   for (let i = 0; i < 10; i++) await new Promise(resolve => setImmediate(resolve));
   assert.equal(readProjectRegistration(f.stateDir, f.slug)?.rotationState, "normal");

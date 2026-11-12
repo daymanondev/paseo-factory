@@ -108,7 +108,7 @@ function fakeDaemon(agents: FakeAgent[]) {
       listModels: async () => ({ models: [] }),
     },
   };
-  return { daemon, created, sent };
+  return { daemon, created, sent, agents };
 }
 
 /** The production wiring in miniature: factory + surface handlers + Lead-mailbox runtime + spool. */
@@ -2246,4 +2246,67 @@ test("factory notebook round-trips the CLI → Spool single writer from the Lead
   assert.equal(refused.status, 2);
   assert.match(refused.stderr, /notebook-limit-exceeded/);
   assert.equal(readFileSync(join(projectStateDir(stateDir, resolved.slug), "notebook.md"), "utf8"), spoolValidNotebook(1), "the refused write changed nothing");
+});
+
+// ---- no hidden Supervisor (v0.6.1 W2, ADR 0057 §5) ------------------------------------------
+
+test("a Lead report with no live Supervisor creates no agent — it is held on the Supervisor slice for the next Supervisor (02, ADR 0057 §5)", async (t) => {
+  const { stateDir, slug, leadMail, fake } = makeSpooledSurface(t);
+
+  const reply = await leadMail.reportSupervisor({ id: "rep-no-sup-1", kind: "supervisor_report", project: slug, message: "Wave 1 complete" });
+  assert.equal(reply.ok, true, "the report is admitted — holding is the safe state, never a failure");
+  assert.equal(fake.created.length, 0, "no Supervisor is ever created from a Lead report");
+  assert.equal(fake.sent.length, 0, "nothing was sent — no seat exists to receive it");
+
+  const events = readMailbox(stateDir, slug);
+  assert.deepEqual(events.map((evt) => evt.type), ["mail_queued"], "the report sits queued on the Supervisor slice");
+  assert.equal(events[0]?.to, "supervisor");
+  assert.equal(events[0]?.from, "lead");
+  assert.equal(events[0]?.kind, "report");
+  assert.equal(events[0]?.text, "Wave 1 complete");
+
+  // A later pump changes nothing: with no live Supervisor the mail stays queued.
+  await leadMail.pumpProjectSupervisor(slug);
+  assert.equal(fake.created.length, 0);
+  assert.equal(fake.sent.length, 0);
+  assert.deepEqual(readMailbox(stateDir, slug).map((evt) => evt.type), ["mail_queued"], "the pump holds the report — never creates a recipient");
+});
+
+test("an Owner directive with no live Supervisor is held too — the mailbox pump never creates a Supervisor (02, ADR 0057 §5)", async (t) => {
+  const { stateDir, slug, leadMail, fake } = makeSpooledSurface(t);
+
+  const reply = await leadMail.dispatchSupervisor({ id: "disp-no-sup-1", kind: "supervisor_dispatch", project: slug, message: "Plan the next wave" });
+  assert.equal(reply.ok, true, "the directive is admitted and held — the reply names the hold, never a phantom seat");
+  assert.equal(fake.created.length, 0, "no Supervisor is ever created from a dispatch");
+  assert.equal(fake.sent.length, 0);
+
+  const events = readMailbox(stateDir, slug);
+  assert.deepEqual(events.map((evt) => evt.type), ["mail_queued"]);
+  assert.equal(events[0]?.to, "supervisor");
+  assert.equal(events[0]?.from, "owner");
+});
+
+test("the Supervisor recipient is re-resolved at every send — mail queued for a dead Supervisor delivers to the next live one, never to the archived chat (02, ADR 0057 §5)", async (t) => {
+  const supervisor: FakeAgent = { id: "agent-sup-old", title: "Supervisor", status: "running", labels: {} };
+  const { stateDir, slug, leadMail, fake } = makeSpooledSurface(t, [supervisor]);
+  supervisor.labels = { seat: "supervisor", project: slug };
+
+  const reply = await leadMail.reportSupervisor({ id: "rep-reres-1", kind: "supervisor_report", project: slug, message: "Wave 2 complete" });
+  assert.equal(reply.ok, true);
+  if (reply.ok) assert.equal(reply.supervisorAgentId, "agent-sup-old", "the queue-time resolution names the then-live Supervisor");
+  assert.equal(fake.sent.length, 0, "the running Supervisor is never interrupted — the report holds");
+
+  // The old Supervisor is archived from outside; a pump must not route into the dead chat.
+  await fake.daemon.agents.ref("agent-sup-old").archive();
+  await leadMail.pumpProjectSupervisor(slug);
+  assert.equal(fake.sent.length, 0, "nothing routes into an archived Supervisor");
+
+  // The next Supervisor appears (a labelled seat): the SAME queued report delivers to it.
+  fake.agents.push({ id: "agent-sup-new", title: "Supervisor", status: "idle", labels: { seat: "supervisor", project: slug } });
+  await leadMail.pumpProjectSupervisor(slug);
+  assert.equal(fake.sent.length, 1);
+  assert.equal(fake.sent[0]?.agentId, "agent-sup-new", "the send re-resolved the recipient — the new Supervisor, never the old id");
+  assert.ok(fake.sent[0]?.text.includes("Wave 2 complete"));
+  const delivered = readMailbox(stateDir, slug).find((evt) => evt.type === "mail_delivered");
+  assert.equal(delivered?.toAgentId, "agent-sup-new");
 });

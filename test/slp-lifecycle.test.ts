@@ -199,7 +199,6 @@ test("Full SLP lifecycle: Owner -> Supervisor -> Lead -> Agent -> Lead -> Superv
     stateDir,
     daemon,
     ensureLead: (input) => surface.leadEnsure(input),
-    ensureSupervisor: (input) => surface.supervisorEnsure(input),
     retireLead: (input) => surface.leadRotate(input),
   });
   const spool = startSpool(stateDir, factory, {
@@ -212,7 +211,10 @@ test("Full SLP lifecycle: Owner -> Supervisor -> Lead -> Agent -> Lead -> Superv
   });
   t.after(() => spool.stop());
 
-  // 1. Owner -> Supervisor via factory_dispatch_supervisor
+  // 1. Owner -> Supervisor. v0.6.1 (ADR 0057 §5): the dispatch never creates a
+  // Supervisor — the Owner starts the seat explicitly, then the directive routes.
+  const started = await surface.supervisorStart({ projectRoot });
+  assert.ok(started.ok, started.ok ? "" : started.error);
   const ownerDispatch = await callMcpTool({
     args: ["--state-dir", stateDir, "--workspace", projectRoot],
     toolName: "factory_dispatch_supervisor",

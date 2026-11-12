@@ -39,6 +39,7 @@ import { CorrelationRegistry } from "./core/correlations.ts";
 import { FactoryError } from "./core/errors.ts";
 import type { Factory } from "./core/factory.ts";
 import { readLeadMailbox } from "./core/mailbox.ts";
+import { buildSeatKickoffPacket } from "./core/preflight.ts";
 import { LANE_NAMES, laneError, loadLanes, migrateLegacyZcodeLane, parseLane, saveLanes, projectLanesPath, listLaneProfiles, getLaneProfile, readLaneProfilesFile, saveLaneProfile, deleteLaneProfile, applyLaneProfile, saveLanesBatch, resetProjectLanes } from "./core/lanes.ts";
 import type { LaneProfile } from "./core/lanes.ts";
 import { listProjectRegistrations, projectNotebookPath, projectStateDir, readProjectRegistration, resolveOrBootstrapProject, resolveProject } from "./core/project.ts";
@@ -952,6 +953,15 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
   const retireSeat = (seat: SeatName, slug: string | undefined, root: string | undefined, context?: SurfaceCallContext) =>
     serializeSeat(`${slug}:${seat}`, () => retireSeatUnlocked(seat, slug, root, context));
 
+  /** The Project's own ledger stream for a seat kickoff packet — its Factory's events, never a wrong-Project's. */
+  const projectLedgerEventsOf = (slug: string): readonly LedgerEvent[] => {
+    try {
+      return factoryForSlug(slug).ledger.events;
+    } catch {
+      return deps.factory.ledger.events;
+    }
+  };
+
   const ensureSeatUnlocked = async (
     seat: SeatName,
     input: { projectRoot: string; message?: string },
@@ -1205,8 +1215,26 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     }
     const message = input.message?.trim();
     if (message !== undefined && message !== "") {
+      // v0.6.1 (ADR 0057 §5, story 16): Start Supervisor with a directive still
+      // sends the full Seat kickoff packet — the packet leads and the directive
+      // rides the SAME first turn, exactly like the mailbox drain's first-turn
+      // prepend, so a directive-started Supervisor knows the Project as well as
+      // one started without.
+      const firstTurn =
+        seat === "supervisor" && created
+          ? `${buildSeatKickoffPacket({
+              role: "supervisor",
+              projectSlug: project.slug,
+              projectRoot: project.root,
+              ledgerEvents: projectLedgerEventsOf(project.slug),
+              helperMcps: discoverHelperMcps({ stateDir: deps.stateDir, userHome: resolveSurfaceUserHome() }).servers,
+              lanes: lanes.lanes,
+              stateDir: deps.stateDir,
+              omitSystemPromptDuplicates: true,
+            })}\n${message}`
+          : message;
       try {
-        await daemon.agents.ref(agent.id).send(message);
+        await daemon.agents.ref(agent.id).send(firstTurn);
         deps.onSeatKickoffSent?.({ slug: project.slug, seat, agentId: agent.id });
         log(`${seat}: dispatched a message to ${agent.id}`);
       } catch (err) {
@@ -2128,6 +2156,17 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       // The Project panel view-model (v0.6.0, ADR 0056 §5), projected here from
       // the same gathered halves the fold read — the client only renders it.
       const panelRegistration = enrichedProject === null ? undefined : readProjectRegistration(deps.stateDir, enrichedProject.slug);
+      // v0.6.1 (ADR 0057 §5): the held Supervisor-mail count — reports waiting
+      // with no live Supervisor to receive them. An unreadable mailbox is not a
+      // snapshot failure; the count reads 0.
+      let heldSupervisorMailCount = 0;
+      if (enrichedProject !== null) {
+        try {
+          heldSupervisorMailCount = readLeadMailbox(join(projectStateDir(deps.stateDir, enrichedProject.slug), "mailbox.jsonl")).supervisorQueued.length;
+        } catch {
+          heldSupervisorMailCount = 0;
+        }
+      }
       const panelMissingPrerequisites = buildCompanionToolsView()
         .filter((tool) => tool.status !== "running" || tool.error !== null)
         .map((tool) => tool.title);
@@ -2159,6 +2198,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           openDesign: enrichedProject === null || enrichedProject.missingRoot === true ? null : probeOpenDesign(deps.stateDir, enrichedProject.slug, enrichedProject.root),
           rotationState: panelRegistration?.rotationState ?? null,
           handoffRequestedAt: panelRegistration?.handoffRequestedAt ?? null,
+          heldSupervisorMailCount,
           now: Date.now(),
         },
       });

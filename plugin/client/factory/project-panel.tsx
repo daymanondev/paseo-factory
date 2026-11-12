@@ -69,6 +69,7 @@ const NEEDS_YOU_TONE: Record<PanelNeedsYouItem["kind"], Colour> = {
   "needs-human": "statusWarning",
   "attempt-ceiling": "statusDanger",
   "seat-stuck": "statusDanger",
+  "no-supervisor": "statusDanger",
   "handoff-stuck": "statusDanger",
   prerequisites: "statusWarning",
   "open-design-broken": "statusDanger",

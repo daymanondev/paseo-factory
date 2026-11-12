@@ -59,6 +59,12 @@ export interface PanelInput {
   rotationState: RotationState | null;
   /** When the current Lead handoff began (ISO 8601), from the registration. */
   handoffRequestedAt: string | null;
+  /**
+   * Supervisor-addressed mail waiting in `mailbox.jsonl` with no live
+   * Supervisor to receive it (v0.6.1, ADR 0057 §5) — the count the
+   * `no-supervisor` Needs-you item carries. 0 when none is held.
+   */
+  heldSupervisorMailCount: number;
   now: number;
 }
 
@@ -252,6 +258,20 @@ function needsYou(input: PanelInput): PanelNeedsYouItem[] {
     });
   }
   items.push(...seatStuckItems("supervisor", input.supervisor), ...seatStuckItems("lead", input.lead));
+  // v0.6.1 (ADR 0057 §5): Supervisor-addressed mail holds when no live
+  // Supervisor exists — the plugin never creates one — so the Owner sees the
+  // hold and how many reports wait. Start Supervisor is the one action (the
+  // client renders the desktop-only hint for it on mobile).
+  if (input.supervisor === null && input.heldSupervisorMailCount > 0) {
+    const count = input.heldSupervisorMailCount;
+    items.push({
+      key: "no-supervisor",
+      kind: "no-supervisor",
+      title: `No Supervisor · ${count} ${count === 1 ? "report" : "reports"} waiting`,
+      detail: null,
+      action: START_SUPERVISOR_ACTION,
+    });
+  }
   if ((input.rotationState ?? input.lead?.rotationState) === "handing_over") {
     const since = input.handoffRequestedAt === null ? Number.NaN : Date.parse(input.handoffRequestedAt);
     const lost = input.lead === null || input.lead.status === "error";

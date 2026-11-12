@@ -337,7 +337,7 @@ export default function contribute(server: PluginServerContext) {
     daemon: () => paseoApi as never,
     usage,
     ensureLead: (input) => surface.leadEnsure(input),
-    ensureSupervisor: (input) => surface.supervisorEnsure(input),
+    // v0.6.1 (ADR 0057 §5): no `ensureSupervisor` door — the mailbox never creates a Supervisor.
     retireLead: (input) => surface.leadRotate(input),
     onLog: log,
   });
