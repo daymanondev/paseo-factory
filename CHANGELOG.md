@@ -7,15 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-11-12
+
+**Seat-handoff release** (ADR 0057): Decisions 4 and 5 — the Lead unparented from the Supervisor with lost-Lead recovery, and the Supervisor binding with no hidden Supervisor and adoption — plus Decision 11's three hygiene fixes and the §8 read-only spike. Everything else ships in v0.7.0.
+
 ### Fixed
 
 - **Project-scoped lane saves no longer rewrite machine-wide role providers** (ADR 0057 §11): `lanesSet`, `lanesSetBatch`, `lanesReset`, and `profilesApply` scoped to a Project — and the plugin-boot reconcile — anchor `<paseoHome>/config.json`'s `factory-*` entries to the machine table only, so one Project's override never changes another Project's New Chat picker; the per-Project override keeps applying at `agent.create` (supersedes ADR 0026 §1's active-scope picker sync).
 - **The Lead handover file records its provenance** (ADR 0057 §11): `lead-handoff.md` is written behind a metadata header naming the outgoing Lead id and a written-at timestamp. A successor kickoff fed from disk dates the handover — a fresh file rides without a notice, a file older than the outgoing Lead's last observed activity carries the dated staleness line, and a file without metadata is stale-unknown; every notice tells the successor to re-read the Ledger and the repository, and the header itself never reaches a seat.
 - **The bridge writes the Supervisor binding through the single writer** (ADR 0057 §11): `supervisor_dispatch_lead`'s binding update rides `plugin/bin/project.mjs`'s atomic read-merge-write instead of a raw whole-file write, so a binding write can never tear `project.json` and no `project.json` path remains in `bridge.mjs`.
+- **A released Supervisor always settles, and the records accumulate** (ADR 0057 §4, v0.6.1 review): the retire loop appends to a `releasedSupervisors` list in `project.json` instead of overwriting one record, so the duplicate-supervisor anomaly cannot strand a never-archived zombie — every released Supervisor keeps its own waiting-on-Lead record and settles independently. A parented Lead archived from OUTSIDE the plugin now settles the releases waiting on it through the lost-Lead door (the new `settleReleasedSupervisor` seam), so no record can outlive its Lead short of a Project reset.
+- **The plugin's own archive markers persist** (ADR 0057 §4, v0.6.1 review): `<stateDir>/plugin-archive-markers.json` survives plugin restarts, so a daemon `agent.archive.after` delivered after a restart is never misread as a lost Lead, and an archive call that fails clears its marker — a later genuine outside archive of the same id is never swallowed.
+- **The glossary's Supervisor mailbox entry matches v0.6.1** (ADR 0057 §5, v0.6.1 review): the slice never ensures or self-heals a Supervisor seat — with no live bound Supervisor, queued items hold (Needs you shows `No Supervisor · N reports waiting`) — and the Lead mailbox entry scopes its auto-ensure clause to the Lead recipient.
 
 ### Added
 
+- **The Lead is no longer a Paseo child of the Supervisor** (ADR 0057 §4): every new Lead is created unparented, so replacing a Supervisor never cascade-archives the Lead. A Supervisor whose live Lead is still parented (pre-v0.6.1 parentage) is RELEASED when replaced — never archived while that Lead lives — and settles when the Lead hands off or is archived from outside.
+- **Lost-Lead recovery** (ADR 0057 §4): a Lead archived from outside the plugin is detected through `agent.archive.after` — the binding clears, delivered-but-unacked mail requeues (`lead_lost`), the on-disk handover is dated against the loss, and the next pump raises a successor with the handover plus a staleness line.
+- **No hidden Supervisor, and the first candidate auto-binds** (ADR 0057 §5): the plugin never creates a Supervisor from a report or a mailbox pump — reports hold and Needs you shows `No Supervisor · N reports waiting`. When the bound Supervisor is gone, the first Supervisor candidate chat to open a session binds automatically, receiving the Seat kickoff packet plus every held report in one first turn.
 - **"Use this chat as Supervisor"** (ADR 0057 §5/§10): while a live Supervisor holds the seat, the panel's Seats section names every Supervisor candidate chat in the Project's workspace (the new `panel.seats.supervisorCandidates` rows) with a `factory.supervisor.adopt` button — the one seat write mobile may perform. The `no-supervisor` Needs-you item ("No Supervisor · N reports waiting" with Start Supervisor, desktop hint on mobile) renders with it.
+- **The v0.6.1 spike** (ADR 0057 §8/§11): `factory.seats.directory` (read RPC) returns every live seat across Projects, and the client starter polls it every 20 seconds to register one Factory header button per Project root workspace and one read-only composer pill per live seat chat — the first app-wide contributions since the v0.6.0 slim-down, to verify on real Paseo before v0.7.0 builds on them.
 
 ## [0.6.0] - 2026-11-11
 
