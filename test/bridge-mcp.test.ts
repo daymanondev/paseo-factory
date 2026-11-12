@@ -300,7 +300,6 @@ test("bridge.mjs executes Supervisor, Lead, and Agent tools end-to-end over the 
     registry,
     daemon: fakeDaemon as never,
     ensureLead: async () => ({ ok: true, agentId: "lead-1", created: false, projectRoot: repoDir, slug: reg.slug }),
-    ensureSupervisor: async () => ({ ok: true, agentId: "sup-1", created: false, projectRoot: repoDir, slug: reg.slug }),
     retireLead: async () => ({ ok: true, agentId: "lead-1" }),
   });
 
@@ -622,7 +621,6 @@ test("agent_escalate_blocker keeps the Peer alive and routes the challenge Lead-
     registry,
     daemon: fakeDaemon as never,
     ensureLead: async () => ({ ok: true, agentId: lead.id, created: false, projectRoot: repoDir, slug: reg.slug }),
-    ensureSupervisor: async () => ({ ok: true, agentId: supervisor.id, created: false, projectRoot: repoDir, slug: reg.slug }),
     retireLead: async () => ({ ok: true, agentId: lead.id }),
   });
   const spool = startSpool(stateDir, factory, {
@@ -1263,7 +1261,6 @@ test("agent_claim carries the mandatory six-field handoff end-to-end (ADR 0053 Â
     registry,
     daemon: fakeDaemon as never,
     ensureLead: async () => ({ ok: true, agentId: "lead-1", created: false, projectRoot: repoDir, slug: reg.slug }),
-    ensureSupervisor: async () => ({ ok: true, agentId: "sup-1", created: false, projectRoot: repoDir, slug: reg.slug }),
     retireLead: async () => ({ ok: true, agentId: "lead-1" }),
   });
   const spool = startSpool(stateDir, factory, {
@@ -2068,7 +2065,6 @@ test("v0.0.93 quiet-point regression: Lead dispatches a Peer then crosses 128k â
       leadRetired
         ? { ok: true, agentId: createAgentIn(undefined, { cwd: repoDir, labels: { seat: "lead", project: reg.slug } }), created: true, projectRoot: repoDir, slug: reg.slug }
         : { ok: true, agentId: lead.id, created: false, projectRoot: repoDir, slug: reg.slug },
-    ensureSupervisor: async () => ({ ok: true, agentId: supervisor.id, created: false, projectRoot: repoDir, slug: reg.slug }),
     retireLead: async () => {
       leadRetired = true;
       lead.archivedAt = new Date().toISOString();

@@ -323,6 +323,9 @@ export default function contribute(server: PluginServerContext) {
     resetProjectMailbox: (slug) => leadMail.resetProjectMailbox(slug),
     leadDispatch: (request, options) => leadMail.dispatchLead(request, options),
     supervisorReport: (request) => leadMail.reportSupervisor(request),
+    // v0.6.1 (ADR 0057 §5): a newly bound Supervisor receives its Seat kickoff
+    // packet plus every held report through the mailbox's own drain.
+    pumpSupervisorMailbox: (slug) => leadMail.pumpProjectSupervisor(slug),
   });
   // The Lead mailbox runtime (v0.0.20, ADR 0013 §4–§5): the single writer
   // around each Project's mailbox.jsonl. Its seat doors are the surface's
@@ -337,7 +340,7 @@ export default function contribute(server: PluginServerContext) {
     daemon: () => paseoApi as never,
     usage,
     ensureLead: (input) => surface.leadEnsure(input),
-    ensureSupervisor: (input) => surface.supervisorEnsure(input),
+    // v0.6.1 (ADR 0057 §5): no `ensureSupervisor` door — the mailbox never creates a Supervisor.
     retireLead: (input) => surface.leadRotate(input),
     onLog: log,
   });
@@ -557,6 +560,20 @@ export default function contribute(server: PluginServerContext) {
       // The role identity re-applies on every provider launch (v0.0.14): a
       // seat's or worker's shell can always ask which seat it is.
       const withEnv = injectSessionEnv(next, stateDir);
+      // The Supervisor auto-bind door (v0.6.1, ADR 0057 §5): every non-history
+      // session open hands the surface the agent + cwd, and the FIRST candidate
+      // to open a session binds when the bound Supervisor is archived or
+      // missing — the held reports deliver with its kickoff. Fire-and-forget:
+      // the session never waits on the bind, and a live Supervisor is never
+      // displaced.
+      if (request.purpose !== "history") {
+        const openedWorkspaceId =
+          typeof next.workspaceId === "string" && next.workspaceId.trim() !== "" ? next.workspaceId.trim() : undefined;
+        void surface.supervisorSessionOpened(
+          { agentId: request.agentId, cwd: next.cwd, ...(openedWorkspaceId !== undefined ? { workspaceId: openedWorkspaceId } : {}) },
+          { paseo: paseoApi },
+        ).catch((error) => log(`supervisor: session-open bind of ${request.agentId} deferred — ${String(error)}`));
+      }
       // The new-Supervisor session sweep (v0.0.31, ADR 0017 §5): a Supervisor
       // session opening/binding for a Project archives that Project's orphaned
       // `local_checkout` workspaces over the daemon records — the same sweep

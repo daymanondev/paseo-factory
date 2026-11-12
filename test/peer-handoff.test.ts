@@ -63,7 +63,7 @@ function fixture(t: TestContext, handoffTimeoutMs?: number) {
   const stopAgent = async (id: string) => { stopped.push(id); if (stopFails) return { ok: false as const, reason: "stop failed" }; const agent = agents.find(a => a.id === id); if (agent) agent.status = "idle"; return { ok: true as const }; };
   const surface = createSurfaceHandlers({ factory, stateDir, home: join(dir, "home"), daemon, stopAgent });
   const logs: string[] = [];
-  const makeRuntime = () => createLeadMailRuntime({ factory, stateDir, home: join(dir, "home"), daemon, stopAgent, handoffTimeoutMs, ensureLead: input => surface.leadEnsure(input), ensureSupervisor: input => surface.supervisorEnsure(input), retireLead: input => surface.leadRotate(input), onLog: text => logs.push(text) });
+  const makeRuntime = () => createLeadMailRuntime({ factory, stateDir, home: join(dir, "home"), daemon, stopAgent, handoffTimeoutMs, ensureLead: input => surface.leadEnsure(input), retireLead: input => surface.leadRotate(input), onLog: text => logs.push(text) });
   const runtime = makeRuntime();
   const spool = startSpool(stateDir, factory, { daemon, stopAgent, peerMail: runtime.notifyPeer });
   t.after(() => { runtime.stop(); spool.stop(); });

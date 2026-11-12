@@ -607,7 +607,12 @@ test("supervisor.ensure: seats the agent AT the project root — no AGENTS.md wr
   assert.equal(fake.created[0]!.title, "Supervisor");
   assert.equal(fake.created[0]!.cwd, project.root, "the seat stands at cwd = <project-root>");
   assert.equal(fake.created[0]!.prompt, undefined, "seat creation is silent — no bootstrap prompt inside agents.create (v0.0.28, ADR 0018 §2)");
-  assert.deepEqual(fake.sent, [{ agentId: reply.agentId, text: "Check the T1 verdict." }], "the quick dispatch rode the create");
+  // v0.6.1 (ADR 0057 §5): an explicit first message to a fresh seat carries the
+  // Seat kickoff packet with it — the dispatch rides the same first turn.
+  assert.equal(fake.sent.length, 1);
+  assert.equal(fake.sent[0]!.agentId, reply.agentId);
+  assert.match(fake.sent[0]!.text, /\[paseo-factory seat kickoff packet · role=supervisor/);
+  assert.ok(fake.sent[0]!.text.endsWith("Check the T1 verdict."));
 
   // The durable registration records the slug→root + seat id.
   const registration = readProjectRegistration(stateDir, project.slug);
@@ -6389,6 +6394,34 @@ test("panel: Peer challenge signals queued to the Lead mailbox never reach Needs
   assert.equal(snap.view.panel.summary, "Lead idle · nothing needs you");
 });
 
+test("panel: Lead reports held with no live Supervisor raise the no-supervisor item with the waiting count — Start Supervisor is the one action (02, ADR 0057 §5)", async (t) => {
+  const { handlers, stateDir, project } = makePanelSurface(t, (p) => [
+    { id: "agent-lead", labels: seatLabels(p, "lead"), cwd: p.root },
+  ]);
+  const mailbox = join(stateDir, "projects", project.slug, "mailbox.jsonl");
+  enqueueLeadMail(mailbox, { to: "supervisor", from: "lead", kind: "report", text: "Wave 1 complete" });
+  enqueueLeadMail(mailbox, { to: "supervisor", from: "lead", kind: "report", text: "Wave 2 complete" });
+  const snap = await handlers.snapshot({ projectRoot: project.root });
+  assert.ok(snap.ok, snap.ok ? "" : snap.error);
+  const item = snap.view.panel.needsYou.find((entry) => entry.kind === "no-supervisor");
+  assert.ok(item !== undefined, "held reports with no Supervisor are Owner-actionable");
+  assert.equal(item.title, "No Supervisor · 2 reports waiting");
+  assert.deepEqual(item.action, { kind: "start-supervisor", label: "Start Supervisor" });
+
+  // One report alone reads singular; with a live Supervisor the item never appears.
+  const single = makePanelSurface(t, (p) => [{ id: "agent-lead", labels: seatLabels(p, "lead"), cwd: p.root }], "no-supervisor-one");
+  enqueueLeadMail(join(single.stateDir, "projects", single.project.slug, "mailbox.jsonl"), { to: "supervisor", from: "lead", kind: "report", text: "Wave 1 complete" });
+  const singleSnap = await single.handlers.snapshot({ projectRoot: single.project.root });
+  assert.ok(singleSnap.ok, singleSnap.ok ? "" : singleSnap.error);
+  assert.equal(singleSnap.view.panel.needsYou.find((entry) => entry.kind === "no-supervisor")?.title, "No Supervisor · 1 report waiting");
+
+  const seated = makePanelSurface(t, (p) => [{ id: "agent-sup", labels: seatLabels(p, "supervisor"), cwd: p.root }], "no-supervisor-live");
+  enqueueLeadMail(join(seated.stateDir, "projects", seated.project.slug, "mailbox.jsonl"), { to: "supervisor", from: "lead", kind: "report", text: "Wave 1 complete" });
+  const seatedSnap = await seated.handlers.snapshot({ projectRoot: seated.project.root });
+  assert.ok(seatedSnap.ok, seatedSnap.ok ? "" : seatedSnap.error);
+  assert.equal(seatedSnap.view.panel.needsYou.find((entry) => entry.kind === "no-supervisor"), undefined, "a live Supervisor receives the reports — no item");
+});
+
 test("panel: Needs you lists every kind in the ADR order — needs-human, ceiling, seat, handoff, prerequisites, Open Design", async (t) => {
   const project = makeProject(t, "ordered");
   const agents: FakeAgent[] = [
@@ -6603,7 +6636,13 @@ test("supervisor.start: a vacant seat starts through the role provider — recog
   assert.equal(wsCreated[0]!.title, "Supervisor");
   assert.deepEqual(wsCreated[0]!.labels, { seat: "supervisor", project: project.slug });
   assert.equal(wsCreated[0]!.parent, undefined);
-  assert.deepEqual(fake.sent, [{ agentId: reply.agentId, text: "Build the login page." }], "the directive is the seat's first user message");
+  assert.deepEqual(fake.sent.map((sent) => sent.agentId), [reply.agentId], "the directive is the seat's first user message");
+  // v0.6.1 (ADR 0057 §5, story 16): Start Supervisor with a directive still sends the
+  // full Seat kickoff packet — kickoff first, directive in the same first turn.
+  const firstTurn = fake.sent[0]?.text ?? "";
+  assert.match(firstTurn, /^--- \[paseo-factory seat kickoff packet · role=supervisor · project=/, "the first turn opens with the Seat kickoff packet");
+  assert.match(firstTurn, /- Workspace: /);
+  assert.match(firstTurn, /--- \[end seat kickoff packet\] ---\n\nBuild the login page\.$/, "the directive follows the packet in the same first turn");
   assert.equal(fake.created.length, 1, "exactly one agent exists — a Lead is never created by a Supervisor start");
   assert.equal(fake.created.some((agent) => agent.labels?.seat === "lead"), false);
 
@@ -6793,7 +6832,11 @@ test("onboarding.commit: a plain folder with initGit is initialised and register
   assert.equal(wired.created.length, 1);
   assert.equal(wired.created[0]!.provider, "factory-supervisor", "the role provider path");
   assert.equal(wired.created[0]!.workspaceId, "ws-onboard");
-  assert.deepEqual(fake.sent, [{ agentId: reply.agentId, text: "Build the login page." }], "the directive is the first user message");
+  // v0.6.1 (ADR 0057 §5, story 16): the directive rides the Seat kickoff packet's first turn.
+  assert.equal(fake.sent.length, 1, "the directive is the seat's first user message");
+  assert.equal(fake.sent[0]!.agentId, reply.agentId);
+  assert.match(fake.sent[0]!.text, /\[paseo-factory seat kickoff packet · role=supervisor/);
+  assert.ok(fake.sent[0]!.text.endsWith("Build the login page."));
   assert.equal(fake.created.length, 1);
   assert.equal(fake.created.some((agent) => agent.labels?.seat === "lead"), false, "onboarding never creates a Lead");
 
@@ -6881,7 +6924,11 @@ test("onboarding.commit: an Open Design choice links the design to the new Proje
   assert.equal(status.link?.projectId, "owner-design");
   assert.equal(readProjectSettings(f.stateDir, project.slug).openDesignLink?.projectName, "Owner screens", "the link is persisted in the Project settings record");
   assert.ok(existsSync(join(project.root, "design", "index.html")), "the design is staged in the repository");
-  assert.deepEqual(f.fake.sent, [{ agentId: reply.agentId, text: "Implement the design." }]);
+  // v0.6.1 (ADR 0057 §5, story 16): the directive rides the Seat kickoff packet's first turn.
+  assert.equal(f.fake.sent.length, 1);
+  assert.equal(f.fake.sent[0]!.agentId, reply.agentId);
+  assert.match(f.fake.sent[0]!.text, /\[paseo-factory seat kickoff packet · role=supervisor/);
+  assert.ok(f.fake.sent[0]!.text.endsWith("Implement the design."));
 });
 
 test("onboarding.commit: a failed Open Design link is a named refusal that starts no Supervisor, and the same commit succeeds once the design exists", async (t) => {

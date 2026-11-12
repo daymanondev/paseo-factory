@@ -201,6 +201,59 @@ export function inferRoleFromProviderId(provider: unknown): RoleName | undefined
   return FACTORY_ROLE_BY_PROVIDER_ID[provider.trim().split("/")[0] ?? ""];
 }
 
+// ---- Supervisor candidates (v0.6.1, ADR 0057 §5) ---------------------------------------------
+
+/** The agent slice the Supervisor-candidate predicate reads — plain data, no SDK types. */
+export interface SupervisorCandidateAgent {
+  provider?: string | null;
+  labels?: Record<string, string> | null;
+  model?: string | null;
+}
+
+/**
+ * Whether a live agent in the Project's workspace is a Supervisor candidate
+ * (v0.6.1, ADR 0057 §5) — any ONE of three arms suffices:
+ *
+ *   1. it was started on the `factory-supervisor` role provider (the
+ *      `Supervisor (Factory)` picker row);
+ *   2. it carries `seat: supervisor` labels;
+ *   3. it was opened from Paseo's own picker on the Supervisor lane's
+ *      provider/model — family match, and model match when both are known.
+ *
+ * A Lead or Peer identity (by provider, seat label, or task label) is never a
+ * candidate, whatever its provider family. The workspace fence itself is the
+ * caller's law — this predicate answers identity only.
+ */
+export function isSupervisorCandidate(
+  agent: SupervisorCandidateAgent,
+  input: { stateDir: string; slug: string },
+): boolean {
+  const provider = typeof agent.provider === "string" ? agent.provider.trim() : "";
+  const inferred = inferRoleFromProviderId(provider);
+  if (inferred === "supervisor") return true; // arm 1
+  if (inferred === "lead" || inferred === "agent") return false; // another seat's identity
+  const labels = agent.labels ?? {};
+  if (labels.seat === "supervisor") return true; // arm 2
+  if (labels.seat === "lead" || labels.task !== undefined) return false; // a Lead or task-bound Peer
+  // Arm 3 — the picker on the Supervisor lane's provider/model.
+  const lane = resolveRoleLane(input.stateDir, input.slug, "supervisor");
+  const parsed = lane !== undefined ? parseLane(lane) : undefined;
+  if (parsed === undefined || provider === "") return false;
+  const familyOf = (value: string): string => value.split("/")[0]?.trim().toLowerCase() ?? "";
+  if (familyOf(provider) !== familyOf(parsed.provider)) return false;
+  // The model must match when it is knowable: from the daemon's model field, or
+  // embedded in the provider id itself (`<family>/<model>` picker providers).
+  const bare = (value: string): string => value.replace(/^[^/]+\//, "");
+  const agentModel =
+    typeof agent.model === "string" && agent.model.trim() !== ""
+      ? agent.model
+      : provider.includes("/")
+        ? provider.slice(provider.indexOf("/") + 1)
+        : undefined;
+  if (agentModel !== undefined && bare(agentModel) !== bare(parsed.model)) return false;
+  return true;
+}
+
 /** The three factory role names as they appear in `PASEO_FACTORY_SEAT`. */
 function parseRoleName(value: unknown): RoleName | undefined {
   return value === "supervisor" || value === "lead" || value === "agent" ? value : undefined;

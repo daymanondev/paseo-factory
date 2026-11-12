@@ -434,7 +434,7 @@ export const PanelNeedsYouActionSchema = z.discriminatedUnion("kind", [
 export type PanelNeedsYouAction = z.infer<typeof PanelNeedsYouActionSchema>;
 
 /** The Owner-actionable item kinds, in the order the list shows them. */
-export const PANEL_NEEDS_YOU_KINDS = ["needs-human", "attempt-ceiling", "seat-stuck", "handoff-stuck", "prerequisites", "open-design-broken"] as const;
+export const PANEL_NEEDS_YOU_KINDS = ["needs-human", "attempt-ceiling", "seat-stuck", "no-supervisor", "handoff-stuck", "prerequisites", "open-design-broken"] as const;
 
 export const PanelNeedsYouItemSchema = z.object({
   key: z.string(),
