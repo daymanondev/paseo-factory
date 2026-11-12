@@ -303,6 +303,15 @@ export interface LeadMailRuntimeDeps {
    * (v0.0.28, ADR 0018 §3; defaults to `HANDOFF_EXTRACTION_TIMEOUT_MS = 180_000`).
    */
   handoffTimeoutMs?: number;
+  /**
+   * The released-Supervisor settle door (v0.6.1 review fix, ADR 0057 §4): the
+   * surface's `settleReleasedSupervisor` is the implementation. The lost-Lead
+   * path fires it when a parented Lead is archived from OUTSIDE the plugin —
+   * every released Supervisor waiting on that Lead archives (the cascade risk
+   * died with the Lead) and its record clears, so a release always has a
+   * settlement path even when the Lead never hands off through the plugin.
+   */
+  settleReleasedSupervisor?: (input: { slug: string; leadAgentId: string }) => Promise<void>;
   onLog?: (message: string) => void;
   logger?: { warn?: (message: string) => void; info?: (message: string) => void; error?: (message: string) => void };
 }
@@ -354,7 +363,9 @@ export interface LeadMailRuntime {
    * An archive of a registered Lead that the plugin did NOT perform itself
    * (`markPluginArchive` was never fired for the id) clears the binding,
    * requeues delivered-but-unacked Lead mail (`mail_requeued`, reason
-   * `lead_lost`), marks the on-disk handover stale-unknown, and pumps — the
+   * `lead_lost`), marks the on-disk handover stale-unknown, settles every
+   * released Supervisor waiting on that Lead (the `settleReleasedSupervisor`
+   * door — the cascade risk died with the Lead), and pumps — the
    * normal succession path creates the successor with the handover plus a
    * staleness line. Never rejects; every failure logs and holds.
    */
@@ -363,9 +374,19 @@ export interface LeadMailRuntime {
    * Records that the plugin itself is about to archive `agentId` (v0.6.1,
    * ADR 0057 §4) — the surface fires this BEFORE its own archive calls, so
    * the daemon's `agent.archive.after` for that id is recognised as a plugin
-   * archive and `onAgentArchived` never runs lost-Lead recovery for it.
+   * archive and `onAgentArchived` never runs lost-Lead recovery for it. The
+   * marker persists across plugin restarts (the daemon may deliver its event
+   * late); it is consumed by the event and cleared by `clearPluginArchive`
+   * when the archive call fails.
    */
   markPluginArchive(agentId: string): void;
+  /**
+   * Clears a marker set by `markPluginArchive` (v0.6.1 review fix): the
+   * surface fires it when its own archive call FAILED — the plugin did not
+   * archive the id after all, so a later genuine outside archive of the same
+   * id must not be swallowed by a stale marker.
+   */
+  clearPluginArchive(agentId: string): void;
   /**
    * Clears in-memory retry and handoff state for one Project (`slug`), used
    * by `Project reset` (`v0.0.24`, ADR 0015 §5).
@@ -1833,10 +1854,43 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     }
   };
 
-  /** The plugin's own archive markers (v0.6.1, ADR 0057 §4) — see `markPluginArchive`. */
-  const pluginArchivedAgentIds = new Set<string>();
+  /**
+   * The plugin's own archive markers (v0.6.1, ADR 0057 §4) — see
+   * `markPluginArchive`. v0.6.1 review fix: the set PERSISTS at
+   * `<stateDir>/plugin-archive-markers.json`, because the daemon can deliver
+   * its `agent.archive.after` after a plugin restart — an in-memory set would
+   * misread the plugin's own archive as a lost Lead. A marker whose archive
+   * call FAILS is cleared (`clearPluginArchive`), so it can never swallow a
+   * later genuine outside archive of the same id.
+   */
+  const pluginArchivedAgentIdsPath = join(deps.stateDir, "plugin-archive-markers.json");
+  const readPluginArchivedAgentIds = (): Set<string> => {
+    try {
+      const parsed = readOptionalJson(pluginArchivedAgentIdsPath);
+      return new Set(Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === "string" && id.trim() !== "") : []);
+    } catch {
+      return new Set(); // an unreadable marker file reads as empty — recovery, never a crash
+    }
+  };
+  const persistPluginArchivedAgentIds = (ids: Set<string>): void => {
+    try {
+      atomicJson(pluginArchivedAgentIdsPath, [...ids]);
+    } catch (err) {
+      log(`lead-mailbox: persisting archive markers failed (${messageOf(err)}) — the in-memory set stands for this lifetime`);
+    }
+  };
+  const pluginArchivedAgentIds = readPluginArchivedAgentIds();
   const markPluginArchive = (agentId: string): void => {
-    if (typeof agentId === "string" && agentId.trim() !== "") pluginArchivedAgentIds.add(agentId.trim());
+    if (typeof agentId === "string" && agentId.trim() !== "") {
+      pluginArchivedAgentIds.add(agentId.trim());
+      persistPluginArchivedAgentIds(pluginArchivedAgentIds);
+    }
+  };
+  const clearPluginArchive = (agentId: string): void => {
+    const trimmed = typeof agentId === "string" ? agentId.trim() : "";
+    if (trimmed !== "" && pluginArchivedAgentIds.delete(trimmed)) {
+      persistPluginArchivedAgentIds(pluginArchivedAgentIds);
+    }
   };
 
   /**
@@ -1845,7 +1899,9 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
    * Lead: (1) clears the binding so nothing routes to a dead seat, (2)
    * requeues the delivered-but-unacked batch (`mail_requeued`,
    * `reason: "lead_lost"`), (3) marks the on-disk handover stale-unknown so
-   * the successor's kickoff carries the staleness line, and (4) pumps — the
+   * the successor's kickoff carries the staleness line, (3b) settles every
+   * released Supervisor waiting on this Lead (the cascade risk died with it),
+   * and (4) pumps — the
    * normal succession path (`drainLeadMailbox`'s ensure arm) creates the
    * successor. A plugin archive (marked beforehand) is consumed and skipped.
    */
@@ -1853,7 +1909,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     const agentId = typeof input.agentId === "string" ? input.agentId.trim() : "";
     if (agentId === "") return;
     if (pluginArchivedAgentIds.has(agentId)) {
-      pluginArchivedAgentIds.delete(agentId);
+      clearPluginArchive(agentId);
       return; // the plugin's own archive — never a lost Lead
     }
     for (const registration of listProjectRegistrations(deps.stateDir)) {
@@ -1884,6 +1940,16 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
             ...(priorExtraction ?? {}),
             leadLostAt: new Date().toISOString(),
           });
+          // (3b) v0.6.1 review fix (ADR 0057 §4): the same outside archive
+          // settles every released Supervisor waiting on this Lead — the
+          // cascade risk died with the Lead, so without this a released
+          // record whose Lead never hands off through the plugin would have
+          // no settlement path short of a Project reset.
+          try {
+            await deps.settleReleasedSupervisor?.({ slug: registration.slug, leadAgentId: agentId });
+          } catch (err) {
+            log(`lead-mailbox: released-supervisor settle of ${registration.slug} deferred (${messageOf(err)}) — the record stands`);
+          }
           // (4) The succession pump — the ensure arm creates the successor.
           await drainLeadMailbox(registration.slug);
         } catch (err) {
@@ -1963,11 +2029,16 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     settleLeadRotation,
     onAgentArchived,
     markPluginArchive,
+    clearPluginArchive,
     resetProjectMailbox,
     markKickoffSent,
     stop,
   };
-  const sync = new Set(["startupRecovery", "settleLeadRotation", "resetProjectMailbox", "markKickoffSent", "hasPendingHandoff"]);
+  // v0.6.1 review fix: the archive markers run SYNCHRONOUSLY — the surface
+  // sets a marker right before its archive call flies and clears it inside a
+  // failure path nobody awaits, so both effects must land before control
+  // returns (the markKickoffSent precedent).
+  const sync = new Set(["startupRecovery", "settleLeadRotation", "resetProjectMailbox", "markKickoffSent", "markPluginArchive", "clearPluginArchive", "hasPendingHandoff"]);
   return new Proxy(runtime, { get(target, key, receiver) {
     const value = Reflect.get(target, key, receiver);
     if (typeof value !== "function" || key === "stop") return value;

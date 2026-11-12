@@ -1141,13 +1141,18 @@ function readProjectRegistration(stateDir, slug) {
         }
       }
     }
-    const parsedRelease = parsed.releasedSupervisor;
-    const releasedSupervisor = parsedRelease !== null && typeof parsedRelease === "object" && !Array.isArray(parsedRelease) ? {
-      agentId: parsedRelease.agentId,
-      waitingOnLead: parsedRelease.waitingOnLead,
-      releasedAt: parsedRelease.releasedAt
-    } : void 0;
-    const release = releasedSupervisor !== void 0 && typeof releasedSupervisor.agentId === "string" && releasedSupervisor.agentId !== "" && typeof releasedSupervisor.waitingOnLead === "string" && releasedSupervisor.waitingOnLead !== "" && typeof releasedSupervisor.releasedAt === "string" && releasedSupervisor.releasedAt !== "" ? releasedSupervisor : void 0;
+    const releasedSupervisors = [];
+    const rawReleases = [
+      ...Array.isArray(parsed.releasedSupervisors) ? parsed.releasedSupervisors : [],
+      ...parsed.releasedSupervisor !== null && typeof parsed.releasedSupervisor === "object" && !Array.isArray(parsed.releasedSupervisor) ? [parsed.releasedSupervisor] : []
+    ];
+    for (const rawRelease of rawReleases) {
+      if (rawRelease === null || typeof rawRelease !== "object" || Array.isArray(rawRelease)) continue;
+      const candidate = rawRelease;
+      if (typeof candidate.agentId === "string" && candidate.agentId !== "" && typeof candidate.waitingOnLead === "string" && candidate.waitingOnLead !== "" && typeof candidate.releasedAt === "string" && candidate.releasedAt !== "" && !releasedSupervisors.some((record2) => record2.agentId === candidate.agentId)) {
+        releasedSupervisors.push(candidate);
+      }
+    }
     return {
       slug,
       root: parsed.root,
@@ -1155,7 +1160,7 @@ function readProjectRegistration(stateDir, slug) {
       ...typeof parsed.commonDir === "string" && parsed.commonDir !== "" ? { commonDir: parsed.commonDir } : {},
       ...typeof parsed.supervisor === "string" && parsed.supervisor !== "" ? { supervisor: parsed.supervisor } : {},
       ...typeof parsed.lead === "string" && parsed.lead !== "" ? { lead: parsed.lead } : {},
-      ...release !== void 0 ? { releasedSupervisor: release } : {},
+      ...releasedSupervisors.length > 0 ? { releasedSupervisors } : {},
       ...typeof parsed.rotationState === "string" && LEAD_ROTATION_STATES.includes(parsed.rotationState) ? { rotationState: parsed.rotationState } : {},
       ...typeof parsed.handoffRequestedAt === "string" && parsed.handoffRequestedAt !== "" ? { handoffRequestedAt: parsed.handoffRequestedAt } : {},
       ...typeof parsed.workspaceId === "string" && parsed.workspaceId !== "" ? { workspaceId: parsed.workspaceId } : {},

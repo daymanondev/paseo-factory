@@ -746,9 +746,10 @@ test("v0.6.1 (ADR 0057 §4): replacing a Supervisor whose live Lead is parented 
   assert.equal(fake.archived.length, 0, "a released Supervisor is never archived");
   const reg = readProjectRegistration(stateDir, project.slug);
   assert.equal(reg?.supervisor, undefined, "the Supervisor binding clears");
-  assert.equal(reg?.releasedSupervisor?.agentId, "agent-sup-parent", "the release is recorded in Project state");
-  assert.equal(reg?.releasedSupervisor?.waitingOnLead, "agent-lead-parented", "with the Lead id it waits on");
-  assert.ok(typeof reg?.releasedSupervisor?.releasedAt === "string", "and a release timestamp");
+  assert.equal(reg?.releasedSupervisors?.length, 1, "the release is recorded in Project state");
+  assert.equal(reg?.releasedSupervisors?.[0]?.agentId, "agent-sup-parent", "the release is recorded in Project state");
+  assert.equal(reg?.releasedSupervisors?.[0]?.waitingOnLead, "agent-lead-parented", "with the Lead id it waits on");
+  assert.ok(typeof reg?.releasedSupervisors?.[0]?.releasedAt === "string", "and a release timestamp");
   assert.ok(agents.some((agent) => agent.id === "agent-lead-parented"), "the parented Lead stays live");
   assert.ok(agents.some((agent) => agent.id === "agent-sup-parent"), "the released old Supervisor stays live too");
 
@@ -770,7 +771,7 @@ test("v0.6.1 (ADR 0057 §4): replacing a Supervisor whose live Lead is parented 
     daemon: fake.daemon,
     stopAgent: async () => ({ ok: true }),
   });
-  assert.equal(readProjectRegistration(stateDir, project.slug)?.releasedSupervisor?.agentId, "agent-sup-parent");
+  assert.equal(readProjectRegistration(stateDir, project.slug)?.releasedSupervisors?.[0]?.agentId, "agent-sup-parent");
 
   // (4) The parented Lead's own handoff archives it (the Lead retire door the
   // handoff rides): the waiting record fires, then clears.
@@ -778,8 +779,57 @@ test("v0.6.1 (ADR 0057 §4): replacing a Supervisor whose live Lead is parented 
   assert.ok(rotated.ok, rotated.ok ? "" : rotated.error);
   assert.ok(fake.archived.includes("agent-lead-parented"), "the Lead archives through its own handoff door");
   assert.ok(fake.archived.includes("agent-sup-parent"), "the released Supervisor archives once its Lead is archived");
-  assert.equal(readProjectRegistration(stateDir, project.slug)?.releasedSupervisor, undefined, "the waiting record clears after the archive");
+  assert.equal(readProjectRegistration(stateDir, project.slug)?.releasedSupervisors, undefined, "the waiting record clears after the archive");
   assert.equal(readProjectRegistration(stateDir, project.slug)?.lead, undefined, "the Lead binding cleared with the rotation");
+});
+
+test("v0.6.1 review fix: two duplicate Supervisors each parented to a live Lead both release — the records accumulate, and each settles on its own Lead", async (t) => {
+  const project = makeProject(t, "released-sup-duplicate");
+  const agents: FakeAgent[] = [
+    { id: "agent-sup-a", labels: { seat: "supervisor", project: project.slug }, provider: "pi/zai/glm-5.3" },
+    { id: "agent-sup-b", labels: { seat: "supervisor", project: project.slug }, provider: "pi/zai/glm-5.3" },
+    { id: "agent-lead-a", labels: { seat: "lead", project: project.slug }, provider: "pi/zai/glm-5.3", parentAgentId: "agent-sup-a" },
+    { id: "agent-lead-b", labels: { seat: "lead", project: project.slug }, provider: "pi/zai/glm-5.3", parentAgentId: "agent-sup-b" },
+  ];
+  const { stateDir, home, factory, handlers, fake } = makeSurface(t, agents);
+  writeProjectRegistration(stateDir, project.slug, { root: project.root, supervisor: "agent-sup-a", lead: "agent-lead-a" });
+
+  // The duplicate-supervisor anomaly (the state the ensure sweep normally
+  // prevents): the revoke loop visits BOTH live Supervisors, and each has its
+  // own parented live Lead.
+  const released = await handlers.supervisorRevoke({ projectRoot: project.root });
+  assert.ok(released.ok, released.ok ? "" : released.error);
+  assert.deepEqual(released.releasedAgentIds.sort(), ["agent-sup-a", "agent-sup-b"], "both duplicates release");
+  const reg = readProjectRegistration(stateDir, project.slug);
+  const byAgent = new Map((reg?.releasedSupervisors ?? []).map((record) => [record.agentId, record]));
+  assert.equal(byAgent.get("agent-sup-a")?.waitingOnLead, "agent-lead-a", "the first release survives the second write");
+  assert.equal(byAgent.get("agent-sup-b")?.waitingOnLead, "agent-lead-b", "the second release is recorded beside it");
+  assert.equal(fake.archived.length, 0, "neither released Supervisor is archived while its Lead lives");
+  assert.ok(agents.every((agent) => agents.includes(agent)), "all four agents stay live");
+
+  // A restart keeps the accumulated list — no record was lost to an overwrite.
+  const restarted = createSurfaceHandlers({
+    factory,
+    stateDir,
+    home,
+    daemon: fake.daemon,
+    stopAgent: async () => ({ ok: true }),
+  });
+
+  // Each release settles on its OWN Lead: archiving Lead B (an outside-style
+  // archive through the settle door) archives only Supervisor B; Lead A's
+  // release stands until Lead A archives too.
+  await restarted.settleReleasedSupervisor({ slug: project.slug, leadAgentId: "agent-lead-b" });
+  assert.ok(fake.archived.includes("agent-sup-b"), "Supervisor B settles once its own Lead is archived");
+  assert.ok(!fake.archived.includes("agent-sup-a"), "Supervisor A does not settle on Lead B's archive");
+  const afterB = new Map((readProjectRegistration(stateDir, project.slug)?.releasedSupervisors ?? []).map((record) => [record.agentId, record]));
+  assert.ok(afterB.has("agent-sup-a"), "Supervisor A's record stands after B settles");
+  assert.ok(!afterB.has("agent-sup-b"), "Supervisor B's record cleared");
+
+  await restarted.settleReleasedSupervisor({ slug: project.slug, leadAgentId: "agent-lead-a" });
+  assert.ok(fake.archived.includes("agent-sup-a"), "Supervisor A settles once its own Lead archives");
+  assert.equal(readProjectRegistration(stateDir, project.slug)?.releasedSupervisors, undefined, "the release list empties after both settle");
+  assert.ok(fake.archived.indexOf("agent-sup-b") < fake.archived.indexOf("agent-sup-a"), "each settle fires in its own Lead's order");
 });
 
 test("supervisor.revoke without a projectRoot: one live supervisor is the legacy global act; two or more is a named refusal", async (t) => {

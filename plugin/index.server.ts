@@ -320,6 +320,7 @@ export default function contribute(server: PluginServerContext) {
     onLeadRetired: (input) => leadMail.settleLeadRotation(input.slug),
     onSeatKickoffSent: (input) => leadMail.markKickoffSent(input.agentId),
     markPluginArchive: (input) => leadMail.markPluginArchive(input.agentId),
+    clearPluginArchive: (input) => leadMail.clearPluginArchive(input.agentId),
     resetProjectMailbox: (slug) => leadMail.resetProjectMailbox(slug),
     leadDispatch: (request, options) => leadMail.dispatchLead(request, options),
     supervisorReport: (request) => leadMail.reportSupervisor(request),
@@ -342,6 +343,10 @@ export default function contribute(server: PluginServerContext) {
     ensureLead: (input) => surface.leadEnsure(input),
     // v0.6.1 (ADR 0057 §5): no `ensureSupervisor` door — the mailbox never creates a Supervisor.
     retireLead: (input) => surface.leadRotate(input),
+    // v0.6.1 review fix (ADR 0057 §4): an outside archive of a parented Lead
+    // settles the released Supervisors waiting on it — the surface's settle
+    // door is the implementation.
+    settleReleasedSupervisor: (input) => surface.settleReleasedSupervisor(input),
     onLog: log,
   });
   const sleepInhibitor = new SleepInhibitor({ onError: error => log(`sleep inhibition unavailable: ${String(error)}`) });

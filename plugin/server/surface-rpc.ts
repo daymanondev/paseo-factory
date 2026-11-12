@@ -362,6 +362,14 @@ export interface SurfaceDeps {
    * `markPluginArchive` is the implementation.
    */
   markPluginArchive?: (input: { agentId: string }) => void;
+  /**
+   * The failed-archive unmark (v0.6.1 review fix, ADR 0057 §4): when one of
+   * the surface's own archive calls FAILS, the marker `markPluginArchive` set
+   * for that id must go — the plugin did not archive it after all, and a
+   * stale marker would swallow a later genuine outside archive of the same
+   * id. The Lead-mailbox runtime's `clearPluginArchive` is the implementation.
+   */
+  clearPluginArchive?: (input: { agentId: string }) => void;
   /** Notify LeadMailRuntime when ensureSeat dispatches an explicit initial message to a seat (v0.0.28, ADR 0018 §2). */
   onSeatKickoffSent?: (input: { slug: string; seat: "supervisor" | "lead"; agentId: string }) => void;
   /** Reset in-memory mailbox state for a project on Owner-only Project reset (v0.0.24). */
@@ -912,7 +920,14 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       const stopped = await (deps.stopAgent ?? stopAgentViaCli)(agent.id, deps.home);
       if (!stopped.ok) log(`${seat}: cancel before retire failed — ${stopped.reason}`);
     } catch (err) { log(`${seat}: cancel before retire failed — ${messageOf(err)}`); }
-    await daemon.agents.ref(agent.id).archive();
+    try {
+      await daemon.agents.ref(agent.id).archive();
+    } catch (err) {
+      // v0.6.1 review fix: the archive never flew — the marker must not
+      // outlive it, or a later genuine outside archive of this id is swallowed.
+      deps.clearPluginArchive?.({ agentId: agent.id });
+      throw err;
+    }
     if (seat === "lead" && slug !== undefined) {
       try { deps.onLeadRetired?.({ slug, agentId: agent.id }); }
       catch (err) { log(`lead: mailbox settle failed — ${messageOf(err)}`); }
@@ -921,28 +936,44 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
   };
 
   /**
-   * The release's settling act (v0.6.1, ADR 0057 §4): a Lead the plugin just
-   * archived through its own door settles any released-Supervisor record
-   * waiting on it — the cascade risk died with the Lead, so the old
-   * Supervisor archives now and the record clears. Fires on the Lead handoff's
-   * retire step and the manual rotate alike; idempotent (the record is gone
-   * after the first settle).
+   * The release's settling act (v0.6.1, ADR 0057 §4): a Lead that just
+   * archived settles every released-Supervisor record waiting on it — the
+   * cascade risk died with the Lead, so the old Supervisor(s) archive now and
+   * their records clear. Fires on the Lead handoff's retire step and the
+   * manual rotate alike (the plugin's own Lead archives), and — through the
+   * `settleReleasedSupervisor` door the Lead-mailbox runtime fires — when the
+   * parented Lead is archived from OUTSIDE, so a released record always has a
+   * settlement path. Idempotent (a settled record is removed by the first
+   * settle).
    */
   const archiveReleasedSupervisorWaitingOnLead = async (daemon: SurfaceDaemonApi, slug: string, leadAgentId: string): Promise<void> => {
     const reg = readProjectRegistration(deps.stateDir, slug);
-    const released = reg?.releasedSupervisor;
-    if (released === undefined || released.waitingOnLead !== leadAgentId) return;
-    try {
-      const stopped = await (deps.stopAgent ?? stopAgentViaCli)(released.agentId, deps.home);
-      if (!stopped.ok) log(`supervisor: cancel before release-archive failed — ${stopped.reason}`);
-    } catch (err) { log(`supervisor: cancel before release-archive failed — ${messageOf(err)}`); }
-    deps.markPluginArchive?.({ agentId: released.agentId });
-    try {
-      await daemon.agents.ref(released.agentId).archive();
-      writeProjectRegistration(deps.stateDir, slug, { root: reg!.root, releasedSupervisor: null });
-      log(`${slug}: released supervisor ${released.agentId} archived — its parented Lead ${leadAgentId} was archived by the plugin first`);
-    } catch (err) {
-      log(`${slug}: released supervisor ${released.agentId} could not be archived yet (${messageOf(err)}) — the record stands for the next attempt`);
+    const waiting = reg?.releasedSupervisors?.filter((record) => record.waitingOnLead === leadAgentId) ?? [];
+    if (reg === undefined || waiting.length === 0) return;
+    const settled: string[] = [];
+    for (const released of waiting) {
+      try {
+        const stopped = await (deps.stopAgent ?? stopAgentViaCli)(released.agentId, deps.home);
+        if (!stopped.ok) log(`supervisor: cancel before release-archive failed — ${stopped.reason}`);
+      } catch (err) { log(`supervisor: cancel before release-archive failed — ${messageOf(err)}`); }
+      deps.markPluginArchive?.({ agentId: released.agentId });
+      try {
+        await daemon.agents.ref(released.agentId).archive();
+        settled.push(released.agentId);
+        log(`${slug}: released supervisor ${released.agentId} archived — its parented Lead ${leadAgentId} was archived first`);
+      } catch (err) {
+        // v0.6.1 review fix: this archive never flew — drop its marker so a
+        // later genuine outside archive of the same id is not swallowed.
+        deps.clearPluginArchive?.({ agentId: released.agentId });
+        log(`${slug}: released supervisor ${released.agentId} could not be archived yet (${messageOf(err)}) — the record stands for the next attempt`);
+      }
+    }
+    if (settled.length > 0) {
+      const settledIds = new Set(settled);
+      writeProjectRegistration(deps.stateDir, slug, {
+        root: reg.root,
+        releasedSupervisors: (reg.releasedSupervisors ?? []).filter((record) => !settledIds.has(record.agentId)),
+      });
     }
   };
 
@@ -1428,9 +1459,11 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
    * retirement. One exception (v0.6.1, ADR 0057 §4): a Supervisor whose live
    * Lead is still PARENTED to it (pre-v0.6.1 parentage, read from the daemon
    * row's `parentAgentId`) is RELEASED instead — the binding clears and a
-   * `releasedSupervisor` record names the Lead the archive waits on, because a
-   * Paseo archive would cascade onto the child. The record settles (the old
-   * Supervisor archives) when that Lead is archived by its own handoff.
+   * `releasedSupervisors` record names the Lead the archive waits on, because
+   * a Paseo archive would cascade onto the child. The records accumulate (the
+   * duplicate-supervisor anomaly can release more than one), and each settles
+   * (the old Supervisor archives) when its own Lead is archived — by the
+   * plugin's handoff or from outside (the lost-Lead door's settle).
    */
   const retireSeatUnlocked = async (
     seat: "supervisor" | "lead",
@@ -1463,10 +1496,19 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           parentedLeadId = undefined; // a daemon miss archives as before — the pre-v0.6.1 behaviour
         }
         if (parentedLeadId !== undefined) {
+          // v0.6.1 review fix: the release APPENDS to the registration's
+          // released-Supervisor list instead of overwriting one record — the
+          // duplicate-supervisor anomaly (the state the ensure sweep normally
+          // prevents) can release more than one old Supervisor in this loop,
+          // and each waits on its own parented Lead.
+          const priorReleases = readProjectRegistration(deps.stateDir, projectSlug)?.releasedSupervisors ?? [];
           writeProjectRegistration(deps.stateDir, projectSlug, {
             root: projectRoot,
             supervisor: null,
-            releasedSupervisor: { agentId: agent.id, waitingOnLead: parentedLeadId, releasedAt: new Date().toISOString() },
+            releasedSupervisors: [
+              ...priorReleases.filter((record) => record.agentId !== agent.id),
+              { agentId: agent.id, waitingOnLead: parentedLeadId, releasedAt: new Date().toISOString() },
+            ],
           });
           agentIds.push(agent.id);
           releasedAgentIds.push(agent.id);
@@ -1605,6 +1647,9 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         if (options.includeSeats && isSeatRole) archivedSeats.push(agent.id);
         else archivedAgents.push(agent.id);
       } catch {
+        // v0.6.1 review fix: the reset/delete archive never flew — drop its
+        // marker so a later genuine outside archive of this id is not swallowed.
+        deps.clearPluginArchive?.({ agentId: agent.id });
         // best-effort archive
       }
     }
@@ -2881,6 +2926,19 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       await serializeSeat(`${resolved.slug}:supervisor`, () => supervisorSessionOpenedUnlocked(input, context));
     },
 
+    /**
+     * The released-Supervisor settle door (v0.6.1, ADR 0057 §4): the
+     * Lead-mailbox runtime's lost-Lead recovery fires it when a parented Lead
+     * is archived from OUTSIDE the plugin — every released Supervisor waiting
+     * on that Lead archives (the cascade risk died with the Lead) and its
+     * record clears. The plugin's own Lead archives settle the same way
+     * through `archiveSeatAgent`. Void by design: a failed archive logs and
+     * the record stands for the next attempt.
+     */
+    async settleReleasedSupervisor(input: { slug: string; leadAgentId: string }, context?: SurfaceCallContext): Promise<void> {
+      await archiveReleasedSupervisorWaitingOnLead(resolveDaemon(context), input.slug, input.leadAgentId);
+    },
+
     async supervisorStart(input: { projectRoot: string; directive?: string }, context?: SurfaceCallContext) {
       return startSupervisor(input, context);
     },
@@ -3360,7 +3418,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       }
       writeProjectRegistration(deps.stateDir, project.slug, {
         root: project.root,
-        ...(input.keepSeats === true ? {} : { supervisor: null, lead: null, releasedSupervisor: null }),
+        ...(input.keepSeats === true ? {} : { supervisor: null, lead: null, releasedSupervisors: null }),
         rotationState: null,
         handoffRequestedAt: null,
         taskWorkspaces: null,

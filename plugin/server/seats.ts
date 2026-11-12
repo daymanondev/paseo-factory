@@ -9,8 +9,10 @@ export function seatCandidates(agents: SurfaceAgentSnapshot[], stateDir: string,
   // v0.6.1 (ADR 0057 §4): a released Supervisor — one held un-archived because
   // its live Lead is still parented to it — is no longer the seat. It never
   // resolves as the Project's Supervisor and never falls to a duplicate sweep.
-  const releasedSupervisor = seat === "supervisor" ? registration?.releasedSupervisor?.agentId : undefined;
-  return agents.filter(agent => agent.archivedAt === null && agent.id !== releasedSupervisor && (
+  // The exclusion covers the whole LIST: the duplicate-supervisor anomaly can
+  // leave more than one released Supervisor, each waiting on its own Lead.
+  const releasedSupervisorIds = new Set((seat === "supervisor" ? registration?.releasedSupervisors : undefined)?.map((record) => record.agentId));
+  return agents.filter(agent => agent.archivedAt === null && !releasedSupervisorIds.has(agent.id) && (
     agent.id === bound ||
     (agent.labels?.seat === seat && (slug === undefined || agent.labels.project === slug)) ||
     (inferRoleFromProviderId(agent.provider) === seat && (slug === undefined || agent.labels?.project === slug || agent.cwd === registration?.root))

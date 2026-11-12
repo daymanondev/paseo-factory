@@ -475,14 +475,18 @@ export function writeProjectNotebook(
 export type LeadRotationState = "normal" | "rotation_pending" | "handing_over";
 
 /**
- * The released-Supervisor record (v0.6.1, ADR 0057 §4): when a Supervisor
+ * The released-Supervisor records (v0.6.1, ADR 0057 §4): when a Supervisor
  * whose live Lead is still PARENTED to it (pre-v0.6.1 parentage, read from
  * the daemon row's `parentAgentId`) is replaced, the old Supervisor is
  * released — its binding clears but it is never archived, because a Paseo
- * archive would cascade onto the parented Lead. The record names the Lead id
- * the archive waits on; the Lead's own next handoff archives the released
- * Supervisor and clears the record. Lives in `project.json`, so it survives
- * plugin restarts.
+ * archive would cascade onto the parented Lead. Each record names the Lead id
+ * the archive waits on; that Lead's own next handoff (or its outside archive,
+ * through the lost-Lead door) archives the released Supervisor and clears the
+ * record. The registration carries a LIST because the duplicate-supervisor
+ * anomaly (two live Supervisor seat agents, each parented to its own Lead —
+ * the state the ensure sweep normally prevents) can release more than one at
+ * a time; every record settles independently on its own Lead. Lives in
+ * `project.json`, so it survives plugin restarts.
  */
 export interface ReleasedSupervisor {
   agentId: string;
@@ -498,8 +502,8 @@ export interface ProjectRegistration {
   commonDir?: string;
   supervisor?: string;
   lead?: string;
-  /** The released-Supervisor record (v0.6.1, ADR 0057 §4) — absent when no release is pending. */
-  releasedSupervisor?: ReleasedSupervisor;
+  /** The released-Supervisor records (v0.6.1, ADR 0057 §4) — absent when no release is pending. */
+  releasedSupervisors?: ReleasedSupervisor[];
   /** The Lead rotation state's durable record (v0.0.20, ADR 0013 §5) — absent reads as "normal". */
   rotationState?: LeadRotationState;
   /** When the current handoff was requested (ISO 8601) — stamped entering "handing_over", cleared on reset. */
@@ -537,22 +541,30 @@ export function readProjectRegistration(stateDir: string, slug: string): Project
         }
       }
     }
-    const parsedRelease = parsed.releasedSupervisor;
-    const releasedSupervisor =
-      parsedRelease !== null && typeof parsedRelease === "object" && !Array.isArray(parsedRelease)
-        ? {
-            agentId: (parsedRelease as { agentId?: unknown }).agentId,
-            waitingOnLead: (parsedRelease as { waitingOnLead?: unknown }).waitingOnLead,
-            releasedAt: (parsedRelease as { releasedAt?: unknown }).releasedAt,
-          }
-        : undefined;
-    const release =
-      releasedSupervisor !== undefined &&
-      typeof releasedSupervisor.agentId === "string" && releasedSupervisor.agentId !== "" &&
-      typeof releasedSupervisor.waitingOnLead === "string" && releasedSupervisor.waitingOnLead !== "" &&
-      typeof releasedSupervisor.releasedAt === "string" && releasedSupervisor.releasedAt !== ""
-        ? releasedSupervisor as ReleasedSupervisor
-        : undefined;
+    // The released-Supervisor list (v0.6.1, ADR 0057 §4). A legacy singular
+    // `releasedSupervisor` object (the pre-review v0.6.1 dev shape) migrates
+    // into the list; entries validate field by field and dedupe by agent id.
+    const releasedSupervisors: ReleasedSupervisor[] = [];
+    const rawReleases: unknown[] = [
+      ...(Array.isArray(parsed.releasedSupervisors) ? parsed.releasedSupervisors : []),
+      ...((parsed as { releasedSupervisor?: unknown }).releasedSupervisor !== null &&
+      typeof (parsed as { releasedSupervisor?: unknown }).releasedSupervisor === "object" &&
+      !Array.isArray((parsed as { releasedSupervisor?: unknown }).releasedSupervisor)
+        ? [(parsed as { releasedSupervisor?: unknown }).releasedSupervisor]
+        : []),
+    ];
+    for (const rawRelease of rawReleases) {
+      if (rawRelease === null || typeof rawRelease !== "object" || Array.isArray(rawRelease)) continue;
+      const candidate = rawRelease as { agentId?: unknown; waitingOnLead?: unknown; releasedAt?: unknown };
+      if (
+        typeof candidate.agentId === "string" && candidate.agentId !== "" &&
+        typeof candidate.waitingOnLead === "string" && candidate.waitingOnLead !== "" &&
+        typeof candidate.releasedAt === "string" && candidate.releasedAt !== "" &&
+        !releasedSupervisors.some((record) => record.agentId === candidate.agentId)
+      ) {
+        releasedSupervisors.push(candidate as ReleasedSupervisor);
+      }
+    }
     return {
       slug,
       root: parsed.root,
@@ -560,7 +572,7 @@ export function readProjectRegistration(stateDir: string, slug: string): Project
       ...(typeof parsed.commonDir === "string" && parsed.commonDir !== "" ? { commonDir: parsed.commonDir } : {}),
       ...(typeof parsed.supervisor === "string" && parsed.supervisor !== "" ? { supervisor: parsed.supervisor } : {}),
       ...(typeof parsed.lead === "string" && parsed.lead !== "" ? { lead: parsed.lead } : {}),
-      ...(release !== undefined ? { releasedSupervisor: release } : {}),
+      ...(releasedSupervisors.length > 0 ? { releasedSupervisors } : {}),
       ...(typeof parsed.rotationState === "string" && LEAD_ROTATION_STATES.includes(parsed.rotationState)
         ? { rotationState: parsed.rotationState as LeadRotationState }
         : {}),
@@ -596,7 +608,8 @@ export function writeProjectRegistration(
     commonDir?: string | null;
     supervisor?: string | null;
     lead?: string | null;
-    releasedSupervisor?: ReleasedSupervisor | null;
+    /** The full released-Supervisor list (replace semantics): a value sets it, `null` clears it, `undefined` preserves it. */
+    releasedSupervisors?: ReleasedSupervisor[] | null;
     rotationState?: LeadRotationState | null;
     handoffRequestedAt?: string | null;
     workspaceId?: string | null;
@@ -610,7 +623,7 @@ export function writeProjectRegistration(
   const commonDir = patch.commonDir === null ? undefined : patch.commonDir ?? prior?.commonDir;
   const supervisor = patch.supervisor === null ? undefined : patch.supervisor ?? prior?.supervisor;
   const lead = patch.lead === null ? undefined : patch.lead ?? prior?.lead;
-  const releasedSupervisor = patch.releasedSupervisor === null ? undefined : patch.releasedSupervisor ?? prior?.releasedSupervisor;
+  const releasedSupervisors = patch.releasedSupervisors === null ? undefined : patch.releasedSupervisors ?? prior?.releasedSupervisors;
   const rotationState = patch.rotationState === null ? undefined : patch.rotationState ?? prior?.rotationState;
   const handoffRequestedAt = patch.handoffRequestedAt === null ? undefined : patch.handoffRequestedAt ?? prior?.handoffRequestedAt;
   const workspaceId = patch.workspaceId === null ? undefined : patch.workspaceId ?? prior?.workspaceId;
@@ -650,7 +663,7 @@ export function writeProjectRegistration(
   if (commonDir !== undefined) record.commonDir = commonDir;
   if (supervisor !== undefined) record.supervisor = supervisor;
   if (lead !== undefined) record.lead = lead;
-  if (releasedSupervisor !== undefined) record.releasedSupervisor = releasedSupervisor;
+  if (releasedSupervisors !== undefined && releasedSupervisors.length > 0) record.releasedSupervisors = releasedSupervisors;
   if (rotationState !== undefined) record.rotationState = rotationState;
   if (handoffRequestedAt !== undefined) record.handoffRequestedAt = handoffRequestedAt;
   if (workspaceId !== undefined) record.workspaceId = workspaceId;

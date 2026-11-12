@@ -139,6 +139,7 @@ function makeSpooledRuntime(t: TestContext, agents: FakeAgent[] = [], options?: 
     onLeadRetired: (input) => leadMail.settleLeadRotation(input.slug),
     onSeatKickoffSent: (input) => leadMail.markKickoffSent(input.agentId),
     markPluginArchive: (input) => leadMail.markPluginArchive(input.agentId),
+    clearPluginArchive: (input) => leadMail.clearPluginArchive(input.agentId),
     leadDispatch: (request) => leadMail.dispatchLead(request),
   });
   const leadMail = createLeadMailRuntime({
@@ -147,6 +148,7 @@ function makeSpooledRuntime(t: TestContext, agents: FakeAgent[] = [], options?: 
     daemon: fake.daemon,
     ensureLead: (input) => surface.leadEnsure(input),
     retireLead: (input) => surface.leadRotate(input),
+    settleReleasedSupervisor: (input) => surface.settleReleasedSupervisor(input),
     ...(options?.handoffTimeoutMs === undefined ? {} : { handoffTimeoutMs: options.handoffTimeoutMs }),
     onLog: (msg) => logs.push(msg),
     logger: { warn: (msg) => warnings.push(msg) },
@@ -2571,8 +2573,8 @@ test("v0.6.1 (ADR 0057 §4): the released Supervisor archives when the Lead hand
   const revoked = await surface.supervisorRevoke({ projectRoot });
   assert.ok(revoked.ok, revoked.ok ? "" : revoked.error);
   const reg = readProjectRegistration(stateDir, slug);
-  assert.equal(reg?.releasedSupervisor?.agentId, "agent-sup-rel");
-  assert.equal(reg?.releasedSupervisor?.waitingOnLead, "agent-lead-rel");
+  assert.equal(reg?.releasedSupervisors?.[0]?.agentId, "agent-sup-rel");
+  assert.equal(reg?.releasedSupervisors?.[0]?.waitingOnLead, "agent-lead-rel");
   assert.ok(fake.agents.some((agent) => agent.id === supervisor.id), "the released Supervisor stays live");
 
   // The Lead crosses its mark and rotates: extraction, completion, retire, successor.
@@ -2586,8 +2588,115 @@ test("v0.6.1 (ADR 0057 §4): the released Supervisor archives when the Lead hand
   assert.equal(readProjectRegistration(stateDir, slug)?.rotationState, "normal");
   assert.equal(fake.agents.some((agent) => agent.id === lead.id), false, "the parented Lead archived through its own handoff");
   assert.equal(fake.agents.some((agent) => agent.id === supervisor.id), false, "the released Supervisor archived once its Lead did");
-  assert.equal(readProjectRegistration(stateDir, slug)?.releasedSupervisor, undefined, "the release record settled and cleared");
+  assert.equal(readProjectRegistration(stateDir, slug)?.releasedSupervisors, undefined, "the release record settled and cleared");
   assert.ok(fake.created.some((agent) => agent.labels?.seat === "lead"), "the rotation's successor Lead exists");
+});
+
+test("v0.6.1 review fix (ADR 0057 §4): a parented Lead archived from OUTSIDE settles the released Supervisor — the record never outlives its Lead", async (t) => {
+  const supervisor: FakeAgent = { id: "agent-sup-outside", status: "idle" };
+  const lead: FakeAgent = { id: "agent-lead-outside", status: "idle", parentAgentId: "agent-sup-outside" };
+  const { stateDir, slug, projectRoot, surface, leadMail, fake } = makeSpooledRuntime(t, [supervisor, lead]);
+  supervisor.labels = { seat: "supervisor", project: slug };
+  supervisor.cwd = projectRoot;
+  lead.labels = { seat: "lead", project: slug };
+  lead.cwd = projectRoot;
+  await surface.supervisorEnsure({ projectRoot });
+  await surface.leadEnsure({ projectRoot });
+  // Mail in flight when the Lead vanishes — the lost-Lead recovery's mark.
+  await leadMail.enqueueLeadMail(slug, { from: "supervisor", kind: "directive", text: "Directive in flight when the Lead vanishes" });
+  await leadMail.pumpProjectLead(slug);
+
+  // The Supervisor is replaced while its Lead is still parented: a release
+  // record waits on the parented Lead.
+  const revoked = await surface.supervisorRevoke({ projectRoot });
+  assert.ok(revoked.ok, revoked.ok ? "" : revoked.error);
+  assert.equal(readProjectRegistration(stateDir, slug)?.releasedSupervisors?.[0]?.agentId, "agent-sup-outside");
+
+  // The OUTSIDE archive: the daemon fires agent.archive.after for the
+  // parented Lead with no plugin door involved (the fake's emitArchive).
+  await fake.emitArchive(lead.id);
+
+  assert.ok(fake.agents.some((agent) => agent.id === supervisor.id) === false, "the released Supervisor archived once its Lead was archived from outside");
+  assert.equal(readProjectRegistration(stateDir, slug)?.releasedSupervisors, undefined, "the release record settled and cleared through the lost-Lead door");
+  assert.equal(readMailboxLines(stateDir, slug).some((event) => event.type === "mail_requeued" && event.reason === "lead_lost"), true, "the lost-Lead recovery still requeues the in-flight mail");
+  assert.ok(fake.created.some((agent) => agent.labels?.seat === "lead"), "the lost-Lead pump still raises a successor Lead");
+});
+
+/** The persisted plugin-archive markers (v0.6.1 review fix) — `<stateDir>/plugin-archive-markers.json`. */
+const readMarkerIds = (stateDir: string): string[] => {
+  const path = join(stateDir, "plugin-archive-markers.json");
+  if (!existsSync(path)) return [];
+  const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
+  return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === "string") : [];
+};
+
+test("v0.6.1 review fix: the plugin's own archive marker survives a plugin restart — the daemon's late agent.archive.after is never misread as a lost Lead", async (t) => {
+  const lead: FakeAgent = { id: "agent-lead-marked", status: "idle", lastUserMessageAt: "2026-11-13T08:00:00.000Z" };
+  const first = makeSpooledRuntime(t, [lead]);
+  lead.labels = { seat: "lead", project: first.slug };
+  lead.cwd = first.projectRoot;
+  await first.surface.leadEnsure({ projectRoot: first.projectRoot });
+  await first.leadMail.enqueueLeadMail(first.slug, { from: "supervisor", kind: "directive", text: "Directive in flight when the plugin restarts" });
+  await first.leadMail.pumpProjectLead(first.slug);
+  assert.ok(readLeadMailbox(join(projectStateDir(first.stateDir, first.slug), "mailbox.jsonl")).inFlight, "a delivery is live when the mark is set");
+
+  // The plugin marks its own upcoming archive (every plugin archive door
+  // does) — then RESTARTS before the daemon delivers agent.archive.after.
+  first.leadMail.markPluginArchive(lead.id);
+  assert.deepEqual(readMarkerIds(first.stateDir), [lead.id], "the marker persisted the moment it was set");
+
+  const second = createLeadMailRuntime({
+    factory: first.factory,
+    stateDir: first.stateDir,
+    daemon: first.fake.daemon,
+    ensureLead: (input) => first.surface.leadEnsure(input),
+    retireLead: (input) => first.surface.leadRotate(input),
+    settleReleasedSupervisor: (input) => first.surface.settleReleasedSupervisor(input),
+    onLog: () => {},
+  });
+  t.after(() => second.stop());
+
+  await second.onAgentArchived({ agentId: lead.id });
+  assert.equal(readProjectRegistration(first.stateDir, first.slug)?.lead, lead.id, "the late event for a marked archive never clears the binding");
+  assert.equal(readMailboxLines(first.stateDir, first.slug).some((event) => event.type === "mail_requeued" && event.reason === "lead_lost"), false, "and never requeues as lead_lost");
+  assert.deepEqual(readMarkerIds(first.stateDir), [], "the consumed event cleared the marker again");
+});
+
+test("v0.6.1 review fix: a failed plugin archive clears its marker — a later genuine outside archive of the same id still runs lost-Lead recovery", async (t) => {
+  const lead: FakeAgent = { id: "agent-lead-fail", status: "idle", lastUserMessageAt: "2026-11-13T08:00:00.000Z" };
+  const { stateDir, slug, projectRoot, surface, leadMail, fake } = makeSpooledRuntime(t, [lead]);
+  lead.labels = { seat: "lead", project: slug };
+  lead.cwd = projectRoot;
+  await surface.leadEnsure({ projectRoot });
+  await leadMail.enqueueLeadMail(slug, { from: "supervisor", kind: "directive", text: "Directive in flight when the archive refuses" });
+  await leadMail.pumpProjectLead(slug);
+
+  // The daemon refuses THIS agent's archive once: the plugin's own rotate
+  // marks the id, the archive call throws, the rotate fails.
+  const originalRef = fake.daemon.agents.ref.bind(fake.daemon.agents);
+  let refuseArchive = true;
+  fake.daemon.agents.ref = (id: string): ReturnType<typeof originalRef> => {
+    const ref = originalRef(id);
+    return {
+      ...ref,
+      archive: async () => {
+        if (refuseArchive) throw new Error("archive refused");
+        return ref.archive();
+      },
+    };
+  };
+
+  const rotated = await surface.leadRotate({ projectRoot });
+  assert.ok(!rotated.ok, "the rotate fails when the daemon refuses the archive");
+  assert.deepEqual(readMarkerIds(stateDir), [], "the failed archive left no stale marker behind");
+
+  // The SAME id is then archived from OUTSIDE: lost-Lead recovery must run —
+  // a stale marker must not swallow it.
+  refuseArchive = false;
+  await fake.emitArchive(lead.id);
+  assert.notEqual(readProjectRegistration(stateDir, slug)?.lead, lead.id, "the genuine outside archive clears the dead Lead's binding (the pump rebinds the successor)");
+  assert.equal(fake.agents.some((agent) => agent.id === lead.id), false, "the archived Lead is gone");
+  assert.equal(readMailboxLines(stateDir, slug).some((event) => event.type === "mail_requeued" && event.reason === "lead_lost"), true, "and requeues the in-flight mail as lead_lost");
 });
 
 test("settleTurnAndRotate begins the handoff immediately at the turn boundary when no Peer is running (v0.0.93, ADR 0031)", async (t) => {

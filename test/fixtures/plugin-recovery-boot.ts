@@ -39,7 +39,7 @@ factory.setContract({ task: "LOCAL", workspace, gate: "true", artifact: "out", s
 writeProjectRegistration(stateDir, "project", {
   root: workspace,
   lead: "lead",
-  releasedSupervisor: { agentId: "sup-released", waitingOnLead: "lead", releasedAt: "2026-11-12T17:11:02.000Z" },
+  releasedSupervisors: [{ agentId: "sup-released", waitingOnLead: "lead", releasedAt: "2026-11-12T17:11:02.000Z" }],
 });
 const projectPath = join(stateDir, "projects/project/ledger.jsonl");
 writeFileSync(projectPath, JSON.stringify({ seq: 1, ts: "2026-10-23T00:00:00Z", event: "contract_set", task: "COPY", workspace, gate: "true", artifact: "out", scope: ["copy"] }) + "\n");
@@ -152,8 +152,8 @@ try {
   assert.ok(listProjectRegistrations(stateDir).some((r) => r.lead === "lead"), "a stranger archive never clears a bound Lead");
   assert.equal(readLeadMailbox(mailbox).inFlight?.deliveryId, mailboxBeforeArchive.inFlight?.deliveryId, "a stranger archive never touches the mailbox");
   assert.deepEqual(
-    listProjectRegistrations(stateDir).find((r) => r.slug === "project")?.releasedSupervisor,
-    { agentId: "sup-released", waitingOnLead: "lead", releasedAt: "2026-11-12T17:11:02.000Z" },
+    listProjectRegistrations(stateDir).find((r) => r.slug === "project")?.releasedSupervisors,
+    [{ agentId: "sup-released", waitingOnLead: "lead", releasedAt: "2026-11-12T17:11:02.000Z" }],
     "the released-Supervisor record survived the restart and the boot's registration writes",
   );
   if (action === "resume") {
