@@ -60,7 +60,14 @@ import { commitSeatMemoryOnRoot } from "./core/workspace.ts";
  *     for one Project, fired by the surface's `retireSeat` through its
  *     `onLeadRetired` door the moment a Lead is archived, so a manual rotate
  *     racing a live delivery returns the batch to `queued` instead of
- *     stranding it `inFlight` until the next plugin restart.
+ *     stranding it `inFlight` until the next plugin restart;
+ *   - `onAgentArchived` / `markPluginArchive` — the lost-Lead door (v0.6.1,
+ *     ADR 0057 §4): the shell's `agent.archive.after` registration hands
+ *     every daemon archive here; an outside archive of a bound Lead (one the
+ *     surface did not mark first) clears the binding, requeues un-acked mail
+ *     (`reason: "lead_lost"`), marks the on-disk handover stale-unknown, and
+ *     pumps — the normal succession path raises the successor with the
+ *     handover plus a staleness line.
  */
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -347,6 +354,24 @@ export interface LeadMailRuntime {
    */
   settleLeadRotation(slug: string): void;
   /**
+   * The lost-Lead door (v0.6.1, ADR 0057 §4): the shell's
+   * `agent.archive.after` registration hands every daemon archive event here.
+   * An archive of a registered Lead that the plugin did NOT perform itself
+   * (`markPluginArchive` was never fired for the id) clears the binding,
+   * requeues delivered-but-unacked Lead mail (`mail_requeued`, reason
+   * `lead_lost`), marks the on-disk handover stale-unknown, and pumps — the
+   * normal succession path creates the successor with the handover plus a
+   * staleness line. Never rejects; every failure logs and holds.
+   */
+  onAgentArchived(input: { agentId: string }): Promise<void>;
+  /**
+   * Records that the plugin itself is about to archive `agentId` (v0.6.1,
+   * ADR 0057 §4) — the surface fires this BEFORE its own archive calls, so
+   * the daemon's `agent.archive.after` for that id is recognised as a plugin
+   * archive and `onAgentArchived` never runs lost-Lead recovery for it.
+   */
+  markPluginArchive(agentId: string): void;
+  /**
    * Clears in-memory retry and handoff state for one Project (`slug`), used
    * by `Project reset` (`v0.0.24`, ADR 0015 §5).
    */
@@ -554,7 +579,8 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
   };
 
   const extractionPath = (slug: string) => join(projectStateDir(deps.stateDir, slug), "lead-handoff-extraction.json");
-  const readExtraction = (slug: string) => readOptionalJson(extractionPath(slug)) as { requestedAt?: string; prior?: string; stale?: boolean; sends?: number } | undefined;
+  const readExtraction = (slug: string) =>
+    readOptionalJson(extractionPath(slug)) as { requestedAt?: string; prior?: string; stale?: boolean; sends?: number; leadLostAt?: string } | undefined;
   const readDiskHandoffText = (slug: string): string | undefined => {
     try {
       const handoffPath = join(projectStateDir(deps.stateDir, slug), "lead-handoff.md");
@@ -623,7 +649,21 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
         events,
       });
       const digest = renderLedgerDigest(events);
-      pendingHandoff = renderSuccessorKickoff({ slug, roster, digest, handoffText: diskHandoffText, stale: readExtraction(slug)?.stale });
+      // v0.6.1 (ADR 0057 §4): a successor raised after a LOST Lead reads the
+      // on-disk handover as stale-unknown — its age against the lost Lead's
+      // last activity is not knowable until v0.7.0's handover metadata, so
+      // the staleness line rides any file (a fresh rotation's own extraction
+      // record keeps its explicit `stale` verdict either way).
+      const extractionSnapshot = readExtraction(slug);
+      const lostLead = typeof extractionSnapshot?.leadLostAt === "string";
+      pendingHandoff = renderSuccessorKickoff({
+        slug,
+        roster,
+        digest,
+        handoffText: diskHandoffText,
+        stale: lostLead || extractionSnapshot?.stale === true,
+        ...(lostLead ? { staleSource: "lost-lead" as const } : {}),
+      });
     }
     // v0.0.93 (ADR 0031 Quiet-Point Succession): a Successor Lead's Turn-1
     // kickoff delivers immediately — never held on `projectPeerInFlight`, the
@@ -1758,6 +1798,65 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     }
   };
 
+  /** The plugin's own archive markers (v0.6.1, ADR 0057 §4) — see `markPluginArchive`. */
+  const pluginArchivedAgentIds = new Set<string>();
+  const markPluginArchive = (agentId: string): void => {
+    if (typeof agentId === "string" && agentId.trim() !== "") pluginArchivedAgentIds.add(agentId.trim());
+  };
+
+  /**
+   * The lost-Lead door (v0.6.1, ADR 0057 §4) — the body behind the shell's
+   * `agent.archive.after` registration. An outside archive of a registered
+   * Lead: (1) clears the binding so nothing routes to a dead seat, (2)
+   * requeues the delivered-but-unacked batch (`mail_requeued`,
+   * `reason: "lead_lost"`), (3) marks the on-disk handover stale-unknown so
+   * the successor's kickoff carries the staleness line, and (4) pumps — the
+   * normal succession path (`drainLeadMailbox`'s ensure arm) creates the
+   * successor. A plugin archive (marked beforehand) is consumed and skipped.
+   */
+  const onAgentArchived = async (input: { agentId: string }): Promise<void> => {
+    const agentId = typeof input.agentId === "string" ? input.agentId.trim() : "";
+    if (agentId === "") return;
+    if (pluginArchivedAgentIds.has(agentId)) {
+      pluginArchivedAgentIds.delete(agentId);
+      return; // the plugin's own archive — never a lost Lead
+    }
+    for (const registration of listProjectRegistrations(deps.stateDir)) {
+      if (registration.lead !== agentId) continue;
+      await projectLane(registration.slug, async () => {
+        try {
+          // (1) The binding clears — the mailbox never routes to a dead Lead.
+          writeProjectRegistration(deps.stateDir, registration.slug, { root: registration.root, lead: null });
+          kickoffSentAgentIds.delete(agentId);
+          inFlightKickoffAgentIds.delete(agentId);
+          failedFirstTurnAgentIds.delete(agentId);
+          pendingHandoffByAgentId.delete(agentId);
+          inFlightHandoffByAgentId.delete(agentId);
+          // (2) Delivered-but-unacked mail returns to queued.
+          const settled = recoverLeadMailbox(mailboxPath(registration.slug), "lead_lost", "lead");
+          for (const event of settled) {
+            log(
+              `lead-mailbox: ${registration.slug}'s lead ${agentId} was archived outside the plugin — requeued ${event.mailIds.length} item(s) (lead_lost), the next pump raises a successor`,
+            );
+          }
+          // (3) The on-disk handover is stale-unknown until v0.7.0's metadata
+          // (W3) can date it against the lost Lead's last activity.
+          const diskHandoff = readDiskHandoffText(registration.slug);
+          const priorExtraction = readExtraction(registration.slug);
+          atomicJson(extractionPath(registration.slug), {
+            ...(priorExtraction ?? {}),
+            ...(diskHandoff === undefined ? {} : { stale: true }),
+            leadLostAt: new Date().toISOString(),
+          });
+          // (4) The succession pump — the ensure arm creates the successor.
+          await drainLeadMailbox(registration.slug);
+        } catch (err) {
+          log(`lead-mailbox: lost-lead recovery of ${registration.slug} failed — mail holds queued (${messageOf(err)})`);
+        }
+      });
+    }
+  };
+
   const resetProjectMailbox = (slug: string): void => {
     peerHandoff.reset(slug);
     clearHandoffTimer(slug);
@@ -1826,6 +1925,8 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     pumpAll,
     sweepPeers,
     settleLeadRotation,
+    onAgentArchived,
+    markPluginArchive,
     resetProjectMailbox,
     markKickoffSent,
     stop,
@@ -1864,12 +1965,28 @@ function renderHandoffExtractionPrompt(slug: string): string {
 
 /**
  * The successor's three-layer kickoff — roster, digest, and the outgoing
- * Lead's handoff text.
+ * Lead's handoff text. `stale` rides the last-known-good notice of an
+ * interrupted extraction (ADR 0050) or, with `staleSource: "lost-lead"`, the
+ * stale-unknown notice a lost Lead's on-disk handover carries (v0.6.1,
+ * ADR 0057 §4) until v0.7.0's handover metadata can date the file.
  */
-function renderSuccessorKickoff(input: { slug: string; roster: string; digest: string; handoffText: string | null; stale?: boolean }): string {
+function renderSuccessorKickoff(input: {
+  slug: string;
+  roster: string;
+  digest: string;
+  handoffText: string | null;
+  stale?: boolean;
+  staleSource?: "extraction" | "lost-lead";
+}): string {
   return [
     `# Lead handoff — project ${input.slug}`,
-    ...(input.stale ? ["Staleness notice: the latest extraction did not complete; the last-known-good handoff is shown below the authoritative live Machine-Verified Active Peer Roster and Ledger State Digest."] : []),
+    ...(input.stale
+      ? [
+          input.staleSource === "lost-lead"
+            ? "Staleness notice: this handover may predate the lost Lead's last activity — its age is unknown. Re-read the Ledger and the repository before relying on it; the roster and digest above are the machine-verified truth."
+            : "Staleness notice: the latest extraction did not complete; the last-known-good handoff is shown below the authoritative live Machine-Verified Active Peer Roster and Ledger State Digest.",
+        ]
+      : []),
     "",
     "You are the fresh successor Lead of this project, spawned at 0% context after the outgoing Lead crossed the 128,000-token rotation threshold. Three layers of continuity follow — the first two are machine-verified, built by the plugin from the live daemon and the ledger, never from prose:",
     "",

@@ -319,6 +319,7 @@ export default function contribute(server: PluginServerContext) {
     handoffPending: slug => leadMail.hasPendingHandoff(slug),
     onLeadRetired: (input) => leadMail.settleLeadRotation(input.slug),
     onSeatKickoffSent: (input) => leadMail.markKickoffSent(input.agentId),
+    markPluginArchive: (input) => leadMail.markPluginArchive(input.agentId),
     resetProjectMailbox: (slug) => leadMail.resetProjectMailbox(slug),
     leadDispatch: (request, options) => leadMail.dispatchLead(request, options),
     supervisorReport: (request) => leadMail.reportSupervisor(request),
@@ -413,6 +414,19 @@ export default function contribute(server: PluginServerContext) {
       // schedules the atomic rollup flush — zero Ledger lines per turn.
       usage.recordTurnEnd(event.agent.id).catch((error) => log(`usage: turn capture deferred — ${String(error)}`));
       void leadMail.onLeadTurnEnded({ agentId: event.agent.id, outcome: event.outcome, timeline: event.timeline }).catch((error) => log(`lead-mailbox: turn settle deferred — ${String(error)}`));
+    },
+  );
+  // The lost-Lead door (v0.6.1, ADR 0057 §4): every daemon archive event hands
+  // the Lead-mailbox runtime the archived agent id. The runtime tells plugin
+  // archives (marked beforehand through `markPluginArchive` by the surface's
+  // own archive doors) from outside ones; an outside archive of a bound Lead
+  // clears the binding, requeues un-acked mail (`lead_lost`) and pumps a
+  // successor with the on-disk handover plus a staleness line.
+  const offAgentArchived = registerLifecycleHook<PluginHookEvents["agent.archive.after"], void>(
+    (handler) => server.addHook("agent.archive.after", handler),
+    (handler) => server.on("agent.archived", handler),
+    (event) => {
+      void leadMail.onAgentArchived({ agentId: event.agent.id }).catch((error) => log(`lead-mailbox: archive settle deferred — ${String(error)}`));
     },
   );
   const spool = startSpool(stateDir, factory, {
@@ -596,6 +610,7 @@ export default function contribute(server: PluginServerContext) {
     offAgentCreate();
     offSessionOpen();
     offTurnEnded();
+    offAgentArchived();
     gitBlocks.stop();
     spool.stop();
     leadMail.stop();

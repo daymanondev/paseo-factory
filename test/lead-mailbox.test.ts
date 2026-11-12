@@ -29,11 +29,25 @@ interface FakeAgent {
   cwd?: string;
   lastUsage?: { contextWindowUsedTokens?: number; contextWindowMaxTokens?: number } | null;
   lastUserMessageAt?: string | null;
+  /** The Paseo parent link (v0.6.1, ADR 0057 §4) — a pre-v0.6.1 Lead still parented to its Supervisor. */
+  parentAgentId?: string | null;
 }
 
 function fakeDaemon(agents: FakeAgent[]) {
   const created: { config: { provider: string }; cwd: string; title: string; labels: Record<string, string>; prompt?: string }[] = [];
   const sent: { agentId: string; text: string }[] = [];
+  // The fake daemon's agent.archive.after listeners (v0.6.1, ADR 0057 §4) —
+  // the runtime registers through the harness the way the shell's server hook
+  // does; emitArchive drives an OUTSIDE archive, ref().archive() a plugin one.
+  const archiveListeners: ((agentId: string) => Promise<void>)[] = [];
+  const notifyArchived = async (agentId: string): Promise<void> => {
+    for (const listener of [...archiveListeners]) await listener(agentId);
+  };
+  const emitArchive = async (agentId: string): Promise<void> => {
+    const at = agents.findIndex((agent) => agent.id === agentId);
+    if (at !== -1) agents.splice(at, 1);
+    await notifyArchived(agentId);
+  };
   const daemon: SurfaceDaemonApi = {
     agents: {
       list: async (options) => {
@@ -62,6 +76,7 @@ function fakeDaemon(agents: FakeAgent[]) {
               cwd: agent.cwd ?? "/tmp",
               lastUsage: agent.lastUsage ?? null,
               ...(agent.lastUserMessageAt === undefined ? {} : { lastUserMessageAt: agent.lastUserMessageAt }),
+              ...(agent.parentAgentId === undefined ? {} : { parentAgentId: agent.parentAgentId }),
             },
           })),
         };
@@ -79,6 +94,7 @@ function fakeDaemon(agents: FakeAgent[]) {
         archive: async () => {
           const at = agents.findIndex((agent) => agent.id === id);
           if (at !== -1) agents.splice(at, 1);
+          await notifyArchived(id); // a faithful daemon fires agent.archive.after on its own archive too
           return { archivedAt: new Date().toISOString() };
         },
         timeline: { refetch: async () => ({ entries: [] }) },
@@ -89,7 +105,7 @@ function fakeDaemon(agents: FakeAgent[]) {
       listModels: async () => ({ models: [] }),
     },
   };
-  return { daemon, created, sent, agents };
+  return { daemon, created, sent, agents, emitArchive, archiveListeners };
 }
 
 function makeSpooledRuntime(t: TestContext, agents: FakeAgent[] = [], options?: { handoffTimeoutMs?: number }) {
@@ -118,6 +134,7 @@ function makeSpooledRuntime(t: TestContext, agents: FakeAgent[] = [], options?: 
     stopAgent: async () => ({ ok: true }),
     onLeadRetired: (input) => leadMail.settleLeadRotation(input.slug),
     onSeatKickoffSent: (input) => leadMail.markKickoffSent(input.agentId),
+    markPluginArchive: (input) => leadMail.markPluginArchive(input.agentId),
     leadDispatch: (request) => leadMail.dispatchLead(request),
   });
   const leadMail = createLeadMailRuntime({
@@ -131,6 +148,10 @@ function makeSpooledRuntime(t: TestContext, agents: FakeAgent[] = [], options?: 
     onLog: (msg) => logs.push(msg),
     logger: { warn: (msg) => warnings.push(msg) },
   });
+  // The shell's agent.archive.after registration, wired the same way
+  // index.server.ts does it: every daemon archive event reaches the runtime's
+  // lost-Lead door (v0.6.1, ADR 0057 §4).
+  fake.archiveListeners.push((agentId) => leadMail.onAgentArchived({ agentId }));
   const spool = startSpool(stateDir, factory, {
     pollMs: POLL_MS,
     leadDispatch: (request) => leadMail.dispatchLead(request),
@@ -2318,6 +2339,163 @@ test("quiet-point Lead rotation (ADR 0031, v0.0.93): rotation_pending holds the 
   assert.match(unstartedSends[0]!.text, /# Lead handoff — project/);
   assert.match(unstartedSends[0]!.text, /# Handoff for T-03\nReview T-03 when Peer finishes\./);
   assert.match(unstartedSends[0]!.text, /Recovered verdict after restart/);
+});
+
+// ---- lost-Lead recovery (v0.6.1, ADR 0057 §4) ----------------------------------------------
+
+test("v0.6.1 (ADR 0057 §4): an outside archive of the bound Lead (agent.archive.after) requeues unacked mail (lead_lost) and the next pump spawns a successor whose kickoff carries the handover with the staleness line", async (t) => {
+  const lead: FakeAgent = { id: "agent-lead-lost", status: "idle", lastUserMessageAt: "2026-11-12T08:00:00.000Z" };
+  const { stateDir, slug, projectRoot, surface, leadMail, fake } = makeSpooledRuntime(t, [lead]);
+  lead.labels = { seat: "lead", project: slug };
+  lead.cwd = projectRoot;
+  await surface.leadEnsure({ projectRoot });
+  // A handover from an earlier rotation, hours older than the Lead's last turn.
+  mkdirSync(join(projectStateDir(stateDir, slug)), { recursive: true });
+  writeFileSync(join(projectStateDir(stateDir, slug), "lead-handoff.md"), "# Old handoff\nWave 2 was mid-flight.\n");
+
+  // Mail delivered but never acked — the Lead died mid-delivery.
+  await leadMail.enqueueLeadMail(slug, { from: "supervisor", kind: "directive", text: "Directive the lost Lead never acked" });
+  await leadMail.pumpProjectLead(slug);
+  assert.ok(readLeadMailbox(join(projectStateDir(stateDir, slug), "mailbox.jsonl")).inFlight, "the delivery is live and unacked");
+
+  // The Owner archives the Lead from Paseo's own UI — a daemon archive the plugin did not perform.
+  await fake.emitArchive(lead.id);
+
+  assert.equal(fake.agents.some((agent) => agent.id === lead.id), false, "the daemon no longer lists the lost Lead");
+  const events = readMailboxLines(stateDir, slug);
+  const requeued = events.filter((event) => event.type === "mail_requeued");
+  assert.equal(requeued.length, 1, "exactly one requeue settles the unacked delivery");
+  assert.equal(requeued[0]?.reason, "lead_lost");
+  assert.equal(requeued[0]?.to, "lead");
+
+  // The next pump (the recovery's own) created the successor through the normal succession path.
+  const successorIndex = fake.created.findIndex((agent) => agent.labels?.seat === "lead");
+  assert.ok(successorIndex !== -1, "a successor Lead was ensured");
+  const successorId = `agent-created-${successorIndex + 1}`;
+  assert.notEqual(successorId, lead.id);
+  assert.equal(readProjectRegistration(stateDir, slug)?.lead, successorId, "the dead Lead's binding cleared and the successor bound in its place");
+  const successorSends = fake.sent.filter((entry) => entry.agentId === successorId);
+  assert.equal(successorSends.length, 1, "the successor received its Turn-1 kickoff");
+  assert.match(successorSends[0]!.text, /\[paseo-factory seat kickoff packet · role=lead/);
+  assert.match(successorSends[0]!.text, /# Lead handoff — project/);
+  assert.match(successorSends[0]!.text, /# Old handoff\nWave 2 was mid-flight\./, "the on-disk handover rides the kickoff");
+  assert.match(successorSends[0]!.text, /Staleness notice: this handover may predate the lost Lead's last activity/, "the stale-unknown notice rides it");
+  assert.match(successorSends[0]!.text, /Re-read the Ledger and the repository/, "the notice tells the successor to re-read the Ledger and repository");
+  assert.match(successorSends[0]!.text, /Directive the lost Lead never acked/, "the requeued mail is delivered to the successor");
+});
+
+test("v0.6.1 (ADR 0057 §4): a lost Lead with NO on-disk handover spawns a successor without a staleness line or handoff layer", async (t) => {
+  const lead: FakeAgent = { id: "agent-lead-lost-bare", status: "idle", lastUserMessageAt: "2026-11-12T08:00:00.000Z" };
+  const { stateDir, slug, projectRoot, surface, leadMail, fake } = makeSpooledRuntime(t, [lead]);
+  lead.labels = { seat: "lead", project: slug };
+  lead.cwd = projectRoot;
+  await surface.leadEnsure({ projectRoot });
+
+  await leadMail.enqueueLeadMail(slug, { from: "supervisor", kind: "directive", text: "Directive for the bare successor" });
+  await leadMail.pumpProjectLead(slug);
+  await fake.emitArchive(lead.id);
+
+  const successorIndex = fake.created.findIndex((agent) => agent.labels?.seat === "lead");
+  assert.ok(successorIndex !== -1, "a successor Lead was still ensured");
+  const successorId = `agent-created-${successorIndex + 1}`;
+  const successorSends = fake.sent.filter((entry) => entry.agentId === successorId);
+  assert.equal(successorSends.length, 1);
+  assert.doesNotMatch(successorSends[0]!.text, /Staleness notice/, "no handover on disk — no staleness line to carry");
+  assert.doesNotMatch(successorSends[0]!.text, /# Lead handoff — project/, "no handoff layer without a file");
+  assert.match(successorSends[0]!.text, /Directive for the bare successor/, "the requeued mail still reaches the successor");
+});
+
+test("v0.6.1 (ADR 0057 §4): archives the plugin performs itself (manual rotate, handoff retire) never trigger lost-Lead recovery", async (t) => {
+  const lead: FakeAgent = { id: "agent-lead-own", status: "idle", lastUserMessageAt: "2026-11-12T08:00:00.000Z" };
+  const { stateDir, slug, projectRoot, surface, fake } = makeSpooledRuntime(t, [lead]);
+  lead.labels = { seat: "lead", project: slug };
+  lead.cwd = projectRoot;
+  await surface.leadEnsure({ projectRoot });
+  await surface.leadDispatch({ projectRoot, message: "Directive delivered to the live Lead" });
+  assert.ok(readLeadMailbox(join(projectStateDir(stateDir, slug), "mailbox.jsonl")).inFlight, "a delivery is live when the rotate fires");
+
+  // The plugin's own archive door — the fake daemon fires agent.archive.after
+  // for it too, exactly like a real one.
+  const rotated = await surface.leadRotate({ projectRoot });
+  assert.ok(rotated.ok, rotated.ok ? "" : rotated.error);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+
+  const events = readMailboxLines(stateDir, slug);
+  assert.equal(events.some((event) => event.type === "mail_requeued" && event.reason === "lead_lost"), false, "a plugin archive never records lead_lost");
+  assert.equal(events.some((event) => event.type === "mail_requeued" && event.reason === "lead-rotated"), true, "the normal rotate settle requeues instead");
+  assert.equal(fake.created.length, 0, "the archive event alone never spawns a successor — no dispatch, no ensure");
+});
+
+test("v0.6.1 (ADR 0057 §4): a Project reset's and delete's own archives never trigger lost-Lead recovery — no successor rises from the cleanup", async (t) => {
+  const lead: FakeAgent = { id: "agent-lead-reset", status: "idle", lastUserMessageAt: "2026-11-12T08:00:00.000Z" };
+  const { stateDir, slug, projectRoot, surface, leadMail, fake } = makeSpooledRuntime(t, [lead]);
+  lead.labels = { seat: "lead", project: slug };
+  lead.cwd = projectRoot;
+  await surface.leadEnsure({ projectRoot });
+  await leadMail.enqueueLeadMail(slug, { from: "supervisor", kind: "directive", text: "Directive in flight when the reset lands" });
+  await leadMail.pumpProjectLead(slug);
+
+  const reset = await surface.projectReset({ projectRoot });
+  assert.ok(reset.ok, reset.ok ? "" : reset.error);
+  assert.ok(reset.archivedSeats.includes(lead.id), "the reset archived the bound Lead itself");
+  assert.equal(fake.created.length, 0, "the reset's archive events never raise a successor through lost-Lead recovery");
+  assert.equal(readProjectRegistration(stateDir, slug)?.lead, undefined, "the reset cleared the binding its own way");
+
+  // projectDelete has no retireSeat loop — cleanupProjectArtifacts' own mark
+  // is its only guard, exercised here with a second bound Lead.
+  const doomedRoot = makeTempDir();
+  disposeDir(t, doomedRoot);
+  writeFileSync(join(doomedRoot, "README.md"), "doomed\n");
+  gitCommitAll(doomedRoot);
+  const doomed = ensureProjectRegistered(stateDir, doomedRoot);
+  assert.ok(doomed.ok);
+  const doomedLead: FakeAgent = { id: "agent-lead-doomed", status: "idle", labels: { seat: "lead", project: doomed.slug }, cwd: doomedRoot };
+  fake.agents.push(doomedLead);
+  writeProjectRegistration(stateDir, doomed.slug, { root: doomedRoot, lead: doomedLead.id });
+  // Queued mail for the doomed Project: without the mark, the cleanup's
+  // archive would run lost-Lead recovery and raise a successor to eat it.
+  await leadMail.enqueueLeadMail(doomed.slug, { from: "supervisor", kind: "directive", text: "Directive queued for the doomed Lead" });
+
+  const deleted = await surface.projectDelete({ projectSlug: doomed.slug });
+  assert.ok(deleted.ok, deleted.ok ? "" : deleted.error);
+  assert.ok(deleted.archivedSeats.includes(doomedLead.id), "the delete archived the bound Lead through the cleanup seam");
+  assert.equal(fake.agents.some((agent) => agent.id === doomedLead.id), false);
+  assert.equal(fake.created.length, 0, "the delete's archive events never raise a successor either");
+});
+
+test("v0.6.1 (ADR 0057 §4): the released Supervisor archives when the Lead handoff retires the parented Lead — end to end through the rotation machine", async (t) => {
+  const supervisor: FakeAgent = { id: "agent-sup-rel", status: "idle" };
+  const lead: FakeAgent = { id: "agent-lead-rel", status: "idle", lastUsage: { contextWindowUsedTokens: 135_000 }, parentAgentId: "agent-sup-rel" };
+  const { stateDir, slug, projectRoot, surface, leadMail, fake } = makeSpooledRuntime(t, [supervisor, lead]);
+  supervisor.labels = { seat: "supervisor", project: slug };
+  supervisor.cwd = projectRoot;
+  lead.labels = { seat: "lead", project: slug };
+  lead.cwd = projectRoot;
+  await surface.supervisorEnsure({ projectRoot });
+  await surface.leadEnsure({ projectRoot });
+  assert.equal(readProjectRegistration(stateDir, slug)?.supervisor, "agent-sup-rel", "the pre-v0.6.1 parented pair is bound");
+
+  // The Supervisor is replaced directly: the parented live Lead holds the archive — a release is recorded.
+  const revoked = await surface.supervisorRevoke({ projectRoot });
+  assert.ok(revoked.ok, revoked.ok ? "" : revoked.error);
+  const reg = readProjectRegistration(stateDir, slug);
+  assert.equal(reg?.releasedSupervisor?.agentId, "agent-sup-rel");
+  assert.equal(reg?.releasedSupervisor?.waitingOnLead, "agent-lead-rel");
+  assert.ok(fake.agents.some((agent) => agent.id === supervisor.id), "the released Supervisor stays live");
+
+  // The Lead crosses its mark and rotates: extraction, completion, retire, successor.
+  await leadMail.onLeadTurnEnded({ agentId: lead.id, outcome: { kind: "completed" }, timeline: [] });
+  assert.equal(readProjectRegistration(stateDir, slug)?.rotationState, "handing_over");
+  await leadMail.onLeadTurnEnded({
+    agentId: lead.id,
+    outcome: { kind: "completed" },
+    timeline: [{ type: "assistant_message", text: "# Handoff after release\nWave 3 continues." }],
+  });
+  assert.equal(readProjectRegistration(stateDir, slug)?.rotationState, "normal");
+  assert.equal(fake.agents.some((agent) => agent.id === lead.id), false, "the parented Lead archived through its own handoff");
+  assert.equal(fake.agents.some((agent) => agent.id === supervisor.id), false, "the released Supervisor archived once its Lead did");
+  assert.equal(readProjectRegistration(stateDir, slug)?.releasedSupervisor, undefined, "the release record settled and cleared");
+  assert.ok(fake.created.some((agent) => agent.labels?.seat === "lead"), "the rotation's successor Lead exists");
 });
 
 test("settleTurnAndRotate begins the handoff immediately at the turn boundary when no Peer is running (v0.0.93, ADR 0031)", async (t) => {

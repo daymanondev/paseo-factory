@@ -34,7 +34,13 @@ const workspace = join(home, "workspace"); mkdirSync(workspace); execFileSync("g
 execFileSync("git", ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-qm", "fixture"], { cwd: workspace });
 let factory = createFactory({ stateDir });
 factory.setContract({ task: "LOCAL", workspace, gate: "true", artifact: "out", scope: ["local"] });
-writeProjectRegistration(stateDir, "project", { root: workspace, lead: "lead" });
+// v0.6.1 (ADR 0057 §4): a released-Supervisor record seeded before the boot —
+// the restart must keep it (the Lead it waits on has not handed off yet).
+writeProjectRegistration(stateDir, "project", {
+  root: workspace,
+  lead: "lead",
+  releasedSupervisor: { agentId: "sup-released", waitingOnLead: "lead", releasedAt: "2026-11-12T17:11:02.000Z" },
+});
 const projectPath = join(stateDir, "projects/project/ledger.jsonl");
 writeFileSync(projectPath, JSON.stringify({ seq: 1, ts: "2026-10-23T00:00:00Z", event: "contract_set", task: "COPY", workspace, gate: "true", artifact: "out", scope: ["copy"] }) + "\n");
 const mailbox = join(stateDir, "projects/project/mailbox.jsonl");
@@ -65,11 +71,11 @@ try {
   // legacy four.
   if (legacyServer) {
     assert.deepEqual([...hooks.keys()], []);
-    assert.deepEqual([...events.keys()].sort(), ["agent.permission_requested", "agent.turn_ended"]);
+    assert.deepEqual([...events.keys()].sort(), ["agent.archived", "agent.permission_requested", "agent.turn_ended"]);
     assert.deepEqual([...beforeHooks.keys()].sort(), ["agent.create", "agent.session_open"]);
   } else {
     assert.deepEqual([...events.keys(), ...beforeHooks.keys()], []);
-    assert.deepEqual([...hooks.keys()].sort(), ["agent.create.before", "agent.open.before", "agent.permission.before", "agent.turn.after"]);
+    assert.deepEqual([...hooks.keys()].sort(), ["agent.archive.after", "agent.create.before", "agent.open.before", "agent.permission.before", "agent.turn.after"]);
   }
   await new Promise((done) => setTimeout(done, 550));
   assert.deepEqual(stateSnapshot(stateDir), before, "ordinary startup/timer work stays deferred during incomplete maintenance");
@@ -134,6 +140,22 @@ try {
   const historyEnv = await sessionOpenHook(supervisorOpen("history"), { paseo: daemon });
   await new Promise((done) => setTimeout(done, 150));
   assert.equal(historyEnv?.env?.PASEO_FACTORY_SEAT, "supervisor", "the history open still re-carries the seat env");
+  // The lost-Lead door's registration (v0.6.1, ADR 0057 §4): an
+  // agent.archive.after for a STRANGER agent — not any Project's bound Lead —
+  // reaches the runtime and correctly does nothing: no binding clears, no
+  // mailbox line moves. (The full recovery behaviour is the fake-daemon
+  // lead-mailbox suite's; this arm pins the shell wiring alone.)
+  const archiveHook = legacyServer ? events.get("agent.archived")! : hooks.get("agent.archive.after")!;
+  const mailboxBeforeArchive = readLeadMailbox(mailbox);
+  archiveHook({ agent: { id: "stranger-agent", workspaceId: null, parentAgentId: null, provider: "pi", cwd: workspace, title: null }, archivedAt: new Date().toISOString() }, { paseo: daemon });
+  await new Promise((done) => setTimeout(done, 150));
+  assert.ok(listProjectRegistrations(stateDir).some((r) => r.lead === "lead"), "a stranger archive never clears a bound Lead");
+  assert.equal(readLeadMailbox(mailbox).inFlight?.deliveryId, mailboxBeforeArchive.inFlight?.deliveryId, "a stranger archive never touches the mailbox");
+  assert.deepEqual(
+    listProjectRegistrations(stateDir).find((r) => r.slug === "project")?.releasedSupervisor,
+    { agentId: "sup-released", waitingOnLead: "lead", releasedAt: "2026-11-12T17:11:02.000Z" },
+    "the released-Supervisor record survived the restart and the boot's registration writes",
+  );
   if (action === "resume") {
     const source = planLegacyIdentity(JSON.stringify({ seq: 1, ts: "2026-10-23T00:00:00Z", event: "contract_set", task: "REMOTE", workspace, gate: "true", artifact: "out", scope: ["remote"] }) + "\n", { writerId: "remote" });
     const imported = await handlers.get("factory.history.import")!({ project: projectSlug, sources: [{ nodeId: "holder", lines: source.events.map((event) => JSON.stringify(event) + "\n").join("") }] }, {});

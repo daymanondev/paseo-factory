@@ -67,6 +67,8 @@ interface FakeAgent {
   requiresAttention?: boolean;
   seqEnd?: number;
   cwd?: string;
+  /** The Paseo parent link (v0.6.1, ADR 0057 §4) — a pre-v0.6.1 Lead still parented to its Supervisor. */
+  parentAgentId?: string | null;
   /** The live usage slice the 128k Lead sensor reads (ticket 07's SurfaceAgentSnapshot extension). */
   lastUsage?: { contextWindowUsedTokens?: number; contextWindowMaxTokens?: number } | null;
   /** The Paseo Workspace the agent's session lives in (v0.0.31, ADR 0017 §5). */
@@ -107,6 +109,7 @@ function fakeDaemon(agents: FakeAgent[]) {
               attentionReason: agent.attentionReason ?? null,
               updatedAt: agent.updatedAt ?? "2026-10-15T00:00:00.000Z",
               cwd: agent.cwd ?? "/tmp",
+              ...(agent.parentAgentId === undefined ? {} : { parentAgentId: agent.parentAgentId }),
               ...(agent.workspaceId === undefined ? {} : { workspaceId: agent.workspaceId }),
               ...(agent.lastUsage === undefined ? {} : { lastUsage: agent.lastUsage }),
             },
@@ -697,6 +700,81 @@ test("supervisor.revoke: stops and archives the Project's supervisor; none is a 
   const none = await handlers.supervisorRevoke({ projectRoot: project.root });
   assert.ok(!none.ok);
   assert.equal(none.code, "no-supervisor");
+});
+
+test("v0.6.1 (ADR 0057 §4): archiving the Supervisor through a cross-provider lane change leaves an unparented Lead live and still bound", async (t) => {
+  const project = makeProject(t, "lanes-sup-unparented");
+  const agents: FakeAgent[] = [
+    { id: "agent-sup-x", labels: { seat: "supervisor", project: project.slug }, provider: "pi/zai/glm-5.3" },
+    { id: "agent-lead-x", labels: { seat: "lead", project: project.slug }, provider: "pi/zai/glm-5.3" },
+  ];
+  const { stateDir, handlers, stopped, fake } = makeSurface(t, agents);
+  writeProjectRegistration(stateDir, project.slug, { root: project.root, supervisor: "agent-sup-x", lead: "agent-lead-x" });
+
+  const retired = await handlers.lanesSet({ lane: "supervisor", value: "claude/opus-4-8", projectRoot: project.root });
+  assert.ok(retired.ok, retired.ok ? "" : retired.error);
+  assert.match(retired.modelSync, /retired — agent agent-su.*rotated onto claude\/opus-4-8's provider family/);
+  assert.deepEqual(stopped, ["agent-sup-x"], "a family change cancels the live Supervisor");
+  assert.deepEqual(fake.archived, ["agent-sup-x"], "then archives it — the Supervisor is replaced");
+  assert.ok(agents.some((agent) => agent.id === "agent-lead-x"), "the unparented Lead stays live — no cascade can reach it");
+  const reg = readProjectRegistration(stateDir, project.slug);
+  assert.equal(reg?.lead, "agent-lead-x", "the Lead keeps its binding through the Supervisor swap");
+  assert.equal(reg?.supervisor, undefined, "the Supervisor binding clears for the next start");
+});
+
+test("v0.6.1 (ADR 0057 §4): replacing a Supervisor whose live Lead is parented to it releases it — archived only after that Lead's next handoff, and the record survives a restart", async (t) => {
+  const project = makeProject(t, "released-sup");
+  const agents: FakeAgent[] = [
+    { id: "agent-sup-parent", labels: { seat: "supervisor", project: project.slug }, provider: "pi/zai/glm-5.3" },
+    { id: "agent-lead-parented", labels: { seat: "lead", project: project.slug }, provider: "pi/zai/glm-5.3", parentAgentId: "agent-sup-parent" },
+  ];
+  const { stateDir, home, factory, handlers, fake, stopped } = makeSurface(t, agents);
+  writeProjectRegistration(stateDir, project.slug, { root: project.root, supervisor: "agent-sup-parent", lead: "agent-lead-parented" });
+
+  // (1) A direct revoke with a parented live Lead: the binding clears but the
+  // old Supervisor is RELEASED, never archived — a Paseo archive would
+  // cascade onto the pre-v0.6.1 parented Lead.
+  const released = await handlers.supervisorRevoke({ projectRoot: project.root });
+  assert.ok(released.ok, released.ok ? "" : released.error);
+  assert.equal(released.agentId, "agent-sup-parent");
+  assert.equal(stopped.length, 0, "a released Supervisor is never cancelled");
+  assert.equal(fake.archived.length, 0, "a released Supervisor is never archived");
+  const reg = readProjectRegistration(stateDir, project.slug);
+  assert.equal(reg?.supervisor, undefined, "the Supervisor binding clears");
+  assert.equal(reg?.releasedSupervisor?.agentId, "agent-sup-parent", "the release is recorded in Project state");
+  assert.equal(reg?.releasedSupervisor?.waitingOnLead, "agent-lead-parented", "with the Lead id it waits on");
+  assert.ok(typeof reg?.releasedSupervisor?.releasedAt === "string", "and a release timestamp");
+  assert.ok(agents.some((agent) => agent.id === "agent-lead-parented"), "the parented Lead stays live");
+  assert.ok(agents.some((agent) => agent.id === "agent-sup-parent"), "the released old Supervisor stays live too");
+
+  // (2) The seat is vacant: a Supervisor ensure creates a fresh seat and the
+  // duplicate sweep never archives the released old one.
+  const ensured = await handlers.supervisorEnsure({ projectRoot: project.root });
+  assert.ok(ensured.ok, ensured.ok ? "" : ensured.error);
+  assert.equal(ensured.created, true, "the released Supervisor is not the seat — a fresh one is created");
+  assert.equal(ensured.agentId, "agent-created-1");
+  assert.equal(fake.archived.length, 0, "the duplicate sweep never archives the released Supervisor");
+  assert.ok(agents.some((agent) => agent.id === "agent-sup-parent"), "the released Supervisor survives the new seat's sweep");
+
+  // (3) A plugin restart (a fresh handlers instance over the same stateDir):
+  // the release record survives on disk.
+  const restarted = createSurfaceHandlers({
+    factory,
+    stateDir,
+    home,
+    daemon: fake.daemon,
+    stopAgent: async () => ({ ok: true }),
+  });
+  assert.equal(readProjectRegistration(stateDir, project.slug)?.releasedSupervisor?.agentId, "agent-sup-parent");
+
+  // (4) The parented Lead's own handoff archives it (the Lead retire door the
+  // handoff rides): the waiting record fires, then clears.
+  const rotated = await restarted.leadRotate({ projectRoot: project.root });
+  assert.ok(rotated.ok, rotated.ok ? "" : rotated.error);
+  assert.ok(fake.archived.includes("agent-lead-parented"), "the Lead archives through its own handoff door");
+  assert.ok(fake.archived.includes("agent-sup-parent"), "the released Supervisor archives once its Lead is archived");
+  assert.equal(readProjectRegistration(stateDir, project.slug)?.releasedSupervisor, undefined, "the waiting record clears after the archive");
+  assert.equal(readProjectRegistration(stateDir, project.slug)?.lead, undefined, "the Lead binding cleared with the rotation");
 });
 
 test("supervisor.revoke without a projectRoot: one live supervisor is the legacy global act; two or more is a named refusal", async (t) => {
@@ -2775,7 +2853,7 @@ test("vault snapshot & vault.sync / vault.import: unconfigured snapshot probes g
   assert.equal(badImport.code, "vault-import-file-not-found");
 });
 
-test("v0.0.23 (ADR 0015 §6): ensureSeat opens/reuses the Project's Paseo workspaceId, persists workspaceId + paseoProjectId, and sets parent: supervisorId on Lead", async (t) => {
+test("v0.6.1 (ADR 0057 §4): ensureSeat opens/reuses the Project's Paseo workspaceId, persists workspaceId + paseoProjectId, and creates the Lead WITHOUT a parent", async (t) => {
   const { handlers, fake, stateDir } = makeSurface(t, []);
   const project = makeProject(t, "ws-bound-seats");
   writeLanes(stateDir, { supervisor: "claude/opus-4-8", lead: "opencode/glm-5.1" });
@@ -2830,7 +2908,7 @@ test("v0.0.23 (ADR 0015 §6): ensureSeat opens/reuses the Project's Paseo worksp
   assert.equal(leadReply.created, true);
   assert.equal(wsCreatedAgents.length, 2, "Lead was also created through workspaces.ref(workspaceId).agents.create");
   assert.equal(wsCreatedAgents[1]!.workspaceId, "ws-project-main");
-  assert.equal(wsCreatedAgents[1]!.parent, supReply.agentId, "Lead carries parent: supervisor.id when a live Supervisor exists");
+  assert.equal(wsCreatedAgents[1]!.parent, undefined, "v0.6.1: the Lead is created unparented — archiving any Supervisor can never cascade to it, while co-location in the Supervisor's workspace stays");
 
   const reg = readProjectRegistration(stateDir, project.slug);
   assert.equal(reg?.workspaceId, "ws-project-main", "workspaceId persisted in project.json");
@@ -3019,7 +3097,7 @@ test("v0.0.31 (ADR 0017 §2/§5): spawn titles the Task worktree Workspace `Peer
   assert.equal(reg?.taskWorkspaces?.["T-WS-2"], "ws-wt-1");
 });
 
-test("v0.0.31 (ADR 0017 §5): leadEnsure creates Lead INSIDE the Supervisor's wks_sup_main via workspaces.ref(...).agents.create — no second workspace opened", async (t) => {
+test("v0.0.31 (ADR 0017 §5) + v0.6.1 (ADR 0057 §4): leadEnsure creates an unparented Lead INSIDE the Supervisor's wks_sup_main via workspaces.ref(...).agents.create — no second workspace opened", async (t) => {
   const project = makeProject(t, "colocated-lead");
   const { stateDir, handlers, fake } = makeSurface(t, [
     // The native New Chat Supervisor: session_open bound it and its workspace.
@@ -3061,7 +3139,7 @@ test("v0.0.31 (ADR 0017 §5): leadEnsure creates Lead INSIDE the Supervisor's wk
   assert.equal(wsCreatedAgents.length, 1, "Lead was created through workspaces.ref(workspaceId).agents.create");
   assert.equal(wsCreatedAgents[0]!.workspaceId, "wks_sup_main");
   assert.equal(wsCreatedAgents[0]!.title, "Lead");
-  assert.equal(wsCreatedAgents[0]!.parent, "native-sup-1", "Lead carries parent: the live Supervisor's agent id");
+  assert.equal(wsCreatedAgents[0]!.parent, undefined, "v0.6.1: even beside a live native Supervisor the Lead carries no parent link — co-location only");
   assert.equal(fake.created.length, 1);
   assert.equal(fake.created[0]!.title, "Lead");
   // The registration keeps the Supervisor's workspace — never displaced.
