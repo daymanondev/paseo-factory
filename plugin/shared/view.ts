@@ -532,6 +532,49 @@ export const PanelViewSchema = z.object({
 });
 export type PanelView = z.infer<typeof PanelViewSchema>;
 
+// ---- the seat directory (v0.6.1 W4 spike, ADR 0057 §8/§11) ---------------------------------------
+
+/**
+ * One live seat in the all-Projects directory (`factory.seats.directory`) —
+ * the read-only composer pill's whole world: which Project, which Paseo
+ * workspace, which agent, which role, on which lane, how close to the
+ * handoff mark. The handoff state is a `null` placeholder in v0.6.1; W9 fills
+ * it with the real per-seat progress.
+ */
+export const SeatDirectoryEntrySchema = z.object({
+  /** The owning Project's canonical slug. */
+  slug: z.string(),
+  /** The Paseo workspace the seat's session lives in — null when the daemon reports none (no pill anchors). */
+  workspaceId: z.string().nullable(),
+  agentId: z.string(),
+  role: z.enum(["supervisor", "lead", "peer"]),
+  provider: z.string(),
+  model: z.string().nullable(),
+  thinking: z.string().nullable(),
+  /** The daemon's live context-window reading — null when it reports none, never a fabricated zero. */
+  contextUsedTokens: z.number().nullable(),
+  /** The v0.6.1 handoff mark — the flat 128k (W9 makes it follow the model's window). */
+  markTokens: z.number().int(),
+  /** The handoff-state placeholder — `null` until W9. */
+  handoffState: z.string().nullable(),
+});
+export type SeatDirectoryEntry = z.infer<typeof SeatDirectoryEntrySchema>;
+
+/**
+ * One Project row of the directory — the header button's whole world: the
+ * Project's root workspace (where the button lands) and the Needs-you count
+ * its label carries, folded by the same panel projection the workspace panel
+ * renders.
+ */
+export const ProjectDirectoryEntrySchema = z.object({
+  slug: z.string(),
+  /** The Project's root workspace id — the registration's, else the live Supervisor's or Lead's; null when none is known. */
+  workspaceId: z.string().nullable(),
+  /** How many Needs-you items the Project's panel view carries. */
+  needsYouCount: z.number().int(),
+});
+export type ProjectDirectoryEntry = z.infer<typeof ProjectDirectoryEntrySchema>;
+
 export const FactoryViewSchema = z.object({
   /** The Project panel's view-model, projected server-side — the client only renders it (v0.6.0, ADR 0056). */
   panel: PanelViewSchema,

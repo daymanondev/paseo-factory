@@ -67,3 +67,17 @@ test("the client bundle Gate accepts browser event APIs behind a typeof method g
   );
   assert.equal(accepted.status, 0, accepted.stderr);
 });
+
+// ---- the seat directory starter's contributions (v0.6.1 W4 spike, ADR 0057 §8/§11) ------------------
+//
+// The header buttons and composer pills are the first app-wide client
+// contributions since the v0.6.0 slim-down, so the acceptance names the Gate
+// itself: the SHIPPED client tree — starter, popover and all — carries no
+// unguarded globals (the fixture arms above prove the Gate refuses them; this
+// proves the real sources never grow one).
+
+test("the shipped client bundle — the seat directory starter's header buttons and composer pills included — passes the Hermes gate (W4)", () => {
+  const gate = spawnSync(process.execPath, [join(repoRoot, "scripts/check-bundle.mjs")], { encoding: "utf8", timeout: 120_000 });
+  assert.equal(gate.status, 0, gate.stderr);
+  assert.match(gate.stdout + gate.stderr, /client bundle|bundles/i);
+});

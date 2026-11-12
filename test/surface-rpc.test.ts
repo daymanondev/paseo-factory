@@ -6985,3 +6985,192 @@ test("onboarding.commit: an unusable lane is a named refusal that starts no Supe
   assert.equal(reply.code, "invalid-lane");
   assert.equal(fake.created.length, 0);
 });
+
+// ---- the seat directory (v0.6.1 W4 spike, ADR 0057 §8/§11) ---------------------------------------
+//
+// `factory.seats.directory` is the spike's one read: every live seat across
+// ALL Projects — the header-button and composer-pill starter's whole world —
+// plus the per-Project root workspace and Needs-you count the header button
+// renders. The fake-daemon suites above are the pattern; the daemon-half law
+// (never a failed read) governs.
+
+/**
+ * Two registered Projects over one registry-wired surface with live agents,
+ * host prerequisites complete so the Needs-you counts are deterministic (the
+ * makeTwinSurface shape, plus seats — the panel suite's seedCorePack law).
+ */
+function makeSeatedTwinSurface(
+  t: TestContext,
+  agentsFor: (project: { root: string; slug: string }, which: "a" | "b") => FakeAgent[],
+): {
+  home: string;
+  stateDir: string;
+  rootA: string;
+  rootB: string;
+  slugA: string;
+  slugB: string;
+  registry: FactoryRegistry;
+  handlers: ReturnType<typeof createSurfaceHandlers>;
+  fake: ReturnType<typeof fakeDaemon>;
+} {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const projects: { root: string; slug: string }[] = [];
+  for (const name of ["directory-a", "directory-b"]) {
+    const root = join(dir, name);
+    mkdirSync(root, { recursive: true });
+    writeFileSync(join(root, "README.md"), "x\n");
+    gitCommitAll(root);
+    const resolved = resolveProject(root);
+    assert.ok(resolved.ok, resolved.ok ? "" : resolved.reason);
+    projects.push({ root: resolved.root, slug: resolved.slug });
+  }
+  const [projectA, projectB] = projects;
+  const home = join(dir, "paseo-home");
+  const stateDir = join(home, "plugin-state", "paseo-factory");
+  writeProjectRegistration(stateDir, projectA!.slug, { root: projectA!.root });
+  writeProjectRegistration(stateDir, projectB!.slug, { root: projectB!.root });
+  const registry = createFactoryRegistry({ stateDir });
+  t.after(() => registry.stop());
+  const agents: FakeAgent[] = [];
+  const fake = fakeDaemon(agents);
+  const handlers = createSurfaceHandlers({
+    factory: registry.root,
+    registry,
+    stateDir,
+    home,
+    daemon: fake.daemon,
+    stopAgent: async () => ({ ok: true }),
+    cleanupDaemonWorkspaces: async () => ({ ok: true, removedWorkspaceIds: [], removedProjectIds: [] }),
+  });
+  seedCorePack(home);
+  agents.push(...agentsFor(projectA!, "a"), ...agentsFor(projectB!, "b"));
+  return { home, stateDir, rootA: projectA!.root, rootB: projectB!.root, slugA: projectA!.slug, slugB: projectB!.slug, registry, handlers, fake };
+}
+
+test("seat directory: every live seat across two Projects — slug, workspace, role, lane, context against the 128k mark, and the null handoff placeholder (W4, ADR 0057 §8)", async (t) => {
+  const { rootB, slugA, slugB, registry, handlers } = makeSeatedTwinSurface(t, (p, which) => {
+    if (which === "a") {
+      return [
+        { id: "agent-sup-a", labels: seatLabels(p, "supervisor"), cwd: p.root, workspaceId: "ws-a", model: "glm-5.3", thinkingOptionId: "high", lastUsage: { contextWindowUsedTokens: 40_000, contextWindowMaxTokens: 200_000 } },
+        { id: "agent-lead-a", labels: seatLabels(p, "lead"), cwd: p.root, workspaceId: "ws-a" },
+        // The production Peer shape (spool.ts): labeled at spawn, no ledger binding needed.
+        { id: "agent-peer-a", labels: { seat: "agent", project: p.slug, task: "T-07" }, cwd: join(p.root, "wt-1"), workspaceId: "wt-ws-a" },
+        // A stranger chat shares the daemon census but belongs to no Project.
+        { id: "agent-stranger", title: "Unrelated", provider: "claude/opus-4-8" },
+      ];
+    }
+    return [
+      { id: "agent-sup-b", labels: seatLabels(p, "supervisor"), cwd: p.root, workspaceId: "ws-b", status: "error", lastError: "provider quota exhausted" },
+      { id: "agent-lead-b", labels: seatLabels(p, "lead"), cwd: p.root, workspaceId: "ws-b" },
+      // A ledger-bound unlabeled Peer (the panel's identification path).
+      { id: "agent-peer-b", cwd: join(p.root, "wt-2"), workspaceId: "wt-ws-b", status: "running" },
+    ];
+  });
+  // Project B's Peer is bound by its own ledger: a contract + claim in B's Factory.
+  const factoryB = registry.factoryForProject(slugB);
+  factoryB.ledger.append({ event: "contract_set", task: "T-02", workspace: join(rootB, "wt-2"), gate: "true", artifact: "a" });
+  factoryB.ledger.append({ event: "claim_reported", task: "T-02", attempt: 1, sha: "s1", agent: "agent-peer-b" });
+
+  const reply = await handlers.seatsDirectory({});
+  assert.ok(reply.ok, "the directory read never refuses — the daemon law");
+  assert.equal(reply.daemonError, null);
+
+  const byAgent = new Map(reply.seats.map((seat) => [seat.agentId, seat]));
+  const supA = byAgent.get("agent-sup-a");
+  assert.ok(supA !== undefined, "project-a's Supervisor rides the directory");
+  assert.equal(supA.slug, slugA);
+  assert.equal(supA.workspaceId, "ws-a");
+  assert.equal(supA.role, "supervisor");
+  assert.equal(supA.provider, "pi/zai/glm-5.3");
+  assert.equal(supA.model, "glm-5.3");
+  assert.equal(supA.thinking, "high");
+  assert.equal(supA.contextUsedTokens, 40_000, "the live usage reading rides the seat");
+  assert.equal(supA.markTokens, 128_000, "the v0.6.1 handoff mark is the flat 128k (W9 makes it follow the window)");
+  assert.equal(supA.handoffState, null, "the handoff state is a null placeholder until W9");
+
+  const leadA = byAgent.get("agent-lead-a");
+  assert.ok(leadA !== undefined, "project-a's Lead rides the directory");
+  assert.equal(leadA.role, "lead");
+  assert.equal(leadA.slug, slugA);
+  assert.equal(leadA.contextUsedTokens, null, "no daemon usage reading reads as null, never a fabricated zero");
+
+  const peerA = byAgent.get("agent-peer-a");
+  assert.ok(peerA !== undefined, "a labeled production Peer (seat=agent + project) is a seat");
+  assert.equal(peerA.role, "peer");
+  assert.equal(peerA.slug, slugA);
+  assert.equal(peerA.workspaceId, "wt-ws-a");
+
+  const peerB = byAgent.get("agent-peer-b");
+  assert.ok(peerB !== undefined, "a ledger-bound unlabeled Peer is a seat too");
+  assert.equal(peerB.role, "peer");
+  assert.equal(peerB.slug, slugB);
+
+  for (const id of ["agent-sup-b", "agent-lead-b"]) {
+    const seat = byAgent.get(id);
+    assert.ok(seat !== undefined, `${id} rides the directory`);
+    assert.equal(seat.slug, slugB);
+  }
+  assert.equal(byAgent.has("agent-stranger"), false, "a stranger chat is never a seat");
+  for (const seat of reply.seats) assert.equal(seat.handoffState, null, "every seat carries the null handoff placeholder");
+
+  // The projects half — the header-button rows: root workspace and Needs-you count.
+  assert.equal(reply.projects.length, 2, "one row per registered Project");
+  const projA = reply.projects.find((row) => row.slug === slugA);
+  assert.ok(projA !== undefined);
+  assert.equal(projA.workspaceId, "ws-a", "the registration names no workspace — the live Supervisor's stands in");
+  assert.equal(projA.needsYouCount, 0, "a healthy Project needs nobody");
+  const projB = reply.projects.find((row) => row.slug === slugB);
+  assert.ok(projB !== undefined);
+  assert.equal(projB.workspaceId, "ws-b");
+  assert.equal(projB.needsYouCount, 1, "the errored Supervisor is one seat-stuck Needs-you item");
+});
+
+test("seat directory: the Needs-you count rides the panel fold — held Supervisor reports with no live Supervisor count (W4, ADR 0057 §5)", async (t) => {
+  const { stateDir, slugA, slugB, handlers } = makeSeatedTwinSurface(t, (p, which) =>
+    which === "a"
+      ? [{ id: "agent-lead-a", labels: seatLabels(p, "lead"), cwd: p.root, workspaceId: "ws-a" }]
+      : [{ id: "agent-sup-b", labels: seatLabels(p, "supervisor"), cwd: p.root, workspaceId: "ws-b" }, { id: "agent-lead-b", labels: seatLabels(p, "lead"), cwd: p.root, workspaceId: "ws-b" }],
+  );
+  const mailbox = join(stateDir, "projects", slugA, "mailbox.jsonl");
+  enqueueLeadMail(mailbox, { to: "supervisor", from: "lead", kind: "report", text: "Wave 1 complete" });
+  enqueueLeadMail(mailbox, { to: "supervisor", from: "lead", kind: "report", text: "Wave 2 complete" });
+
+  const reply = await handlers.seatsDirectory({});
+  assert.ok(reply.ok, "the directory read never refuses — the daemon law");
+  const projA = reply.projects.find((row) => row.slug === slugA);
+  assert.ok(projA !== undefined);
+  assert.equal(projA.needsYouCount, 1, "the no-supervisor item with its two waiting reports is exactly one Needs-you item");
+  const projB = reply.projects.find((row) => row.slug === slugB);
+  assert.ok(projB !== undefined);
+  assert.equal(projB.needsYouCount, 0);
+  // The seat rows: the Lead lives without a Supervisor — a seat, never a hidden Supervisor.
+  assert.deepEqual(
+    reply.seats.filter((seat) => seat.slug === slugA).map((seat) => seat.role),
+    ["lead"],
+  );
+});
+
+test("seat directory: a daemon that cannot answer degrades to an empty seat list with the error named — never a failed read (W4)", async (t) => {
+  const project = makeProject(t, "directory-degraded");
+  const surface = makeSurface(t, []);
+  seedCorePack(surface.home);
+  writeProjectRegistration(surface.stateDir, project.slug, { root: project.root, workspaceId: "ws-degraded" });
+  const handlers = createSurfaceHandlers({
+    factory: surface.factory,
+    stateDir: surface.stateDir,
+    home: surface.home,
+    daemon: {
+      ...surface.fake.daemon,
+      agents: { ...surface.fake.daemon.agents, list: async () => { throw new Error("daemon socket closed"); } },
+    },
+  });
+
+  const reply = await handlers.seatsDirectory({});
+  assert.ok(reply.ok, "the daemon-half law holds — a dead daemon is data, never an exception");
+  assert.deepEqual(reply.seats, [], "no daemon answer means no live seats");
+  assert.match(reply.daemonError ?? "", /daemon unavailable: daemon socket closed/);
+  // The projects half still answers — the Project, its workspace and a Needs-you count need no daemon.
+  assert.equal(reply.projects.length, 1);
+  assert.equal(reply.projects[0]!.workspaceId, "ws-degraded");
+});
