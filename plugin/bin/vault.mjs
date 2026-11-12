@@ -1141,6 +1141,13 @@ function readProjectRegistration(stateDir, slug) {
         }
       }
     }
+    const parsedRelease = parsed.releasedSupervisor;
+    const releasedSupervisor = parsedRelease !== null && typeof parsedRelease === "object" && !Array.isArray(parsedRelease) ? {
+      agentId: parsedRelease.agentId,
+      waitingOnLead: parsedRelease.waitingOnLead,
+      releasedAt: parsedRelease.releasedAt
+    } : void 0;
+    const release = releasedSupervisor !== void 0 && typeof releasedSupervisor.agentId === "string" && releasedSupervisor.agentId !== "" && typeof releasedSupervisor.waitingOnLead === "string" && releasedSupervisor.waitingOnLead !== "" && typeof releasedSupervisor.releasedAt === "string" && releasedSupervisor.releasedAt !== "" ? releasedSupervisor : void 0;
     return {
       slug,
       root: parsed.root,
@@ -1148,6 +1155,7 @@ function readProjectRegistration(stateDir, slug) {
       ...typeof parsed.commonDir === "string" && parsed.commonDir !== "" ? { commonDir: parsed.commonDir } : {},
       ...typeof parsed.supervisor === "string" && parsed.supervisor !== "" ? { supervisor: parsed.supervisor } : {},
       ...typeof parsed.lead === "string" && parsed.lead !== "" ? { lead: parsed.lead } : {},
+      ...release !== void 0 ? { releasedSupervisor: release } : {},
       ...typeof parsed.rotationState === "string" && LEAD_ROTATION_STATES.includes(parsed.rotationState) ? { rotationState: parsed.rotationState } : {},
       ...typeof parsed.handoffRequestedAt === "string" && parsed.handoffRequestedAt !== "" ? { handoffRequestedAt: parsed.handoffRequestedAt } : {},
       ...typeof parsed.workspaceId === "string" && parsed.workspaceId !== "" ? { workspaceId: parsed.workspaceId } : {},

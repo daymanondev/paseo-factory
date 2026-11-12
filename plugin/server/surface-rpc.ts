@@ -160,6 +160,13 @@ export interface SurfaceAgentSnapshot {
    */
   workspaceId?: string | null;
   /**
+   * The agent's Paseo parent link (v0.6.1, ADR 0057 §4). New Leads are created
+   * without one; a pre-v0.6.1 Lead still parented to its Supervisor is read
+   * here, so replacing that Supervisor releases it instead of archiving (a
+   * Paseo archive would cascade onto the child). Null/absent when unparented.
+   */
+  parentAgentId?: string | null;
+  /**
    * Timestamp of the last user message delivered to this session (`null` when
    * no turn has ever been sent to this seat yet, ADR 0031).
    */
@@ -335,6 +342,15 @@ export interface SurfaceDeps {
    */
   handoffPending?: (slug: string) => boolean;
   onLeadRetired?: (input: { slug: string; agentId: string }) => void;
+  /**
+   * The lost-Lead guard (v0.6.1, ADR 0057 §4): the surface marks every agent
+   * id it is ABOUT to archive through its own doors (seat retire, project
+   * reset/delete) BEFORE the archive call flies, so the daemon's
+   * `agent.archive.after` for that id is recognised as a plugin archive and
+   * never triggers lost-Lead recovery. The Lead-mailbox runtime's
+   * `markPluginArchive` is the implementation.
+   */
+  markPluginArchive?: (input: { agentId: string }) => void;
   /** Notify LeadMailRuntime when ensureSeat dispatches an explicit initial message to a seat (v0.0.28, ADR 0018 §2). */
   onSeatKickoffSent?: (input: { slug: string; seat: "supervisor" | "lead"; agentId: string }) => void;
   /** Reset in-memory mailbox state for a project on Owner-only Project reset (v0.0.24). */
@@ -847,6 +863,9 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
 
   /** Find-or-create one Project's standing seat agent at `cwd = <project-root>` under its lane. */
   const archiveSeatAgent = async (daemon: SurfaceDaemonApi, seat: SeatName, agent: SurfaceAgentSnapshot, slug?: string): Promise<void> => {
+    // v0.6.1 (ADR 0057 §4): marked BEFORE the archive flies — the daemon's
+    // `agent.archive.after` for this id is a plugin archive, never a lost Lead.
+    deps.markPluginArchive?.({ agentId: agent.id });
     try {
       const stopped = await (deps.stopAgent ?? stopAgentViaCli)(agent.id, deps.home);
       if (!stopped.ok) log(`${seat}: cancel before retire failed — ${stopped.reason}`);
@@ -855,6 +874,33 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     if (seat === "lead" && slug !== undefined) {
       try { deps.onLeadRetired?.({ slug, agentId: agent.id }); }
       catch (err) { log(`lead: mailbox settle failed — ${messageOf(err)}`); }
+      await archiveReleasedSupervisorWaitingOnLead(daemon, slug, agent.id);
+    }
+  };
+
+  /**
+   * The release's settling act (v0.6.1, ADR 0057 §4): a Lead the plugin just
+   * archived through its own door settles any released-Supervisor record
+   * waiting on it — the cascade risk died with the Lead, so the old
+   * Supervisor archives now and the record clears. Fires on the Lead handoff's
+   * retire step and the manual rotate alike; idempotent (the record is gone
+   * after the first settle).
+   */
+  const archiveReleasedSupervisorWaitingOnLead = async (daemon: SurfaceDaemonApi, slug: string, leadAgentId: string): Promise<void> => {
+    const reg = readProjectRegistration(deps.stateDir, slug);
+    const released = reg?.releasedSupervisor;
+    if (released === undefined || released.waitingOnLead !== leadAgentId) return;
+    try {
+      const stopped = await (deps.stopAgent ?? stopAgentViaCli)(released.agentId, deps.home);
+      if (!stopped.ok) log(`supervisor: cancel before release-archive failed — ${stopped.reason}`);
+    } catch (err) { log(`supervisor: cancel before release-archive failed — ${messageOf(err)}`); }
+    deps.markPluginArchive?.({ agentId: released.agentId });
+    try {
+      await daemon.agents.ref(released.agentId).archive();
+      writeProjectRegistration(deps.stateDir, slug, { root: reg!.root, releasedSupervisor: null });
+      log(`${slug}: released supervisor ${released.agentId} archived — its parented Lead ${leadAgentId} was archived by the plugin first`);
+    } catch (err) {
+      log(`${slug}: released supervisor ${released.agentId} could not be archived yet (${messageOf(err)}) — the record stands for the next attempt`);
     }
   };
 
@@ -1042,13 +1088,14 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         : parsed?.thinking !== undefined
           ? { provider: `${parsed.provider}/${parsed.model}`, thinkingOptionId: parsed.thinking }
           : { provider: lane };
-      const parent = seat === "lead" ? supervisorSnapshot?.id : undefined;
+      // v0.6.1 (ADR 0057 §4): the Lead is created WITHOUT a Paseo parent —
+      // archiving any Supervisor can never cascade to it. Co-location in the
+      // Supervisor's workspace (the resolution above) is the only link kept.
       const createInWorkspace = async (targetWorkspaceId: string): Promise<{ id: string }> =>
         daemon.workspaces!.ref(targetWorkspaceId).agents.create({
           config,
           title,
           labels: { seat, project: project.slug },
-          ...(parent !== undefined ? { parent } : {}),
         });
       try {
         let handle: { id: string } | undefined;
@@ -1094,16 +1141,11 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
               }
             }
             if (handle === undefined) {
-              const parentHasFailedWorkspace =
-                parent !== undefined &&
-                typeof supervisorSnapshot?.workspaceId === "string" &&
-                supervisorSnapshot.workspaceId === workspaceId;
               handle = await daemon.agents.create({
                 config,
                 cwd: project.root,
                 title,
                 labels: { seat, project: project.slug },
-                ...(parent !== undefined && !parentHasFailedWorkspace ? { parent } : {}),
               });
               workspaceId = undefined;
             }
@@ -1114,7 +1156,6 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
             cwd: project.root,
             title,
             labels: { seat, project: project.slug },
-            ...(parent !== undefined ? { parent } : {}),
           });
         }
         agent = {
@@ -1175,13 +1216,21 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     return { ok: true as const, agentId: agent.id, created, projectRoot: project.root, slug: project.slug };
   };
 
-  /** Cancel + archive one Project's live seat agent — the rotate/revoke retirement. */
+  /**
+   * Cancel + archive one Project's live seat agent — the rotate/revoke
+   * retirement. One exception (v0.6.1, ADR 0057 §4): a Supervisor whose live
+   * Lead is still PARENTED to it (pre-v0.6.1 parentage, read from the daemon
+   * row's `parentAgentId`) is RELEASED instead — the binding clears and a
+   * `releasedSupervisor` record names the Lead the archive waits on, because a
+   * Paseo archive would cascade onto the child. The record settles (the old
+   * Supervisor archives) when that Lead is archived by its own handoff.
+   */
   const retireSeatUnlocked = async (
     seat: "supervisor" | "lead",
     projectSlug: string | undefined,
     projectRoot: string | undefined,
     context?: SurfaceCallContext,
-  ): Promise<{ ok: true; agentId: string; agentIds: string[] } | { ok: false; code: string; error: string }> => {
+  ): Promise<{ ok: true; agentId: string; agentIds: string[]; releasedAgentIds: string[] } | { ok: false; code: string; error: string }> => {
     const daemon = resolveDaemon(context);
     let agents: SurfaceAgentSnapshot[];
     try {
@@ -1191,8 +1240,33 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     }
     if (agents.length === 0) return failure(seat === "lead" ? "no-lead" : "no-supervisor", `no live ${seat} seat`);
     const agentIds: string[] = [];
+    const releasedAgentIds: string[] = [];
     const errors: string[] = [];
     for (const agent of agents) {
+      // The v0.6.1 release arm: a live Lead parented to this Supervisor holds
+      // the archive — the old Supervisor is released, never archived, until
+      // that Lead's own handoff archives it (archiveSeatAgent's settle).
+      if (seat === "supervisor" && projectSlug !== undefined && projectRoot !== undefined) {
+        let parentedLeadId: string | undefined;
+        try {
+          parentedLeadId = (await liveSeatCandidates(daemon, deps.stateDir, "lead", projectSlug)).find(
+            (lead) => lead.parentAgentId === agent.id,
+          )?.id;
+        } catch {
+          parentedLeadId = undefined; // a daemon miss archives as before — the pre-v0.6.1 behaviour
+        }
+        if (parentedLeadId !== undefined) {
+          writeProjectRegistration(deps.stateDir, projectSlug, {
+            root: projectRoot,
+            supervisor: null,
+            releasedSupervisor: { agentId: agent.id, waitingOnLead: parentedLeadId, releasedAt: new Date().toISOString() },
+          });
+          agentIds.push(agent.id);
+          releasedAgentIds.push(agent.id);
+          log(`supervisor: ${agent.id} released (not archived) — its live Lead ${parentedLeadId} is still parented to it; the release settles when that Lead hands off`);
+          continue;
+        }
+      }
       // The retiring seat's final usage is flushed BEFORE the archive
       // (v0.0.87, ADR 0043 §3) — rotate/revoke never loses the session's
       // tokens. Best-effort by contract: accounting never blocks the act.
@@ -1203,10 +1277,10 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       } catch (err) { errors.push(`${agent.id}: ${messageOf(err)}`); }
     }
     if (errors.length > 0) return failure("archive-failed", errors.join("; "));
-    if (projectSlug !== undefined && projectRoot !== undefined) {
+    if (projectSlug !== undefined && projectRoot !== undefined && releasedAgentIds.length === 0) {
       writeProjectRegistration(deps.stateDir, projectSlug, { root: projectRoot, [seat]: null });
     }
-    return { ok: true as const, agentId: agentIds[0]!, agentIds };
+    return { ok: true as const, agentId: agentIds[0]!, agentIds, releasedAgentIds };
   };
 
   /**
@@ -1310,6 +1384,9 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           // best-effort
         }
       }
+      // v0.6.1 (ADR 0057 §4): marked BEFORE the archive flies — reset/delete
+      // archives are the plugin's own, never a lost Lead.
+      deps.markPluginArchive?.({ agentId: agent.id });
       try {
         await stop(agent.id, deps.home);
       } catch {
@@ -1603,14 +1680,20 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       }
       // Cross-provider family: retire/rotate through the same door the Owner's
       // rotate/revoke acts ride — cancel + archive, clear the registration
-      // binding, and (Lead) settle the mailbox so queued mail requeues.
+      // binding, and (Lead) settle the mailbox so queued mail requeues. A
+      // Supervisor whose live Lead is still parented to it is released
+      // instead of archived (v0.6.1, ADR 0057 §4).
       const retired = await retireSeat(seat, input.projectSlug, input.projectRoot, input.context);
       if (retired.ok) {
-        parts.push(
-          seat === "lead"
-            ? `retired — agent ${agent.id.slice(0, 8)} rotated onto ${toLane}'s provider family (queued Lead mail requeues for the next Lead)`
-            : `retired — agent ${agent.id.slice(0, 8)} rotated onto ${toLane}'s provider family (the next turn/dispatch spawns a fresh Supervisor)`,
-        );
+        if (seat === "lead") {
+          parts.push(`retired — agent ${agent.id.slice(0, 8)} rotated onto ${toLane}'s provider family (queued Lead mail requeues for the next Lead)`);
+        } else if (retired.releasedAgentIds.includes(agent.id)) {
+          parts.push(
+            `released — agent ${agent.id.slice(0, 8)} stays live until its parented Lead's next handoff (a Supervisor archive would cascade onto it); the next turn/dispatch spawns a fresh Supervisor on ${toLane}'s family`,
+          );
+        } else {
+          parts.push(`retired — agent ${agent.id.slice(0, 8)} rotated onto ${toLane}'s provider family (the next turn/dispatch spawns a fresh Supervisor)`);
+        }
       } else {
         parts.push(`retire failed — ${retired.error}`);
       }
@@ -2863,7 +2946,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       }
       writeProjectRegistration(deps.stateDir, project.slug, {
         root: project.root,
-        ...(input.keepSeats === true ? {} : { supervisor: null, lead: null }),
+        ...(input.keepSeats === true ? {} : { supervisor: null, lead: null, releasedSupervisor: null }),
         rotationState: null,
         handoffRequestedAt: null,
         taskWorkspaces: null,

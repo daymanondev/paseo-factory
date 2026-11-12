@@ -6,7 +6,11 @@ import { inferRoleFromProviderId } from "./roles.ts";
 export function seatCandidates(agents: SurfaceAgentSnapshot[], stateDir: string, seat: "supervisor" | "lead", slug?: string): SurfaceAgentSnapshot[] {
   const registration = slug === undefined ? undefined : readProjectRegistration(stateDir, slug);
   const bound = registration?.[seat];
-  return agents.filter(agent => agent.archivedAt === null && (
+  // v0.6.1 (ADR 0057 §4): a released Supervisor — one held un-archived because
+  // its live Lead is still parented to it — is no longer the seat. It never
+  // resolves as the Project's Supervisor and never falls to a duplicate sweep.
+  const releasedSupervisor = seat === "supervisor" ? registration?.releasedSupervisor?.agentId : undefined;
+  return agents.filter(agent => agent.archivedAt === null && agent.id !== releasedSupervisor && (
     agent.id === bound ||
     (agent.labels?.seat === seat && (slug === undefined || agent.labels.project === slug)) ||
     (inferRoleFromProviderId(agent.provider) === seat && (slug === undefined || agent.labels?.project === slug || agent.cwd === registration?.root))
