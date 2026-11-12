@@ -11,7 +11,7 @@ import { OpenDesignProjectLinkSchema } from "./view.ts";
  */
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
-import { HelperMcpViewSchema, ImportMaterializationSchema, ImportStatusSchema, FactoryViewSchema, LaneNameSchema, LaneProfileViewSchema, LanesSchema, LanesUpdateSchema, ProjectViewSchema, VaultStatusViewSchema } from "./view.ts";
+import { HelperMcpViewSchema, ImportMaterializationSchema, ImportStatusSchema, FactoryViewSchema, LaneNameSchema, LaneProfileViewSchema, LanesSchema, LanesUpdateSchema, ProjectDirectoryEntrySchema, ProjectViewSchema, SeatDirectoryEntrySchema, VaultStatusViewSchema } from "./view.ts";
 
 /** Every handler's refusal shape: a stable machine code plus the human sentence. */
 export const Failure = z.object({ ok: z.literal(false), code: z.string(), error: z.string() });
@@ -150,6 +150,26 @@ export const profilesDelete = defineRpc({
   }),
   output: z.union([
     z.object({ ok: z.literal(true), deleted: z.boolean(), summary: z.string() }),
+    Failure,
+  ]),
+});
+
+// The all-Projects seat directory (v0.6.1 W4 spike, ADR 0057 §8/§11): the one
+// read the client's header-button/composer-pill starter polls every 20
+// seconds — every live seat across every registered Project, plus each
+// Project's root workspace and Needs-you count (the header label's badge).
+// Read-only by construction; the daemon-half law holds (an unreachable daemon
+// degrades to an empty seat list with `daemonError` set, never a refusal).
+export const seatsDirectory = defineRpc({
+  name: "factory.seats.directory",
+  input: z.object({}),
+  output: z.union([
+    z.object({
+      ok: z.literal(true),
+      seats: z.array(SeatDirectoryEntrySchema),
+      projects: z.array(ProjectDirectoryEntrySchema),
+      daemonError: z.string().nullable(),
+    }),
     Failure,
   ]),
 });

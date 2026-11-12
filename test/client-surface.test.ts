@@ -9,10 +9,11 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { repoRoot } from "./helpers.ts";
 import { planLiveSeatTransitions, providerFamilyOf } from "../plugin/client/kit/live-seats.ts";
+import { headerPlans, pillPlans, reconcileDirectory } from "../plugin/client/kit/directory.ts";
 import {
   formatPluginCardProgressPill,
   formatToolbarProgressPill,
@@ -20,7 +21,7 @@ import {
   isPluginTargetedByAct,
   resolveCoreRestartWatch,
 } from "../plugin/client/factory/plugin-feedback.ts";
-import type { AgentView, CompanionPluginView, FactoryView } from "../plugin/shared/view.ts";
+import type { AgentView, CompanionPluginView, FactoryView, SeatDirectoryEntry } from "../plugin/shared/view.ts";
 
 const read = (rel: string): string => readFileSync(join(repoRoot, rel), "utf8");
 
@@ -967,4 +968,135 @@ test("v0.0.87 (ADR 0043 §4): SeatsPane renders the Project Token & Model Usage 
   const status = readFileSync(join(repoRoot, "plugin/bin/factory.mjs"), "utf8");
   assert.match(status, /usage-status\.mjs/, "factory status reads the generated usage-status mirror");
   assert.match(status, /Token Usage/, "the CLI section header prints");
+});
+
+// ---- the seat directory starter (v0.6.1 W4 spike, ADR 0057 §8/§11) ----------------------------------
+//
+// One starter polls `factory.seats.directory` every 20 seconds and keeps two
+// registration maps in step with it — paseo-room's role-pill pattern: a map
+// of registrations, `update` on change, `remove` on disappearance. The pure
+// halves live in kit/directory.ts (zero React Native runtime imports, the
+// live-seats.ts precedent); the starter and popover in factory/directory.tsx.
+
+test("kit/directory: headerPlans yields one factory-header-<workspaceId> button per Project root workspace, labelled Factory plus the Needs-you count only when it is non-zero (W4)", () => {
+  const plans = headerPlans([
+    { slug: "goal-partner", workspaceId: "ws-1", needsYouCount: 0 },
+    { slug: "paseo-factory", workspaceId: "ws-2", needsYouCount: 3 },
+    { slug: "no-workspace", workspaceId: null, needsYouCount: 2 },
+  ]);
+  assert.deepEqual(plans, [
+    { id: "factory-header-ws-1", workspaceId: "ws-1", label: "Factory", fingerprint: "Factory" },
+    { id: "factory-header-ws-2", workspaceId: "ws-2", label: "Factory · 3", fingerprint: "Factory · 3" },
+  ], "a Project with no workspace id gets no header button — there is nothing to anchor it to");
+});
+
+test("kit/directory: pillPlans yields one factory-pill-<agentId> per live seat agent with a workspace, labelled by role (W4)", () => {
+  const seat = (over: Partial<SeatDirectoryEntry>): SeatDirectoryEntry => ({
+    slug: "goal-partner",
+    workspaceId: "ws-1",
+    agentId: "agent-1",
+    role: "lead",
+    provider: "pi/zai/glm-5.3",
+    model: "glm-5.3",
+    thinking: "high",
+    contextUsedTokens: 40_000,
+    markTokens: 128_000,
+    handoffState: null,
+    ...over,
+  });
+  const plans = pillPlans([
+    seat({ agentId: "agent-sup", role: "supervisor" }),
+    seat({ agentId: "agent-lead", role: "lead" }),
+    seat({ agentId: "agent-peer", role: "peer", workspaceId: "wt-ws" }),
+    seat({ agentId: "agent-nows", workspaceId: null }),
+  ]);
+  assert.deepEqual(
+    plans.map((plan) => ({ id: plan.id, label: plan.label, agentId: plan.agentId, workspaceId: plan.workspaceId })),
+    [
+      { id: "factory-pill-agent-sup", label: "supervisor", agentId: "agent-sup", workspaceId: "ws-1" },
+      { id: "factory-pill-agent-lead", label: "lead", agentId: "agent-lead", workspaceId: "ws-1" },
+      { id: "factory-pill-agent-peer", label: "peer", agentId: "agent-peer", workspaceId: "wt-ws" },
+    ],
+    "the label is the role; a seat the daemon cannot place in a workspace gets no pill",
+  );
+});
+
+test("kit/directory: reconcileDirectory registers what appeared, updates on change and removes what disappeared — the role-pill pattern (W4)", () => {
+  const registrations: { id: string; updates: string[]; removed: boolean }[] = [];
+  const registrationOf = (plan: { id: string }) => {
+    const registration = { id: plan.id, updates: [] as string[], removed: false };
+    registrations.push(registration);
+    return {
+      update: (patch: { label?: string }) => { registration.updates.push(patch.label ?? ""); },
+      remove: () => { registration.removed = true; },
+    };
+  };
+  const current = new Map<string, { fingerprint: string; registration: ReturnType<typeof registrationOf> }>();
+  const headerPlan = (workspaceId: string, count: number) => ({
+    id: `factory-header-${workspaceId}`,
+    workspaceId,
+    label: count > 0 ? `Factory · ${count}` : "Factory",
+    fingerprint: count > 0 ? `Factory · ${count}` : "Factory",
+  });
+
+  // First poll: two Projects — both register.
+  reconcileDirectory(current, [headerPlan("ws-1", 0), headerPlan("ws-2", 3)], registrationOf, (registration, plan) => registration.update({ label: plan.label }));
+  assert.deepEqual(registrations.map((r) => r.id), ["factory-header-ws-1", "factory-header-ws-2"]);
+  assert.deepEqual(registrations.map((r) => r.updates), [[], []], "a fresh registration needs no update");
+
+  // Second poll: same shape — nothing updates, nothing registers again.
+  reconcileDirectory(current, [headerPlan("ws-1", 0), headerPlan("ws-2", 3)], registrationOf, (registration, plan) => registration.update({ label: plan.label }));
+  assert.equal(registrations.length, 2, "an unchanged directory registers nothing new");
+
+  // Third poll: ws-2's count dropped to zero (an update), ws-1 vanished (a remove).
+  reconcileDirectory(current, [headerPlan("ws-2", 0)], registrationOf, (registration, plan) => registration.update({ label: plan.label }));
+  assert.equal(registrations.length, 2);
+  assert.deepEqual(registrations[1]!.updates, ["Factory"], "the label change is an in-place update");
+  assert.equal(registrations[0]!.removed, true, "the disappeared Project's button is removed");
+  assert.equal(current.size, 1);
+
+  // Fourth poll: ws-1 returns — a fresh registration after the removal.
+  reconcileDirectory(current, [headerPlan("ws-1", 0), headerPlan("ws-2", 0)], registrationOf, (registration, plan) => registration.update({ label: plan.label }));
+  assert.equal(registrations.filter((r) => r.id === "factory-header-ws-1" && !r.removed && r.updates.length === 0).length, 1, "a returning Project registers anew");
+});
+
+test("W4: the client starts the seat directory starter in contribute() and its cleanup rides the disposer", () => {
+  const index = read("plugin/index.client.tsx");
+  assert.match(index, /startSeatDirectory\(client\)/, "contribute() starts the 20-second directory poll");
+  assert.match(index, /import \{ startSeatDirectory \} from "\.\/client\/factory\/directory\.tsx";/);
+});
+
+test("W4: header buttons and composer pills register ONLY through the seat directory starter — no other client source calls addHeaderButton or addComposerPill", () => {
+  const clientSources: string[] = [];
+  const walk = (dir: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) walk(path);
+      else if (/\.(ts|tsx)$/.test(entry.name)) clientSources.push(path);
+    }
+  };
+  walk(join(repoRoot, "plugin/client"));
+  clientSources.push(join(repoRoot, "plugin/index.client.tsx"));
+  assert.ok(clientSources.length > 10, "the walk actually found the client tree");
+  const offenders = clientSources.filter((path) => /addHeaderButton|addComposerPill/.test(readFileSync(path, "utf8")));
+  assert.deepEqual(offenders, [join(repoRoot, "plugin/client/factory/directory.tsx")], "the directory starter is the one registration door (the bundle-gate acceptance)");
+});
+
+test("W4: the starter polls factory.seats.directory every 20 seconds, keeps the last registrations on error, and the header button opens the panel at the workspace location", () => {
+  const directory = read("plugin/client/factory/directory.tsx");
+  assert.match(directory, /DIRECTORY_POLL_MS = 20_000/, "the spec's 20-second cadence");
+  assert.match(directory, /setInterval\(\(\) => \{ void tick\(\); \}, DIRECTORY_POLL_MS\)/);
+  assert.match(directory, /client\.rpc\(seatsDirectory, \{\}\)/, "the poll rides the read RPC");
+  assert.match(directory, /client\.openPanel\(PANEL_ID, \{ workspaceId: plan\.workspaceId, location: "workspace" \}\)/, "the header button opens the existing panel as a workspace-location tab");
+  assert.match(directory, /catch\s*\{\s*\}/, "a failed poll keeps the last registrations — the next tick retries");
+});
+
+test("W4: the composer pill popover is read-only — role, model, thinking, context and Project on the factory-pill-popover test id, and no RPC or write action inside", () => {
+  const directory = read("plugin/client/factory/directory.tsx");
+  assert.match(directory, /testID="factory-pill-popover"/, "the spike's named E2E hook");
+  for (const word of ["Role", "Model", "Thinking", "Context", "Project"]) {
+    assert.ok(new RegExp(`\\b${word}\\b`).test(directory), `the popover renders ${word}`);
+  }
+  assert.ok(!directory.includes("useRpc"), "the popover is a pure render — the panes' law");
+  assert.ok(!/onPress=\{[^}]*Call/.test(directory), "no action dispatches an RPC from the pill");
 });

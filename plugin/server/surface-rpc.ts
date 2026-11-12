@@ -57,8 +57,9 @@ import {
 } from "./core/companion-tools.ts";
 import type { CompanionToolRunner, CompanionToolUpdateStatus } from "./core/companion-tools.ts";
 import { basename, join, resolve } from "node:path";
-import { foldView } from "./view.ts";
-import { inspectGitReadiness, probeOpenDesign } from "./panel.ts";
+import { foldView, foldTasks } from "./view.ts";
+import { foldPanel, inspectGitReadiness, probeOpenDesign } from "./panel.ts";
+import { LEAD_ROTATE_TOKENS } from "./handoff-limits.ts";
 import type { ProjectEventStream } from "./view.ts";
 import type { LedgerEvent } from "./core/events.ts";
 import { setAgentModelViaCli, setAgentThinkingViaCli, stopAgentViaCli } from "./daemon-cli.ts";
@@ -94,6 +95,7 @@ import {
   onboardingInspect,
   projectDelete,
   projectReset,
+  seatsDirectory,
   snapshot,
   supervisorAdopt,
   supervisorEnsure,
@@ -109,7 +111,7 @@ import {
   vaultPush,
   vaultSync,
 } from "../shared/rpc.ts";
-import type { CompanionPluginView, AgentView, LaneName, LaneProfileView, Lanes, ProjectView, VaultStatusView } from "../shared/view.ts";
+import type { CompanionPluginView, AgentView, LaneName, LaneProfileView, Lanes, ProjectDirectoryEntry, ProjectView, SeatDirectoryEntry, VaultStatusView } from "../shared/view.ts";
 import type { UsageRuntime } from "./usage-rollup.ts";
 
 // ---- the daemon slice ---------------------------------------------------------------------
@@ -789,6 +791,29 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       cwd: agent.cwd,
     };
   };
+
+  /**
+   * One daemon agent → its seat-directory row (v0.6.1 W4 spike, ADR 0057
+   * §8/§11): the workspace falls back to the Project registration's when the
+   * daemon reports none, the mark is the flat 128k, and the handoff state is
+   * the null placeholder W9 fills.
+   */
+  const directorySeatOf = (
+    registration: { slug: string; workspaceId?: string },
+    agent: SurfaceAgentSnapshot,
+    role: "supervisor" | "lead" | "peer",
+  ): SeatDirectoryEntry => ({
+    slug: registration.slug,
+    workspaceId: agent.workspaceId ?? registration.workspaceId ?? null,
+    agentId: agent.id,
+    role,
+    provider: agent.provider,
+    model: agent.model ?? null,
+    thinking: agent.thinkingOptionId ?? null,
+    contextUsedTokens: agent.lastUsage?.contextWindowUsedTokens ?? null,
+    markTokens: LEAD_ROTATE_TOKENS,
+    handoffState: null,
+  });
 
   const PROVIDERS_TTL_MS = 5 * 60_000;
   const PROVIDERS_WAIT_MS = 2_000;
@@ -2399,6 +2424,100 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       };
     },
 
+    /**
+     * The all-Projects seat directory (v0.6.1 W4 spike, ADR 0057 §8/§11): one
+     * read the client's header-button/composer-pill starter polls. Per
+     * registered Project — the standing seats through the same
+     * `seatCandidates` resolution the snapshot uses, Peers through BOTH
+     * identification paths (the spool's spawn labels and the ledger's own
+     * agent→task binding), the root workspace id, and the Needs-you count
+     * folded by the same `foldPanel` the workspace panel renders. The
+     * daemon-half law holds: an unreachable daemon degrades to an empty seat
+     * list with `daemonError` named, never a failed read.
+     */
+    async seatsDirectory(_input: {}, context?: SurfaceCallContext) {
+      const daemon = resolveDaemon(context);
+      let rawAgents: SurfaceAgentSnapshot[] = [];
+      let daemonError: string | null = null;
+      try {
+        const page = await daemon.agents.list({ filter: { includeArchived: false, includeBackground: true } });
+        rawAgents = page.entries.map((entry) => entry.agent).filter((agent) => agent.archivedAt === null);
+      } catch (err) {
+        daemonError = `daemon unavailable: ${messageOf(err)}`;
+      }
+      const missingPrerequisites = buildCompanionToolsView()
+        .filter((tool) => tool.status !== "running" || tool.error !== null)
+        .map((tool) => tool.title);
+      const seats: SeatDirectoryEntry[] = [];
+      const projects: ProjectDirectoryEntry[] = [];
+      for (const registration of listProjectRegistrations(deps.stateDir)) {
+        const supervisorRaw = seatCandidates(rawAgents, deps.stateDir, "supervisor", registration.slug)[0];
+        const leadRaw = seatCandidates(rawAgents, deps.stateDir, "lead", registration.slug)[0];
+        // Peers: the spool's labeled spawn shape first, then the ledger-bound
+        // path on still-open tasks (the panel's peerRows law).
+        let events: readonly LedgerEvent[] = [];
+        try {
+          events = factoryForSlug(registration.slug).ledger.events;
+        } catch (err) {
+          log(`seatsDirectory: project ${registration.slug} ledger unreadable — ${messageOf(err)}`);
+        }
+        const tasks = foldTasks(events);
+        const bound = agentTaskIndex(events);
+        const peers: SurfaceAgentSnapshot[] = [];
+        for (const agent of rawAgents) {
+          if (agent.id === supervisorRaw?.id || agent.id === leadRaw?.id) continue;
+          if (agent.labels.seat === "agent" && agent.labels.project === registration.slug) {
+            peers.push(agent);
+            continue;
+          }
+          if (agent.labels.seat !== undefined) continue;
+          const task = bound.get(agent.id);
+          if (task === undefined || !taskInProject(task, registration.root, registration.slug)) continue;
+          const view = tasks.find((entry) => entry.task === task);
+          if (view !== undefined && (view.status === "accepted" || view.status === "closed")) continue;
+          peers.push(agent);
+        }
+        // The Needs-you count: the same panel projection the workspace panel
+        // renders for this Project (the snapshot's own gather, reused).
+        const supervisor = supervisorRaw === undefined ? null : agentViewOf(supervisorRaw, null, "supervisor");
+        const lead = leadRaw === undefined ? null : agentViewOf(leadRaw, null, "lead");
+        const agents = [
+          ...(supervisor === null ? [] : [supervisor]),
+          ...(lead === null ? [] : [lead]),
+          ...peers.map((agent) => agentViewOf(agent, bound.get(agent.id) ?? null, undefined)),
+        ];
+        let heldSupervisorMailCount = 0;
+        try {
+          heldSupervisorMailCount = readLeadMailbox(join(projectStateDir(deps.stateDir, registration.slug), "mailbox.jsonl")).supervisorQueued.length;
+        } catch {
+          heldSupervisorMailCount = 0; // an unreadable mailbox is not a failed directory read
+        }
+        const panel = foldPanel({
+          project: { slug: registration.slug, root: registration.root, ...(registration.name !== undefined ? { name: registration.name } : {}) },
+          registered: true,
+          folder: null,
+          git: { gitRepo: true, hasCommits: true },
+          tasks,
+          agents,
+          supervisor,
+          lead,
+          missingPrerequisites,
+          openDesign: existsSync(registration.root) ? probeOpenDesign(deps.stateDir, registration.slug, registration.root) : null,
+          rotationState: registration.rotationState ?? null,
+          handoffRequestedAt: registration.handoffRequestedAt ?? null,
+          heldSupervisorMailCount,
+          supervisorCandidates: [], // the adopt rows are a live-Supervisor panel concern, never a Needs-you item
+          now: Date.now(),
+        });
+        const workspaceId = registration.workspaceId ?? supervisorRaw?.workspaceId ?? leadRaw?.workspaceId ?? null;
+        projects.push({ slug: registration.slug, workspaceId, needsYouCount: panel.needsYou.length });
+        if (supervisorRaw !== undefined) seats.push(directorySeatOf(registration, supervisorRaw, "supervisor"));
+        if (leadRaw !== undefined) seats.push(directorySeatOf(registration, leadRaw, "lead"));
+        for (const peer of peers) seats.push(directorySeatOf(registration, peer, "peer"));
+      }
+      return { ok: true as const, seats, projects, daemonError };
+    },
+
     async lanesSet(input: { lane: LaneName; value: string; projectRoot?: string }, context?: SurfaceCallContext) {
       let projectSlug: string | undefined;
       let projectRoot: string | undefined;
@@ -3748,7 +3867,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       }
     },
   };
-  const reads = new Set(["cachedProviders", "sanitizeLane", "snapshot", "pluginsCheckUpdates", "historyImport", "historyImports", "historyUpgrade", "vaultHydrate", "vaultPull", "vaultPush", "vaultSync", "vaultImport"]);
+  const reads = new Set(["cachedProviders", "sanitizeLane", "snapshot", "seatsDirectory", "pluginsCheckUpdates", "historyImport", "historyImports", "historyUpgrade", "vaultHydrate", "vaultPull", "vaultPush", "vaultSync", "vaultImport"]);
   const wrappers = new Map<PropertyKey, unknown>();
   return new Proxy(handlers, {
     get(target, key, receiver) {
@@ -3793,6 +3912,7 @@ export function registerSurfaceRpc(
   };
   server.handle(historyUpgrade, (input, context) => { pass(context); return handlers.historyUpgrade(input); });
       server.handle(snapshot, (input, context) => handlers.snapshot(input, pass(context)));
+  server.handle(seatsDirectory, (input, context) => handlers.seatsDirectory(input, pass(context)));
   server.handle(openDesignCatalog, input => handlers.openDesignCatalog(input));
   server.handle(openDesignExport, input => handlers.openDesignExport(input));
   server.handle(openDesignStatus, input => handlers.openDesignStatus(input));
