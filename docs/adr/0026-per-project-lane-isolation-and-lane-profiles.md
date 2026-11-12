@@ -1,6 +1,6 @@
 # ADR 0026 — Per-Project Multi-Provider Lane Isolation, Live-Seat Transition Warning, and Owner-Authored `Lane profile`s
 
-- **Status:** Accepted — 2026-10-24; amended 2026-10-25 (`grill-with-docs` Q1–Q4; ratified by Andrew)
+- **Status:** Accepted — 2026-10-24; amended 2026-10-25 (`grill-with-docs` Q1–Q4; ratified by Andrew). Decision 1's reconcile scope is narrowed by [ADR 0057](0057-every-seat-replacement-is-a-handoff-supervisor-handoff-and-wide-colourful-factory-tab.md) §11 (v0.6.1): a Project-scoped lane save, batch, profile apply, or reset — and the boot reconcile — anchors `<paseoHome>/config.json` to the MACHINE table only, never the saved Project's effective lanes (a Project override is applied per-Project by the `agent.create` rewrite below, never by rewriting the machine-wide `factory-*` entries).
 - **Amends:** [ADR 0009](0009-factory-surface-and-lane-config.md) §2–§3 (`Lane config` and `Seats & Models`), [ADR 0010](0010-project-scoped-slp-worktrees-and-lead-agent.md) §2/§5 (per-Project `lanes.json` scope), [ADR 0014](0014-private-vault-hydration-and-release-lab-companion.md) §3 (`Private vault` config sync), and [ADR 0017](0017-native-paseo-role-providers-and-slp-seat-recognition.md) §1–§2 (`Role provider` reconciliation and `agent.create` recognition)
 
 ## Context

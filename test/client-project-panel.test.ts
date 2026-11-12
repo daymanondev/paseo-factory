@@ -74,6 +74,7 @@ const healthySeats: NonNullable<PanelView["seats"]> = {
     handoff: { state: "normal", label: "normal", queuedMailCount: 0 },
   },
   peers: [{ agentId: "agent-peer", task: "T-08", title: "Peer · T-08", disposition: "reviewer", statusLabel: "working", tone: "normal", model: "glm-5.3" }],
+  supervisorCandidates: [],
 };
 
 function makePanel(overrides: Partial<PanelView> = {}): PanelView {
@@ -90,7 +91,7 @@ function makePanel(overrides: Partial<PanelView> = {}): PanelView {
 }
 
 const noopActions = () => ({
-  openAgent() {}, installPrerequisites() {}, rotateLead() {}, revokeSupervisor() {}, startSupervisor() {}, syncOpenDesign() {}, busy: false,
+  openAgent() {}, installPrerequisites() {}, rotateLead() {}, revokeSupervisor() {}, startSupervisor() {}, syncOpenDesign() {}, adoptSupervisor() {}, busy: false,
 });
 
 async function render(panel: PanelView, props: { mobile?: boolean; openDesignActions?: unknown; menu?: unknown; initialUi?: Record<string, unknown>; actions?: Record<string, unknown> } = {}): Promise<string> {
@@ -380,6 +381,56 @@ test("a Project whose folder is gone keeps Delete but drops Reset and the model 
   assert.ok(hasHook(html, "factory-panel-menu-delete"));
   assert.equal(hasHook(html, "factory-panel-menu-reset"), false);
   assert.equal(hasHook(html, "models-slot") || hasHook(html, "od-slot"), false);
+});
+
+// ---- v0.6.1 W3 (ADR 0057 §5/§10): no-supervisor item + Use this chat as Supervisor -----------
+
+const noSupervisorItem = {
+  key: "no-supervisor",
+  kind: "no-supervisor",
+  title: "No Supervisor · 2 reports waiting",
+  detail: null,
+  action: { kind: "start-supervisor", label: "Start Supervisor" },
+} as PanelView["needsYou"][number];
+
+test("the no-supervisor Needs-you item renders with its hook and one action; mobile keeps the Start-Supervisor hint instead of the button (03, ADR 0057 §5)", async () => {
+  const desktop = await render(makePanel({ needsYou: [noSupervisorItem], summary: "No Supervisor · 2 need you" }), { mobile: false });
+  assert.ok(hasHook(desktop, "factory-panel-needs-you-no-supervisor"), "the item's test hook renders");
+  assert.match(desktop, /No Supervisor · 2 reports waiting/);
+  assert.ok(hasHook(desktop, "factory-panel-needs-you-action-no-supervisor"), "Start Supervisor is the one action on desktop");
+  const mobile = await render(makePanel({ needsYou: [noSupervisorItem], summary: "No Supervisor · 2 need you" }), { mobile: true });
+  assert.ok(hasHook(mobile, "factory-panel-needs-you-no-supervisor"), "the item still shows on mobile");
+  assert.equal(hasHook(mobile, "factory-panel-needs-you-action-no-supervisor"), false, "mobile starts nothing — the hint instead");
+  assert.ok(hasHook(mobile, "factory-panel-needs-you-hint-no-supervisor"), "the mobile hint names where to start it");
+  assert.match(mobile, /Start the Supervisor on Paseo Desktop\./);
+});
+
+test("a live Supervisor with a candidate chat renders the candidate row with 'Use this chat as Supervisor' on desktop AND mobile — and no rows when there is none (03, ADR 0057 §5/§10)", async () => {
+  const panel = makePanel({
+    seats: {
+      ...healthySeats,
+      supervisorCandidates: [{ agentId: "agent-candidate", title: "Chat about release", statusLabel: "idle", tone: "normal", model: "glm-5.3" }],
+    },
+  });
+  for (const mobile of [false, true]) {
+    const html = await render(panel, { mobile });
+    assert.ok(hasHook(html, "factory-panel-supervisor-candidates"), `the candidates block renders (mobile=${mobile})`);
+    assert.match(html, /Chat about release/, "the candidate chat is named");
+    assert.ok(hasHook(html, "factory-panel-adopt-supervisor"), `the adopt button renders (mobile=${mobile})`);
+    assert.match(html, /Use this chat as Supervisor/, "the button carries its label");
+  }
+  const none = await render(makePanel());
+  assert.equal(hasHook(none, "factory-panel-supervisor-candidates"), false, "no candidate, no block");
+  assert.equal(hasHook(none, "factory-panel-adopt-supervisor"), false);
+});
+
+test("the adopt button rides the factory.supervisor.adopt RPC through the shell — no mobile guard, and success opens the adopted chat", () => {
+  const shell = read("plugin/client/factory/shell.tsx");
+  assert.match(shell, /useRpc\(supervisorAdopt\)/, "the shell binds the adopt RPC");
+  assert.match(shell, /supervisorAdoptCall\(\{ projectRoot, agentId \}\)/, "the adopt action passes the Project and the candidate's agent id");
+  const adoptGuard = shell.slice(shell.indexOf("const adoptSupervisor"), shell.indexOf(";", shell.indexOf("supervisorAdoptCall")));
+  assert.doesNotMatch(adoptGuard, /mobile/, "adopt is the one seat write mobile may perform (ADR 0057 §10)");
+  assert.match(shell, /<ProjectPanel/, "the panel still mounts");
 });
 
 // ---- the shell's host wiring (not mountable in Node) ----------------------------------------

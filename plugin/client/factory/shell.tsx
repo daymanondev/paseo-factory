@@ -22,7 +22,7 @@ import { useRpc } from "@getpaseo/plugin/client";
 import { ScrollView, useToast } from "@getpaseo/plugin/client/ui";
 import { useEffect, useRef, useState } from "react";
 import { Text, View } from "react-native";
-import { skillsImport, skillsTogglePack, lanesReset, lanesSet, lanesSetBatch, leadRotate, onboardingCommit, onboardingInspect, openDesignCatalog, openDesignSync, helperMcpsSyncAndProbe, helperMcpsSetEnabled, pluginsInstall, pluginsManage, pluginsCheckUpdates, profilesApply, profilesDelete, profilesSave, projectDelete, projectReset, snapshot, supervisorRevoke, supervisorStart, vaultConfigure, vaultHydrate, vaultImport, vaultSync } from "../../shared/rpc.ts";
+import { skillsImport, skillsTogglePack, lanesReset, lanesSet, lanesSetBatch, leadRotate, onboardingCommit, onboardingInspect, openDesignCatalog, openDesignSync, helperMcpsSyncAndProbe, helperMcpsSetEnabled, pluginsInstall, pluginsManage, pluginsCheckUpdates, profilesApply, profilesDelete, profilesSave, projectDelete, projectReset, snapshot, supervisorAdopt, supervisorRevoke, supervisorStart, vaultConfigure, vaultHydrate, vaultImport, vaultSync } from "../../shared/rpc.ts";
 import type { ManageablePluginId } from "../../shared/companions.ts";
 import type { FactoryView, LaneName } from "../../shared/view.ts";
 import { SPACING, text } from "../kit/theme.ts";
@@ -75,6 +75,7 @@ export function FactoryShell({
   const leadRotateCall = useRpc(leadRotate);
   const supervisorRevokeCall = useRpc(supervisorRevoke);
   const supervisorStartCall = useRpc(supervisorStart);
+  const supervisorAdoptCall = useRpc(supervisorAdopt);
   // The onboarding wizard's doors (v0.6.0 W7): a read-only folder inspection, the Start commit, and the Open Design catalog.
   const onboardingInspectCall = useRpc(onboardingInspect);
   const onboardingCommitCall = useRpc(onboardingCommit);
@@ -273,6 +274,20 @@ export function FactoryShell({
   const revokeSupervisor = (): void => {
     if (projectRoot === undefined) return;
     void act("Revoke Supervisor", () => supervisorRevokeCall({ projectRoot }));
+  };
+  /**
+   * "Use this chat as Supervisor" (v0.6.1, ADR 0057 §5): adopt a live candidate
+   * chat as the Project's Supervisor. The one seat write mobile may perform
+   * (ADR 0057 §10), so it carries no `mobile` guard; success opens the adopted
+   * conversation.
+   */
+  const adoptSupervisor = (agentId: string): void => {
+    if (projectRoot === undefined) return;
+    void act("Use this chat as Supervisor", async () => {
+      const reply = await supervisorAdoptCall({ projectRoot, agentId });
+      if (reply.ok) navigation?.openAgent({ agentId: reply.agentId, serverId });
+      return reply;
+    });
   };
   /** Start Supervisor on a vacant seat; success opens the conversation it created (desktop only). */
   const startSupervisor = (directive: string): void => {
@@ -654,7 +669,7 @@ export function FactoryShell({
             mobile={mobile}
             now={now}
             daemonError={view.daemonError}
-            actions={{ openAgent, installPrerequisites, rotateLead, revokeSupervisor, startSupervisor, syncOpenDesign, busy: busy || activePluginAct !== null }}
+            actions={{ openAgent, installPrerequisites, rotateLead, revokeSupervisor, startSupervisor, syncOpenDesign, adoptSupervisor, busy: busy || activePluginAct !== null }}
             openDesignActions={
               !mobile && view.project !== null && view.project.missingRoot !== true ? (
                 <OpenDesignControl key={view.project.root} part="card" theme={theme} root={view.project.root} sourceKey={`${serverId ?? "local"}:${view.project.root}`} onChanged={refresh} />

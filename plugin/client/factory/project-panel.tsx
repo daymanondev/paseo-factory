@@ -20,7 +20,9 @@
  * `factory-panel-od`, `factory-panel-open-<role|peer-T>`,
  * `factory-panel-rotate-lead`, `factory-panel-supervisor-menu`,
  * `factory-panel-revoke-supervisor`, `factory-panel-start-supervisor`,
- * `factory-panel-directive`, `factory-panel-menu-toggle`, `factory-panel-menu`.
+ * `factory-panel-directive`, `factory-panel-menu-toggle`, `factory-panel-menu`,
+ * `factory-panel-supervisor-candidates` / `factory-panel-adopt-supervisor`
+ * (v0.6.1 W3: the adopt rows — desktop and mobile alike, ADR 0057 §10).
  * UI-only state (open menus, the directive draft) is local; `initialUi` seeds
  * it. Function components only — no class syntax reaches the Hermes bundle.
  */
@@ -29,7 +31,7 @@ import { TextInput } from "@getpaseo/plugin/client/ui";
 import { useState } from "react";
 import type { ReactNode } from "react";
 import { Text, View } from "react-native";
-import type { PanelNeedsYouItem, PanelOpenDesign, PanelPeerRow, PanelSeatRow, PanelTone, PanelView } from "../../shared/view.ts";
+import type { PanelNeedsYouItem, PanelOpenDesign, PanelPeerRow, PanelSeatRow, PanelSupervisorCandidateRow, PanelTone, PanelView } from "../../shared/view.ts";
 import { Btn } from "../kit/pill.tsx";
 import { CONTROL_H, RADIUS, SPACING, text, tint } from "../kit/theme.ts";
 import type { Colour } from "../kit/theme.ts";
@@ -48,6 +50,8 @@ export interface ProjectPanelActions {
   startSupervisor(directive: string): void;
   /** Sync the linked Open Design project again from the host — a broken link's primary action (desktop only). */
   syncOpenDesign(): void;
+  /** "Use this chat as Supervisor" (v0.6.1, ADR 0057 §5) — adopt a candidate chat; the one seat write mobile may perform (ADR 0057 §10). */
+  adoptSupervisor(agentId: string): void;
   busy: boolean;
 }
 
@@ -278,6 +282,32 @@ function PeerRowView({ theme, row, actions }: { theme: PluginTheme; row: PanelPe
   );
 }
 
+/**
+ * One Supervisor candidate chat (v0.6.1, ADR 0057 §5) — the Owner's way to
+ * choose it over the still-live bound Supervisor. The adopt button is the one
+ * seat write mobile may perform (ADR 0057 §10), so it never gates on `mobile`.
+ */
+function SupervisorCandidateRow({ theme, row, actions }: { theme: PluginTheme; row: PanelSupervisorCandidateRow; actions: ProjectPanelActions }) {
+  const colour = toneColour(row.tone);
+  return (
+    <View testID="factory-panel-supervisor-candidate" style={{ gap: SPACING[0.5], paddingVertical: SPACING[1] }}>
+      <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[2] }}>
+        <Text style={text(theme, "rowTitle")}>{row.title ?? row.agentId}</Text>
+        <Text style={text(theme, "label", colour)}>{row.statusLabel}</Text>
+      </View>
+      {row.model !== null ? <Text style={text(theme, "code", "foregroundMuted")} numberOfLines={1}>{row.model}</Text> : null}
+      <Btn
+        theme={theme}
+        small
+        testID="factory-panel-adopt-supervisor"
+        label="Use this chat as Supervisor"
+        disabled={actions.busy}
+        onPress={() => actions.adoptSupervisor(row.agentId)}
+      />
+    </View>
+  );
+}
+
 function Seats({
   theme,
   seats,
@@ -301,6 +331,14 @@ function Seats({
           <Text style={text(theme, "label")}>Peers</Text>
           {seats.peers.map((peer) => (
             <PeerRowView key={peer.agentId} theme={theme} row={peer} actions={actions} />
+          ))}
+        </View>
+      ) : null}
+      {seats.supervisorCandidates.length > 0 ? (
+        <View testID="factory-panel-supervisor-candidates" style={{ gap: SPACING[1] }}>
+          <Text style={text(theme, "label")}>Supervisor candidates</Text>
+          {seats.supervisorCandidates.map((candidate) => (
+            <SupervisorCandidateRow key={candidate.agentId} theme={theme} row={candidate} actions={actions} />
           ))}
         </View>
       ) : null}
