@@ -15,6 +15,7 @@ import { readProjectRegistration, writeProjectRegistration } from "../plugin/ser
 import { createSurfaceHandlers } from "../plugin/server/surface-rpc.ts";
 import type { SurfaceAgentSnapshot, SurfaceDaemonApi } from "../plugin/server/surface-rpc.ts";
 import { handleSpoolRequest, parseSpoolRequest, spoolRootFor, startSpool } from "../plugin/server/spool.ts";
+import { parseHandoffFile } from "../plugin/server/handoff-text.ts";
 import { createLeadMailRuntime, LEAD_ROTATE_TOKENS, readLeadContextTokens } from "../plugin/server/lead-mailbox.ts";
 import { deliverLeadMail as coreDeliver, enqueueLeadMail as coreEnqueue } from "../src/index.ts";
 import { disposeDir, gitCommitAll, makeTempDir, repoRoot, writeLanes } from "./helpers.ts";
@@ -1030,9 +1031,14 @@ test("a turn ending at >= 128k acks its batch, locks handing_over, holds arrivin
     ],
   });
 
-  // The fallback write: the turn's assistant text became lead-handoff.md.
+  // The fallback write: the turn's assistant text became lead-handoff.md —
+  // under the v0.6.1 metadata header (ADR 0057 §11 hygiene, spec story 8)
+  // recording the outgoing Lead id and a written-at timestamp, which the
+  // successor kickoff dates the handover by.
   const handoffPath = join(projectStateDir(stateDir, slug), "lead-handoff.md");
-  assert.equal(readFileSync(handoffPath, "utf8"), "# Handoff\nGoal: ship the roadmap.");
+  const handoffOnDisk = readFileSync(handoffPath, "utf8");
+  assert.match(handoffOnDisk, /^<!-- paseo-factory handoff: lead=agent-lead-1 written-at=\S+ -->/, "the handover file records the outgoing Lead id and a written-at timestamp");
+  assert.equal(parseHandoffFile(handoffOnDisk).body, "# Handoff\nGoal: ship the roadmap.", "the body under the header is the extracted handoff text");
 
   // The outgoing Lead was cancelled (best-effort) and archived; the successor
   // is the one live seat=lead agent, and the registry names it.
