@@ -14,9 +14,13 @@ import { createSurfaceHandlers } from "../plugin/server/surface-rpc.ts";
 import type { SurfaceDaemonApi } from "../plugin/server/surface-rpc.ts";
 import { handleSpoolRequest, parseSpoolRequest, spoolRootFor, startSpool } from "../plugin/server/spool.ts";
 import { createLeadMailRuntime, HANDOFF_EXTRACTION_MAX_SENDS, HANDOFF_EXTRACTION_TIMEOUT_MS, isBlockedByAttention, LEAD_HANDOFF_MAX_BYTES } from "../plugin/server/lead-mailbox.ts";
+import { parseHandoffFile } from "../plugin/server/handoff-text.ts";
 import { disposeDir, gitCommitAll, makeTempDir } from "./helpers.ts";
 
 const POLL_MS = 20;
+
+/** The handover file's BODY — the v0.6.1 metadata header is storage, never prose. */
+const handoffBodyOnDisk = (path: string): string => parseHandoffFile(readFileSync(path, "utf8")).body;
 
 interface FakeAgent {
   id: string;
@@ -1344,7 +1348,7 @@ test("Fuse 2: handing_over timeout (via scheduled timer and via pumpProjectLead)
     assert.equal(successorSends.length, 1);
     assert.match(successorSends[0]!.text, /latest extraction did not complete.*last-known-good handoff/);
     assert.match(successorSends[0]!.text, /Stale Handoff From Yesterday/);
-    assert.equal(readFileSync(handoffPath, "utf8"), "# Stale Handoff From Yesterday\nDo not use.");
+    assert.equal(handoffBodyOnDisk(handoffPath), "# Stale Handoff From Yesterday\nDo not use.");
     assert.match(successorSends[0]!.text, /task T-FUSE2-TIMER/);
     assert.match(successorSends[0]!.text, /Held mail drained by timer fuse/);
     // v0.2.2 (ADR 0050 Decision 4): the degraded completion is loud — exactly one
@@ -2262,6 +2266,12 @@ test("quiet-point Lead rotation (ADR 0031, v0.0.93): rotation_pending holds the 
   });
   assert.equal(readProjectRegistration(stateDir, slug)?.rotationState, "normal");
   assert.equal(fake.agents.some((a) => a.id === lead.id), false, "the outgoing Lead was archived at completion");
+  // v0.6.1 (ADR 0057 §11 hygiene, spec story 8): the handover file records the
+  // outgoing Lead id and a written-at timestamp, so a later successor kickoff
+  // can date it against the outgoing Lead's last activity.
+  const handoffOnDisk = readFileSync(join(projectStateDir(stateDir, slug), "lead-handoff.md"), "utf8");
+  assert.match(handoffOnDisk, new RegExp(`^<!-- paseo-factory handoff: lead=${lead.id} written-at=\\S+ -->`), "the handover file records the outgoing Lead id and a written-at timestamp");
+  assert.match(handoffOnDisk, /# Handoff for T-03/, "the handover body follows the metadata header");
   const successorId = "agent-created-1";
   const successor = fake.agents.find((a) => a.id === successorId);
   assert.ok(successor);
@@ -2270,6 +2280,7 @@ test("quiet-point Lead rotation (ADR 0031, v0.0.93): rotation_pending holds the 
   assert.match(successorSends[0]!.text, /\[paseo-factory seat kickoff packet · role=lead/);
   assert.match(successorSends[0]!.text, /# Lead handoff — project/);
   assert.match(successorSends[0]!.text, /# Handoff for T-03\nReview T-03 when Peer finishes\./);
+  assert.doesNotMatch(successorSends[0]!.text, /paseo-factory handoff:/, "the file's metadata header never leaks into the successor's kickoff");
   assert.match(successorSends[0]!.text, /T-03 attempt 1 ended GREEN/);
   assert.match(successorSends[0]!.text, /Directive held through rotation_pending/);
   assert.ok(fake.agents.some((a) => a.id === neighborPeer.id), "the neighbor Project's Peer was untouched");
@@ -2348,6 +2359,81 @@ test("quiet-point Lead rotation (ADR 0031, v0.0.93): rotation_pending holds the 
 });
 
 // ---- lost-Lead recovery (v0.6.1, ADR 0057 §4) ----------------------------------------------
+
+/**
+ * Seeds one Project whose registered Lead has NOT received its first turn,
+ * writes `lead-handoff.md` as given, and pumps one queued directive — the
+ * successor-kickoff-from-disk arm (the restart/unstarted-successor path).
+ * Returns the Turn-1 kickoff text the unstarted Lead received.
+ */
+async function unstartedSuccessorKickoff(t: TestContext, handoffFile: string): Promise<string> {
+  const unstarted: FakeAgent = {
+    id: "agent-lead-unstarted-disk",
+    status: "idle",
+    cwd: "",
+    labels: { seat: "lead", project: "" },
+  };
+  const runtime = makeSpooledRuntime(t, [unstarted]);
+  unstarted.cwd = runtime.projectRoot;
+  unstarted.labels = { seat: "lead", project: runtime.slug };
+  writeProjectRegistration(runtime.stateDir, runtime.slug, { root: runtime.projectRoot, lead: unstarted.id, rotationState: "normal" });
+  writeFileSync(join(projectStateDir(runtime.stateDir, runtime.slug), "lead-handoff.md"), handoffFile);
+  await runtime.leadMail.enqueueLeadMail(runtime.slug, { from: "supervisor", kind: "directive", text: "Directive for the disk-fed successor" });
+  await runtime.leadMail.pumpProjectLead(runtime.slug);
+  const sends = runtime.fake.sent.filter((entry) => entry.agentId === unstarted.id);
+  assert.equal(sends.length, 1, "the unstarted successor received its Turn-1 kickoff");
+  return sends[0]!.text;
+}
+
+test("v0.6.1 (ADR 0057 §11 hygiene): a disk-fed successor kickoff dates the handover — a fresh file carries no staleness line and no metadata leak", async (t) => {
+  const kickoff = await unstartedSuccessorKickoff(
+    t,
+    `<!-- paseo-factory handoff: lead=agent-lead-old written-at=${new Date().toISOString()} -->\n\n# Fresh handoff\nWave N complete, T-09 green.`,
+  );
+  assert.match(kickoff, /# Lead handoff — project/);
+  assert.match(kickoff, /# Fresh handoff\nWave N complete, T-09 green\./, "the handover body rides the kickoff");
+  assert.doesNotMatch(kickoff, /Staleness notice/, "a dated, current handover is trusted — no staleness line");
+  assert.doesNotMatch(kickoff, /paseo-factory handoff:/, "the file's metadata header never leaks into the kickoff");
+  assert.match(kickoff, /Directive for the disk-fed successor/, "the queued mail still rides the same turn");
+});
+
+test("v0.6.1 (ADR 0057 §11 hygiene): a disk-fed successor kickoff marks a handover WITHOUT metadata stale-unknown — even with no lost Lead", async (t) => {
+  const kickoff = await unstartedSuccessorKickoff(t, "# Legacy handoff\nWave 2 was mid-flight.\n");
+  assert.match(kickoff, /# Legacy handoff\nWave 2 was mid-flight\./, "the legacy handover still rides the kickoff");
+  assert.match(kickoff, /Staleness notice: this handover may predate the lost Lead's last activity — its age is unknown/, "a file without the v0.6.1 metadata is stale-unknown, never fresh");
+  assert.match(kickoff, /Re-read the Ledger and the repository/, "the notice tells the successor to re-read the Ledger and repository");
+});
+
+test("v0.6.1 (ADR 0057 §11 hygiene): a lost Lead's successor kickoff marks a DATED old handover stale with the dated line", async (t) => {
+  const lead: FakeAgent = { id: "agent-lead-lost-dated", status: "idle", lastUserMessageAt: "2026-11-12T08:00:00.000Z" };
+  const { stateDir, slug, projectRoot, surface, leadMail, fake } = makeSpooledRuntime(t, [lead]);
+  lead.labels = { seat: "lead", project: slug };
+  lead.cwd = projectRoot;
+  await surface.leadEnsure({ projectRoot });
+  // The plugin's own rotation wrote this file hours before the Lead was lost —
+  // the Lead kept working after it, so it is older than the last activity.
+  mkdirSync(join(projectStateDir(stateDir, slug)), { recursive: true });
+  const writtenAt = new Date(Date.now() - 8 * 3_600_000).toISOString();
+  writeFileSync(
+    join(projectStateDir(stateDir, slug), "lead-handoff.md"),
+    `<!-- paseo-factory handoff: lead=${lead.id} written-at=${writtenAt} -->\n\n# Dated handoff\nMorning state snapshot.`,
+  );
+
+  await leadMail.enqueueLeadMail(slug, { from: "supervisor", kind: "directive", text: "Directive the dated successor receives" });
+  await leadMail.pumpProjectLead(slug);
+  assert.ok(readLeadMailbox(join(projectStateDir(stateDir, slug), "mailbox.jsonl")).inFlight, "the delivery is live and unacked");
+
+  await fake.emitArchive(lead.id);
+  const successorIndex = fake.created.findIndex((agent) => agent.labels?.seat === "lead");
+  assert.ok(successorIndex !== -1, "a successor Lead was ensured");
+  const successorId = `agent-created-${successorIndex + 1}`;
+  const successorSends = fake.sent.filter((entry) => entry.agentId === successorId);
+  assert.equal(successorSends.length, 1);
+  assert.match(successorSends[0]!.text, /# Dated handoff\nMorning state snapshot\./, "the dated handover body rides the kickoff");
+  assert.match(successorSends[0]!.text, /Staleness notice: this handover was written before the outgoing Lead's last activity/, "the dated-old handover carries the staleness line");
+  assert.match(successorSends[0]!.text, /Re-read the Ledger and the repository/, "the notice tells the successor to re-read the Ledger and repository");
+  assert.doesNotMatch(successorSends[0]!.text, /paseo-factory handoff:/, "the metadata header never leaks");
+});
 
 test("v0.6.1 (ADR 0057 §4): an outside archive of the bound Lead (agent.archive.after) requeues unacked mail (lead_lost) and the next pump spawns a successor whose kickoff carries the handover with the staleness line", async (t) => {
   const lead: FakeAgent = { id: "agent-lead-lost", status: "idle", lastUserMessageAt: "2026-11-12T08:00:00.000Z" };
@@ -2653,7 +2739,7 @@ test("Lead handoff persists the final Markdown reply, caps UTF-8 at 8 KB (LEAD_H
   writeFileSync(path, "# Disk fallback\nOlder than the reply.");
   const reply = "# Reply handoff\n" + "Roadmap 🧭\n".repeat(4000);
   await f.leadMail.onLeadTurnEnded({ agentId: lead.id, outcome: { kind: "completed" }, timeline: [{ type: "assistant_message", text: reply }] });
-  const persisted = readFileSync(path, "utf8");
+  const persisted = handoffBodyOnDisk(path);
   assert.match(persisted, /^# Reply handoff/);
   assert.ok(Buffer.byteLength(persisted) <= LEAD_HANDOFF_MAX_BYTES);
   assert.match(persisted, /\n\.\.\.\[truncated\]$/);
@@ -2792,7 +2878,7 @@ for (const failure of ["refusal", "send", "timeout"] as const) {
       lead.status = "running";
     }
     await until(() => assert.equal(readProjectRegistration(f.stateDir, f.slug)?.rotationState, "normal"));
-    assert.equal(readFileSync(path, "utf8"), prior);
+    assert.equal(handoffBodyOnDisk(path), prior);
     const kickoff = f.fake.sent.find(item => item.agentId !== lead.id)!.text;
     assert.match(kickoff, /latest extraction did not complete.*last-known-good handoff/i);
     assert.ok(kickoff.includes(prior));
@@ -2849,7 +2935,7 @@ test("Lead restores its last-known-good snapshot after a plugin restart during e
   // over the shutdown trips immediately and restores the snapshot prior.
   lead.status = "error";
   await restarted.pumpProjectLead(f.slug);
-  assert.equal(readFileSync(path, "utf8"), "# Durable prior handoff\nArchitecture survives restart.");
+  assert.equal(handoffBodyOnDisk(path), "# Durable prior handoff\nArchitecture survives restart.");
   assert.match(f.fake.sent.find(item => item.agentId !== lead.id)!.text, /latest extraction did not complete.*last-known-good handoff/);
 });
 

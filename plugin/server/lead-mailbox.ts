@@ -100,7 +100,8 @@ import type {
   SpoolSupervisorReportRequest,
 } from "./spool.ts";
 import type { SurfaceAgentSnapshot, SurfaceDaemonApi } from "./surface-rpc.ts";
-import { capHandoffText, validHandoffText } from "./handoff-text.ts";
+import { capHandoffText, parseHandoffFile, renderHandoffFile, validHandoffText } from "./handoff-text.ts";
+import type { HandoffFileMetadata } from "./handoff-text.ts";
 import { createPeerHandoffRuntime } from "./peer-handoff.ts";
 import type { DaemonReply } from "./daemon-cli.ts";
 import { readNativeContextWindowTokens, type UsagePaths } from "./core/usage-extractor.ts";
@@ -575,16 +576,23 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
   const extractionPath = (slug: string) => join(projectStateDir(deps.stateDir, slug), "lead-handoff-extraction.json");
   const readExtraction = (slug: string) =>
     readOptionalJson(extractionPath(slug)) as { requestedAt?: string; prior?: string; stale?: boolean; sends?: number; leadLostAt?: string } | undefined;
-  const readDiskHandoffText = (slug: string): string | undefined => {
+  /**
+   * The parsed on-disk handover (v0.6.1, ADR 0057 §11 hygiene): the body the
+   * kickoff feeds, plus the file's own metadata header — the outgoing Lead id
+   * and written-at timestamp — when the file carries one. A file without the
+   * header parses with `meta: undefined`; an invalid body is `undefined`.
+   */
+  const readDiskHandoffFile = (slug: string): { meta: HandoffFileMetadata | undefined; body: string } | undefined => {
     try {
       const handoffPath = join(projectStateDir(deps.stateDir, slug), "lead-handoff.md");
       if (!existsSync(handoffPath)) return undefined;
-      const text = readFileSync(handoffPath, "utf8");
-      return validHandoffText(text) || text === INTERRUPTED_HANDOFF_EXTRACTION_NOTE ? text : undefined;
+      const parsed = parseHandoffFile(readFileSync(handoffPath, "utf8"));
+      return validHandoffText(parsed.body) || parsed.body === INTERRUPTED_HANDOFF_EXTRACTION_NOTE ? parsed : undefined;
     } catch {
       return undefined;
     }
   };
+  const readDiskHandoffText = (slug: string): string | undefined => readDiskHandoffFile(slug)?.body;
 
   const drainLeadMailbox = async (slug: string): Promise<void> => {
     const path = mailboxPath(slug);
@@ -643,20 +651,41 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
         events,
       });
       const digest = renderLedgerDigest(events);
-      // v0.6.1 (ADR 0057 §4): a successor raised after a LOST Lead reads the
-      // on-disk handover as stale-unknown — its age against the lost Lead's
-      // last activity is not knowable until v0.7.0's handover metadata, so
-      // the staleness line rides any file (a fresh rotation's own extraction
-      // record keeps its explicit `stale` verdict either way).
+      // v0.6.1 (ADR 0057 §11 hygiene, spec story 8): the successor dates the
+      // on-disk handover by the file's own metadata. The staleness law:
+      // - a file WITHOUT metadata is stale-unknown — never fresh (spec test
+      //   plan: "a handover file without the new metadata is treated as
+      //   stale-unknown, not fresh");
+      // - a dated file is stale when it was written before the outgoing
+      //   Lead's last activity — anchored to `leadLostAt`, the last moment
+      //   the plugin observed the lost Lead (a plugin-written file always
+      //   precedes the Lead's loss, so a loss after the write means the Lead
+      //   worked on past it);
+      // - with no loss marker (the restarted unstarted-successor path), a
+      //   dated file is the plugin's own latest write — trusted fresh;
+      // - an extraction record that already carries `stale: true` (the
+      //   last-known-good rotation prior) keeps its verdict either way.
       const extractionSnapshot = readExtraction(slug);
-      const lostLead = typeof extractionSnapshot?.leadLostAt === "string";
+      const lostLeadAt = typeof extractionSnapshot?.leadLostAt === "string" ? extractionSnapshot.leadLostAt : undefined;
+      const diskFile = readDiskHandoffFile(slug);
+      const undated = diskFile !== undefined && diskFile.meta === undefined;
+      const writtenMs = diskFile?.meta !== undefined ? Date.parse(diskFile.meta.writtenAt) : Number.NaN;
+      const lostMs = lostLeadAt !== undefined ? Date.parse(lostLeadAt) : Number.NaN;
+      const datedOld = Number.isFinite(writtenMs) && Number.isFinite(lostMs) && writtenMs < lostMs;
+      const extractionStale = extractionSnapshot?.stale === true;
       pendingHandoff = renderSuccessorKickoff({
         slug,
         roster,
         digest,
         handoffText: diskHandoffText,
-        stale: lostLead || extractionSnapshot?.stale === true,
-        ...(lostLead ? { staleSource: "lost-lead" as const } : {}),
+        stale: undated || datedOld || extractionStale,
+        ...(datedOld
+          ? { staleSource: "dated" as const }
+          : undated || lostLeadAt !== undefined
+            ? { staleSource: "lost-lead" as const }
+            : extractionStale
+              ? { staleSource: "extraction" as const }
+              : {}),
       });
     }
     // v0.0.93 (ADR 0031 Quiet-Point Succession): a Successor Lead's Turn-1
@@ -1180,7 +1209,9 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     if (!validHandoffText(handoffText) && input.fuseReason !== "extraction-send-failed") {
       try {
         const stat = statSync(handoffPath);
-        const disk = readFileSync(handoffPath, "utf8");
+        // v0.6.1: the disk fallback reads the BODY — the file's metadata
+        // header is storage, never handover prose.
+        const disk = parseHandoffFile(readFileSync(handoffPath, "utf8")).body;
         if ((!Number.isFinite(requestedMs) || stat.mtimeMs + 1 >= requestedMs) &&
             !(snapshot !== undefined && snapshot.requestedAt === requestedAt && disk === snapshot.prior)) handoffText = disk;
       } catch { /* A fresh file remains a secondary fallback. */ }
@@ -1199,7 +1230,13 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     atomicJson(extractionPath(slug), { requestedAt, prior, stale, ...(snapshot?.sends === undefined ? {} : { sends: snapshot.sends }) });
     try {
       mkdirSync(statePath, { recursive: true });
-      writeFileSync(handoffPath, handoffText);
+      // v0.6.1 (ADR 0057 §11 hygiene, spec story 8): the handover file records
+      // the outgoing Lead id and the written-at timestamp in a metadata header,
+      // so a later successor kickoff can date it against the Lead's last
+      // activity. The header is storage — every reader parses it back out and
+      // only the body ever reaches a seat.
+      const outgoingLeadId = readProjectRegistration(deps.stateDir, slug)?.lead ?? input.agentId;
+      writeFileSync(handoffPath, renderHandoffFile(handoffText, { leadId: outgoingLeadId, writtenAt: new Date().toISOString() }));
     } catch { /* Best-effort persistence of resolved handoff text. */ }
     const events = projectEventsOf(slug, root);
     const tasks = foldTasks(events);
@@ -1837,13 +1874,14 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
               `lead-mailbox: ${registration.slug}'s lead ${agentId} was archived outside the plugin — requeued ${event.mailIds.length} item(s) (lead_lost), the next pump raises a successor`,
             );
           }
-          // (3) The on-disk handover is stale-unknown until v0.7.0's metadata
-          // (W3) can date it against the lost Lead's last activity.
-          const diskHandoff = readDiskHandoffText(registration.slug);
+          // (3) v0.6.1 (ADR 0057 §11 hygiene, spec story 8): the loss stamps
+          // `leadLostAt` — the anchor the successor kickoff dates the on-disk
+          // handover's metadata against (older-than-loss ⇒ the dated staleness
+          // line; no metadata ⇒ stale-unknown). No blanket `stale: true`
+          // anymore: the file's own written-at decides.
           const priorExtraction = readExtraction(registration.slug);
           atomicJson(extractionPath(registration.slug), {
             ...(priorExtraction ?? {}),
-            ...(diskHandoff === undefined ? {} : { stale: true }),
             leadLostAt: new Date().toISOString(),
           });
           // (4) The succession pump — the ensure arm creates the successor.
@@ -1963,10 +2001,13 @@ function renderHandoffExtractionPrompt(slug: string): string {
 
 /**
  * The successor's three-layer kickoff — roster, digest, and the outgoing
- * Lead's handoff text. `stale` rides the last-known-good notice of an
- * interrupted extraction (ADR 0050) or, with `staleSource: "lost-lead"`, the
- * stale-unknown notice a lost Lead's on-disk handover carries (v0.6.1,
- * ADR 0057 §4) until v0.7.0's handover metadata can date the file.
+ * Lead's handoff text. `stale` rides one of three notices: the
+ * last-known-good notice of an interrupted extraction (ADR 0050); the
+ * stale-unknown notice an undated on-disk handover — or a lost Lead's file —
+ * carries while its age cannot be read (v0.6.1, ADR 0057 §4); or, since the
+ * v0.6.1 hygiene fixes (ADR 0057 §11, spec story 8), the dated notice for a
+ * handover the file's own metadata places before the outgoing Lead's last
+ * activity.
  */
 function renderSuccessorKickoff(input: {
   slug: string;
@@ -1974,15 +2015,17 @@ function renderSuccessorKickoff(input: {
   digest: string;
   handoffText: string | null;
   stale?: boolean;
-  staleSource?: "extraction" | "lost-lead";
+  staleSource?: "extraction" | "lost-lead" | "dated";
 }): string {
   return [
     `# Lead handoff — project ${input.slug}`,
     ...(input.stale
       ? [
-          input.staleSource === "lost-lead"
-            ? "Staleness notice: this handover may predate the lost Lead's last activity — its age is unknown. Re-read the Ledger and the repository before relying on it; the roster and digest above are the machine-verified truth."
-            : "Staleness notice: the latest extraction did not complete; the last-known-good handoff is shown below the authoritative live Machine-Verified Active Peer Roster and Ledger State Digest.",
+          input.staleSource === "dated"
+            ? "Staleness notice: this handover was written before the outgoing Lead's last activity. Re-read the Ledger and the repository before relying on it; the roster and digest above are the machine-verified truth."
+            : input.staleSource === "lost-lead"
+              ? "Staleness notice: this handover may predate the lost Lead's last activity — its age is unknown. Re-read the Ledger and the repository before relying on it; the roster and digest above are the machine-verified truth."
+              : "Staleness notice: the latest extraction did not complete; the last-known-good handoff is shown below the authoritative live Machine-Verified Active Peer Roster and Ledger State Digest.",
         ]
       : []),
     "",

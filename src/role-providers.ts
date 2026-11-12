@@ -610,18 +610,19 @@ export function healFactoryRoleProvidersInConfig(paseoHome: string): boolean {
 }
 
 /**
- * The lane table the role providers reconcile from (ADR 0017 §1, ADR 0026 §1):
- * when `preferredProjectSlug` is given, that Project's effective `Lanes` table;
- * otherwise, when `<stateDir>/lanes.json` exists, the most recently modified
- * valid scope between `<stateDir>/lanes.json` and any registered Project's
- * `<projectStateDir>/lanes.json` (so plugin boot reflects the latest Project or
- * machine lane save); otherwise — a machine that never named its lanes — the
- * cleanest effective table across the registered projects' own override files:
- * per lane, the value the majority of projects run, ties broken by the first
- * registration (slug order, deterministic), absent everywhere → the safe
- * default. A broken machine file is the same named refusal `loadLanes` gives
- * (boot logs it and skips the reconcile); a broken project entry is skipped,
- * never trusted.
+ * The lane table the role providers reconcile from (ADR 0017 §1, ADR 0026 §1;
+ * the boot scope narrowed by v0.6.1's ADR 0057 §11): when
+ * `preferredProjectSlug` is given, that Project's effective `Lanes` table;
+ * otherwise, when `<stateDir>/lanes.json` exists, the MACHINE table — never a
+ * single Project's override, no matter which file was modified last, so a
+ * Project-scoped save can never rewrite the daemon-wide `factory-*` entries
+ * (Project overrides are applied per-Project by the before-create rewrite);
+ * otherwise — a machine that never named its lanes — the cleanest effective
+ * table across the registered projects' own override files: per lane, the
+ * value the majority of projects run, ties broken by the first registration
+ * (slug order, deterministic), absent everywhere → the safe default. A broken
+ * machine file is the same named refusal `loadLanes` gives (boot logs it and
+ * skips the reconcile); a broken project entry is skipped, never trusted.
  */
 export function effectiveLanesForReconcile(stateDir: string, preferredProjectSlug?: string): LanesResult {
   if (preferredProjectSlug !== undefined) {
@@ -629,32 +630,7 @@ export function effectiveLanesForReconcile(stateDir: string, preferredProjectSlu
   }
   const machineFile = lanesPath(stateDir);
   if (existsSync(machineFile)) {
-    const machineLoaded = loadLanes(stateDir);
-    if (!machineLoaded.ok) return machineLoaded;
-    let newestMtime = 0;
-    try {
-      newestMtime = statSync(machineFile).mtimeMs;
-    } catch {
-      return machineLoaded;
-    }
-    let newestProjectLanes: LanesResult | undefined;
-    for (const registration of listProjectRegistrations(stateDir)) {
-      const projFile = projectLanesPath(stateDir, registration.slug);
-      if (!existsSync(projFile)) continue;
-      try {
-        const mtime = statSync(projFile).mtimeMs;
-        if (mtime > newestMtime) {
-          const candidate = loadLanes(stateDir, registration.slug);
-          if (candidate.ok) {
-            newestMtime = mtime;
-            newestProjectLanes = candidate;
-          }
-        }
-      } catch {
-        // skip unreadable project override
-      }
-    }
-    return newestProjectLanes ?? machineLoaded;
+    return loadLanes(stateDir);
   }
   const lanes = defaultLanes();
   const tally = new Map<LaneName, { counts: Map<string, number>; first: string }>();

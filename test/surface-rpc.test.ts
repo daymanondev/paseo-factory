@@ -5161,7 +5161,7 @@ function readHomeConfig(home: string): { providers: Record<string, { extends?: s
   return { providers: parsed.agents?.providers ?? {}, profiles: parsed.daemon?.agentProfiles ?? [] };
 }
 
-test("Seam 2: saving lanes, batching, or applying a profile on Project A reconciles the New Chat picker to the active scope while preserving per-Project lanes.json isolation (ADR 0026 §1/§2/§5)", async (t) => {
+test("Seam 2: saving lanes, batching, or applying a profile on Project A leaves the New Chat picker anchored to the MACHINE table while preserving per-Project lanes.json isolation (ADR 0026 §1/§2/§5; v0.6.1 ADR 0057 §11)", async (t) => {
   const projectA = makeProject(t, "iso-a");
   const projectB = makeProject(t, "iso-b");
   const { home, stateDir, handlers } = makeSurface(t, []);
@@ -5176,26 +5176,26 @@ test("Seam 2: saving lanes, batching, or applying a profile on Project A reconci
   mkdirSync(home, { recursive: true });
   writeFileSync(join(home, "config.json"), `${JSON.stringify({ agents: { providers: {} }, daemon: { agentProfiles: [] } }, null, 2)}\n`);
 
-  // 1. A single project-scoped save on Project A updates the New Chat picker to A's supervisor model.
+  // 1. A single project-scoped save on Project A leaves the picker on the MACHINE model (v0.6.1, ADR 0057 §11).
   const supSave = await handlers.lanesSet({ lane: "supervisor", value: "claude/claude-opus-4-6:high", projectRoot: projectA.root });
   assert.ok(supSave.ok, supSave.ok ? "" : supSave.error);
   const afterSave = readHomeConfig(home);
   assert.equal(
     afterSave.providers[FACTORY_ROLE_PROVIDERS.supervisor]?.models?.[0]?.id,
-    "claude-opus-4-6",
-    "factory-supervisor reflects the active scope's supervisor model in <paseoHome>/config.json",
+    "zcode/glm-5.3",
+    "factory-supervisor keeps the MACHINE supervisor model in <paseoHome>/config.json after A's save",
   );
-  assert.equal(afterSave.profiles.find((row) => row.id === FACTORY_ROLE_PROVIDERS.supervisor)?.model, "claude-opus-4-6");
+  assert.equal(afterSave.profiles.find((row) => row.id === FACTORY_ROLE_PROVIDERS.supervisor)?.model, "zcode/glm-5.3");
 
-  // 2. The atomic batch save lands A's remaining matrix lanes in ONE write.
+  // 2. The atomic batch save lands A's remaining matrix lanes in ONE write — the globals stay machine-anchored.
   const batch = await handlers.lanesSetBatch({ lanes: { lead: "codex/gpt-5.4:high", worker: "opencode/glm-5.1" }, projectRoot: projectA.root });
   assert.ok(batch.ok, batch.ok ? "" : batch.error);
   assert.equal(batch.lanes.supervisor, "claude/claude-opus-4-6:high");
   assert.equal(batch.lanes.lead, "codex/gpt-5.4:high");
   assert.equal(batch.lanes.worker, "opencode/glm-5.1");
   const afterBatch = readHomeConfig(home);
-  assert.equal(afterBatch.providers[FACTORY_ROLE_PROVIDERS.lead]?.models?.[0]?.id, "gpt-5.4", "factory-lead updates to Project A's lead model");
-  assert.equal(afterBatch.providers[FACTORY_ROLE_PROVIDERS.agent]?.models?.[0]?.id, "glm-5.1", "factory-peer updates to Project A's worker model");
+  assert.equal(afterBatch.providers[FACTORY_ROLE_PROVIDERS.lead]?.models?.[0]?.id, "zcode/glm-5.3", "factory-lead keeps the machine lead model, not A's gpt-5.4 override");
+  assert.equal(afterBatch.providers[FACTORY_ROLE_PROVIDERS.agent]?.models?.[0]?.id, "zcode/glm-5.3", "factory-peer keeps the machine worker model, not A's glm-5.1 override");
 
   // 3. Save the current 6-lane table as a profile (the + Save as Profile… act).
   const savedProfile = await handlers.profilesSave({ name: "A Setup", projectRoot: projectA.root });
@@ -5237,8 +5237,8 @@ test("Seam 2: saving lanes, batching, or applying a profile on Project A reconci
   const afterApply = readHomeConfig(home);
   assert.equal(
     afterApply.providers[FACTORY_ROLE_PROVIDERS.supervisor]?.models?.[0]?.id,
-    "claude-opus-4-6",
-    "applying a profile on Project B reconciles the New Chat picker to the applied profile's supervisor model",
+    "zcode/glm-5.3",
+    "applying a profile on Project B leaves the New Chat picker anchored to the machine table (v0.6.1, ADR 0057 §11)",
   );
 
   // 5. Tweak one lane on B — only B's override changes, the profile shows modified.
@@ -6420,6 +6420,36 @@ test("panel: Lead reports held with no live Supervisor raise the no-supervisor i
   const seatedSnap = await seated.handlers.snapshot({ projectRoot: seated.project.root });
   assert.ok(seatedSnap.ok, seatedSnap.ok ? "" : seatedSnap.error);
   assert.equal(seatedSnap.view.panel.needsYou.find((entry) => entry.kind === "no-supervisor"), undefined, "a live Supervisor receives the reports — no item");
+});
+
+test("panel: with a live Supervisor the seats view names every Supervisor candidate chat in the Project's workspace — the adopt action's rows; with no live Supervisor the list is empty (03, ADR 0057 §5)", async (t) => {
+  // A live bound Supervisor plus a picker chat started on the factory-supervisor provider.
+  const { handlers, project } = makePanelSurface(t, (p) => [
+    { id: "agent-sup", labels: seatLabels(p, "supervisor"), cwd: p.root },
+    { id: "agent-lead", labels: seatLabels(p, "lead"), cwd: p.root },
+    { id: "agent-candidate", title: "Chat about release", provider: "factory-supervisor", cwd: p.root },
+    { id: "agent-peer", labels: { seat: "agent", project: p.slug, task: "T-01" }, provider: "pi/zcode/glm-5.3", cwd: p.root },
+    { id: "agent-stranger", title: "Chat elsewhere", provider: "factory-supervisor", cwd: "/tmp" },
+  ], "adopt-rows");
+  const snap = await handlers.snapshot({ projectRoot: project.root });
+  assert.ok(snap.ok, snap.ok ? "" : snap.error);
+  assert.ok(snap.view.panel.seats !== null, "the seats view exists");
+  const candidates = snap.view.panel.seats.supervisorCandidates;
+  assert.deepEqual(
+    candidates.map((row) => row.agentId),
+    ["agent-candidate"],
+    "only the Project-workspace candidate chat is a candidate row — the bound seats, task Peers, and strangers never are",
+  );
+  assert.equal(candidates[0]?.title, "Chat about release");
+
+  // Without a live Supervisor the auto-bind door owns recovery — no candidate rows.
+  const bare = makePanelSurface(t, (p) => [
+    { id: "agent-lead", labels: seatLabels(p, "lead"), cwd: p.root },
+    { id: "agent-candidate", provider: "factory-supervisor", cwd: p.root },
+  ], "adopt-bare");
+  const bareSnap = await bare.handlers.snapshot({ projectRoot: bare.project.root });
+  assert.ok(bareSnap.ok, bareSnap.ok ? "" : bareSnap.error);
+  assert.deepEqual(bareSnap.view.panel.seats?.supervisorCandidates ?? [], [], "no live Supervisor — the next candidate binds itself, no adopt rows");
 });
 
 test("panel: Needs you lists every kind in the ADR order — needs-human, ceiling, seat, handoff, prerequisites, Open Design", async (t) => {
