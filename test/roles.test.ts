@@ -22,6 +22,7 @@ import {
   resolveEffectiveProviderFamily,
   sanitizeAgentCreateHookResult,
   inferRoleFromProviderId,
+  isSupervisorCandidate,
   SEAT_TITLES,
 } from "../plugin/server/roles.ts";
 import type { AgentCreateRequest } from "../plugin/server/roles.ts";
@@ -1984,4 +1985,35 @@ test("Peer create refreshes selected OAuth before provider fencing; coordination
   assert.ok(catalog.roles.supervisor.includes("supervisor_accept_task"));
   assert.ok(catalog.roles.lead.includes("lead_repoke_agent"));
   assert.ok(catalog.roles.lead.includes("lead_needs_human"));
+});
+
+// ---- Supervisor candidates (v0.6.1 W2, ADR 0057 §5) ------------------------------------------
+
+test("isSupervisorCandidate recognises the three candidate arms — the factory-supervisor provider, the seat labels, and Paseo's picker on the Supervisor lane — and refuses other seats (02, ADR 0057 §5)", (t) => {
+  const dir = makeTempDir("roles-supervisor-candidate-");
+  disposeDir(t, dir);
+  const stateDir = join(dir, "state");
+  mkdirSync(stateDir, { recursive: true });
+  writeFileSync(
+    join(stateDir, "lanes.json"),
+    `${JSON.stringify({ supervisor: "claude/opus-4-8", lead: "pi/zai/glm-5.3", worker: "pi/zai/glm-5.3" }, null, 2)}\n`,
+  );
+  const slug = "repo-abc123";
+
+  // Arm 1 — started on the `factory-supervisor` role provider (the `Supervisor (Factory)` picker row).
+  assert.equal(isSupervisorCandidate({ provider: "factory-supervisor" }, { stateDir, slug }), true);
+  assert.equal(isSupervisorCandidate({ provider: "factory-supervisor/opus-4-8" }, { stateDir, slug }), true);
+  // Arm 2 — carries `seat: supervisor` labels.
+  assert.equal(isSupervisorCandidate({ provider: "pi/zai/glm-5.3", labels: { seat: "supervisor" } }, { stateDir, slug }), true);
+  // Arm 3 — opened from Paseo's picker on the Supervisor lane's provider/model.
+  assert.equal(isSupervisorCandidate({ provider: "claude/opus-4-8" }, { stateDir, slug }), true);
+  assert.equal(isSupervisorCandidate({ provider: "claude", model: "opus-4-8" }, { stateDir, slug }), true);
+  assert.equal(isSupervisorCandidate({ provider: "claude/sonnet-4-9" }, { stateDir, slug }), false, "the picker arm needs the lane's model when the model is known");
+
+  // Never candidates: another provider family, the Lead and Peer identities, a task-bound Peer.
+  assert.equal(isSupervisorCandidate({ provider: "pi/zai/glm-5.3" }, { stateDir, slug }), false, "the Lead lane's family is not the Supervisor lane's");
+  assert.equal(isSupervisorCandidate({ provider: "factory-lead" }, { stateDir, slug }), false);
+  assert.equal(isSupervisorCandidate({ provider: "factory-peer" }, { stateDir, slug }), false);
+  assert.equal(isSupervisorCandidate({ provider: "claude/opus-4-8", labels: { seat: "lead" } }, { stateDir, slug }), false);
+  assert.equal(isSupervisorCandidate({ provider: "claude/opus-4-8", labels: { task: "T-01" } }, { stateDir, slug }), false);
 });

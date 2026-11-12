@@ -17,7 +17,7 @@ import type { SurfaceAgentSnapshot, SurfaceDaemonApi } from "../plugin/server/su
 import { handleSpoolRequest, parseSpoolRequest, spoolRootFor, startSpool } from "../plugin/server/spool.ts";
 import { createLeadMailRuntime, LEAD_ROTATE_TOKENS, readLeadContextTokens } from "../plugin/server/lead-mailbox.ts";
 import { deliverLeadMail as coreDeliver, enqueueLeadMail as coreEnqueue } from "../src/index.ts";
-import { disposeDir, gitCommitAll, makeTempDir, repoRoot } from "./helpers.ts";
+import { disposeDir, gitCommitAll, makeTempDir, repoRoot, writeLanes } from "./helpers.ts";
 
 /**
  * The v0.0.20 dispatch pipeline seam (spec §Testing Decisions 2, the
@@ -53,6 +53,7 @@ interface FakeAgent {
 function fakeDaemon(agents: FakeAgent[]) {
   const created: { config: { provider: string }; cwd: string; title: string; labels: Record<string, string>; prompt?: string }[] = [];
   const sent: { agentId: string; text: string }[] = [];
+  const labelUpdates: { agentId: string; labels: Record<string, string> }[] = [];
   const daemon: SurfaceDaemonApi = {
     agents: {
       list: async (options) => {
@@ -100,6 +101,13 @@ function fakeDaemon(agents: FakeAgent[]) {
           if (at !== -1) agents.splice(at, 1);
           return { archivedAt: new Date().toISOString() };
         },
+        update: async (input: { labels?: Record<string, string> }) => {
+          if (input.labels === undefined) return {};
+          labelUpdates.push({ agentId: id, labels: input.labels });
+          const agent = agents.find((entry) => entry.id === id);
+          if (agent !== undefined) agent.labels = { ...agent.labels, ...input.labels };
+          return {};
+        },
         timeline: { refetch: async () => ({ entries: [] }) },
       }),
     },
@@ -108,7 +116,7 @@ function fakeDaemon(agents: FakeAgent[]) {
       listModels: async () => ({ models: [] }),
     },
   };
-  return { daemon, created, sent, agents };
+  return { daemon, created, sent, agents, labelUpdates };
 }
 
 /** The production wiring in miniature: factory + surface handlers + Lead-mailbox runtime + spool. */
@@ -149,6 +157,7 @@ function makeSpooledSurface(t: TestContext, agents: FakeAgent[] = []) {
     },
     onLeadRetired: (input) => leadMail.settleLeadRotation(input.slug),
     leadDispatch: (request) => leadMail.dispatchLead(request),
+    pumpSupervisorMailbox: (slug) => leadMail.pumpProjectSupervisor(slug),
   });
   const leadMail = createLeadMailRuntime({
     factory,
@@ -2309,4 +2318,107 @@ test("the Supervisor recipient is re-resolved at every send — mail queued for 
   assert.ok(fake.sent[0]?.text.includes("Wave 2 complete"));
   const delivered = readMailbox(stateDir, slug).find((evt) => evt.type === "mail_delivered");
   assert.equal(delivered?.toAgentId, "agent-sup-new");
+});
+
+// ---- Supervisor binding: auto-bind and adopt (v0.6.1 W2, ADR 0057 §5) -----------------------
+
+test("a picker-opened candidate auto-binds once the old Supervisor is gone — the Seat kickoff packet leads the first turn and the held reports ride it (02, ADR 0057 §5)", async (t) => {
+  const { stateDir, slug, projectRoot, surface, leadMail, fake } = makeSpooledSurface(t);
+  writeLanes(stateDir, { supervisor: "claude/opus-4-8" });
+  // The bound Supervisor is archived/missing — the stale binding names a dead seat.
+  writeProjectRegistration(stateDir, slug, { root: projectRoot, supervisor: "sup-gone" });
+  await leadMail.reportSupervisor({ id: "rep-bind-1", kind: "supervisor_report", project: slug, message: "Wave 1 complete" });
+  await leadMail.reportSupervisor({ id: "rep-bind-2", kind: "supervisor_report", project: slug, message: "Wave 2 complete" });
+  assert.equal(fake.sent.length, 0, "the reports hold with no live Supervisor");
+
+  // The Owner opens a chat from Paseo's own picker on the Supervisor lane's
+  // provider, at the Project root — unlabelled, exactly the shape the plugin
+  // could not see before.
+  fake.agents.push({ id: "picker-chat-1", title: "Plan the next wave", status: "idle", provider: "claude/opus-4-8", cwd: projectRoot, labels: {} });
+  await surface.supervisorSessionOpened({ agentId: "picker-chat-1", cwd: projectRoot });
+
+  // Bound through the state writer, labelled, and served in one first turn.
+  assert.equal(readProjectRegistration(stateDir, slug)?.supervisor, "picker-chat-1", "the first candidate to open a session binds");
+  assert.deepEqual(fake.labelUpdates, [{ agentId: "picker-chat-1", labels: { seat: "supervisor", project: slug } }], "the adopted chat is labelled as the seat");
+  assert.equal(fake.created.length, 0, "auto-binding never creates an agent");
+  assert.equal(fake.sent.length, 1, "one first turn — kickoff packet then the held reports");
+  assert.match(fake.sent[0]!.text, /^--- \[paseo-factory seat kickoff packet · role=supervisor/, "the kickoff packet leads the first turn");
+  assert.ok(fake.sent[0]!.text.includes("Wave 1 complete"));
+  assert.ok(fake.sent[0]!.text.includes("Wave 2 complete"));
+  const delivered = readMailbox(stateDir, slug).filter((evt) => evt.type === "mail_delivered");
+  assert.equal(delivered.length, 1, "one first-turn delivery carries the whole held batch");
+  assert.equal(delivered[0]?.toAgentId, "picker-chat-1");
+  assert.deepEqual(delivered[0]?.mailIds, readMailbox(stateDir, slug).filter((evt) => evt.type === "mail_queued").map((evt) => evt.mailId));
+});
+
+test("auto-bind never displaces a live Supervisor and ignores chats off the Supervisor lane (02, ADR 0057 §5)", async (t) => {
+  const live: FakeAgent = { id: "sup-live-1", title: "Supervisor", status: "idle", labels: { seat: "supervisor", project: "x" } };
+  const { stateDir, slug, projectRoot, surface, leadMail, fake } = makeSpooledSurface(t, [live]);
+  writeLanes(stateDir, { supervisor: "claude/opus-4-8" });
+  live.labels = { seat: "supervisor", project: slug };
+  writeProjectRegistration(stateDir, slug, { root: projectRoot, supervisor: "sup-live-1" });
+
+  // A picker chat opens while the old Supervisor is still live: no adoption, no bind.
+  fake.agents.push({ id: "picker-chat-2", title: "Another chat", status: "idle", provider: "claude/opus-4-8", cwd: projectRoot, labels: {} });
+  await surface.supervisorSessionOpened({ agentId: "picker-chat-2", cwd: projectRoot });
+  assert.equal(readProjectRegistration(stateDir, slug)?.supervisor, "sup-live-1", "the live Supervisor keeps the seat — adopt is the Owner's choice");
+  assert.equal(fake.labelUpdates.length, 0);
+  assert.equal(fake.sent.length, 0);
+
+  // A chat on another provider family never binds even with the seat vacant.
+  const vacant = makeSpooledSurface(t);
+  writeLanes(vacant.stateDir, { supervisor: "claude/opus-4-8" });
+  writeProjectRegistration(vacant.stateDir, vacant.slug, { root: vacant.projectRoot, supervisor: null });
+  vacant.fake.agents.push({ id: "picker-chat-3", title: "Off-lane chat", status: "idle", provider: "pi/zai/glm-5.3", cwd: vacant.projectRoot, labels: {} });
+  await vacant.surface.supervisorSessionOpened({ agentId: "picker-chat-3", cwd: vacant.projectRoot });
+  assert.equal(readProjectRegistration(vacant.stateDir, vacant.slug)?.supervisor ?? null, null, "a chat off the Supervisor lane is not a candidate");
+  assert.equal(vacant.fake.sent.length, 0);
+  await vacant.leadMail.reportSupervisor({ id: "rep-nobind", kind: "supervisor_report", project: vacant.slug, message: "Still waiting" });
+  assert.equal(readMailbox(vacant.stateDir, vacant.slug).some((evt) => evt.type === "mail_delivered"), false, "the report stays held");
+});
+
+test("factory.supervisor.adopt binds, labels, kicks off, delivers held reports, and releases the previous Supervisor (02, ADR 0057 §5)", async (t) => {
+  // The old Supervisor is mid-turn (running), so the report below holds for the successor.
+  const old: FakeAgent = { id: "sup-old-1", title: "Supervisor", status: "running", labels: {} };
+  const { stateDir, slug, projectRoot, surface, leadMail, fake, stopped } = makeSpooledSurface(t, [old]);
+  writeLanes(stateDir, { supervisor: "claude/opus-4-8" });
+  old.labels = { seat: "supervisor", project: slug };
+  writeProjectRegistration(stateDir, slug, { root: projectRoot, supervisor: "sup-old-1" });
+  await leadMail.reportSupervisor({ id: "rep-adopt-1", kind: "supervisor_report", project: slug, message: "Wave 3 complete" });
+  assert.equal(fake.sent.length, 0, "the running Supervisor holds the report — it must reach the successor");
+  fake.agents.push({ id: "picker-chat-4", title: "Better model", status: "idle", provider: "claude/opus-4-8", cwd: projectRoot, labels: {} });
+
+  const reply = await surface.supervisorAdopt({ projectRoot, agentId: "picker-chat-4" });
+  assert.ok(reply.ok, reply.ok ? "" : reply.error);
+
+  // The previous Supervisor is released (archived — no parented Lead here).
+  assert.ok(stopped.includes("sup-old-1"), "the old Supervisor was stopped before the archive");
+  assert.equal(fake.agents.some((agent) => agent.id === "sup-old-1"), false, "the old Supervisor left the live listing");
+  // The candidate is bound, labelled, kicked off, and holds the reports.
+  assert.equal(readProjectRegistration(stateDir, slug)?.supervisor, "picker-chat-4");
+  assert.deepEqual(fake.labelUpdates, [{ agentId: "picker-chat-4", labels: { seat: "supervisor", project: slug } }]);
+  assert.equal(fake.sent.length, 1);
+  assert.match(fake.sent[0]!.text, /^--- \[paseo-factory seat kickoff packet · role=supervisor/);
+  assert.ok(fake.sent[0]!.text.includes("Wave 3 complete"));
+  assert.equal(readMailbox(stateDir, slug).find((evt) => evt.type === "mail_delivered")?.toAgentId, "picker-chat-4");
+});
+
+test("factory.supervisor.adopt refuses an agent outside the Project workspace and one already bound as the Lead (02, ADR 0057 §5)", async (t) => {
+  const lead: FakeAgent = { id: "lead-live-1", title: "Lead", status: "idle", labels: {} };
+  const { stateDir, slug, projectRoot, surface, fake } = makeSpooledSurface(t, [lead]);
+  writeLanes(stateDir, { supervisor: "claude/opus-4-8" });
+  lead.labels = { seat: "lead", project: slug };
+  lead.cwd = projectRoot; // inside the Project workspace, so the Lead-identity refusal is the one that fires
+  writeProjectRegistration(stateDir, slug, { root: projectRoot, lead: "lead-live-1" });
+  fake.agents.push({ id: "outside-chat", title: "Elsewhere", status: "idle", provider: "claude/opus-4-8", cwd: "/tmp", labels: {} });
+
+  const outside = await surface.supervisorAdopt({ projectRoot, agentId: "outside-chat" });
+  assert.ok(!outside.ok);
+  assert.equal(outside.code, "agent-outside-project");
+
+  const asLead = await surface.supervisorAdopt({ projectRoot, agentId: "lead-live-1" });
+  assert.ok(!asLead.ok);
+  assert.equal(asLead.code, "agent-bound-elsewhere");
+  assert.equal(readProjectRegistration(stateDir, slug)?.supervisor ?? null, null, "a refused adopt binds nothing");
+  assert.equal(fake.sent.length, 0);
 });

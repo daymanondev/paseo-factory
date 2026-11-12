@@ -65,7 +65,7 @@ import { setAgentModelViaCli, setAgentThinkingViaCli, stopAgentViaCli } from "./
 import { checkDaemonPluginUpdates, cleanupDaemonWorkspacesAndProjectsViaWs, getCachedPluginUpdateStatus, installDaemonPlugin, isPaseoWorkspaceArchivedOnDisk, listDaemonPlugins, manageDaemonPlugin, prunePaseoProjectRegistry, reloadDaemonConfigViaWs, restoreDaemonWorkspaceViaWs } from "./daemon-cli.ts";
 import type { DaemonPluginAction, DaemonPluginItem, DaemonPluginSourceStatus, DaemonPluginUpdateRow, DaemonReply } from "./daemon-cli.ts";
 import { effectiveLanesForReconcile, reconcilePaseoRoleProviders } from "./core/role-providers.ts";
-import { FACTORY_SEAT_PROVIDER_IDS, SEAT_TITLES, inferRoleFromProviderId, resolveEffectiveProviderFamily } from "./roles.ts";
+import { FACTORY_SEAT_PROVIDER_IDS, SEAT_TITLES, inferRoleFromProviderId, isSupervisorCandidate, resolveEffectiveProviderFamily } from "./roles.ts";
 import type { SeatName } from "./roles.ts";
 import { ensureProjectRegistered, writeProjectRegistration, resolveTargetProject } from "./projects.ts";
 import type { FactoryRegistry } from "./projects.ts";
@@ -95,6 +95,7 @@ import {
   projectDelete,
   projectReset,
   snapshot,
+  supervisorAdopt,
   supervisorEnsure,
   supervisorRevoke,
   supervisorStart,
@@ -241,6 +242,13 @@ export interface SurfaceDaemonApi {
     ref(id: string): {
       send(text: string): Promise<void>;
       archive(): Promise<{ archivedAt: string }>;
+      /**
+       * Best-effort agent update (v0.6.1, ADR 0057 §5 adopt/auto-bind step
+       * "label the agent") — optional: a daemon without an agent-update API
+       * skips the label write, and the registration binding alone carries the
+       * seat. Failures are logged, never a failed adopt.
+       */
+      update?(input: { labels?: Record<string, string>; title?: string }): Promise<unknown>;
       timeline: {
         refetch(options?: {
           direction?: "tail";
@@ -365,6 +373,14 @@ export interface SurfaceDeps {
    */
   leadDispatch?: (request: SpoolLeadDispatchRequest, options?: { existingDesignSnapshot: true }) => Promise<SpoolReply>;
   supervisorReport?: (request: SpoolSupervisorReportRequest) => Promise<SpoolReply>;
+  /**
+   * The Supervisor-mailbox pump door (v0.6.1, ADR 0057 §5): the Lead-mailbox
+   * runtime's `pumpProjectSupervisor` is the implementation — the bind paths
+   * (auto-bind on session open, `factory.supervisor.adopt`) call it so a newly
+   * bound Supervisor receives its Seat kickoff packet plus every held report in
+   * one first turn, through the same drain the mailbox owns.
+   */
+  pumpSupervisorMailbox?: (slug: string) => Promise<void>;
   /**
    * The vault transport seam (v0.0.21, ADR 0014 §2; tests): every external
    * CLI call the four `factory.vault.*` handlers make — `gh api`,
@@ -960,6 +976,144 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     } catch {
       return deps.factory.ledger.events;
     }
+  };
+
+  // ---- Supervisor binding: the shared adopt body (v0.6.1, ADR 0057 §5) --------------------
+
+  /**
+   * The newly bound Supervisor's first turn (v0.6.1, ADR 0057 §5): when
+   * Supervisor-addressed mail waits, the Lead-mailbox pump delivers the Seat
+   * kickoff packet plus the whole held batch in ONE send (the drain's own
+   * first-turn prepend). With nothing held, a chat that has not yet seen its
+   * first turn gets the kickoff packet alone. A chat the Owner already typed
+   * into keeps its history — its packet rides the next mail turn instead.
+   */
+  const kickoffSupervisorSeat = async (
+    daemon: SurfaceDaemonApi,
+    project: { slug: string; root: string },
+    agent: SurfaceAgentSnapshot,
+  ): Promise<void> => {
+    let held = 0;
+    try {
+      held = readLeadMailbox(join(projectStateDir(deps.stateDir, project.slug), "mailbox.jsonl")).supervisorQueued.length;
+    } catch {
+      held = 0;
+    }
+    if (held > 0) {
+      if (deps.pumpSupervisorMailbox !== undefined) await deps.pumpSupervisorMailbox(project.slug);
+      return; // no pump wired — the mail stays held, never dropped
+    }
+    if (typeof agent.lastUserMessageAt === "string" && agent.lastUserMessageAt.trim() !== "") return;
+    const loadedLanes = loadLanes(deps.stateDir, project.slug);
+    const kickoff = buildSeatKickoffPacket({
+      role: "supervisor",
+      projectSlug: project.slug,
+      projectRoot: project.root,
+      ledgerEvents: projectLedgerEventsOf(project.slug),
+      helperMcps: discoverHelperMcps({ stateDir: deps.stateDir, userHome: resolveSurfaceUserHome() }).servers,
+      ...(loadedLanes.ok ? { lanes: loadedLanes.lanes } : {}),
+      stateDir: deps.stateDir,
+      omitSystemPromptDuplicates: true,
+    });
+    try {
+      await daemon.agents.ref(agent.id).send(kickoff);
+      deps.onSeatKickoffSent?.({ slug: project.slug, seat: "supervisor", agentId: agent.id });
+    } catch (err) {
+      log(`supervisor: the kickoff packet to ${agent.id} did not land (${messageOf(err)}) — the seat is bound either way`);
+    }
+  };
+
+  /**
+   * The Supervisor-binding body the session-open auto-bind and
+   * `factory.supervisor.adopt` share (v0.6.1, ADR 0057 §5): label the agent
+   * (best-effort daemon update — the binding is the durable act), write the
+   * binding through the plugin's registration writer, then serve the first
+   * turn through `kickoffSupervisorSeat`. The caller owns the trigger's laws:
+   * auto-bind only when no live Supervisor exists; adopt releases the previous
+   * one first.
+   */
+  const bindSupervisorCandidate = async (
+    daemon: SurfaceDaemonApi,
+    project: { slug: string; root: string },
+    agent: SurfaceAgentSnapshot,
+  ): Promise<void> => {
+    try {
+      await daemon.agents.ref(agent.id).update?.({ labels: { ...agent.labels, seat: "supervisor", project: project.slug } });
+    } catch (err) {
+      log(`supervisor: labelling ${agent.id} as the seat did not land — the binding carries the seat (${messageOf(err)})`);
+    }
+    writeProjectRegistration(deps.stateDir, project.slug, {
+      root: project.root,
+      supervisor: agent.id,
+      ...(typeof agent.workspaceId === "string" && agent.workspaceId !== "" ? { workspaceId: agent.workspaceId } : {}),
+    });
+    log(`supervisor: ${agent.id} bound as ${project.slug}'s Supervisor (candidate binding, ADR 0057 §5)`);
+    await kickoffSupervisorSeat(daemon, project, agent);
+  };
+
+  /** The live daemon row for one agent id — undefined when it is absent or archived. */
+  const liveAgentById = async (daemon: SurfaceDaemonApi, agentId: string): Promise<SurfaceAgentSnapshot | undefined> => {
+    try {
+      const page = await daemon.agents.list({ filter: { includeArchived: false, includeBackground: true } });
+      return page.entries.map((entry) => entry.agent).find((agent) => agent.id === agentId && agent.archivedAt === null);
+    } catch {
+      return undefined;
+    }
+  };
+
+  /** Whether a live agent sits in the Project's workspace — cwd at/inside the root, or the Project's own workspace id. */
+  const agentInProjectWorkspace = (
+    agent: SurfaceAgentSnapshot,
+    project: { slug: string; root: string },
+    extraWorkspaceId?: string | null,
+  ): boolean => {
+    const normRoot = realpathSafe(project.root);
+    const cwd = realpathSafe(typeof agent.cwd === "string" ? agent.cwd : "");
+    if (cwd === normRoot || cwd.startsWith(`${normRoot}/`)) return true;
+    const registration = readProjectRegistration(deps.stateDir, project.slug);
+    const workspaceIds = [agent.workspaceId, typeof extraWorkspaceId === "string" ? extraWorkspaceId : undefined];
+    return workspaceIds.some((id) => typeof id === "string" && id !== "" && id === registration?.workspaceId);
+  };
+
+  /**
+   * The session-open auto-bind door (v0.6.1, ADR 0057 §5): the shell's
+   * `agent.session_open` hook calls this for every non-history open. When the
+   * Project's bound Supervisor is archived or missing, the first candidate to
+   * open a session binds automatically — REPLACING the old "bind only if
+   * empty" rule, so a stale binding no longer blocks recovery. A live
+   * Supervisor is never displaced (the panel's Use-this-chat-as-Supervisor —
+   * `factory.supervisor.adopt` — is the Owner's choice there), and a
+   * non-candidate chat is ignored. Void by design: never the caller's failure.
+   */
+  const supervisorSessionOpenedUnlocked = async (
+    input: { agentId: string; cwd: string; workspaceId?: string | null },
+    context?: SurfaceCallContext,
+  ): Promise<void> => {
+    const agentId = typeof input.agentId === "string" ? input.agentId.trim() : "";
+    const cwd = typeof input.cwd === "string" ? input.cwd.trim() : "";
+    if (agentId === "" || cwd === "") return;
+    const resolved = resolveProject(cwd);
+    if (!resolved.ok) return; // not inside a Project's repository — nothing to bind
+    const daemon = resolveDaemon(context);
+    const agent = await liveAgentById(daemon, agentId);
+    if (agent === undefined) return;
+    if (!agentInProjectWorkspace(agent, resolved, input.workspaceId)) return;
+    const registration = readProjectRegistration(deps.stateDir, resolved.slug);
+    let current: SurfaceAgentSnapshot | undefined;
+    try {
+      current = await seatOf(daemon, "supervisor", resolved.slug);
+    } catch {
+      return; // no daemon answer — never bind blind
+    }
+    if (current !== undefined && current.id !== agentId) return; // a live Supervisor holds the seat
+    if (current?.id === agentId && registration?.supervisor === agentId) {
+      // The bound live Supervisor reopening: held mail delivers, nothing rebinds.
+      if (deps.pumpSupervisorMailbox !== undefined) await deps.pumpSupervisorMailbox(resolved.slug);
+      return;
+    }
+    if (agentId === registration?.lead) return; // the Lead never becomes its own Supervisor
+    if (!isSupervisorCandidate(agent, { stateDir: deps.stateDir, slug: resolved.slug })) return;
+    await bindSupervisorCandidate(daemon, resolved, agent);
   };
 
   const ensureSeatUnlocked = async (
@@ -2508,6 +2662,75 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       return ensureSeat("supervisor", input, context);
     },
 
+    /**
+     * "Use this chat as Supervisor" (v0.6.1, ADR 0057 §5): adopt a live
+     * candidate chat as the Project's Supervisor. Refuses an agent outside the
+     * Project's workspace, one that is not a candidate, and one already bound
+     * as the Lead or a Peer. On success the previous Supervisor is released
+     * (archived, or marked released per the W1 parented-Lead rule) BEFORE the
+     * new binding, the agent is labelled, the binding is written through the
+     * state writer, and the first turn carries the Seat kickoff packet plus
+     * every held report.
+     */
+    async supervisorAdopt(input: { projectRoot: string; agentId: string }, context?: SurfaceCallContext) {
+      const project = projectOrRefusal(input.projectRoot);
+      if (!project.ok) return project;
+      const agentId = typeof input.agentId === "string" ? input.agentId.trim() : "";
+      if (agentId === "") {
+        return failure("invalid-agent", "adopt needs the agent id of the chat to adopt — pass the candidate chat's agentId");
+      }
+      return serializeSeat(`${project.slug}:supervisor`, async () => {
+        const daemon = resolveDaemon(context);
+        const registration = readProjectRegistration(deps.stateDir, project.slug);
+        const agent = await liveAgentById(daemon, agentId);
+        if (agent === undefined) {
+          return failure("agent-not-live", `agent ${agentId} is not a live chat — open it in Paseo first, then adopt it as the Supervisor`);
+        }
+        if (!agentInProjectWorkspace(agent, project)) {
+          return failure("agent-outside-project", `agent ${agentId} does not sit in ${project.root}'s workspace — open the chat inside the Project before adopting it as the Supervisor`);
+        }
+        if (agent.id === registration?.lead || agent.labels.seat === "lead" || inferRoleFromProviderId(agent.provider) === "lead") {
+          return failure("agent-bound-elsewhere", `agent ${agentId} is this Project's Lead — the Lead never becomes its own Supervisor`);
+        }
+        if ((typeof agent.labels.task === "string" && agent.labels.task !== "") || inferRoleFromProviderId(agent.provider) === "agent") {
+          return failure("agent-bound-elsewhere", `agent ${agentId} is a task Peer — a Peer never becomes the Supervisor`);
+        }
+        if (!isSupervisorCandidate(agent, { stateDir: deps.stateDir, slug: project.slug })) {
+          const loaded = loadLanes(deps.stateDir, project.slug);
+          return failure(
+            "agent-not-candidate",
+            `agent ${agentId} is not a Supervisor candidate — start it on the factory-supervisor provider, or open it on the Supervisor lane (${loaded.ok ? loaded.lanes.supervisor : "the configured lane"}) inside this Project`,
+          );
+        }
+        // The release precedes the binding so the retire sweep can only name
+        // the old seat (the candidate is still unbound at that point).
+        if (registration?.supervisor !== agentId) {
+          const retired = await retireSeatUnlocked("supervisor", project.slug, project.root, context);
+          if (!retired.ok && retired.code !== "no-supervisor") return retired;
+        }
+        await bindSupervisorCandidate(daemon, project, agent);
+        return {
+          ok: true as const,
+          agentId: agent.id,
+          slug: project.slug,
+          summary: `adopted ${agent.id} as ${project.slug}'s Supervisor — kickoff sent, held reports delivered, the previous seat released`,
+        };
+      });
+    },
+
+    /**
+     * The session-open auto-bind door (v0.6.1, ADR 0057 §5) — see
+     * `supervisorSessionOpenedUnlocked`. Serialized on the Project's supervisor
+     * seat lane like every seat act; void by design.
+     */
+    async supervisorSessionOpened(input: { agentId: string; cwd: string; workspaceId?: string | null }, context?: SurfaceCallContext): Promise<void> {
+      const cwd = typeof input?.cwd === "string" ? input.cwd.trim() : "";
+      if (cwd === "") return;
+      const resolved = resolveProject(cwd);
+      if (!resolved.ok) return;
+      await serializeSeat(`${resolved.slug}:supervisor`, () => supervisorSessionOpenedUnlocked(input, context));
+    },
+
     async supervisorStart(input: { projectRoot: string; directive?: string }, context?: SurfaceCallContext) {
       return startSupervisor(input, context);
     },
@@ -3552,6 +3775,7 @@ export function registerSurfaceRpc(
   server.handle(profilesApply, (input, context) => handlers.profilesApply(input, pass(context)));
   server.handle(profilesDelete, (input, context) => handlers.profilesDelete(input, pass(context)));
   server.handle(supervisorEnsure, (input, context) => handlers.supervisorEnsure(input, pass(context)));
+  server.handle(supervisorAdopt, (input, context) => handlers.supervisorAdopt(input, pass(context)));
   server.handle(supervisorStart, (input, context) => handlers.supervisorStart(input, pass(context)));
   server.handle(supervisorRevoke, (input, context) => handlers.supervisorRevoke(input, pass(context)));
   server.handle(leadEnsure, (input, context) => handlers.leadEnsure(input, pass(context)));

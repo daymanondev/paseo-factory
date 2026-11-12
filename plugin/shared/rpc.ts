@@ -154,6 +154,25 @@ export const profilesDelete = defineRpc({
   ]),
 });
 
+// "Use this chat as Supervisor" (v0.6.1 W2, ADR 0057 §5): adopt a live
+// candidate chat in the Project's workspace as the Supervisor — label it, bind
+// it through the state writer, send the Seat kickoff packet, deliver held
+// reports, and release the previous Supervisor. The panel's candidate row is
+// the caller (W3 wires the client button).
+export const supervisorAdopt = defineRpc({
+  name: "factory.supervisor.adopt",
+  input: z.object({
+    /** The Project scope — any directory inside its repository. */
+    projectRoot: z.string().min(1),
+    /** The live chat to adopt, named by its agent id. */
+    agentId: z.string().min(1),
+  }),
+  output: z.union([
+    z.object({ ok: z.literal(true), agentId: z.string(), slug: z.string(), summary: z.string() }),
+    Failure,
+  ]),
+});
+
 export const supervisorEnsure = defineRpc({
   name: "factory.supervisor.ensure",
   input: z.object({
