@@ -1385,7 +1385,8 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         }
       }
       // v0.6.1 (ADR 0057 §4): marked BEFORE the archive flies — reset/delete
-      // archives are the plugin's own, never a lost Lead.
+      // archives are the plugin's own, never a lost Lead (projectDelete has
+      // no retireSeat loop: this mark is its only guard).
       deps.markPluginArchive?.({ agentId: agent.id });
       try {
         await stop(agent.id, deps.home);

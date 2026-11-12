@@ -2426,6 +2426,43 @@ test("v0.6.1 (ADR 0057 §4): archives the plugin performs itself (manual rotate,
   assert.equal(fake.created.length, 0, "the archive event alone never spawns a successor — no dispatch, no ensure");
 });
 
+test("v0.6.1 (ADR 0057 §4): a Project reset's and delete's own archives never trigger lost-Lead recovery — no successor rises from the cleanup", async (t) => {
+  const lead: FakeAgent = { id: "agent-lead-reset", status: "idle", lastUserMessageAt: "2026-11-12T08:00:00.000Z" };
+  const { stateDir, slug, projectRoot, surface, leadMail, fake } = makeSpooledRuntime(t, [lead]);
+  lead.labels = { seat: "lead", project: slug };
+  lead.cwd = projectRoot;
+  await surface.leadEnsure({ projectRoot });
+  await leadMail.enqueueLeadMail(slug, { from: "supervisor", kind: "directive", text: "Directive in flight when the reset lands" });
+  await leadMail.pumpProjectLead(slug);
+
+  const reset = await surface.projectReset({ projectRoot });
+  assert.ok(reset.ok, reset.ok ? "" : reset.error);
+  assert.ok(reset.archivedSeats.includes(lead.id), "the reset archived the bound Lead itself");
+  assert.equal(fake.created.length, 0, "the reset's archive events never raise a successor through lost-Lead recovery");
+  assert.equal(readProjectRegistration(stateDir, slug)?.lead, undefined, "the reset cleared the binding its own way");
+
+  // projectDelete has no retireSeat loop — cleanupProjectArtifacts' own mark
+  // is its only guard, exercised here with a second bound Lead.
+  const doomedRoot = makeTempDir();
+  disposeDir(t, doomedRoot);
+  writeFileSync(join(doomedRoot, "README.md"), "doomed\n");
+  gitCommitAll(doomedRoot);
+  const doomed = ensureProjectRegistered(stateDir, doomedRoot);
+  assert.ok(doomed.ok);
+  const doomedLead: FakeAgent = { id: "agent-lead-doomed", status: "idle", labels: { seat: "lead", project: doomed.slug }, cwd: doomedRoot };
+  fake.agents.push(doomedLead);
+  writeProjectRegistration(stateDir, doomed.slug, { root: doomedRoot, lead: doomedLead.id });
+  // Queued mail for the doomed Project: without the mark, the cleanup's
+  // archive would run lost-Lead recovery and raise a successor to eat it.
+  await leadMail.enqueueLeadMail(doomed.slug, { from: "supervisor", kind: "directive", text: "Directive queued for the doomed Lead" });
+
+  const deleted = await surface.projectDelete({ projectSlug: doomed.slug });
+  assert.ok(deleted.ok, deleted.ok ? "" : deleted.error);
+  assert.ok(deleted.archivedSeats.includes(doomedLead.id), "the delete archived the bound Lead through the cleanup seam");
+  assert.equal(fake.agents.some((agent) => agent.id === doomedLead.id), false);
+  assert.equal(fake.created.length, 0, "the delete's archive events never raise a successor either");
+});
+
 test("v0.6.1 (ADR 0057 §4): the released Supervisor archives when the Lead handoff retires the parented Lead — end to end through the rotation machine", async (t) => {
   const supervisor: FakeAgent = { id: "agent-sup-rel", status: "idle" };
   const lead: FakeAgent = { id: "agent-lead-rel", status: "idle", lastUsage: { contextWindowUsedTokens: 135_000 }, parentAgentId: "agent-sup-rel" };
