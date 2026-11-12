@@ -110,6 +110,41 @@ test("StudioRelay mounts under a RN-like window and renders the SDK DocumentFram
   assert.doesNotMatch(html, /<iframe|<img/, "no DOM iframe or img element is created");
 });
 
+test("the Project panel mounts under a RN-like window on mobile and renders the no-supervisor item with the adopt button — the one seat write mobile allows (03, ADR 0057 §5/§10)", async () => {
+  const { ProjectPanel } = await load("plugin/client/factory/project-panel.tsx");
+  const { createElement } = await import("react");
+  const theme = { colors: { surface0: "#fff", surface1: "#fff", surface2: "#fff", foreground: "#111", foregroundMuted: "#555", accent: "#35a", border: "#ccc", statusSuccess: "#272", statusWarning: "#860", statusDanger: "#a33" } };
+  const panel = {
+    isProject: true,
+    name: "my-app",
+    summary: "Lead idle · 1 needs you",
+    needsYou: [{ key: "no-supervisor", kind: "no-supervisor", title: "No Supervisor · 2 reports waiting", detail: null, action: { kind: "start-supervisor", label: "Start Supervisor" } }],
+    seats: {
+      supervisor: { role: "supervisor", vacant: true, agentId: null, statusLabel: "vacant", tone: "normal", model: null, hint: null, context: null, handoff: null },
+      lead: { role: "lead", vacant: false, agentId: "agent-lead", statusLabel: "idle", tone: "normal", model: "glm-5.3", hint: null, context: null, handoff: null },
+      peers: [],
+      supervisorCandidates: [{ agentId: "agent-candidate", title: "Chat about release", statusLabel: "idle", tone: "normal", model: "glm-5.3" }],
+    },
+    openDesign: null,
+    onboarding: null,
+  };
+  const html = await mountUnderNativeWindow(async (createRoot, container, act) => {
+    const root = createRoot(container);
+    goNative();
+    await act(() => root.render(createElement(ProjectPanel, {
+      theme, panel, mobile: true, now: Date.now(), daemonError: null,
+      actions: { openAgent() {}, installPrerequisites() {}, rotateLead() {}, revokeSupervisor() {}, startSupervisor() {}, syncOpenDesign() {}, adoptSupervisor() {}, busy: false },
+    })));
+    const markup = container.innerHTML;
+    await act(() => root.unmount());
+    return markup;
+  });
+  assert.match(html, /No Supervisor · 2 reports waiting/, "the no-supervisor item renders on a RN-like window");
+  assert.match(html, /data-testid="factory-panel-adopt-supervisor"/, "the adopt button renders on mobile");
+  assert.match(html, /Use this chat as Supervisor/);
+  assert.doesNotMatch(html, /data-testid="factory-panel-start-supervisor"/, "Start Supervisor stays desktop-only on mobile");
+});
+
 test("the code text role carries a font family iOS ships, not the bare 'monospace' keyword", async () => {
   const ios = await load("plugin/client/kit/theme.ts", "ios");
   const android = await load("plugin/client/kit/theme.ts", "android");

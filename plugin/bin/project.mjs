@@ -8,7 +8,7 @@
  */
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { realpathSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { basename, isAbsolute, join, resolve } from "node:path";
 import { resolveRealGitBinary } from "./worktree-policy.mjs";
 
@@ -16,6 +16,36 @@ const GIT_TIMEOUT_MS = 10_000;
 
 export function projectStateDir(stateDir, projectSlug) {
   return join(stateDir, "projects", projectSlug);
+}
+
+/**
+ * The Supervisor binding's single writer for the zero-dependency CLIs (v0.6.1,
+ * ADR 0057 §11, spec story 18): the bridge's `supervisor_dispatch_lead` updates
+ * the acting Supervisor's binding through HERE — never a raw write of
+ * `<stateDir>/projects/<slug>/project.json` — so the write follows the plugin's
+ * writer law: read-merge-write with every unrelated field preserved verbatim,
+ * landed atomically (tmp + rename, the bridge's own spool-submit precedent) so
+ * a crash mid-write can never tear `project.json`. An absent or unparseable
+ * registration writes nothing (best-effort by design — the spool dispatch the
+ * caller performs is the act of record). Returns true when the file changed.
+ */
+export function writeSupervisorBinding(stateDir, projectSlug, agentId) {
+  const path = join(projectStateDir(stateDir, projectSlug), "project.json");
+  if (!existsSync(path)) return false;
+  let registration;
+  try {
+    registration = JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    return false; // a corrupt registration is never overwritten by a binding update
+  }
+  if (registration === null || typeof registration !== "object" || Array.isArray(registration)) return false;
+  if (registration.supervisor === agentId) return false;
+  registration.supervisor = agentId;
+  mkdirSync(projectStateDir(stateDir, projectSlug), { recursive: true });
+  const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
+  writeFileSync(tmp, `${JSON.stringify(registration, null, 2)}\n`);
+  renameSync(tmp, path);
+  return true;
 }
 
 /**

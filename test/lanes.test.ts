@@ -38,6 +38,10 @@ import {
 } from "../plugin/bin/lanes-config.mjs";
 import { copilotAnswerLines, disposeDir, factoryErrorCode, gitCommitAll, gitCommitChanges, makeTempDir, repoRoot, writeLanes } from "./helpers.ts";
 import * as core from "../src/index.ts";
+import { createFactory } from "../plugin/server/core/factory.ts";
+import { createSurfaceHandlers } from "../plugin/server/surface-rpc.ts";
+import type { SurfaceDaemonApi } from "../plugin/server/surface-rpc.ts";
+import { resolveProject } from "../plugin/server/core/project.ts";
 
 /**
  * The unified Lane config and the headless tool-less runner (v0.0.13, ADR
@@ -282,6 +286,98 @@ test("saveLanes(stateDir, patch, slug) writes only the Project file — machine 
     { lead: "claude/opus-4-8", supervisor: "pi/zcode/glm-5.3" },
     "a refused project save leaves the project file untouched",
   );
+});
+
+// ---- the Project-scoped save's daemon-global reconcile (v0.6.1, ADR 0057 §11) ---------------
+
+/**
+ * The fake daemon slice the lane-save handlers read — no live agents, an empty
+ * provider catalog (the role-providers suite's `emptyDaemon` precedent).
+ */
+function emptyLaneDaemon(): SurfaceDaemonApi {
+  return {
+    agents: {
+      list: async () => ({ entries: [] }),
+      create: async () => ({ id: "agent-x" }),
+      ref: () => ({ send: async () => {}, archive: async () => ({ archivedAt: new Date().toISOString() }), timeline: { refetch: async () => ({ entries: [] }) } }),
+    },
+    providers: {
+      listAvailable: async () => ({ providers: [] }),
+      listModels: async () => ({ models: [] }),
+    },
+  };
+}
+
+test("v0.6.1 (ADR 0057 §11): a Project-scoped lane save, batch, profile apply, or reset reconciles <paseoHome>/config.json from the MACHINE-scope lanes only — a Project override never rewrites the machine-wide factory-* entries", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const home = join(dir, "paseo-home");
+  const stateDir = join(home, "plugin-state", "paseo-factory");
+  const projectRoot = join(dir, "project-a");
+  mkdirSync(projectRoot, { recursive: true });
+  writeFileSync(join(projectRoot, "README.md"), "# a\n");
+  gitCommitAll(projectRoot, "seed a");
+  const resolved = resolveProject(projectRoot);
+  assert.ok(resolved.ok);
+  const slug = resolved.ok ? resolved.slug : "";
+  const factory = createFactory({ stateDir });
+  const handlers = createSurfaceHandlers({ factory, stateDir, home, daemon: emptyLaneDaemon(), onLog: () => {} });
+  mkdirSync(home, { recursive: true });
+  writeFileSync(join(home, "config.json"), `${JSON.stringify({ agents: { providers: {} }, daemon: { agentProfiles: [] } }, null, 2)}\n`);
+
+  // The machine table is the baseline the daemon-global providers must keep.
+  writeLanes(stateDir, { supervisor: "codex/gpt-5.5", worker: "pi/zcode/glm-5.3" });
+
+  const providerModel = (homePath: string): string | undefined => {
+    const parsed = JSON.parse(readFileSync(join(homePath, "config.json"), "utf8")) as {
+      agents?: { providers?: Record<string, { models?: { id: string }[] }> };
+      daemon?: { agentProfiles?: { id: string; model?: string }[] };
+    };
+    return parsed.agents?.providers?.["factory-supervisor"]?.models?.[0]?.id;
+  };
+  const pickerModel = (homePath: string): string | undefined => {
+    const parsed = JSON.parse(readFileSync(join(homePath, "config.json"), "utf8")) as {
+      daemon?: { agentProfiles?: { id: string; model?: string }[] };
+    };
+    return parsed.daemon?.agentProfiles?.find((row) => row.id === "factory-supervisor")?.model;
+  };
+
+  // A single Project-scoped save: the override file changes, config.json does not.
+  const saved = await handlers.lanesSet({ lane: "supervisor", value: "claude/claude-opus-4-6:high", projectRoot });
+  assert.ok(saved.ok, saved.ok ? "" : saved.error);
+  assert.equal(saved.lanes.supervisor, "claude/claude-opus-4-6:high", "the Project's effective table carries the override");
+  assert.equal(providerModel(home), "gpt-5.5", "factory-supervisor still maps the MACHINE supervisor lane after a Project save");
+  assert.equal(pickerModel(home), "gpt-5.5", "the Supervisor (Factory) picker row keeps the machine model");
+  const projectLanes = loadLanes(stateDir, slug);
+  assert.ok(projectLanes.ok, projectLanes.ok ? "" : projectLanes.reason);
+  assert.equal(
+    projectLanes.lanes.supervisor,
+    "claude/claude-opus-4-6:high",
+    "the Project's own override landed — the before-create rewrite applies it at launch",
+  );
+
+  // The batch save obeys the same law.
+  const batch = await handlers.lanesSetBatch({ lanes: { supervisor: "opencode/glm-5.1", worker: "claude-code/claude-opus-5" }, projectRoot });
+  assert.ok(batch.ok, batch.ok ? "" : batch.error);
+  assert.equal(providerModel(home), "gpt-5.5", "a Project batch save never rewrites the machine-wide factory-* entries");
+
+  // A Lane profile applied to the Project obeys it too.
+  const profile = await handlers.profilesSave({ name: "A Setup", projectRoot });
+  assert.ok(profile.ok, profile.ok ? "" : profile.error);
+  const applied = await handlers.profilesApply({ profileId: profile.profile.id, projectRoot });
+  assert.ok(applied.ok, applied.ok ? "" : applied.error);
+  assert.equal(applied.lanes.supervisor, "opencode/glm-5.1", "the apply wrote the Project's override (the batch table it saved)");
+  assert.equal(providerModel(home), "gpt-5.5", "a profile apply on a Project reconciles from the machine table");
+
+  // The Project reset inherits the machine table again — still the machine mapping.
+  const reset = await handlers.lanesReset({ projectRoot });
+  assert.ok(reset.ok, reset.ok ? "" : reset.error);
+  assert.equal(providerModel(home), "gpt-5.5");
+
+  // An UNSCOPED machine save still rewrites the globals — the one act that may.
+  const machineSave = await handlers.lanesSet({ lane: "supervisor", value: "omp/qwen3-coder" });
+  assert.ok(machineSave.ok, machineSave.ok ? "" : machineSave.error);
+  assert.equal(providerModel(home), "qwen3-coder", "an unscoped save reconciles the globals from the machine table it just wrote");
 });
 
 // ---- the headless tool-less runner ------------------------------------------------------

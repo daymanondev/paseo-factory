@@ -468,6 +468,22 @@ export const PanelSeatRowSchema = z.object({
 });
 export type PanelSeatRow = z.infer<typeof PanelSeatRowSchema>;
 
+/**
+ * One Supervisor candidate chat (v0.6.1, ADR 0057 §5) — a live chat in the
+ * Project's workspace the panel offers as "Use this chat as Supervisor"
+ * (`factory.supervisor.adopt`) while the old Supervisor still lives. Rows
+ * appear only then; with the seat vacant, the next candidate session binds
+ * itself through the auto-bind door.
+ */
+export const PanelSupervisorCandidateRowSchema = z.object({
+  agentId: z.string(),
+  title: z.string().nullable(),
+  statusLabel: z.string(),
+  tone: PanelToneSchema,
+  model: z.string().nullable(),
+});
+export type PanelSupervisorCandidateRow = z.infer<typeof PanelSupervisorCandidateRowSchema>;
+
 export const PanelPeerRowSchema = z.object({
   agentId: z.string(),
   task: z.string(),
@@ -504,7 +520,13 @@ export const PanelViewSchema = z.object({
   name: z.string().nullable(),
   summary: z.string(),
   needsYou: z.array(PanelNeedsYouItemSchema),
-  seats: z.object({ supervisor: PanelSeatRowSchema, lead: PanelSeatRowSchema, peers: z.array(PanelPeerRowSchema) }).nullable(),
+  seats: z.object({
+    supervisor: PanelSeatRowSchema,
+    lead: PanelSeatRowSchema,
+    peers: z.array(PanelPeerRowSchema),
+    /** The Project's Supervisor candidate chats — non-empty only while a live Supervisor holds the seat (v0.6.1, ADR 0057 §5). */
+    supervisorCandidates: z.array(PanelSupervisorCandidateRowSchema),
+  }).nullable(),
   openDesign: PanelOpenDesignSchema.nullable(),
   onboarding: PanelOnboardingSchema.nullable(),
 });

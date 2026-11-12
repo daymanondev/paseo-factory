@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Project-scoped lane saves no longer rewrite machine-wide role providers** (ADR 0057 §11): `lanesSet`, `lanesSetBatch`, `lanesReset`, and `profilesApply` scoped to a Project — and the plugin-boot reconcile — anchor `<paseoHome>/config.json`'s `factory-*` entries to the machine table only, so one Project's override never changes another Project's New Chat picker; the per-Project override keeps applying at `agent.create` (supersedes ADR 0026 §1's active-scope picker sync).
+- **The Lead handover file records its provenance** (ADR 0057 §11): `lead-handoff.md` is written behind a metadata header naming the outgoing Lead id and a written-at timestamp. A successor kickoff fed from disk dates the handover — a fresh file rides without a notice, a file older than the outgoing Lead's last observed activity carries the dated staleness line, and a file without metadata is stale-unknown; every notice tells the successor to re-read the Ledger and the repository, and the header itself never reaches a seat.
+- **The bridge writes the Supervisor binding through the single writer** (ADR 0057 §11): `supervisor_dispatch_lead`'s binding update rides `plugin/bin/project.mjs`'s atomic read-merge-write instead of a raw whole-file write, so a binding write can never tear `project.json` and no `project.json` path remains in `bridge.mjs`.
+
+### Added
+
+- **"Use this chat as Supervisor"** (ADR 0057 §5/§10): while a live Supervisor holds the seat, the panel's Seats section names every Supervisor candidate chat in the Project's workspace (the new `panel.seats.supervisorCandidates` rows) with a `factory.supervisor.adopt` button — the one seat write mobile may perform. The `no-supervisor` Needs-you item ("No Supervisor · N reports waiting" with Start Supervisor, desktop hint on mobile) renders with it.
+
 ## [0.6.0] - 2026-11-11
 
 **Breaking release** (ADR 0056): the Factory becomes a small, SLP-only panel inside the Paseo workspace of the Project it serves. SLP is the only workflow, the Paseo plugin client is the only surface, and everything below ships together as one release.

@@ -493,6 +493,94 @@ test("bridge.mjs executes Supervisor, Lead, and Agent tools end-to-end over the 
   }
 });
 
+// ---- v0.6.1 (ADR 0057 §11): the bridge's Supervisor binding write ---------------------------
+
+test("v0.6.1 (ADR 0057 §11): supervisor_dispatch_lead writes the Supervisor binding through the single-writer merge law — no raw write of project.json remains in the bridge", async (t) => {
+  const homeDir = mkdtempSync(join(tmpdir(), "factory-bridge-binding-home-"));
+  const stateDir = join(homeDir, "plugin-state", "paseo-factory");
+  const repoDir = makeGitRepo();
+  const factory = createFactory({ stateDir, eyeCliProbe: () => false });
+  const reg = ensureProjectRegistered(stateDir, repoDir);
+  assert.equal(reg.ok, true);
+  const registry = createFactoryRegistry({ stateDir, root: factory });
+
+  const sentPrompts: Array<{ id: string; text: string }> = [];
+  const fakeAgents = new Map<string, { id: string; status: string; archivedAt: string | null; cwd: string; labels: Record<string, string> }>([
+    ["sup-1", { id: "sup-1", status: "idle", archivedAt: null, cwd: repoDir, labels: { seat: "supervisor", project: reg.slug } }],
+    ["lead-1", { id: "lead-1", status: "idle", archivedAt: null, cwd: repoDir, labels: { seat: "lead", project: reg.slug } }],
+  ]);
+  const fakeDaemon = {
+    agents: {
+      list: async (opts?: { filter?: { labels?: Record<string, string> } }) => {
+        const wanted = opts?.filter?.labels ?? {};
+        const entries = [...fakeAgents.values()]
+          .filter((a) => Object.entries(wanted).every(([k, v]) => a.labels[k] === v))
+          .map((agent) => ({ agent }));
+        return { entries };
+      },
+      ref: (id: string) => ({
+        send: async (text: string) => {
+          sentPrompts.push({ id, text });
+          return { messageId: `msg-${sentPrompts.length}` };
+        },
+        cancel: async () => {},
+        archive: async () => {},
+      }),
+    },
+  };
+  const mailRuntime = createLeadMailRuntime({
+    stateDir,
+    factory,
+    registry,
+    daemon: fakeDaemon as never,
+    ensureLead: async () => ({ ok: true, agentId: "lead-1", created: false, projectRoot: repoDir, slug: reg.slug }),
+    retireLead: async () => ({ ok: true, agentId: "lead-1" }),
+  });
+  const spool = startSpool(stateDir, factory, {
+    registry,
+    pollMs: 25,
+    leadDispatch: mailRuntime.dispatchLead,
+    supervisorDispatch: mailRuntime.dispatchSupervisor,
+    supervisorReport: mailRuntime.reportSupervisor,
+    peerMail: mailRuntime.notifyPeer,
+    daemon: fakeDaemon as never,
+  });
+  try {
+    // A stale Supervisor binding plus fields a raw whole-file rewrite could drop.
+    writeProjectRegistration(stateDir, reg.slug, { root: repoDir, supervisor: "sup-stale", lead: "lead-1", rotationState: "normal" });
+
+    const correlations = new CorrelationRegistry(stateDir);
+    const supCorr = correlations.issue({ role: "supervisor", projectSlug: reg.slug, projectRoot: repoDir });
+    correlations.associate(supCorr.correlationId, "sup-1");
+
+    const dispatch = await runMcpSession({
+      args: ["--correlation", supCorr.correlationId, "--state-dir", stateDir],
+      cwd: repoDir,
+      requests: [
+        { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "supervisor_dispatch_lead", arguments: { message: "Directive from the acting supervisor" } } },
+      ],
+    });
+    const dispatchRes = dispatch[0].result as { isError?: boolean; content: Array<{ text: string }> };
+    assert.notEqual(dispatchRes.isError, true, dispatchRes.content[0].text);
+    assert.ok(sentPrompts.some((p) => p.id === "lead-1" && p.text.includes("Directive from the acting supervisor")), "the dispatch itself still routes to the Lead");
+
+    const after = readProjectRegistration(stateDir, reg.slug);
+    assert.equal(after?.supervisor, "sup-1", "the binding re-pointed at the acting Supervisor");
+    assert.equal(after?.lead, "lead-1", "the Lead binding survives the write (the single-writer merge law)");
+    assert.equal(after?.rotationState, "normal", "unrelated registration fields survive the write");
+  } finally {
+    spool.stop();
+    rmSync(homeDir, { recursive: true, force: true });
+    rmSync(repoDir, { recursive: true, force: true });
+  }
+
+  // The structural pin (spec story 18): the bridge itself never touches
+  // project.json — the binding rides the Project identity mirror's writer.
+  const bridgeSource = readFileSync(BRIDGE_BIN, "utf8");
+  assert.doesNotMatch(bridgeSource, /project\.json/, "no project.json path is named, parsed, or written inside bridge.mjs");
+  assert.match(bridgeSource, /from "\.\/project\.mjs"/, "the binding write rides the plugin/bin project mirror");
+});
+
 test("lead_update_notebook writes <projectStateDir>/notebook.md through JSON-RPC and refuses over-limit content with the named code (ticket 06, spec Seam 1)", async () => {
   const homeDir = mkdtempSync(join(tmpdir(), "factory-bridge-notebook-home-"));
   const stateDir = join(homeDir, "plugin-state", "paseo-factory");
@@ -1735,6 +1823,8 @@ test("bridge Task allocation inherits root dependencies and keeps them clean", a
   const copiedBridge = join(homeDir, "bridge.mjs");
   copyFileSync(BRIDGE_BIN, copiedBridge);
   copyFileSync(resolve(import.meta.dirname, "../plugin/bin/ledger-project.mjs"), join(homeDir, "ledger-project.mjs"));
+  copyFileSync(resolve(import.meta.dirname, "../plugin/bin/project.mjs"), join(homeDir, "project.mjs"));
+  copyFileSync(resolve(import.meta.dirname, "../plugin/bin/worktree-policy.mjs"), join(homeDir, "worktree-policy.mjs"));
   const commonExclude = readFileSync(join(repoDir, ".git", "info", "exclude"), "utf8");
   const factory = createFactory({ stateDir, eyeCliProbe: () => false });
   const reg = ensureProjectRegistered(stateDir, repoDir);
@@ -1933,6 +2023,8 @@ test("background MCP spawn reports the dispatched specialist lane", async t => {
   const bin = join(home, "fixture-bin"); mkdirSync(bin);
   copyFileSync(BRIDGE_BIN, join(bin, "bridge.mjs"));
   copyFileSync(resolve(import.meta.dirname, "../plugin/bin/ledger-project.mjs"), join(bin, "ledger-project.mjs"));
+  copyFileSync(resolve(import.meta.dirname, "../plugin/bin/project.mjs"), join(bin, "project.mjs"));
+  copyFileSync(resolve(import.meta.dirname, "../plugin/bin/worktree-policy.mjs"), join(bin, "worktree-policy.mjs"));
   writeFileSync(join(home, "endpoint.sock"), "fixture presence marker");
   // The external Driver boundary publishes its actual dispatch, which differs from the configured SLP worker.
   const projectLedger = join(stateDir, "projects", project.slug, "ledger.jsonl");

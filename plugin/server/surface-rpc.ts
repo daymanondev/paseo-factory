@@ -1743,10 +1743,14 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
   /**
    * Reconciles `<home>/config.json` (`factory-supervisor`, `factory-lead`,
    * `factory-peer`, plus the `Supervisor (Factory)` New Chat picker row) from
-   * the active scope's effective `Lanes` (ADR 0017 §1, ADR 0026 §1) so Paseo's
-   * New Chat picker immediately reflects the model and thinking level the Owner
-   * just saved or applied, while `server.before("agent.create")` enforces each
-   * Project's own `<projectStateDir>/lanes.json` at agent launch time.
+   * the machine-scope `Lanes` (ADR 0017 §1, ADR 0026 §1; v0.6.1's ADR 0057 §11
+   * narrows the scope to the machine table) so Paseo's New Chat picker tracks
+   * the machine lanes the Owner just saved, while `server.before("agent.create")`
+   * enforces each Project's own `<projectStateDir>/lanes.json` at agent launch
+   * time. An `lanesOverride` is given only by the UNSCOPED machine save (the
+   * table it just wrote); a Project-scoped save passes none, so the reconcile
+   * reads the machine scope and a Project override never rewrites the
+   * daemon-wide providers.
    */
   const reconcileRoleProvidersFromScope = (lanesOverride?: Lanes): void => {
     try {
@@ -2250,6 +2254,24 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       const supervisor = supervisorRaw === undefined ? null : (agents.find((agent) => agent.id === supervisorRaw!.id) ?? null);
       const lead = leadRaw === undefined ? null : (agents.find((agent) => agent.id === leadRaw!.id) ?? null);
 
+      // v0.6.1 (ADR 0057 §5): the Project's live Supervisor candidate chats —
+      // the raw agent census (a picker chat carries no task binding, so the
+      // scoped `relevant` list never sees it), narrowed to the Project's
+      // workspace and `isSupervisorCandidate`. Gathered only while a live
+      // Supervisor holds the seat: the panel's "Use this chat as Supervisor"
+      // rows are the Owner's choice between two live chats, and with the seat
+      // vacant the auto-bind door owns recovery.
+      let supervisorCandidates: AgentView[] = [];
+      if (project !== null && supervisorRaw !== undefined) {
+        for (const agent of rawAgents) {
+          if (supervisorCandidates.length >= 5) break;
+          if (agent.id === supervisorRaw.id || agent.id === leadRaw?.id) continue;
+          if (!agentInProjectWorkspace(agent, project)) continue;
+          if (!isSupervisorCandidate(agent, { stateDir: deps.stateDir, slug: project.slug })) continue;
+          supervisorCandidates.push(agentViewOf(agent, null, undefined));
+        }
+      }
+
       const scopedProject = project;
       const events =
         scopedProject === null
@@ -2353,6 +2375,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           rotationState: panelRegistration?.rotationState ?? null,
           handoffRequestedAt: panelRegistration?.handoffRequestedAt ?? null,
           heldSupervisorMailCount,
+          supervisorCandidates,
           now: Date.now(),
         },
       });
@@ -2462,11 +2485,12 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         }
       }
       log(`lanes: ${input.lane}=${saved.lanes[input.lane]}${projectSlug === undefined ? "" : ` (project ${projectSlug})`} (${modelSync})`);
-      // Reconcile `<home>/config.json` from the active scope's effective lanes
-      // (ADR 0026 §1) so Paseo's New Chat picker immediately shows the model
-      // and thinking level just saved, while `server.before("agent.create")`
-      // enforces each Project's own `<projectStateDir>/lanes.json` at launch.
-      reconcileRoleProvidersFromScope(saved.lanes);
+      // Reconcile `<home>/config.json` (v0.6.1, ADR 0057 §11): the unscoped
+      // machine save reconciles from the table it just wrote; a Project-scoped
+      // save reconciles from the MACHINE scope only, so a Project override
+      // never rewrites the daemon-wide `factory-*` entries — the before-create
+      // rewrite applies it at launch.
+      reconcileRoleProvidersFromScope(projectSlug === undefined ? saved.lanes : undefined);
       return { ok: true as const, lanes: saved.lanes, modelSync };
     },
 
@@ -2524,7 +2548,10 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         if (inheritedSync !== undefined) modelSync = inheritedSync;
       }
       log(`lanes: batch ${Object.keys(sanitized).join("+")}${projectSlug === undefined ? "" : ` (project ${projectSlug})`} → ${saved.path} (${modelSync})`);
-      reconcileRoleProvidersFromScope(saved.lanes);
+      // v0.6.1 (ADR 0057 §11): only the unscoped machine batch reconciles the
+      // daemon globals from the table it wrote; a Project batch stays
+      // machine-anchored (the before-create rewrite applies the override).
+      reconcileRoleProvidersFromScope(projectSlug === undefined ? saved.lanes : undefined);
       return { ok: true as const, lanes: saved.lanes, modelSync };
     },
 
@@ -2553,7 +2580,10 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         context,
       });
       log(`lanes: reset project ${project.slug} to the machine table (removed=${reset.removed}) (${modelSync})`);
-      reconcileRoleProvidersFromScope(reset.lanes);
+      // v0.6.1 (ADR 0057 §11): the reset is Project-scoped, so the daemon
+      // globals reconcile from the machine scope — never the reset Project's
+      // inherited table (which equals the machine table anyway).
+      reconcileRoleProvidersFromScope();
       return { ok: true as const, lanes: reset.lanes, removed: reset.removed, modelSync };
     },
 
@@ -2633,9 +2663,10 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         if (inheritedSync !== undefined) modelSync = inheritedSync;
       }
       log(`profiles: applied "${applied.profile.name}" (${applied.profile.id})${projectSlug === undefined ? " to the machine table" : ` to project ${projectSlug}`} → ${applied.path} (${modelSync})`);
-      // Reconcile `<home>/config.json` from the applied scope's effective lanes
-      // so Paseo's New Chat picker immediately shows the applied Supervisor model.
-      reconcileRoleProvidersFromScope(applied.lanes);
+      // v0.6.1 (ADR 0057 §11): a profile applied to the MACHINE table
+      // reconciles the globals from it; a profile applied to a Project stays
+      // machine-anchored (the Project's override applies at agent create).
+      reconcileRoleProvidersFromScope(projectSlug === undefined ? applied.lanes : undefined);
       return { ok: true as const, lanes: applied.lanes, modelSync };
     },
 

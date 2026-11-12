@@ -18,6 +18,9 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 // caller's Project's isolated <stateDir>/projects/<slug>/ledger.jsonl — the
 // legacy root ledger answers only when no per-Project ledger exists.
 import * as ledgerProject from "./ledger-project.mjs";
+// The Supervisor binding's single writer (v0.6.1, ADR 0057 §11, spec story
+// 18): the bridge never writes the Project registration itself.
+import * as projectIdentity from "./project.mjs";
 
 const DEFAULT_WAIT_MS = 600_000;
 const GIT_TIMEOUT_MS = 15_000;
@@ -1591,15 +1594,12 @@ async function handleToolCall(name, rawArgs) {
         ? resolve(args.workspace.trim())
         : ctx.projectRoot ?? ctx.workspace;
     if (ctx.agentId && ctx.projectSlug) {
-      const projPath = join(ctx.stateDir, "projects", ctx.projectSlug, "project.json");
+      // v0.6.1 (ADR 0057 §11, spec story 18): the binding write rides the
+      // project identity mirror's single writer — the bridge itself never
+      // reads or writes the Project registration, so a binding update can
+      // never tear it.
       try {
-        if (existsSync(projPath)) {
-          const reg = JSON.parse(readFileSync(projPath, "utf8"));
-          if (reg && typeof reg === "object" && reg.supervisor !== ctx.agentId) {
-            reg.supervisor = ctx.agentId;
-            writeFileSync(projPath, `${JSON.stringify(reg, null, 2)}\n`);
-          }
-        }
+        projectIdentity.writeSupervisorBinding(ctx.stateDir, ctx.projectSlug, ctx.agentId);
       } catch {
         // best-effort active supervisor binding update
       }

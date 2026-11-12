@@ -10,7 +10,7 @@
  */
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import type { AgentView, PanelNeedsYouItem, PanelOpenDesign, PanelPeerRow, PanelSeatRow, PanelTone, PanelView, ProjectView, TaskView } from "../shared/view.ts";
+import type { AgentView, PanelNeedsYouItem, PanelOpenDesign, PanelPeerRow, PanelSeatRow, PanelSupervisorCandidateRow, PanelTone, PanelView, ProjectView, TaskView } from "../shared/view.ts";
 import { MAX_ATTEMPTS } from "./core/events.ts";
 import { openDesignBundleReady, readOpenDesignLink } from "./core/open-design/open-design-link-state.ts";
 import { readProjectSettings } from "./core/project-settings.ts";
@@ -65,6 +65,14 @@ export interface PanelInput {
    * `no-supervisor` Needs-you item carries. 0 when none is held.
    */
   heldSupervisorMailCount: number;
+  /**
+   * The Project's live Supervisor candidate chats (v0.6.1, ADR 0057 §5) —
+   * gathered by the snapshot against `isSupervisorCandidate` and the Project's
+   * workspace. Rendered as "Use this chat as Supervisor" rows only while a
+   * live Supervisor holds the seat; when the seat is vacant the auto-bind
+   * door owns recovery and the fold renders none.
+   */
+  supervisorCandidates: readonly AgentView[];
   now: number;
 }
 
@@ -179,6 +187,27 @@ function seatRow(role: SeatRole, agent: AgentView | null): PanelSeatRow {
     },
     handoff: { state, label: handoffLabel(state, queued), queuedMailCount: queued },
   };
+}
+
+/**
+ * The Supervisor candidate rows (v0.6.1, ADR 0057 §5): a candidate chat only
+ * carries an adopt row while a live Supervisor holds the seat — the Owner
+ * chooses between them ("Use this chat as Supervisor", `factory.supervisor.adopt`).
+ * With the seat vacant the auto-bind door binds the first candidate session
+ * itself, so there is nothing to choose and no row renders.
+ */
+function supervisorCandidateRows(input: PanelInput): PanelSupervisorCandidateRow[] {
+  if (input.supervisor === null) return [];
+  return input.supervisorCandidates.map((agent) => {
+    const status = statusOf(agent);
+    return {
+      agentId: agent.id,
+      title: agent.title,
+      statusLabel: status.label,
+      tone: status.tone,
+      model: modelOf(agent),
+    };
+  });
 }
 
 /** Live Peers: task-bound agents that are neither seat, whose Task is still open. */
@@ -345,7 +374,12 @@ export function foldPanel(input: PanelInput): PanelView {
     name: input.project.name ?? input.project.slug,
     summary: summaryOf(input, items.length, peers.length),
     needsYou: items,
-    seats: { supervisor: seatRow("supervisor", input.supervisor), lead: seatRow("lead", input.lead), peers },
+    seats: {
+      supervisor: seatRow("supervisor", input.supervisor),
+      lead: seatRow("lead", input.lead),
+      peers,
+      supervisorCandidates: supervisorCandidateRows(input),
+    },
     openDesign: openDesignOf(input.openDesign),
     onboarding: null,
   };

@@ -75,6 +75,8 @@ test("CLI, copied-alone MCP bridge, driver and startup agree on the Ledger integ
       const bridge = join(dir, "bridge.mjs");
       copyFileSync(join(repoRoot, "plugin/bin/bridge.mjs"), bridge);
       copyFileSync(join(repoRoot, "plugin/bin/ledger-project.mjs"), join(dir, "ledger-project.mjs"));
+      copyFileSync(join(repoRoot, "plugin/bin/project.mjs"), join(dir, "project.mjs"));
+      copyFileSync(join(repoRoot, "plugin/bin/worktree-policy.mjs"), join(dir, "worktree-policy.mjs"));
       const cli = spawnSync(process.execPath, [join(repoRoot, "plugin/bin/factory.mjs"), "status", "--home", dir], { encoding: "utf8" });
       const mcp = mcpStatus(stateDir, bridge);
 
@@ -197,6 +199,8 @@ test("v2 green Gate missing its exit is corrupt at CLI, copied MCP, driver and L
   const bridge = join(dir, "bridge.mjs");
   copyFileSync(join(repoRoot, "plugin/bin/bridge.mjs"), bridge);
   copyFileSync(join(repoRoot, "plugin/bin/ledger-project.mjs"), join(dir, "ledger-project.mjs"));
+  copyFileSync(join(repoRoot, "plugin/bin/project.mjs"), join(dir, "project.mjs"));
+  copyFileSync(join(repoRoot, "plugin/bin/worktree-policy.mjs"), join(dir, "worktree-policy.mjs"));
   const cli = spawnSync(process.execPath, [join(repoRoot, "plugin/bin/factory.mjs"), "status", "--home", dir], { encoding: "utf8" });
   assert.equal(cli.status, 2, cli.stdout);
   assert.match(cli.stderr, /line 4.*valid ledger event/);
@@ -255,6 +259,8 @@ test("CLI and copied-alone MCP status share current-epoch review and acceptance 
   const bridge = join(dir, "bridge.mjs");
   copyFileSync(join(repoRoot, "plugin/bin/bridge.mjs"), bridge);
   copyFileSync(join(repoRoot, "plugin/bin/ledger-project.mjs"), join(dir, "ledger-project.mjs"));
+  copyFileSync(join(repoRoot, "plugin/bin/project.mjs"), join(dir, "project.mjs"));
+  copyFileSync(join(repoRoot, "plugin/bin/worktree-policy.mjs"), join(dir, "worktree-policy.mjs"));
   const contract = { event: "contract_set", task: "T", workspace: dir, gate: "true", artifact: "out", freshEyes: true };
   const attempt = [
     { event: "claim_reported", task: "T", attempt: 1, sha: "abc" },
@@ -290,6 +296,8 @@ test("v2 status refuses contradictory green Gates while valid red and historical
   const bridge = join(dir, "bridge.mjs");
   copyFileSync(join(repoRoot, "plugin/bin/bridge.mjs"), bridge);
   copyFileSync(join(repoRoot, "plugin/bin/ledger-project.mjs"), join(dir, "ledger-project.mjs"));
+  copyFileSync(join(repoRoot, "plugin/bin/project.mjs"), join(dir, "project.mjs"));
+  copyFileSync(join(repoRoot, "plugin/bin/worktree-policy.mjs"), join(dir, "worktree-policy.mjs"));
   const rows = [
     { seq: 1, ts, event: "contract_set", task: "T", workspace: dir, gate: "true", artifact: "out" },
     { seq: 2, ts, event: "claim_reported", task: "T", attempt: 1, sha: "abc" },

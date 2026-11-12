@@ -17,6 +17,7 @@ import {
 import { projectLanesPath, saveLanes } from "../src/lanes.ts";
 import type { Lanes } from "../src/lanes.ts";
 import { laneProviderConfig } from "../plugin/server/provider-lanes.ts";
+import { resolveProject } from "../src/project.ts";
 import { disposeDir, gitCommitAll, makeTempDir, writeLanes } from "./helpers.ts";
 
 /**
@@ -284,7 +285,7 @@ test("v0.0.27 (ADR 0017 §1): an existing config.json that is not valid JSON is 
   assert.equal(statSync(join(freshHome, "config.json")).mode & 0o777, 0o600, "a first write starts owner-only");
 });
 
-test("v0.0.27 (ADR 0017 §1): effectiveLanesForReconcile reads the machine table when it exists, else the cleanest table across registered project overrides", (t) => {
+test("v0.0.27 (ADR 0017 §1) + v0.6.1 (ADR 0057 §11): effectiveLanesForReconcile reads the machine table when it exists (even when a Project override file is newer), else the cleanest table across registered project overrides", (t) => {
   const dir = makeTempDir();
   disposeDir(t, dir);
   const stateDir = join(dir, "state");
@@ -312,6 +313,14 @@ test("v0.0.27 (ADR 0017 §1): effectiveLanesForReconcile reads the machine table
   assert.ok(machine.ok);
   assert.equal(machine.lanes.supervisor, "opencode/glm-5.1", "the machine file wins when it exists");
   assert.equal(machine.lanes.worker, "pi/zcode/glm-5.3", "project-only lanes do not leak into the machine table");
+  // v0.6.1 (ADR 0057 §11): a Project override file modified AFTER the machine
+  // file no longer captures the reconcile — a Project save must never rewrite
+  // the machine-wide factory-* providers, not at the save and not at boot.
+  saveLanes(stateDir, { supervisor: "codex/gpt-5.5" }, "proj-a-111111");
+  const newerProject = effectiveLanesForReconcile(stateDir);
+  assert.ok(newerProject.ok);
+  assert.equal(newerProject.lanes.supervisor, "opencode/glm-5.1", "a newer Project override never captures the machine-anchored reconcile");
+  assert.equal(newerProject.lanes.worker, "pi/zcode/glm-5.3");
   // A project override file with an invalid value is skipped, never trusted (the eye.json law).
   writeFileSync(projectLanesPath(stateDir, "proj-a-111111"), JSON.stringify({ supervisor: "auto" }));
   const skipped = effectiveLanesForReconcile(join(dir, "state-2"));
@@ -386,7 +395,7 @@ test("v0.0.27 (ADR 0017 §1): lanesSet reconciles <home>/config.json when a Supe
 
 // ---- Seam 2 (ADR 0026 §1): active-scope picker sync + reset to machine default ----
 
-test("ADR 0026 §1: a project-scoped lanesSet or lanesSetBatch reconciles <home>/config.json from the active scope's effective lanes so the New Chat picker immediately shows the configured model, and lanesReset restores the machine default", async (t) => {
+test("ADR 0026 §1, superseded v0.6.1 (ADR 0057 §11): a project-scoped lanesSet, lanesSetBatch, or lanesReset reconciles <home>/config.json from the MACHINE table only — a Project override never rewrites the machine-wide factory-* entries (the before-create rewrite applies it at launch)", async (t) => {
   const dir = makeTempDir();
   disposeDir(t, dir);
   const home = join(dir, "paseo-home");
@@ -401,6 +410,8 @@ test("ADR 0026 §1: a project-scoped lanesSet or lanesSetBatch reconciles <home>
   gitCommitAll(projectB, "seed b");
   writeProjectRegistration(stateDir, "project-a-111111", { root: projectA });
   writeProjectRegistration(stateDir, "project-b-222222", { root: projectB });
+  const slugA = resolveProject(projectA);
+  assert.ok(slugA.ok, slugA.ok ? "" : slugA.reason);
   const factory = createFactory({ stateDir });
   const handlers = createSurfaceHandlers({ factory, stateDir, home, daemon: emptyDaemon(), onLog: () => {} });
   writeConfig(home, liveLikeConfig());
@@ -416,29 +427,34 @@ test("ADR 0026 §1: a project-scoped lanesSet or lanesSetBatch reconciles <home>
     "the global factory-supervisor maps the machine supervisor lane",
   );
 
-  // Saving Project A's lanes reconciles <home>/config.json from Project A's effective lanes
-  // so Paseo Desktop's New Chat picker immediately shows Project A's Supervisor model.
+  // Saving Project A's lanes leaves <home>/config.json anchored to the MACHINE
+  // table (v0.6.1, ADR 0057 §11) — A's override is applied per-Project by the
+  // before-create rewrite, never by rewriting the machine-wide factory-* entries.
   const aSave = await handlers.lanesSet({ lane: "supervisor", value: "claude/claude-opus-4-6:high", projectRoot: projectA });
   assert.ok(aSave.ok, aSave.ok ? "" : aSave.error);
   const aBatch = await handlers.lanesSetBatch({ lanes: { lead: "codex/gpt-5.4:high", worker: "opencode/glm-5.1" }, projectRoot: projectA });
   assert.ok(aBatch.ok, aBatch.ok ? "" : aBatch.error);
   const afterA = readConfig(home);
   const providers = (afterA.agents as { providers: Record<string, { extends?: string; models?: { id: string }[] }> }).providers;
-  assert.equal(providers[FACTORY_ROLE_PROVIDERS.supervisor]?.models?.[0]?.id, "claude-opus-4-6", "factory-supervisor updates to Project A's saved supervisor model");
-  assert.equal(providers[FACTORY_ROLE_PROVIDERS.lead]?.extends, "codex", "factory-lead updates to Project A's saved lead family");
-  assert.equal(providers[FACTORY_ROLE_PROVIDERS.agent]?.models?.[0]?.id, "glm-5.1", "factory-peer updates to Project A's saved worker model");
+  assert.equal(providers[FACTORY_ROLE_PROVIDERS.supervisor]?.models?.[0]?.id, "gpt-5.5", "factory-supervisor keeps mapping the MACHINE supervisor lane after A's save");
+  assert.equal(providers[FACTORY_ROLE_PROVIDERS.lead]?.extends, "omp", "factory-lead keeps the machine lead family (omp), not A's codex override");
+  assert.equal(providers[FACTORY_ROLE_PROVIDERS.agent]?.models?.[0]?.id, "zcode/glm-5.3", "factory-peer keeps the machine worker model, not A's glm-5.1 override");
   const profile = ((afterA.daemon) as { agentProfiles: { id: string; model?: string; thinkingOptionId?: string }[] }).agentProfiles.find((row) => row.id === "factory-supervisor");
-  assert.equal(profile?.model, "claude-opus-4-6", "the Supervisor (Factory) picker row immediately displays Project A's model");
-  assert.equal(profile?.thinkingOptionId, "high");
+  assert.equal(profile?.model, "gpt-5.5", "the Supervisor (Factory) picker row keeps the machine model");
+  assert.equal(
+    (JSON.parse(readFileSync(projectLanesPath(stateDir, slugA.ok ? slugA.slug : ""), "utf8")) as { supervisor?: string }).supervisor,
+    "claude/claude-opus-4-6:high",
+    "A's own override file did land — the before-create rewrite is what applies it",
+  );
 
-  // Resetting Project A back to the machine default reconciles <home>/config.json back to the machine table.
+  // Resetting Project A back to the machine default leaves the same machine mapping.
   const resetA = await handlers.lanesReset({ projectRoot: projectA });
   assert.ok(resetA.ok, resetA.ok ? "" : resetA.error);
   const afterReset = readConfig(home);
   assert.equal(
     ((afterReset.agents as { providers: Record<string, { models?: { id: string }[] }> }).providers[FACTORY_ROLE_PROVIDERS.supervisor]?.models?.[0]?.id),
     "gpt-5.5",
-    "lanesReset restores the machine supervisor model in <home>/config.json",
+    "lanesReset keeps the machine supervisor model in <home>/config.json",
   );
 
   // An unscoped save also reconciles <home>/config.json from the machine table.
