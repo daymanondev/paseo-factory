@@ -98,7 +98,7 @@ const noopActions = () => ({
   openAgent() {}, installPrerequisites() {}, handoffLead() {}, revokeSupervisor() {}, startSupervisor() {}, syncOpenDesign() {}, adoptSupervisor() {}, busy: false,
 });
 
-async function render(panel: PanelView, props: { mobile?: boolean; openDesignActions?: unknown; menu?: unknown; initialUi?: Record<string, unknown>; actions?: Record<string, unknown> } = {}): Promise<string> {
+async function render(panel: PanelView, props: { mobile?: boolean; openDesignActions?: unknown; menu?: unknown; initialUi?: Record<string, unknown>; actions?: Record<string, unknown>; width?: number; skillPacks?: unknown[] } = {}): Promise<string> {
   const { ProjectPanel } = await loadPanel();
   const { createElement } = await import("react");
   const { renderToStaticMarkup } = await import("react-dom/server");
@@ -106,6 +106,7 @@ async function render(panel: PanelView, props: { mobile?: boolean; openDesignAct
     createElement(ProjectPanel, {
       theme, panel, mobile: props.mobile ?? false, now: Date.now(), daemonError: null,
       actions: { ...noopActions(), ...(props.actions ?? {}) },
+      width: props.width, skillPacks: props.skillPacks,
       ...(props.openDesignActions === undefined ? {} : { openDesignActions: props.openDesignActions }),
       ...(props.menu === undefined ? {} : { menu: props.menu }),
       ...(props.initialUi === undefined ? {} : { initialUi: props.initialUi }),
@@ -150,9 +151,10 @@ test("Needs you renders each item with its title, detail and exactly one primary
   assert.doesNotMatch(html, /Start Lead/i, "the Lead is only ever dispatched by the Supervisor");
 });
 
-test("colour is only for exceptions — healthy seats draw none, an errored seat is red, a waiting one amber", async () => {
+test("seat states pair working, error and waiting words with the Factory palette", async () => {
   const healthy = await render(makePanel());
-  assert.equal(healthy.includes(DANGER) || healthy.includes(WARNING), false, "a healthy panel draws no warning or danger colour");
+  assert.ok(healthy.includes("#337e58"), "a working seat is green");
+  assert.match(healthy, /working/);
 
   const sick = makePanel({
     seats: {
@@ -163,9 +165,9 @@ test("colour is only for exceptions — healthy seats draw none, an errored seat
   });
   const html = await render(sick);
   const supervisorRow = html.slice(html.indexOf("factory-panel-seat-supervisor"), html.indexOf("factory-panel-seat-lead"));
-  assert.ok(supervisorRow.includes(DANGER), "the errored seat is red");
+  assert.ok(supervisorRow.includes("#c8253d"), "the errored seat is red");
   const leadRow = html.slice(html.indexOf("factory-panel-seat-lead"), html.indexOf("factory-panel-peers"));
-  assert.ok(leadRow.includes(WARNING), "the waiting seat is amber");
+  assert.ok(leadRow.includes("#8f6802"), "the waiting seat is amber");
 });
 
 test("a handoff that is waiting is amber words on the Lead row; a vacant Lead only says to ask the Supervisor — no start button", async () => {
@@ -323,22 +325,16 @@ test("the header ⋯ appears only when the shell supplies a menu, and its conten
   assert.ok(hasHook(open, "factory-panel-menu"));
 });
 
-test("Project menu on desktop: model overrides, skill pack toggles, Open Design link controls, and two-step Reset / Delete", async () => {
+test("Project menu on desktop preserves two-step Reset / Delete", async () => {
   const { ProjectMenu } = await loadMenu();
   const { createElement } = await import("react");
   const { renderToStaticMarkup } = await import("react-dom/server");
   const props = {
     theme, mobile: false, busy: false, missingRoot: false,
-    modelsSlot: createElement("div", { "data-testid": "models-slot" }, "lanes"),
-    openDesignSlot: createElement("div", { "data-testid": "od-slot" }, "link"),
-    skillPacks: [
-      { id: "expo", label: "Expo", enabled: true, autoDetected: true },
-      { id: "firebase", label: "Firebase", enabled: false, autoDetected: false },
-    ],
-    togglePack() {}, resetProject() {}, deleteProject() {},
+    openSettings() {}, resetProject() {}, deleteProject() {},
   };
   const html = renderToStaticMarkup(createElement(ProjectMenu, props));
-  for (const hook of ["models-slot", "od-slot", "factory-panel-menu-skills", "factory-panel-skill-expo", "factory-panel-skill-firebase", "factory-panel-menu-reset", "factory-panel-menu-delete"]) {
+  for (const hook of ["factory-panel-open-settings", "factory-panel-menu-reset", "factory-panel-menu-delete"]) {
     assert.ok(hasHook(html, hook), `${hook} renders on desktop`);
   }
   assert.doesNotMatch(html, /Confirm Reset|Confirm Delete/, "a single press never destroys — both start unarmed");
@@ -359,13 +355,9 @@ test("Project menu on mobile is view-only — no pack toggles, no Reset, no Dele
   const { renderToStaticMarkup } = await import("react-dom/server");
   const html = renderToStaticMarkup(createElement(ProjectMenu, {
     theme, mobile: true, busy: false, missingRoot: false,
-    modelsSlot: createElement("div", { "data-testid": "models-slot" }, "lanes"),
-    openDesignSlot: null,
-    skillPacks: [{ id: "expo", label: "Expo", enabled: true, autoDetected: true }],
-    togglePack() {}, resetProject() {}, deleteProject() {},
+    openSettings() {}, resetProject() {}, deleteProject() {},
   }));
-  assert.ok(hasHook(html, "models-slot"), "models are shown (the shell passes them read-only)");
-  assert.match(html, /Expo/, "the pack state is readable");
+  assert.doesNotMatch(html, /Models for this Project|Skill packs/);
   assert.doesNotMatch(html, /<button/, "a mobile menu carries no writes at all");
   for (const hook of ["factory-panel-skill-expo", "factory-panel-menu-reset", "factory-panel-menu-delete"]) {
     assert.equal(hasHook(html, hook), false, `${hook} stays off mobile`);
@@ -378,13 +370,11 @@ test("a Project whose folder is gone keeps Delete but drops Reset and the model 
   const { renderToStaticMarkup } = await import("react-dom/server");
   const html = renderToStaticMarkup(createElement(ProjectMenu, {
     theme, mobile: false, busy: false, missingRoot: true,
-    modelsSlot: createElement("div", { "data-testid": "models-slot" }),
-    openDesignSlot: createElement("div", { "data-testid": "od-slot" }),
-    skillPacks: [], togglePack() {}, resetProject() {}, deleteProject() {},
+    openSettings() {}, resetProject() {}, deleteProject() {},
   }));
   assert.ok(hasHook(html, "factory-panel-menu-delete"));
   assert.equal(hasHook(html, "factory-panel-menu-reset"), false);
-  assert.equal(hasHook(html, "models-slot") || hasHook(html, "od-slot"), false);
+  assert.equal(hasHook(html, "factory-panel-open-settings"), false);
 });
 
 // ---- v0.6.1 W3 (ADR 0057 §5/§10): no-supervisor item + Use this chat as Supervisor -----------
@@ -456,11 +446,13 @@ test("no client source offers Start Lead or an Accept action — acceptance and 
   }
 });
 
-test("the panel is one column — the root stacks vertically with no horizontal flex, and every list lives inside it", () => {
-  const panel = read("plugin/client/factory/project-panel.tsx");
-  const root = panel.slice(panel.indexOf('testID="factory-panel"'), panel.indexOf("<View style={{ gap: SPACING[1] }}>", panel.indexOf('testID="factory-panel"')));
-  assert.doesNotMatch(root, /flexDirection: "row"/, "the panel root is a single column");
-  assert.doesNotMatch(panel, /horizontal/, "nothing scrolls sideways at narrow widths");
+test("W10: the shell passes measured width and preserves both Open Design control modes on the main section", () => {
+  const shell = read("plugin/client/factory/shell.tsx");
+  assert.match(shell, /width=\{containerWidth\}/);
+  assert.match(shell, /part="card"/);
+  assert.match(shell, /part="menu"/);
+  assert.match(read("plugin/index.client.tsx"), /client\.openSettings\("paseo-factory"\)/);
+  assert.match(read("plugin/client/factory/entries.tsx"), /FactoryTabErrorBoundary/);
 });
 
 test("the shell reads mobile from the host layout platform, mounts the panel on the workspace panel host only, and mounts no settings write on mobile", () => {
@@ -485,8 +477,95 @@ test("W6 shell wiring: every action rides its RPC — Rotate, Revoke, Start Supe
 
 test("W6 mobile pins: the shell hands the menu its read-only mode and the panel and menu gate their writes on the mobile flag", () => {
   const shell = read("plugin/client/factory/shell.tsx");
-  assert.match(shell, /readOnly=\{mobile\}/, "models are view-only on mobile");
+  assert.match(shell, /skillPacks=\{view\.skillHub\?\.projectPacks \?\? \[\]\}/, "pack state moves to the main panel");
   assert.match(shell, /mobile=\{mobile\}/);
   assert.match(read("plugin/client/factory/project-panel.tsx"), /!mobile/, "the panel gates its desktop-only affordances on the mobile flag");
   assert.match(read("plugin/client/factory/project-menu.tsx"), /mobile/, "the menu gates its writes on the mobile flag");
+});
+
+test("W10: Factory palette follows the host background luminance and freezes pi's role/state/thinking colours", async () => {
+  const { factoryPalette } = await loadModule("plugin/client/kit/theme.ts");
+  const light = factoryPalette(theme);
+  assert.equal(light.supervisor, "#7459b4");
+  assert.equal(light.lead, "#2f7899");
+  assert.equal(light.peer, "#287a81");
+  assert.equal(light.ok, "#337e58");
+  assert.deepEqual(light.thinking, ["#677176", "#3d8eb3", "#4f6fc0", "#7459b4", "#b23a98", "#c8253d"]);
+  const dark = factoryPalette({ colors: { ...theme.colors, surface0: "#000" } });
+  assert.equal(dark.supervisor, "#a798d7");
+  assert.equal(dark.lead, "#5fa8cc");
+  assert.equal(dark.peer, "#5db3ba");
+  assert.deepEqual(dark.thinking, ["#6c767b", "#5489a4", "#6185cc", "#9776e5", "#de54c1", "#fe5462"]);
+  assert.equal(factoryPalette({ colors: { ...theme.colors, surface0: "rgb(255, 255, 255)" } }).bad, "#c8253d");
+});
+
+test("W10: measured width chooses the wide columns and the narrow section order", async () => {
+  const panel = makePanel({
+    needsYou: [noSupervisorItem],
+    handoffs: [{ ...handoffFixture, seat: "peer:T-absent", state: "failed", failure: "successor unavailable" }],
+    defaultWorker: { role: "worker", title: "Default worker", lane: { provider: "pi", model: "worker-model", scope: "project" } },
+  });
+  const props = { skillPacks: [{ id: "expo", label: "Expo", enabled: true, autoDetected: true }] };
+  const narrow = await render(panel, { ...props, width: 899 });
+  assert.equal(hasHook(narrow, "factory-tab-col-left"), false);
+  const order = ["factory-panel-needs-you", "factory-handoff-block", "factory-panel-seats", "factory-default-worker", "factory-skill-packs", "factory-panel-od"];
+  for (let i = 1; i < order.length; i++) assert.ok(narrow.indexOf(order[i - 1]!) < narrow.indexOf(order[i]!), `${order[i - 1]} precedes ${order[i]}`);
+  assert.match(narrow, /peer:T-absent/);
+  assert.match(narrow, /successor unavailable/);
+  assert.match(narrow, /Expo/);
+  assert.match(narrow, /auto-detected/);
+  assert.ok(hasHook(narrow, "factory-profile-chip"));
+  const wide = await render(panel, { ...props, width: 900 });
+  assert.ok(hasHook(wide, "factory-tab-col-left"));
+  assert.ok(hasHook(wide, "factory-tab-col-right"));
+  assert.ok(wide.indexOf("factory-panel-seats") < wide.indexOf("factory-tab-col-right"));
+  assert.ok(wide.indexOf("factory-tab-col-right") < wide.indexOf("factory-handoff-block"));
+});
+
+test("W10: seat roles, state words and model chips carry semantic colour and context uses the real mark", async () => {
+  const seats = {
+    ...healthySeats,
+    supervisor: { ...healthySeats.supervisor, context: { state: "unknown" as const, usedTokens: null, markTokens: 64000, label: "context unknown", fraction: null } },
+    lead: { ...healthySeats.lead, lane: { provider: "pi", model: "old-model", thinking: "high", scope: "project" as const }, pendingLane: { provider: "codex", model: "new-model", thinking: "max", scope: "project" as const }, context: { state: "used" as const, usedTokens: 60000, markTokens: 64000, label: "60k / 64k", fraction: 0.9375 } },
+  };
+  const html = await render(makePanel({ seats }));
+  assert.ok(hasHook(html, "factory-seat-supervisor"));
+  assert.ok(hasHook(html, "factory-seat-chip-lead"));
+  assert.ok(hasHook(html, "factory-seat-peer-T-08"));
+  assert.match(html, /old-model → new-model/);
+  assert.match(html, /max/);
+  assert.match(html, /Project/);
+  assert.match(html, /context unknown/);
+  assert.match(html, /60k \/ 64k/);
+  assert.ok(html.includes("#7459b4"), "Supervisor role identity");
+  assert.ok(html.includes("#2f7899"), "Lead role identity");
+  assert.ok(html.includes("#287a81"), "Peer role identity");
+  assert.ok(html.includes("#337e58"), "working word is green");
+  assert.ok(html.includes("#c8253d"), "max thinking word uses the ramp");
+  assert.ok(html.includes("#b23a98"), "context fill approaching the mark is magenta");
+});
+
+test("W10: the reduced Project menu contains Reset, Delete and Open Settings only", async () => {
+  const { ProjectMenu } = await loadMenu();
+  const { createElement } = await import("react");
+  const { renderToStaticMarkup } = await import("react-dom/server");
+  const html = renderToStaticMarkup(createElement(ProjectMenu, { theme, mobile: false, busy: false, missingRoot: false, resetProject() {}, deleteProject() {}, openSettings() {} }));
+  assert.ok(hasHook(html, "factory-panel-menu-reset"));
+  assert.ok(hasHook(html, "factory-panel-menu-delete"));
+  assert.ok(hasHook(html, "factory-panel-open-settings"));
+  assert.doesNotMatch(html, /Models for this Project|Skill packs|Open Design/);
+});
+
+test("W10: the independent Handoff block names substitute handovers and uses failure colour for failed recovery", async () => {
+  const html = await render(makePanel({
+    handoffs: [{ ...handoffFixture, state: "substitute" }, { ...handoffFixture, seat: "peer:T-absent", state: "failed", failure: "creation refused" }],
+  }));
+  assert.match(html, /Substitute handover/);
+  const block = html.slice(html.indexOf('data-testid="factory-handoff-block"'), html.indexOf('data-testid="factory-panel-seats"'));
+  assert.ok(block.includes("#c8253d1a"), "the failing block has only a faint failure tint");
+});
+
+test("W10: a vacant seat still displays its configured model chip", async () => {
+  const html = await render(makePanel({ seats: { ...healthySeats, lead: { ...healthySeats.lead, vacant: true, agentId: null, model: null, hint: "Ask your Supervisor.", context: null } } }));
+  assert.ok(hasHook(html, "factory-seat-chip-lead"));
 });

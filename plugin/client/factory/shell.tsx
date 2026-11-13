@@ -1,28 +1,15 @@
 /**
- * The one `<FactoryShell />` the surface entries render (ADR 0009 §1;
- * v0.6.0 W5, ADR 0056): the workspace panel and the settings screen — one
- * component, two hosts. The workspace panel renders the server-projected
- * Project panel (project-panel.tsx — a pure render of `view.panel`); the
- * panel carries no machine-wide pane: the Settings screen (settings.tsx, v0.6.0
- * W8) hosts models, skills & tools, plugins, Vault and diagnostics. The
- * panel's actions (v0.6.0 W6): Hand off Lead, Revoke Supervisor, Start Supervisor (opens the seat it
- * creates) and the header `⋯` Project menu (per-Project models, skill packs,
- * Open Design link, two-step Reset / Delete) — all RPC wiring lives here; on
- * mobile the menu is view-only and Start / Sync / Studio never mount. The shell owns the snapshot poll and every RPC action (lanes.set,
- * the v0.0.38 batch/profile/reset lane acts — lanes.setBatch, lanes.reset,
- * profiles.save/apply/delete (ADR 0026 §2/§5) — plugins, Vault, Skill Hub);
- * the panes are pure renders of the view plus action callbacks. The Project
- * scope is the workspace panel's directory — the snapshot rides it; there is
- * no Project Switcher. Mobile (the host layout platform is iOS/Android) is a
- * monitor: it renders the panel read-only and mounts no settings writes.
- * Function components only — no class syntax reaches the Hermes bundle.
+ * The shared Factory surface host: the Project tab and machine Settings.
+ * It owns snapshot polling, navigation, measured width and RPC actions.
+ * The tab renders the server projection; machine panes stay in Settings.
+ * Desktop-only controls are gated by the host platform before mounting.
  */
 import type { PluginTheme } from "@getpaseo/plugin";
 import { useRpc } from "@getpaseo/plugin/client";
 import { ScrollView, useToast } from "@getpaseo/plugin/client/ui";
 import { useEffect, useRef, useState } from "react";
 import { Text, View } from "react-native";
-import { skillsImport, skillsTogglePack, lanesReset, lanesSet, lanesSetBatch, handoffStart, onboardingCommit, onboardingInspect, openDesignCatalog, openDesignSync, helperMcpsSyncAndProbe, helperMcpsSetEnabled, pluginsInstall, pluginsManage, pluginsCheckUpdates, profilesApply, profilesDelete, profilesSave, projectDelete, projectReset, snapshot, supervisorAdopt, supervisorStart, vaultConfigure, vaultHydrate, vaultImport, vaultSync } from "../../shared/rpc.ts";
+import { skillsImport, skillsTogglePack, lanesSet, lanesSetBatch, handoffStart, onboardingCommit, onboardingInspect, openDesignCatalog, openDesignSync, helperMcpsSyncAndProbe, helperMcpsSetEnabled, pluginsInstall, pluginsManage, pluginsCheckUpdates, profilesApply, profilesDelete, profilesSave, projectDelete, projectReset, snapshot, supervisorAdopt, supervisorStart, vaultConfigure, vaultHydrate, vaultImport, vaultSync } from "../../shared/rpc.ts";
 import type { ManageablePluginId } from "../../shared/companions.ts";
 import type { FactoryView, LaneName } from "../../shared/view.ts";
 import { SPACING, text } from "../kit/theme.ts";
@@ -36,7 +23,7 @@ import { VaultPane, isVaultActName } from "./vault.tsx";
 import type { VaultNote } from "./vault.tsx";
 import { actionFeedback, createResponseOrder } from "./vault-feedback.ts";
 import type { VaultStatusView } from "../../shared/view.ts";
-import { ProjectModelOverrides, SeatsPane } from "./seats.tsx";
+import { SeatsPane } from "./seats.tsx";
 import { PluginsPane, SkillsToolsPane } from "./plugins.tsx";
 import type { PluginsActions } from "./plugins.tsx";
 import { DiagnosticsBody, PrerequisiteSetupCard, SettingsReadOnly, SettingsScreen } from "./settings.tsx";
@@ -56,6 +43,7 @@ export function FactoryShell({
   navigation,
   serverId,
   surface = "panel",
+  openSettings,
 }: {
   theme: PluginTheme;
   layout?: { compact: boolean; platform?: "ios" | "android" | "web" };
@@ -65,6 +53,7 @@ export function FactoryShell({
   serverId?: string;
   /** Which entry hosts the shell: the workspace panel (the Project panel) or the settings screen. */
   surface?: "panel" | "settings";
+  openSettings?: () => void;
 }) {
   const toast = useToast();
   const snapshotCall = useRpc(snapshot);
@@ -86,7 +75,6 @@ export function FactoryShell({
   // dispatch through act() — the SeatsPane stays a pure render of the view
   // plus action callbacks (the panes' law).
   const lanesSetBatchCall = useRpc(lanesSetBatch);
-  const lanesResetCall = useRpc(lanesReset);
   const profilesSaveCall = useRpc(profilesSave);
   const profilesApplyCall = useRpc(profilesApply);
   const profilesDeleteCall = useRpc(profilesDelete);
@@ -665,13 +653,18 @@ export function FactoryShell({
           <ProjectPanel
             theme={theme}
             panel={view.panel}
+            width={containerWidth}
+            skillPacks={view.skillHub?.projectPacks ?? []}
             mobile={mobile}
             now={now}
             daemonError={view.daemonError}
             actions={{ openAgent, installPrerequisites, handoffLead, revokeSupervisor, startSupervisor, syncOpenDesign, adoptSupervisor, busy: busy || activePluginAct !== null }}
             openDesignActions={
               !mobile && view.project !== null && view.project.missingRoot !== true ? (
-                <OpenDesignControl key={view.project.root} part="card" theme={theme} root={view.project.root} sourceKey={`${serverId ?? "local"}:${view.project.root}`} onChanged={refresh} />
+                <>
+                  <OpenDesignControl key={`${view.project.root}:card`} part="card" theme={theme} root={view.project.root} sourceKey={`${serverId ?? "local"}:${view.project.root}`} onChanged={refresh} />
+                  <OpenDesignControl key={`${view.project.root}:link`} part="menu" theme={theme} root={view.project.root} sourceKey={`${serverId ?? "local"}:${view.project.root}`} onChanged={refresh} />
+                </>
               ) : null
             }
             onboarding={
@@ -702,39 +695,7 @@ export function FactoryShell({
                   mobile={mobile}
                   busy={busy || activePluginAct !== null}
                   missingRoot={view.project.missingRoot === true}
-                  modelsSlot={
-                    <ProjectModelOverrides
-                      theme={theme}
-                      view={view}
-                      modelSyncNote={laneNote}
-                      readOnly={mobile}
-                      actions={{
-                        busy,
-                        setLane: (lane: LaneName, value) => {
-                          if (projectRoot === undefined) return;
-                          void act("Lane", async () => {
-                            const reply = await lanesSetCall({ lane, value, projectRoot });
-                            if (reply.ok) setLaneNote(`${lane} → ${reply.lanes[lane]} (${reply.modelSync})`);
-                            return reply;
-                          });
-                        },
-                        resetLanes: () => {
-                          if (projectRoot === undefined) return;
-                          void act("Reset to Machine Default", () => lanesResetCall({ projectRoot }));
-                        },
-                      }}
-                    />
-                  }
-                  openDesignSlot={
-                    mobile ? null : (
-                      <OpenDesignControl key={view.project.root} part="menu" theme={theme} root={view.project.root} sourceKey={`${serverId ?? "local"}:${view.project.root}`} onChanged={refresh} />
-                    )
-                  }
-                  skillPacks={view.skillHub?.projectPacks ?? []}
-                  togglePack={(id, enabled) => {
-                    if (projectRoot === undefined) return;
-                    void act("Project Skill Pack", () => skillsTogglePackCall({ projectRoot, pack: id as "expo" | "firebase" | "zcode-3d" | "science", enabled }));
-                  }}
+                  openSettings={() => openSettings?.()}
                   resetProject={resetProject}
                   deleteProject={deleteProject}
                 />

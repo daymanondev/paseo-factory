@@ -11,10 +11,10 @@
 import type { ProjectDirectoryEntry, SeatDirectoryEntry } from "../../shared/view.ts";
 
 /** The header button's contribution id — `factory-header-<workspaceId>` (the spike's E2E hook). */
-export const headerButtonId = (workspaceId: string): string => `factory-header-${workspaceId}`;
+export const headerButtonId = (workspaceId: string): string => `factory-header-${workspaceId.toLowerCase().replace(/[^a-z0-9-]/g, "-")}`;
 
 /** The composer pill's contribution id — `factory-pill-<agentId>` (the spike's E2E hook). */
-export const pillId = (agentId: string): string => `factory-pill-${agentId}`;
+export const pillId = (agentId: string): string => `factory-pill-${agentId.toLowerCase().replace(/[^a-z0-9-]/g, "-")}`;
 
 /** The header label — "Factory" alone when nothing needs the Owner, "Factory · N" when N things do. */
 export function headerLabel(needsYouCount: number): string {
@@ -94,13 +94,13 @@ export function reconcileDirectory<T extends DirectoryPlan, Patch>(
     if (prior === undefined) {
       current.set(plan.id, { fingerprint: plan.fingerprint, registration: register(plan) });
     } else if (prior.fingerprint !== plan.fingerprint) {
-      prior.fingerprint = plan.fingerprint;
       refresh(prior.registration, plan);
+      prior.fingerprint = plan.fingerprint;
     }
   }
   for (const [id, entry] of current) {
     if (seen.has(id)) continue;
-    current.delete(id);
     entry.registration.remove();
+    current.delete(id);
   }
 }
