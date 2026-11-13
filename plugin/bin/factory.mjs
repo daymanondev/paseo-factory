@@ -225,17 +225,14 @@ commands:
                                       the vault merge's deletion record);
                                       every scope pointer naming it goes
 
-  lead       Rotate a Project's Lead seat or dispatch into its Lead mailbox.
-             lead rotate --project <dir>   (v0.0.14, ADR 0010 §2) cancel and
-                                          archive the active seat=lead,
-                                          project=<slug> agent so the next
-                                          dispatch starts a fresh Lead
-                                          session. Submits through the spool —
-                                          the plugin is the one daemon actor;
-                                          no ledger line lands (a rotation is
-                                          a daemon fact, not a factory fact).
-                                          --project is any directory inside
-                                          the Project's repository.
+  lead       Schedule a Project's Lead handoff or dispatch into its mailbox.
+             lead rotate --project <dir>   schedules an Owner-requested Handoff,
+                                          waiting for unsettled Peers before
+                                          extracting a handover and creating
+                                          the successor. Submits through the
+                                          spool; the plugin is the one daemon
+                                          actor. --project is any directory
+                                          inside the Project's repository.
              lead dispatch [--project <slug>] [--workspace <dir>] --message "<text>"
                                           (v0.0.20, ADR 0013 §4) queue one
                                           directive in the Project's Lead

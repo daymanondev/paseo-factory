@@ -10,7 +10,7 @@ claims the task is finished at a specific commit, and the factory — never the
 agent — runs the gate and records every step in an append-only ledger it
 cannot edit. A green verdict is evidence, not acceptance.
 
-**Status: v0.6.1.** The verification core and installed plugin are covered by
+**Status: v0.7.0.** The verification core and installed plugin are covered by
 1370 tests on Node 22 and 24. The Paseo 0.13 plugin owns the Ledger as its single
 writer and serves CLI, MCP and surface RPC entrances. Acceptance uses trusted
 caller authority and shared Task/Attempt state; Vault history is staged before
@@ -207,19 +207,33 @@ through a shared tool-less CLI runner (`runLaneCli` across `pi --no-tools -p`,
 `copilot -p --available-tools=""`, and `claude -p --tools ""`, while
 `freshEyes: "eye.json"` retains the direct HTTP path).
 
-Since v0.6.0 (ADR 0056) the **Factory surface** is the Paseo plugin client alone
-and it is small. A workspace panel shows the one Project that workspace serves:
-what needs the Owner (only when something does), the Supervisor, the Lead with
-its context bar and handoff state, the live Peers, and the Open Design link. A
-folder that is not yet a Project opens a four-step onboarding wizard (Folder,
-Prerequisites, Models, Start) that ends by starting the Supervisor with the
-Owner's first directive. The Settings screen holds everything machine-wide —
-default models and Lane profiles, skills and tools, plugins, the Private vault
-and diagnostics — in collapsible sections, and there is one Command Center
-action, "Open Factory Panel". On Paseo mobile the panel is a monitor with quick
-actions (Open, Rotate, Revoke) and Settings is view-only. SLP is the only
-workflow; the Agile Scrum mode, the standalone Web Console and the Daily Retro
-were removed in the same release.
+The **Factory surface** is the React Native Paseo plugin client (ADR 0056,
+ADR 0057). Each Project-root workspace has a Factory header button with a
+Needs-you badge. It opens a wide two-column tab for that Project, with a
+one-column version in the narrow explorer: Needs you, Seats, Default worker,
+Handoff progress, Project skill packs and Open Design. Model chips edit the
+Project's provider, model and thinking where they appear; the header's Lane
+profile changes the Project's models together. The `⋯` menu holds Reset,
+Delete and Open Settings. Role and state colours always have words or icons.
+
+A Factory pill in every seat chat offers quick model choices, Other model
+and Hand off now. Same-provider Supervisor/Lead changes keep the session;
+provider changes and Peer replacements use a Handoff with a handover.
+Handoffs show progress, allow Cancel while scheduled, and offer Replace now
+with a labelled plugin-built Substitute handover. The Lead keeps working
+during a Supervisor handoff and reports wait for the successor.
+
+On iOS/Android, pills open the Project-root tab and the seat editor. Mobile
+may change Project model chips, Hand off now, Replace now, Cancel, and Use this
+chat as Supervisor; Open and View handover remain available. Retry, machine
+defaults, Lane profiles, skill-pack changes, onboarding, Settings writes,
+Reset/Delete and Open Design Sync/Studio stay on Paseo Desktop. A folder that
+is not yet a Project opens desktop's four-step onboarding wizard (Folder,
+Prerequisites, Models, Start). The machine-wide Settings screen holds default
+models and Lane profiles, skills and tools, plugins, the Private vault and
+diagnostics in collapsible sections; mobile reads their summaries. SLP is the
+only workflow; the Agile Scrum mode, standalone Web Console and Daily Retro
+were removed in v0.6.0.
 
 The **Agent** gets one command, `factory-claim --task T1 --sha <commit>`, on its
 PATH automatically. It prints the Verdict, the gate note, and the report path;

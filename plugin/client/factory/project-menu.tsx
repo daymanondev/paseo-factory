@@ -161,7 +161,7 @@ export function ProjectMenu({
             />
           </View>
         </MenuSection>
-      ) : null}
+      ) : <Text style={text(theme, "meta")}>Manage Project settings, Reset and Delete on Paseo Desktop.</Text>}
     </View>
   );
 }

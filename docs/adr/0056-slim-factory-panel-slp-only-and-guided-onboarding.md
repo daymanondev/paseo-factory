@@ -2,6 +2,7 @@
 
 - **Date:** 2026-11-11
 - **Status:** Accepted — Owner confirmed Q1–Q24 in `/grill-with-docs` ("toàn bộ theo bạn khuyến nghị"). Implementation tracked in `.scratch/factory-panel-slim/`.
+- **Amended by ADR 0057:** v0.6.1 decouples the Lead and repairs Supervisor binding; the v0.7.0 change set replaces the seat-retirement actions with Handoff, adds the wide tab, inline model chips and composer-pill actions, and expands the mobile write set. ADR 0057 replaces §4/§5 surface entry, layout and colour rules and §8's unchanged-Lead-handoff assumption.
 - **Supersedes:** [ADR 0038](0038-scrum-owner-waits-and-count-based-work-limits.md), [ADR 0049](0049-scrum-slp-parity-zcode-isolation-kickoff-digest-and-role-hardening.md) and every Scrum-mode decision in ADR 0032/0033/0034 (Execution mode, Scrum roles, Owner wait, Task allowance, UI Design Approval Checkpoint) · [ADR 0051](0051-standalone-factory-web-console-plugin-sidecar-and-in-console-supervisor-chat.md) (Web Console + Console sidecar) · the on-demand `Retro` pass of ADR 0045 §Retro and ADR 0048 §4.
 - **Amends:** [ADR 0017](0017-native-paseo-role-providers-and-slp-seat-recognition.md) §4 (the plugin may create a `Supervisor` seat from the onboarding wizard and from a vacant Supervisor row; it still never offers `Start Lead`).
 
