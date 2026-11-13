@@ -24,7 +24,7 @@ export function readLeadContextTokens(lead: SurfaceAgentSnapshot, usagePaths?: U
   const used = finiteNumber(lead.lastUsage?.contextWindowUsedTokens);
   const reportedMax = finiteNumber(lead.lastUsage?.contextWindowMaxTokens);
   const maxTokens = reportedMax !== null && reportedMax > 0 ? reportedMax : null;
-  if (used !== null && used >= 0) {
+  if (used !== null && used > 0) {
     return { usedTokens: used, maxTokens, source: "daemon" };
   }
   const native = lead.persistence?.nativeHandle;
@@ -37,7 +37,10 @@ export function readLeadContextTokens(lead: SurfaceAgentSnapshot, usagePaths?: U
   // tail, antigravity's steps table, and so on, not just Pi's `.jsonl`.
   const fromStore = readNativeContextWindowTokens(lead, usagePaths);
   if (fromStore !== null) return { usedTokens: fromStore, maxTokens, source: "native-store" };
-  return { usedTokens: null, maxTokens, source: "daemon" };
+  // Some restarted harnesses expose an empty daemon gauge while their
+  // native session already contains context. Prefer that reading; retain a
+  // reported zero only when no native reading exists.
+  return { usedTokens: used === 0 ? 0 : null, maxTokens, source: "daemon" };
 }
 
 /**
