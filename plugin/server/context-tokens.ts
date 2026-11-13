@@ -100,4 +100,3 @@ function numberAt(record: object, keys: readonly string[]): number | null {
 function finiteNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
-
