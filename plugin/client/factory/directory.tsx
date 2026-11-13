@@ -81,57 +81,77 @@ const popoverOf = (seat: SeatDirectoryEntry) => ({
 export function startSeatDirectory(client: PluginClientContext): () => void {
   const headers = new Map<string, { fingerprint: string; registration: DirectoryRegistration }>();
   const pills = new Map<string, { fingerprint: string; registration: DirectoryRegistration }>();
+  const warned = new Set<string>();
+  const warn = (surface: string, error: unknown): void => {
+    const message = error instanceof Error ? error.message : String(error);
+    const key = `${surface}:${message}`;
+    if (warned.has(key)) return;
+    warned.add(key);
+    console.warn(`[Factory ${surface}] ${message}`);
+  };
+  let stopped = false;
+  let inFlight = false;
   const tick = async (): Promise<void> => {
-    // A failed poll keeps the last registrations — the next tick retries.
+    if (stopped || inFlight) return;
+    inFlight = true;
     try {
+      // Transport success may still carry a failed daemon read. Keep the last surfaces.
       const reply = await client.rpc(seatsDirectory, {});
-      if (!reply.ok) return;
-      reconcileDirectory(
-        headers,
-        headerPlans(reply.projects),
-        (plan) =>
-          client.addHeaderButton({
-            id: plan.id,
-            workspaceId: plan.workspaceId,
-            button: {
-              title: "Factory",
-              icon: "Activity",
-              label: plan.label,
-              behavior: {
-                kind: "action",
-                onPress: () => {
-                  client.openPanel(PANEL_ID, { workspaceId: plan.workspaceId, location: "workspace" });
+      if (stopped) return;
+      if (!reply.ok) { warn("directory poll", reply.error); return; }
+      if (reply.daemonError) { warn("directory poll", reply.daemonError); return; }
+      try {
+        reconcileDirectory(
+          headers,
+          headerPlans(reply.projects),
+          (plan) =>
+            client.addHeaderButton({
+              id: plan.id,
+              workspaceId: plan.workspaceId,
+              button: {
+                title: "Factory",
+                icon: "Activity",
+                label: plan.label,
+                behavior: {
+                  kind: "action",
+                  onPress: () => {
+                    client.openPanel(PANEL_ID, { workspaceId: plan.workspaceId, location: "workspace" });
+                  },
                 },
               },
-            },
-          }),
-        (registration, plan) => registration.update({ label: plan.label }),
-      );
-      reconcileDirectory(
-        pills,
-        pillPlans(reply.seats),
-        (plan) =>
-          client.addComposerPill({
-            id: plan.id,
-            workspaceId: plan.workspaceId,
-            agentId: plan.agentId,
-            button: {
-              title: plan.seat.role,
-              icon: "Activity",
-              label: plan.label,
-              behavior: popoverOf(plan.seat),
-            },
-          }),
-        (registration, plan) => registration.update({ label: plan.label, behavior: popoverOf(plan.seat) }),
-      );
-    } catch {}
+            }),
+          (registration, plan) => registration.update({ label: plan.label }),
+        );
+      } catch (error) { warn("header", error); }
+      try {
+        reconcileDirectory(
+          pills,
+          pillPlans(reply.seats),
+          (plan) =>
+            client.addComposerPill({
+              id: plan.id,
+              workspaceId: plan.workspaceId,
+              agentId: plan.agentId,
+              button: {
+                title: plan.seat.role,
+                icon: "Activity",
+                label: plan.label,
+                behavior: popoverOf(plan.seat),
+              },
+            }),
+          (registration, plan) => registration.update({ label: plan.label, behavior: popoverOf(plan.seat) }),
+        );
+      } catch (error) { warn("pill", error); }
+    } catch (error) { warn("directory poll", error); }
+    finally { inFlight = false; }
   };
   void tick();
   const timer = setInterval(() => { void tick(); }, DIRECTORY_POLL_MS);
   return () => {
+    stopped = true;
     clearInterval(timer);
-    for (const entry of headers.values()) entry.registration.remove();
-    for (const entry of pills.values()) entry.registration.remove();
+    for (const entry of headers.values()) { try { entry.registration.remove(); } catch (error) { warn("header", error); } }
+    for (const entry of pills.values()) { try { entry.registration.remove(); } catch (error) { warn("pill", error); } }
     headers.clear();
     pills.clear();
   };

@@ -783,21 +783,19 @@ test("v0.0.38 Seam 4 (ADR 0026 §3): the Confirm & Apply / Cancel modal appears 
   );
 });
 
-test("v0.0.38 Seam 4 (ADR 0026 §2/§5): FactoryShell owns the five new lane/profile RPCs — one useRpc per contract, dispatched through act()", () => {
+test("v0.0.38 Seam 4 (ADR 0026 §2/§5): FactoryShell owns the machine lane/profile RPCs — one useRpc per contract, dispatched through act()", () => {
   const shell = read("plugin/client/factory/shell.tsx");
   assert.match(shell, /lanesSetBatch,/, "the setBatch contract import");
-  assert.match(shell, /lanesReset,/, "the reset contract import");
   assert.match(shell, /profilesSave,/, "the profiles.save contract import");
   assert.match(shell, /profilesApply,/, "the profiles.apply contract import");
   assert.match(shell, /profilesDelete,/, "the profiles.delete contract import");
   assert.match(shell, /useRpc\(lanesSetBatch\)/);
-  assert.match(shell, /useRpc\(lanesReset\)/);
   assert.match(shell, /useRpc\(profilesSave\)/);
   assert.match(shell, /useRpc\(profilesApply\)/);
   assert.match(shell, /useRpc\(profilesDelete\)/);
   assert.match(shell, /profilesApplyCall\(\{ profileId/, "apply rides the profileId input field");
   assert.match(shell, /profilesDeleteCall\(\{ profileId \}\)/, "delete rides the profileId input field");
-  assert.match(shell, /lanesResetCall\(\{ projectRoot \}\)/, "reset rides the required projectRoot input field");
+  assert.doesNotMatch(shell, /ProjectModelOverrides/, "Project overrides moved to inline chips in the main panel");
   assert.match(shell, /setLanesBatch: \(lanes: LaneName\[\], value\) =>/, "the batch action is wired into SeatsPane");
   assert.match(shell, /saveProfile: \(name, description\) =>/, "the save action is wired into SeatsPane");
   assert.match(shell, /updateProfile: \(profileId, name\) =>/, "the update action is wired into SeatsPane");
@@ -1090,7 +1088,7 @@ test("W4: the starter polls factory.seats.directory every 20 seconds, keeps the 
   assert.match(directory, /setInterval\(\(\) => \{ void tick\(\); \}, DIRECTORY_POLL_MS\)/);
   assert.match(directory, /client\.rpc\(seatsDirectory, \{\}\)/, "the poll rides the read RPC");
   assert.match(directory, /client\.openPanel\(PANEL_ID, \{ workspaceId: plan\.workspaceId, location: "workspace" \}\)/, "the header button opens the existing panel as a workspace-location tab");
-  assert.match(directory, /catch\s*\{\s*\}/, "a failed poll keeps the last registrations — the next tick retries");
+  assert.match(directory, /warn\("directory poll",/, "failed polls warn and keep registrations; mounted recovery test covers retention");
 });
 
 test("W4: the composer pill popover is read-only — role, model, thinking, context and Project on the factory-pill-popover test id, and no RPC or write action inside", () => {
@@ -1101,4 +1099,32 @@ test("W4: the composer pill popover is read-only — role, model, thinking, cont
   }
   assert.ok(!directory.includes("useRpc"), "the popover is a pure render — the panes' law");
   assert.ok(!/onPress=\{[^}]*Call/.test(directory), "no action dispatches an RPC from the pill");
+});
+
+test("W10: every planned contribution id obeys Paseo's renderer contract", () => {
+  const headers = headerPlans([{ slug: "factory", workspaceId: "wks_2438d240dc71fd76", needsYouCount: 1 }, { slug: "other", workspaceId: "WKS_Mixed.Space/Root", needsYouCount: 0 }]);
+  const pills = pillPlans([{ workspaceId: "wks_root", agentId: "AE879777-27D9-4355-B2C3-A8F99AC7F902" } as SeatDirectoryEntry]);
+  assert.equal(headers[0]!.id, "factory-header-wks-2438d240dc71fd76");
+  for (const plan of [...headers, ...pills]) assert.match(plan.id, /^[a-z][a-z0-9-]*$/);
+});
+
+test("W10: failed contribution updates and removals retry on the next successful poll", () => {
+  let failUpdate = true, failRemove = true;
+  let label = "old", removed = false;
+  const registration = {
+    update(patch: { label?: string }) { if (failUpdate) throw new Error("update failed"); label = patch.label!; },
+    remove() { if (failRemove) throw new Error("remove failed"); removed = true; },
+  };
+  const current = new Map([["factory-header-root", { fingerprint: "old", registration }]]);
+  const next = [{ id: "factory-header-root", label: "new", fingerprint: "new" }];
+  const reconcile = (plans: typeof next) => reconcileDirectory(current, plans, () => registration, (r, p) => r.update({ label: p.label }));
+  assert.throws(() => reconcile(next), /update failed/);
+  failUpdate = false;
+  reconcile(next);
+  assert.equal(label, "new", "a failed update did not consume the new fingerprint");
+  assert.throws(() => reconcile([]), /remove failed/);
+  failRemove = false;
+  reconcile([]);
+  assert.equal(removed, true, "a failed remove retained the handle for retry");
+  assert.equal(current.size, 0);
 });

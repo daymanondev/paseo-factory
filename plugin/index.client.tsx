@@ -24,7 +24,7 @@ export default function contribute(client: PluginClientContext) {
       title: "Factory",
       icon: "Activity",
       locations: ["explorer", "workspace"],
-      Component: FactoryPanel,
+      Component: (props) => <FactoryPanel {...props} openSettings={() => client.openSettings("paseo-factory")} />,
     }),
     client.addSettingsScreen({ id: "paseo-factory", title: "Factory", icon: "Settings2", Component: FactorySettings }),
     client.addCommandCenterItem({

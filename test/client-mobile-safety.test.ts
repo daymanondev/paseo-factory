@@ -114,14 +114,16 @@ test("the Project panel mounts under a RN-like window on mobile and renders the 
   const { ProjectPanel } = await load("plugin/client/factory/project-panel.tsx");
   const { createElement } = await import("react");
   const theme = { colors: { surface0: "#fff", surface1: "#fff", surface2: "#fff", foreground: "#111", foregroundMuted: "#555", accent: "#35a", border: "#ccc", statusSuccess: "#272", statusWarning: "#860", statusDanger: "#a33" } };
+  const seatDefaults = { lane: { provider: "pi", model: "glm-5.3", scope: "machine" }, pendingLane: null, markTokens: 128000, allowedActions: ["switch-model", "hand-off-now"] };
   const panel = {
+    handoffs: [], profile: { active: null, list: [], modified: false }, defaultWorker: null,
     isProject: true,
     name: "my-app",
     summary: "Lead idle · 1 needs you",
     needsYou: [{ key: "no-supervisor", kind: "no-supervisor", title: "No Supervisor · 2 reports waiting", detail: null, action: { kind: "start-supervisor", label: "Start Supervisor" } }],
     seats: {
-      supervisor: { role: "supervisor", vacant: true, agentId: null, statusLabel: "vacant", tone: "normal", model: null, hint: null, context: null, handoff: null },
-      lead: { role: "lead", vacant: false, agentId: "agent-lead", statusLabel: "idle", tone: "normal", model: "glm-5.3", hint: null, context: null, handoff: null },
+      supervisor: { ...seatDefaults, role: "supervisor", vacant: true, agentId: null, statusLabel: "vacant", tone: "normal", model: null, hint: null, context: null, handoff: null },
+      lead: { ...seatDefaults, role: "lead", vacant: false, agentId: "agent-lead", statusLabel: "idle", tone: "normal", model: "glm-5.3", hint: null, context: null, handoff: null },
       peers: [],
       supervisorCandidates: [{ agentId: "agent-candidate", title: "Chat about release", statusLabel: "idle", tone: "normal", model: "glm-5.3" }],
     },
@@ -151,4 +153,68 @@ test("the code text role carries a font family iOS ships, not the bare 'monospac
   const theme = { colors: { foreground: "#111", foregroundMuted: "#555" } };
   assert.equal(ios.text(theme, "code").fontFamily, "Menlo");
   assert.equal(android.text(theme, "code").fontFamily, "monospace");
+});
+
+test("W10: directory reconciles headers and pills independently, dedupes warnings and retains surfaces on failed polls", async () => {
+  const { startSeatDirectory } = await load("plugin/client/factory/directory.tsx");
+  const savedInterval = globalThis.setInterval;
+  const savedClear = globalThis.clearInterval;
+  const savedWarn = console.warn;
+  const warnings: string[] = [];
+  let poll: (() => void) | undefined;
+  let failHeader = true, failPill = false;
+  let reply: any = { ok: true, daemonError: null, projects: [{ slug: "app", workspaceId: "wks_root", needsYouCount: 0 }], seats: [{ agentId: "agent_1", workspaceId: "wks_root", role: "lead", model: "one" }] };
+  const headers: string[] = [], pills: string[] = [], removed: string[] = [];
+  globalThis.setInterval = ((fn: () => void) => { poll = fn; return 1; }) as any;
+  globalThis.clearInterval = (() => {}) as any;
+  console.warn = (...args) => { warnings.push(args.join(" ")); };
+  const flush = async () => { await new Promise<void>((resolve) => setImmediate(resolve)); };
+  let stop = () => {};
+  try {
+    stop = startSeatDirectory({
+      rpc: async () => reply,
+      addHeaderButton: ({ id }: any) => { if (failHeader) throw new Error("renderer refused"); headers.push(id); return { update() {}, remove() { removed.push(id); } }; },
+      addComposerPill: ({ id }: any) => { if (failPill) throw new Error("renderer refused"); pills.push(id); return { update() { if (failPill) throw new Error("renderer refused"); }, remove() { removed.push(id); } }; },
+    });
+    await flush();
+    assert.deepEqual(pills, ["factory-pill-agent-1"], "header failure cannot hide the pill");
+    poll!(); await flush();
+    assert.equal(warnings.length, 1, "the same header failure warns once");
+    failHeader = false; failPill = true;
+    reply = { ...reply, seats: [{ ...reply.seats[0], model: "two" }] };
+    poll!(); await flush();
+    assert.deepEqual(headers, ["factory-header-wks-root"], "pill failure cannot hide the header");
+    assert.equal(warnings.length, 2, "the same message on another surface warns independently");
+    reply = { ok: true, daemonError: "daemon unavailable", projects: [], seats: [] };
+    poll!(); await flush();
+    assert.deepEqual(removed, [], "an ok transport with daemonError is a failed directory poll");
+    reply = { ok: false, error: "poll unavailable" };
+    poll!(); await flush();
+    assert.deepEqual(removed, []);
+    reply = { ok: true, daemonError: null, projects: [], seats: [] };
+    poll!(); await flush();
+    assert.equal(removed.length, 2, "only a successful empty directory removes registrations");
+  } finally { stop(); globalThis.setInterval = savedInterval; globalThis.clearInterval = savedClear; console.warn = savedWarn; }
+});
+
+test("W10: a descendant render throw shows the tab fallback with the section and logs the error", async () => {
+  const { FactoryTabErrorBoundary } = await load("plugin/client/factory/tab-error-boundary.tsx");
+  const { createElement } = await import("react");
+  const theme = { colors: { foreground: "#111", statusDanger: "#c8253d" } };
+  const ThrowingChild = () => { throw new Error("seat renderer failed"); };
+  const savedError = console.error;
+  const errors: unknown[][] = [];
+  console.error = (...args) => { errors.push(args); };
+  try {
+    await mountUnderNativeWindow(async (createRoot, container, act) => {
+      const root = createRoot(container);
+      goNative();
+      await act(() => root.render(createElement(FactoryTabErrorBoundary, { theme, section: "Seats" }, createElement(ThrowingChild))));
+      assert.match(container.innerHTML, /factory-tab-error/);
+      assert.match(container.textContent!, /Seats/);
+      assert.match(container.textContent!, /seat renderer failed/);
+      assert.ok(errors.some((args) => args.some((x) => String(x).includes("Factory tab: Seats"))), "the plugin boundary itself logs the failing section");
+      await act(() => root.unmount());
+    });
+  } finally { console.error = savedError; }
 });

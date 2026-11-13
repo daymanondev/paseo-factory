@@ -1,30 +1,9 @@
 /**
- * The Project panel (v0.6.0 W5, ADR 0056 §5) — the workspace panel's one
- * column, top to bottom: header (name, one summary line), Needs you (only
- * when something does), Seats (Supervisor, Lead with its `Nk / 128k` context
- * bar and handoff state, live Peers), Open Design. A pure render of the
- * server-projected `PanelView` (plugin/server/panel.ts): it derives no state,
- * calls no RPC, and draws colour only for exceptions — red for errors and
- * stuck items, amber for waiting states and items that need the Owner.
- * Actions (W6): every live seat row has Open; the Lead row has Hand off now; the
- * Supervisor row's `⋯` holds Revoke; a vacant Supervisor row offers Start
- * Supervisor with a directive box (desktop only — it creates the seat through
- * the ADR 0017 amendment path); the header `⋯` toggles the Project menu the
- * shell supplies (project-menu.tsx). There is NO Accept and NO Lead start —
- * a vacant Lead only says to ask the Supervisor. Mobile keeps Open, Hand off now and
- * Revoke; Start Supervisor, Sync/Studio and the menu's writes are desktop only.
- * A workspace that is not yet a Project shows the onboarding wizard the Shell
- * supplies (W7, onboarding-wizard.tsx) on desktop, and only "set this Project
- * up on Paseo Desktop" on mobile.
- * Test hooks: `factory-panel-needs-you`, `factory-panel-seat-<role>`,
- * `factory-panel-od`, `factory-panel-open-<role|peer-T>`,
- * `factory-panel-rotate-lead`, `factory-panel-supervisor-menu`,
- * `factory-panel-revoke-supervisor`, `factory-panel-start-supervisor`,
- * `factory-panel-directive`, `factory-panel-menu-toggle`, `factory-panel-menu`,
- * `factory-panel-supervisor-candidates` / `factory-panel-adopt-supervisor`
- * (v0.6.1 W3: the adopt rows — desktop and mobile alike, ADR 0057 §10).
- * UI-only state (open menus, the directive draft) is local; `initialUi` seeds
- * it. Function components only — no class syntax reaches the Hermes bundle.
+ * The native Factory tab's read surface (v0.7.0 W10, ADR 0057 §8–9).
+ * The server owns seat, lane, profile and progress data; the Shell owns RPCs.
+ * Measured width selects the wide columns or the narrow reading order.
+ * Model/profile/pack chips are display-only in this wave. Onboarding,
+ * adoption and existing handoff/Open Design actions retain their host gates.
  */
 import type { PluginTheme } from "@getpaseo/plugin";
 import { TextInput } from "@getpaseo/plugin/client/ui";
@@ -33,8 +12,11 @@ import type { ReactNode } from "react";
 import { Text, View } from "react-native";
 import type { PanelNeedsYouItem, PanelOpenDesign, PanelPeerRow, PanelSeatRow, PanelSupervisorCandidateRow, PanelTone, PanelView } from "../../shared/view.ts";
 import { Btn } from "../kit/pill.tsx";
-import { CONTROL_H, RADIUS, SPACING, text, tint } from "../kit/theme.ts";
+import { CONTROL_H, RADIUS, SPACING, factoryPalette, text, thinkingColour, tint } from "../kit/theme.ts";
 import type { Colour } from "../kit/theme.ts";
+import { FactoryTabErrorBoundary } from "./tab-error-boundary.tsx";
+import type { MenuSkillPack } from "./project-menu.tsx";
+import type { ScopedLaneRef } from "../../shared/view.ts";
 
 /** The panel's action surface — the Shell owns the RPC and navigation calls. */
 export interface ProjectPanelActions {
@@ -44,7 +26,7 @@ export interface ProjectPanelActions {
   installPrerequisites(): void;
   /** Request a continuity handoff for the live Lead (also on mobile). */
   handoffLead(): void;
-  /** Retire the live Supervisor — the seat row's `⋯` act (also on mobile). */
+  /** Existing Supervisor handoff callback; W12 brings actions onto each seat row. */
   revokeSupervisor(): void;
   /** Start the Supervisor on a vacant seat with the Owner's optional first directive (desktop only). */
   startSupervisor(directive: string): void;
@@ -69,16 +51,16 @@ export interface ProjectPanelInitialUi {
 }
 
 /** Items the Owner must resolve themselves are red; items that wait on the Owner's attention are amber. */
-const NEEDS_YOU_TONE: Record<PanelNeedsYouItem["kind"], Colour> = {
-  "needs-human": "statusWarning",
-  "attempt-ceiling": "statusDanger",
-  "seat-stuck": "statusDanger",
-  "no-supervisor": "statusDanger",
-  "supervisor-near-mark": "statusWarning",
-  "handoff-failed": "statusDanger",
-  "handoff-stuck": "statusDanger",
-  prerequisites: "statusWarning",
-  "open-design-broken": "statusDanger",
+const NEEDS_YOU_TONE: Record<PanelNeedsYouItem["kind"], "wait" | "bad"> = {
+  "needs-human": "wait",
+  "attempt-ceiling": "bad",
+  "seat-stuck": "bad",
+  "no-supervisor": "bad",
+  "supervisor-near-mark": "wait",
+  "handoff-failed": "bad",
+  "handoff-stuck": "bad",
+  prerequisites: "wait",
+  "open-design-broken": "bad",
 };
 
 /** What mobile says in place of a desktop-only act — a settings write, a seat start or a design sync cannot finish on a phone. */
@@ -108,8 +90,9 @@ function SectionTitle({ theme, label }: { theme: PluginTheme; label: string }) {
   return <Text style={text(theme, "section")}>{label}</Text>;
 }
 
-/** One bordered block of rows — flat, one line per thing. */
+/** Quiet section structure; only Needs you and Handoff receive background tint. */
 function Block({ theme, testID, border, children }: { theme: PluginTheme; testID?: string; border?: Colour; children: ReactNode }) {
+  const borderColour = border === "statusDanger" ? factoryPalette(theme).bad : border === "statusWarning" ? factoryPalette(theme).wait : border === undefined ? theme.colors.border : theme.colors[border];
   return (
     <View
       testID={testID}
@@ -118,8 +101,8 @@ function Block({ theme, testID, border, children }: { theme: PluginTheme; testID
         padding: SPACING[3],
         borderRadius: RADIUS.lg,
         borderWidth: 1,
-        borderColor: border === undefined ? theme.colors.border : tint(theme.colors[border], "66"),
-        backgroundColor: border === undefined ? theme.colors.surface1 : tint(theme.colors[border], "10"),
+        borderColor: border === undefined ? theme.colors.border : tint(borderColour, "66"),
+        backgroundColor: testID === "factory-panel-needs-you" ? tint(factoryPalette(theme).wait, "1a") : "transparent",
       }}
     >
       {children}
@@ -133,7 +116,7 @@ function NeedsYouRow({ theme, item, mobile, actions }: { theme: PluginTheme; ite
   const buttonId = `factory-panel-needs-you-action-${item.key}`;
   return (
     <View testID={`factory-panel-needs-you-${item.key}`} style={{ gap: SPACING[1], paddingVertical: SPACING[1] }}>
-      <Text style={text(theme, "rowTitle", colour)}>{item.title}</Text>
+      <Text style={{ ...text(theme, "rowTitle"), color: factoryPalette(theme)[colour] }}>{item.title}</Text>
       {item.detail !== null ? <Text style={text(theme, "meta")}>{item.detail}</Text> : null}
       {action.kind === "open-agent" ? (
         <Btn theme={theme} small testID={buttonId} label={action.label} onPress={() => actions.openAgent(action.agentId)} />
@@ -164,16 +147,34 @@ function NeedsYou({ theme, items, mobile, actions }: { theme: PluginTheme; items
   );
 }
 
-/** The Lead's context-window bar — a neutral track and fill; the label says `Nk / 128k`. */
+/** Unknown readings stay explicit; used tokens fill against this seat's actual handoff mark. */
 function ContextBar({ theme, context }: { theme: PluginTheme; context: NonNullable<PanelSeatRow["context"]> }) {
-  return (
-    <View style={{ gap: SPACING[0.5] }}>
-      <Text style={text(theme, "meta")}>Context {context.label}</Text>
-      <View style={{ height: 4, borderRadius: 2, backgroundColor: theme.colors.surface2, overflow: "hidden" }}>
-        <View style={{ height: 4, width: `${Math.round((context.fraction ?? 0) * 100)}%`, backgroundColor: theme.colors.foregroundMuted }} />
-      </View>
+  const palette = factoryPalette(theme);
+  if (context.state === "unknown") return <Text style={text(theme, "meta")}>context unknown</Text>;
+  const fraction = Math.max(0, Math.min(1, context.usedTokens === null || context.markTokens <= 0 ? 0 : context.usedTokens / context.markTokens));
+  const colour = fraction >= 0.9 ? palette.move : fraction >= 0.7 ? palette.wait : palette.ok;
+  return <View style={{ gap: SPACING[0.5] }}>
+    <Text style={text(theme, "meta")}>Context {context.label}</Text>
+    <View style={{ height: 4, borderRadius: 2, backgroundColor: theme.colors.surface2, overflow: "hidden" }}>
+      <View style={{ height: 4, width: `${Math.round(fraction * 100)}%`, backgroundColor: colour }} />
     </View>
-  );
+  </View>;
+}
+
+function seatStateColour(theme: PluginTheme, row: PanelSeatRow | PanelPeerRow): string {
+  const p = factoryPalette(theme);
+  if (row.tone === "error" || row.handoff?.state === "failed") return p.bad;
+  if (row.pendingLane !== null || (row.handoff !== null && row.handoff.state !== "done")) return p.move;
+  if (row.tone === "waiting") return p.wait;
+  return /idle|vacant|offline/i.test(row.statusLabel) ? p.idle : p.ok;
+}
+
+function RoleName({ theme, role, label }: { theme: PluginTheme; role: "supervisor" | "lead" | "peer"; label: string }) {
+  const colour = factoryPalette(theme)[role];
+  return <View style={{ flexDirection: "row", alignItems: "center", gap: SPACING[1.5] }}>
+    <View style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: colour }} />
+    <Text style={{ ...text(theme, "rowTitle"), color: colour }}>{label}</Text>
+  </View>;
 }
 
 function SeatRow({
@@ -192,22 +193,21 @@ function SeatRow({
   initialUi?: ProjectPanelInitialUi;
 }) {
   const colour = toneColour(row.tone);
-  const handoffWaiting = row.handoff !== null && row.handoff.state !== "done";
   const [menuOpen, setMenuOpen] = useState(initialUi?.supervisorMenuOpen === true);
   const [directive, setDirective] = useState(initialUi?.directive ?? "");
   const isSupervisor = row.role === "supervisor";
   const live = !row.vacant && row.agentId !== null;
   const agentId = row.agentId;
   return (
-    <View testID={`factory-panel-seat-${row.role}`} style={{ gap: SPACING[1], paddingVertical: SPACING[1] }}>
+    <View testID={`factory-panel-seat-${row.role}`}><View testID={`factory-seat-${row.role}`} style={{ gap: SPACING[1], paddingVertical: SPACING[1] }}>
       <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[2] }}>
-        <Text style={text(theme, "rowTitle")}>{name}</Text>
-        <Text style={text(theme, "label", colour)}>{row.statusLabel}</Text>
-        {row.model !== null ? <Text style={text(theme, "code", "foregroundMuted")} numberOfLines={1}>{row.model}</Text> : null}
+        <RoleName theme={theme} role={row.role} label={name} />
+        <Text style={{ ...text(theme, "label"), color: seatStateColour(theme, row) }}>{row.statusLabel}</Text>
+        <SeatModelChip theme={theme} seat={row.role} lane={row.lane} pendingLane={row.pendingLane} />
       </View>
       {row.hint !== null ? <Text style={text(theme, "meta", colour)}>{row.hint}</Text> : null}
       {row.context !== null ? <ContextBar theme={theme} context={row.context} /> : null}
-      {row.handoff !== null ? <Text style={text(theme, "meta", handoffWaiting ? "statusWarning" : undefined)}>Handoff: {row.handoff.state === "scheduled" ? `Scheduled · waiting for ${row.handoff.waitingPeers ?? 0} Peers` : row.handoff.state}</Text> : null}
+      {row.handoff !== null ? <Text style={{ ...text(theme, "meta"), color: row.handoff.state === "failed" ? factoryPalette(theme).bad : row.handoff.state === "done" ? factoryPalette(theme).ok : factoryPalette(theme).move }}>Handoff: {row.handoff.state === "scheduled" ? `Scheduled · waiting for ${row.handoff.waitingPeers ?? 0} Peers` : row.handoff.state}</Text> : null}
       {live && agentId !== null ? (
         <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[1.5] }}>
           <Btn theme={theme} small testID={`factory-panel-open-${row.role}`} label="Open" onPress={() => actions.openAgent(agentId)} />
@@ -267,22 +267,22 @@ function SeatRow({
           />
         </View>
       ) : null}
-    </View>
+    </View></View>
   );
 }
 
 function PeerRowView({ theme, row, actions }: { theme: PluginTheme; row: PanelPeerRow; actions: ProjectPanelActions }) {
-  const colour = toneColour(row.tone);
   return (
-    <View testID={`factory-panel-seat-peer-${row.task}`} style={{ gap: SPACING[0.5], paddingVertical: SPACING[1] }}>
+    <View testID={`factory-panel-seat-peer-${row.task}`}><View testID={`factory-seat-peer-${row.task}`} style={{ gap: SPACING[0.5], paddingVertical: SPACING[1] }}>
       <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[2] }}>
-        <Text style={text(theme, "rowTitle")}>{row.title}</Text>
+        <RoleName theme={theme} role="peer" label={row.title} />
         <Text style={text(theme, "label")}>{row.disposition}</Text>
-        <Text style={text(theme, "label", colour)}>{row.statusLabel}</Text>
+        <Text style={{ ...text(theme, "label"), color: seatStateColour(theme, row) }}>{row.statusLabel}</Text>
       </View>
-      {row.model !== null ? <Text style={text(theme, "code", "foregroundMuted")} numberOfLines={1}>{row.model}</Text> : null}
+      <SeatModelChip theme={theme} seat={`peer-${row.task}`} lane={row.lane} pendingLane={row.pendingLane} />
+      <ContextBar theme={theme} context={row.context} />
       <Btn theme={theme} small testID={`factory-panel-open-peer-${row.task}`} label="Open" onPress={() => actions.openAgent(row.agentId)} />
-    </View>
+    </View></View>
   );
 }
 
@@ -398,6 +398,40 @@ function NotAProject({ theme, mobile, wizard }: { theme: PluginTheme; mobile: bo
   );
 }
 
+/** Shared display body for seat and worker chips; W11 adds their editor actions. */
+export function SeatModelChip({ theme, lane, pendingLane, seat }: { theme: PluginTheme; lane: ScopedLaneRef; pendingLane: ScopedLaneRef | null; seat: string }) {
+  return <View testID={`factory-seat-chip-${seat}`} style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[1], borderWidth: 1, borderColor: theme.colors.border, borderRadius: RADIUS.sm, paddingHorizontal: SPACING[1.5], paddingVertical: SPACING[0.5] }}>
+    <Text style={text(theme, "label")}>{lane.model || lane.provider}{pendingLane === null ? "" : ` → ${pendingLane.model || pendingLane.provider}`}</Text>
+    <Text style={{ ...text(theme, "label"), color: thinkingColour(theme, pendingLane?.thinking ?? lane.thinking) }}>{pendingLane?.thinking ?? lane.thinking ?? "off"}</Text>
+    <Text style={text(theme, "meta")}>{lane.scope === "project" ? "Project" : "Machine"}</Text>
+  </View>;
+}
+
+/** Independent progress also includes failed handoffs whose outgoing Peer no longer exists. */
+export function HandoffBlock({ theme, handoffs }: { theme: PluginTheme; handoffs: PanelView["handoffs"] }) {
+  if (handoffs.length === 0) return null;
+  const palette = factoryPalette(theme);
+  const colour = handoffs.some((h) => h.state === "failed") ? palette.bad : handoffs.every((h) => h.state === "done") ? palette.ok : palette.move;
+  const stateLabel = { scheduled: "Scheduled", "handing-over": "Handing over", "creating-successor": "Creating successor", done: "Done", substitute: "Substitute handover", failed: "Failed" };
+  return <View testID="factory-handoff-block" style={{ gap: SPACING[2], padding: SPACING[3], borderRadius: RADIUS.lg, borderWidth: 1, borderColor: colour, backgroundColor: tint(colour, "1a") }}>
+    <SectionTitle theme={theme} label="Handoff" />
+    {handoffs.map((handoff) => <View key={handoff.seat} testID={`factory-handoff-${handoff.seat}`} style={{ gap: SPACING[1] }}>
+      <Text style={{ ...text(theme, "rowTitle"), color: handoff.state === "failed" ? palette.bad : handoff.state === "done" ? palette.ok : palette.move }}>{handoff.seat} · {stateLabel[handoff.state]}</Text>
+      <Text style={text(theme, "meta")}>{handoff.reason === "context-mark" ? "Context mark" : handoff.reason === "provider-change" ? "Provider change" : "Owner requested"} · {handoff.fromLane.model} → {handoff.toLane.model}</Text>
+      {handoff.waitingPeers === undefined ? null : <Text style={text(theme, "meta")}>Waiting for {handoff.waitingPeers} Peers</Text>}
+      {handoff.handover === "substitute" ? <Text style={text(theme, "meta")}>Substitute handover</Text> : null}
+      {handoff.failure === undefined ? null : <Text style={{ ...text(theme, "meta"), color: palette.bad }}>{handoff.failure}</Text>}
+    </View>)}
+  </View>;
+}
+
+export function SkillPacks({ theme, packs }: { theme: PluginTheme; packs: readonly MenuSkillPack[] }) {
+  return <Block theme={theme} testID="factory-skill-packs">
+    <SectionTitle theme={theme} label="Skill packs" />
+    {packs.length === 0 ? <Text style={text(theme, "meta")}>No skill packs available.</Text> : packs.map((pack) => <Text key={pack.id} testID={`factory-panel-skill-${pack.id}`} style={text(theme, "meta")}>{pack.label} · {pack.enabled ? "on" : "off"}{pack.autoDetected ? " (auto-detected)" : ""}</Text>)}
+  </Block>;
+}
+
 export function ProjectPanel({
   theme,
   panel,
@@ -409,7 +443,11 @@ export function ProjectPanel({
   menu = null,
   onboarding = null,
   initialUi,
+  width = 0,
+  skillPacks = [],
 }: {
+  width?: number;
+  skillPacks?: readonly MenuSkillPack[];
   theme: PluginTheme;
   panel: PanelView;
   /** True on Paseo mobile (iOS/Android) — hides desktop-only affordances. */
@@ -428,6 +466,13 @@ export function ProjectPanel({
 }) {
   const [menuOpen, setMenuOpen] = useState(initialUi?.menuOpen === true);
   const hasMenu = panel.isProject && menu !== null;
+  const boundary = (section: string, children: ReactNode) => <FactoryTabErrorBoundary theme={theme} section={section}>{children}</FactoryTabErrorBoundary>;
+  const needsYou = <NeedsYou theme={theme} items={panel.needsYou} mobile={mobile} actions={actions} />;
+  const handoff = <HandoffBlock theme={theme} handoffs={panel.handoffs} />;
+  const seats = panel.seats === null ? null : <Seats theme={theme} seats={panel.seats} mobile={mobile} actions={actions} {...(initialUi === undefined ? {} : { initialUi })} />;
+  const worker = panel.defaultWorker === null ? null : <Block theme={theme} testID="factory-default-worker"><SectionTitle theme={theme} label="Default worker" /><SeatModelChip theme={theme} seat="worker" lane={panel.defaultWorker.lane} pendingLane={null} /></Block>;
+  const packs = <SkillPacks theme={theme} packs={skillPacks} />;
+  const design = panel.openDesign === null ? null : <OpenDesign theme={theme} openDesign={panel.openDesign} now={now} desktopActions={mobile ? null : openDesignActions} />;
   return (
     <View testID="factory-panel" style={{ gap: SPACING[3] }}>
       <View style={{ gap: SPACING[1] }}>
@@ -435,6 +480,7 @@ export function ProjectPanel({
           <Text accessibilityRole="header" style={{ ...text(theme, "detailTitle"), flexShrink: 1 }}>
             {panel.name ?? "Factory"}
           </Text>
+          {panel.isProject ? <View testID="factory-profile-chip" style={{ flexShrink: 1, borderWidth: 1, borderColor: theme.colors.border, borderRadius: RADIUS.sm, padding: SPACING[1.5] }}><Text style={text(theme, "label")}>{panel.profile.active?.name ?? "No Lane profile"}{panel.profile.modified ? " (modified)" : ""}</Text></View> : null}
           {hasMenu ? <Btn theme={theme} small testID="factory-panel-menu-toggle" label="⋯" tone="foregroundMuted" onPress={() => setMenuOpen(!menuOpen)} /> : null}
         </View>
         <Text style={text(theme, "meta")}>{panel.summary}</Text>
@@ -443,9 +489,10 @@ export function ProjectPanel({
       {hasMenu && menuOpen ? <Block theme={theme} testID="factory-panel-menu">{menu}</Block> : null}
       {panel.isProject ? (
         <>
-          <NeedsYou theme={theme} items={panel.needsYou} mobile={mobile} actions={actions} />
-          {panel.seats !== null ? <Seats theme={theme} seats={panel.seats} mobile={mobile} actions={actions} {...(initialUi === undefined ? {} : { initialUi })} /> : null}
-          {panel.openDesign !== null ? <OpenDesign theme={theme} openDesign={panel.openDesign} now={now} desktopActions={mobile ? null : openDesignActions} /> : null}
+          {width >= 900 ? <View style={{ flexDirection: "row", gap: SPACING[4], alignItems: "flex-start" }}>
+            <View testID="factory-tab-col-left" style={{ flex: 1, minWidth: 0, gap: SPACING[3] }}>{boundary("Needs you", needsYou)}{boundary("Seats", seats)}{boundary("Default worker", worker)}</View>
+            <View testID="factory-tab-col-right" style={{ flex: 1, minWidth: 0, gap: SPACING[3] }}>{boundary("Handoff", handoff)}{boundary("Skill packs", packs)}{boundary("Open Design", design)}</View>
+          </View> : <>{boundary("Needs you", needsYou)}{boundary("Handoff", handoff)}{boundary("Seats", seats)}{boundary("Default worker", worker)}{boundary("Skill packs", packs)}{boundary("Open Design", design)}</>}
         </>
       ) : (
         <NotAProject theme={theme} mobile={mobile} wizard={onboarding} />

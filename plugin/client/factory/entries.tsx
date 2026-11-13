@@ -8,6 +8,7 @@
 import type { PluginSurfaceProps, PluginWorkspacePanelProps } from "@getpaseo/plugin/client";
 import { useWorkspace } from "@getpaseo/plugin/client";
 import { FactoryShell } from "./shell.tsx";
+import { FactoryTabErrorBoundary } from "./tab-error-boundary.tsx";
 
 export const PANEL_ID = "paseo-factory";
 
@@ -17,7 +18,7 @@ export function FactorySettings({ theme, layout, navigation, host }: PluginSurfa
 }
 
 /** The workspace panel: the Project panel scoped to this workspace's directory. */
-export function FactoryPanel({ theme, layout, navigation, host, workspaceId }: PluginWorkspacePanelProps) {
+export function FactoryPanel({ theme, layout, navigation, host, workspaceId, openSettings }: PluginWorkspacePanelProps & { openSettings?: () => void }) {
   const dir = useWorkspace(workspaceId, (workspace) => workspace.directory);
-  return <FactoryShell theme={theme} layout={layout} dir={dir ?? undefined} navigation={navigation} serverId={host.id} />;
+  return <FactoryTabErrorBoundary theme={theme} section="Factory tab"><FactoryShell theme={theme} layout={layout} dir={dir ?? undefined} navigation={navigation} serverId={host.id} {...(openSettings === undefined ? {} : { openSettings })} /></FactoryTabErrorBoundary>;
 }

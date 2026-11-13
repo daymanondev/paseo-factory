@@ -1,19 +1,6 @@
-/**
- * The Project menu (v0.6.0 W6, ADR 0056 §5) — the header `⋯`'s content: this
- * Project's own settings, one section per concern, out of the main view.
- * Models (per-Project Supervisor / Lead / Worker overrides), Skill packs,
- * Open Design (link / unlink), and the two destructive acts Reset Project and
- * Delete Project, each behind a two-step confirm that re-arms after 5 seconds.
- *
- * A pure render with local UI state only: the Shell supplies the models and
- * Open Design slots (they own RPC state of their own) and the pack / reset /
- * delete callbacks. Mobile is view-only — packs read as text, the slots are
- * handed their read-only form by the Shell, and Reset / Delete never mount.
- * A Project whose folder is gone keeps Delete only (nothing else can act on a
- * missing root). Test hooks: `factory-panel-menu-models|skills|od|danger`,
- * `factory-panel-skill-<id>`, `factory-panel-menu-reset|delete`,
- * `factory-panel-menu-confirm-reset|confirm-delete`. Function components
- * only — no class syntax reaches the Hermes bundle.
+/** The reduced Project menu (W10, ADR 0057 §8): Reset, Delete and Open Settings.
+ * Reset/Delete retain their two-step confirmation; a missing folder keeps Delete only.
+ * Mobile mounts no menu writes. Model, pack and design controls live in the tab.
  */
 import type { PluginTheme } from "@getpaseo/plugin";
 import { useEffect, useState } from "react";
@@ -22,7 +9,7 @@ import { Text, View } from "react-native";
 import { Btn } from "../kit/pill.tsx";
 import { SPACING, text } from "../kit/theme.ts";
 
-/** One Project skill pack as the menu lists it (`view.skillHub.projectPacks`). */
+/** One Project skill pack exposed by `view.skillHub.projectPacks`. */
 export interface MenuSkillPack {
   id: string;
   label: string;
@@ -110,10 +97,7 @@ export function ProjectMenu({
   mobile,
   busy,
   missingRoot,
-  modelsSlot,
-  openDesignSlot,
-  skillPacks,
-  togglePack,
+  openSettings,
   resetProject,
   deleteProject,
   initialConfirming = null,
@@ -124,12 +108,7 @@ export function ProjectMenu({
   busy: boolean;
   /** The Project's folder is gone: only Delete can act. */
   missingRoot: boolean;
-  /** Per-Project Supervisor / Lead / Worker model overrides (read-only form on mobile). */
-  modelsSlot: ReactNode;
-  /** Open Design link / unlink controls (desktop); null on mobile. */
-  openDesignSlot: ReactNode;
-  skillPacks: MenuSkillPack[];
-  togglePack(id: string, enabled: boolean): void;
+  openSettings(): void;
   resetProject(): void;
   deleteProject(): void;
   /** Seeds the two-step confirm — hosts and tests; the live state is local. */
@@ -146,44 +125,9 @@ export function ProjectMenu({
 
   return (
     <View testID="factory-panel-menu-body" style={{ gap: SPACING[3] }}>
-      {!missingRoot ? (
-        <MenuSection theme={theme} id="models" title="Models for this Project">
-          {modelsSlot}
-        </MenuSection>
-      ) : null}
-      {!missingRoot ? (
-        <MenuSection theme={theme} id="skills" title="Skill packs">
-          {skillPacks.length === 0 ? <Text style={text(theme, "meta")}>No skill packs available.</Text> : null}
-          {skillPacks.map((pack) =>
-            mobile ? (
-              <Text key={pack.id} style={text(theme, "meta")}>
-                {pack.label} · {pack.enabled ? "on" : "off"}
-                {pack.autoDetected ? " (auto-detected)" : ""}
-              </Text>
-            ) : (
-              <View key={pack.id} style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[2] }}>
-                <Btn
-                  theme={theme}
-                  small
-                  testID={`factory-panel-skill-${pack.id}`}
-                  label={`${pack.label} · ${pack.enabled ? "on" : "off"}`}
-                  tone={pack.enabled ? "accent" : "foregroundMuted"}
-                  disabled={busy}
-                  onPress={() => togglePack(pack.id, !pack.enabled)}
-                />
-                {pack.autoDetected ? <Text style={text(theme, "meta")}>auto-detected</Text> : null}
-              </View>
-            ),
-          )}
-        </MenuSection>
-      ) : null}
-      {!missingRoot && openDesignSlot !== null ? (
-        <MenuSection theme={theme} id="od" title="Open Design">
-          {openDesignSlot}
-        </MenuSection>
-      ) : null}
       {!mobile ? (
-        <MenuSection theme={theme} id="danger" title="Danger zone">
+        <MenuSection theme={theme} id="danger" title="Project">
+          {!missingRoot ? <Btn theme={theme} small testID="factory-panel-open-settings" label="Open Settings" onPress={openSettings} /> : null}
           {missingRoot ? (
             <Text style={text(theme, "label", "statusDanger")}>
               The folder is gone — delete this Project to purge its tasks, seats and Paseo records.
