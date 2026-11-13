@@ -10,7 +10,7 @@ import { readLeadMailbox } from '../plugin/server/core/mailbox.ts';
 import { saveLanes } from '../plugin/server/core/lanes.ts';
 import { disposeDir, gitCommitAll, makeTempDir } from './helpers.ts';
 
-function fixture(t: TestContext, options: { parented?: boolean; timeout?: number } = {}) {
+function fixture(t: TestContext, options: { parented?: boolean; backgroundLead?: boolean; timeout?: number } = {}) {
   const dir = makeTempDir(); disposeDir(t, dir);
   const root = join(dir, 'repo'); mkdirSync(root); writeFileSync(join(root, 'README.md'), 'hello\n'); gitCommitAll(root);
   const project = resolveProject(root); assert.ok(project.ok);
@@ -22,7 +22,7 @@ function fixture(t: TestContext, options: { parented?: boolean; timeout?: number
   let failCreate = false; let failSend = false;
   const daemon: SurfaceDaemonApi = {
     agents: {
-      list: async () => ({ entries: agents.filter(a => !a.archivedAt).map(agent => ({ agent })) }),
+      list: async input => ({ entries: agents.filter(a => !a.archivedAt && (!options.backgroundLead || a.id !== "lead" || input?.filter?.includeBackground === true)).map(agent => ({ agent })) }),
       create: async input => { if (failCreate) throw new Error('provider unavailable'); const id = `successor-${created.length + 1}`; created.push(input.config); agents.push({ ...agents[0]!, id, provider: input.config.provider, labels: input.labels ?? {}, archivedAt: null }); return { id }; },
       ref: id => ({ send: async text => { if (failSend && id.startsWith('successor')) throw new Error('send unavailable'); sent.push({ id, text }); }, archive: async () => { archived.push(id); agents.find(a => a.id === id)!.archivedAt = new Date().toISOString(); return { archivedAt: new Date().toISOString() }; }, timeline: { refetch: async () => ({ entries: [] }) } }),
     },
@@ -81,7 +81,7 @@ test('Supervisor ensure cannot bypass an in-flight provider handoff', async t =>
 });
 
 test('Replace now uses a bounded substitute and releases a Supervisor with a parented live Lead', async t => {
-  const f = fixture(t, { parented: true });
+  const f = fixture(t, { parented: true, backgroundLead: true });
   const started = await f.surface.handoff({ projectRoot: f.root, seat: 'supervisor' }, 'start'); assert.ok(started.ok); assert.equal(started.progress?.state, 'handing-over');
   const replaced = await f.surface.handoff({ projectRoot: f.root, seat: 'supervisor' }, 'replaceNow'); assert.ok(replaced.ok); assert.equal(replaced.progress?.state, 'done'); assert.equal(replaced.progress?.handover, 'substitute');
   const handover = await f.surface.handoff({ projectRoot: f.root, seat: 'supervisor' }, 'handover'); assert.ok(handover.ok); assert.equal(handover.source, 'substitute');

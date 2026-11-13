@@ -579,7 +579,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     retire: async (slug, agent) => {
       const reg = readProjectRegistration(deps.stateDir, slug);
       if (!reg) return;
-      const entries = (await resolveDaemon().agents.list()).entries;
+      const entries = (await resolveDaemon().agents.list({ filter: { includeArchived: false, includeBackground: true } })).entries;
       const child = entries.map(e => e.agent).find(a => !a.archivedAt && a.parentAgentId === agent.id && (a.id === reg.lead || (a.labels.seat === "lead" && a.labels.project === slug)));
       if (child) {
         writeProjectRegistration(deps.stateDir, slug, { root: reg.root, releasedSupervisors: [...(reg.releasedSupervisors ?? []).filter(r => r.agentId !== agent.id), { agentId: agent.id, waitingOnLead: child.id, releasedAt: new Date().toISOString() }] });

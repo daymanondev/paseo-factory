@@ -36,7 +36,7 @@ export function createSupervisorHandoffRuntime(deps: {
   };
   const active = (slug: string) => { const current = progress(slug); return current !== null && current.state !== 'done'; };
   const clearTimer = (slug: string) => { clearTimeout(timers.get(slug)); timers.delete(slug); };
-  const live = async () => (await deps.daemon().agents.list({ filter: { includeArchived: false } })).entries.map(e => e.agent).filter(a => !a.archivedAt);
+  const live = async () => (await deps.daemon().agents.list({ filter: { includeArchived: false, includeBackground: true } })).entries.map(e => e.agent).filter(a => !a.archivedAt);
   const textOnDisk = (slug: string) => { try { return readFileSync(path(slug, 'supervisor-handoff.md'), 'utf8'); } catch { return ''; } };
 
   const complete = async (slug: string, extracted?: string | null): Promise<void> => {
