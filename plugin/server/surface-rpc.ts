@@ -61,7 +61,9 @@ import type { CompanionToolRunner, CompanionToolUpdateStatus } from "./core/comp
 import { basename, join, resolve } from "node:path";
 import { foldView, foldTasks } from "./view.ts";
 import { foldPanel, inspectGitReadiness, probeOpenDesign } from "./panel.ts";
-import { LEAD_ROTATE_TOKENS } from "./handoff-limits.ts";
+import { handoffMarkTokens } from "./handoff-limits.ts";
+import { readLeadContextTokens } from "./context-tokens.ts";
+import type { UsagePaths } from "./core/usage-extractor.ts";
 import type { ProjectEventStream } from "./view.ts";
 import type { LedgerEvent } from "./core/events.ts";
 import { setAgentModelViaCli, setAgentThinkingViaCli, stopAgentViaCli } from "./daemon-cli.ts";
@@ -315,6 +317,8 @@ export interface SurfaceDeps {
   stateDir: string;
   /** The paseo home — the daemon the seat bridges and CLI fallbacks target. */
   home: string;
+  /** Provider-native store locations, shared with the runtime sensor. */
+  usagePaths?: UsagePaths;
   /** The resolved plugin directory, when installed from a directory — gives the seat bootstrap an exact factory.mjs path. */
   pluginDir?: string;
   /** The daemon to call when the RPC call carries no `context.paseo` (tests). */
@@ -765,10 +769,8 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     agent: SurfaceAgentSnapshot,
   ): Pick<AgentView, "contextUsedTokens" | "contextMaxTokens" | "rotationState" | "queuedMailCount" | "handoffProgress"> => {
     if (agent.labels.seat !== "lead" || agent.labels.project === undefined) return {};
-    const tokens = {
-      contextUsedTokens: agent.lastUsage?.contextWindowUsedTokens ?? null,
-      contextMaxTokens: agent.lastUsage?.contextWindowMaxTokens ?? null,
-    };
+    const reading = readLeadContextTokens(agent, deps.usagePaths);
+    const tokens = { contextUsedTokens: reading.usedTokens, contextMaxTokens: reading.maxTokens };
     let queued: number;
     try {
       queued = readLeadMailbox(join(projectStateDir(deps.stateDir, agent.labels.project), "mailbox.jsonl")).queued.length;
@@ -785,7 +787,12 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     task: string | null,
     seatOverride?: "supervisor" | "lead",
   ): AgentView => {
+    const reading = readLeadContextTokens(agent, deps.usagePaths);
+    const role = (agent.labels.seat ?? seatOverride) === "supervisor" ? "supervisor" : (agent.labels.seat ?? seatOverride) === "lead" ? "lead" : "peer";
     return {
+      contextUsedTokens: reading.usedTokens,
+      contextMaxTokens: reading.maxTokens,
+      markTokens: handoffMarkTokens(role, reading.maxTokens),
       id: agent.id,
       title: agent.title,
       status: agent.status,
@@ -806,14 +813,16 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
   /**
    * One daemon agent → its seat-directory row (v0.6.1 W4 spike, ADR 0057
    * §8/§11): the workspace falls back to the Project registration's when the
-   * daemon reports none, the mark is the flat 128k, and the handoff state is
+   * daemon reports none, the mark follows its model window, and the handoff state is
    * the null placeholder W9 fills.
    */
   const directorySeatOf = (
     registration: { slug: string; workspaceId?: string },
     agent: SurfaceAgentSnapshot,
     role: "supervisor" | "lead" | "peer",
-  ): SeatDirectoryEntry => ({
+  ): SeatDirectoryEntry => {
+    const reading = readLeadContextTokens(agent, deps.usagePaths);
+    return ({
     slug: registration.slug,
     workspaceId: agent.workspaceId ?? registration.workspaceId ?? null,
     agentId: agent.id,
@@ -821,10 +830,11 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     provider: agent.provider,
     model: agent.model ?? null,
     thinking: agent.thinkingOptionId ?? null,
-    contextUsedTokens: agent.lastUsage?.contextWindowUsedTokens ?? null,
-    markTokens: LEAD_ROTATE_TOKENS,
+    contextUsedTokens: reading.usedTokens,
+    markTokens: handoffMarkTokens(role, reading.maxTokens),
     handoffState: null,
   });
+  };
 
   const PROVIDERS_TTL_MS = 5 * 60_000;
   const PROVIDERS_WAIT_MS = 2_000;

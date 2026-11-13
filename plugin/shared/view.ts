@@ -175,16 +175,10 @@ export const AgentViewSchema = z.object({
   seat: z.string().nullable(),
   /** The factory task this agent is bound to (a ledger claim/spawn/meter named it), when any. */
   task: z.string().nullable(),
-  /**
-   * The Lead telemetry pair (v0.0.20, ADR 0013 §6): the daemon's live
-   * `agent.lastUsage` context-window reading — present on the Project's Lead
-   * (null when the daemon reports no usage), unset on every other agent.
-   * The spec names the pair `z.number().nullable()`; the `.optional()` half
-   * is what lets non-Lead agents leave it unset (the `thinking` tri-state
-   * precedent) — an older client ignores either shape, so the version stays.
-   */
+  /** The seat sensor's occupancy and daemon-reported window; null means unknown. */
   contextUsedTokens: z.number().nullable().optional(),
   contextMaxTokens: z.number().nullable().optional(),
+  markTokens: z.number().optional(),
   /**
    * The Lead rotation state machine's durable state as `project.json` records
    * it (v0.0.20, ADR 0013 §5) — Lead-only; unset when unrecorded (absent
@@ -463,7 +457,7 @@ export const PanelSeatRowSchema = z.object({
   model: z.string().nullable(),
   /** The vacancy sentence (or a daemon error line for a live seat); null otherwise. */
   hint: z.string().nullable(),
-  /** The Lead's context-window reading against the 128k handoff mark — Lead only. */
+  /** The seat context-window reading against its model-dependent handoff mark. */
   context: z.object({ usedTokens: z.number().nullable(), markTokens: z.number(), label: z.string(), fraction: z.number().nullable() }).nullable(),
   /** The Lead handoff state in words, with the queued mail count — Lead only. */
   handoff: z.object({ state: z.enum(["normal", "rotation_pending", "handing_over"]), label: z.string(), queuedMailCount: z.number().int() }).nullable(),
@@ -487,6 +481,7 @@ export const PanelSupervisorCandidateRowSchema = z.object({
 export type PanelSupervisorCandidateRow = z.infer<typeof PanelSupervisorCandidateRowSchema>;
 
 export const PanelPeerRowSchema = z.object({
+  context: PanelSeatRowSchema.shape.context.optional(),
   agentId: z.string(),
   task: z.string(),
   /** `Peer · T-08` — the name the Owner reads. */

@@ -14,7 +14,7 @@ import type { AgentView, PanelNeedsYouItem, PanelOpenDesign, PanelPeerRow, Panel
 import { MAX_ATTEMPTS } from "./core/events.ts";
 import { openDesignBundleReady, readOpenDesignLink } from "./core/open-design/open-design-link-state.ts";
 import { readProjectSettings } from "./core/project-settings.ts";
-import { HANDOFF_EXTRACTION_MAX_SENDS, HANDOFF_EXTRACTION_TIMEOUT_MS, LEAD_ROTATE_TOKENS } from "./handoff-limits.ts";
+import { HANDOFF_EXTRACTION_MAX_SENDS, HANDOFF_EXTRACTION_TIMEOUT_MS, handoffMarkTokens } from "./handoff-limits.ts";
 
 /**
  * How long a `handing_over` handoff may run before the panel calls it stuck:
@@ -173,19 +173,19 @@ function seatRow(role: SeatRole, agent: AgentView | null): PanelSeatRow {
     context: null,
     handoff: null,
   };
-  if (role !== "lead") return row;
   const used = agent.contextUsedTokens ?? null;
+  const mark = handoffMarkTokens(role, agent.contextMaxTokens);
   const state = agent.rotationState ?? "normal";
   const queued = agent.queuedMailCount ?? 0;
   return {
     ...row,
     context: {
       usedTokens: used,
-      markTokens: LEAD_ROTATE_TOKENS,
-      label: `${used === null ? "—" : `${Math.round(used / 1000)}k`} / ${Math.round(LEAD_ROTATE_TOKENS / 1000)}k`,
-      fraction: used === null ? null : Math.min(1, used / LEAD_ROTATE_TOKENS),
+      markTokens: mark,
+      label: used === null ? "context unknown" : `${Math.round(used / 1000)}k / ${Math.round(mark / 1000)}k`,
+      fraction: used === null ? null : Math.min(1, used / mark),
     },
-    handoff: { state, label: handoffLabel(state, queued), queuedMailCount: queued },
+    handoff: role === "lead" ? { state, label: handoffLabel(state, queued), queuedMailCount: queued } : null,
   };
 }
 
@@ -219,7 +219,10 @@ function peerRows(input: PanelInput): PanelPeerRow[] {
     const task = taskByName.get(agent.task);
     if (task !== undefined && (task.status === "accepted" || task.status === "closed")) continue;
     const status = statusOf(agent);
+    const used = agent.contextUsedTokens ?? null;
+    const mark = handoffMarkTokens("peer", agent.contextMaxTokens);
     rows.push({
+      context: { usedTokens: used, markTokens: mark, label: used === null ? "context unknown" : `${Math.round(used / 1000)}k / ${Math.round(mark / 1000)}k`, fraction: used === null ? null : Math.min(1, used / mark) },
       agentId: agent.id,
       task: agent.task,
       title: `Peer · ${agent.task}`,
