@@ -1,6 +1,7 @@
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { readHandoffProgress } from "../plugin/server/handoff-progress.ts";
 import { join } from "node:path";
 import { createFactory } from "../plugin/server/core/factory.ts";
 import { CorrelationRegistry } from "../plugin/server/core/correlations.ts";
@@ -584,6 +585,57 @@ test("automatic successor creation failure stays visible until Owner retry and p
   const owner = await f.surface.handoff({ projectRoot: f.root, seat: "peer:T-04" }, "replaceNow");
   assert.equal(owner.ok, true);
   assert.equal(f.created.length, 2, "Owner replacement still works after the automatic budget is spent");
+});
+
+test("Owner cancel during an Owner-requested extraction keeps the Peer on its Task, ignores a late reply and leaves the budget alone", async t => {
+  const f = fixture(t);
+  f.peer.lastUsage = null;
+  const started = await f.surface.handoff({ projectRoot: f.root, seat: "peer:T-04" }, "start");
+  assert.equal(started.ok, true);
+  const statePath = join(projectStateDir(f.stateDir, f.slug), "peer-handoff-T-04.json");
+  assert.equal(JSON.parse(readFileSync(statePath, "utf8")).phase, "extracting");
+  const canceled = await f.surface.handoff({ projectRoot: f.root, seat: "peer:T-04" }, "cancel");
+  assert.deepEqual(canceled, { ok: true, progress: null });
+  assert.equal(readHandoffProgress(f.stateDir, f.slug, "peer:T-04"), null);
+  const state = JSON.parse(readFileSync(statePath, "utf8"));
+  assert.equal(state.phase, "idle"); assert.equal(state.peerHandoffCount, 0); assert.equal(state.outgoingId, undefined);
+  assert.match(f.sent.filter(message => message.id === f.peer.id).at(-1)?.text ?? "", /Handoff canceled by the Owner — keep working on your Task\./);
+  assert.deepEqual(f.archived, []);
+  await f.runtime.onLeadTurnEnded(ended(f.peer.id, "# Late extraction\nIgnored."));
+  assert.equal(f.created.length, 0); assert.equal(readHandoffProgress(f.stateDir, f.slug, "peer:T-04"), null);
+  const again = await f.surface.handoff({ projectRoot: f.root, seat: "peer:T-04" }, "start");
+  assert.equal(again.ok, true);
+  if (again.ok) assert.equal(again.progress?.state, "handing-over");
+});
+
+test("Owner cancel of a failed Peer handoff clears the dead end without spending the automatic budget", async t => {
+  const f = fixture(t);
+  f.daemon.agents.create = async () => { throw new Error("Provider 'antigravity' is not available"); };
+  const failed = await f.surface.handoff({ projectRoot: f.root, seat: "peer:T-04", lane: "antigravity/x" }, "replaceNow");
+  assert.equal(failed.ok, true);
+  if (failed.ok) assert.equal(failed.progress?.state, "failed");
+  const canceled = await f.surface.handoff({ projectRoot: f.root, seat: "peer:T-04" }, "cancel");
+  assert.deepEqual(canceled, { ok: true, progress: null });
+  assert.equal(readHandoffProgress(f.stateDir, f.slug, "peer:T-04"), null);
+  const state = JSON.parse(readFileSync(join(projectStateDir(f.stateDir, f.slug), "peer-handoff-T-04.json"), "utf8"));
+  assert.equal(state.phase, "idle"); assert.equal(state.peerHandoffCount, 0);
+  assert.equal(existsSync(f.handoff), false);
+  const next = await f.surface.handoff({ projectRoot: f.root, seat: "peer:T-04" }, "retry");
+  assert.equal(next.ok, false);
+  if (!next.ok) assert.equal(next.code, "handoff-not-failed");
+});
+
+test("Owner cancel is refused for a context-mark extraction and when no Peer handoff is active", async t => {
+  const f = fixture(t);
+  const idle = await f.surface.handoff({ projectRoot: f.root, seat: "peer:T-04" }, "cancel");
+  assert.equal(idle.ok, false);
+  if (!idle.ok) assert.equal(idle.code, "handoff-not-active");
+  await f.runtime.onLeadTurnEnded(ended(f.peer.id));
+  assert.equal(readHandoffProgress(f.stateDir, f.slug, "peer:T-04")?.state, "handing-over");
+  const refused = await f.surface.handoff({ projectRoot: f.root, seat: "peer:T-04" }, "cancel");
+  assert.equal(refused.ok, false);
+  if (!refused.ok) assert.equal(refused.code, "handoff-past-cancel");
+  assert.equal(readHandoffProgress(f.stateDir, f.slug, "peer:T-04")?.state, "handing-over");
 });
 
 test("Owner Peer handoff refuses protected or missing Tasks before interrupting the Peer", async t => {

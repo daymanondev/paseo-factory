@@ -1,13 +1,14 @@
 import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createFactory } from '../plugin/server/core/factory.ts';
 import { createSurfaceHandlers, type SurfaceAgentSnapshot, type SurfaceDaemonApi } from '../plugin/server/surface-rpc.ts';
 import { createLeadMailRuntime } from '../plugin/server/lead-mailbox.ts';
 import { resolveProject, projectStateDir, writeProjectRegistration, readProjectRegistration } from '../plugin/server/core/project.ts';
 import { readLeadMailbox } from '../plugin/server/core/mailbox.ts';
-import { saveLanes } from '../plugin/server/core/lanes.ts';
+import { loadLanes, saveLanes } from '../plugin/server/core/lanes.ts';
+import { readHandoffProgress } from '../plugin/server/handoff-progress.ts';
 import { disposeDir, gitCommitAll, makeTempDir } from './helpers.ts';
 
 function fixture(t: TestContext, options: { parented?: boolean; backgroundLead?: boolean; timeout?: number } = {}) {
@@ -164,7 +165,7 @@ test('panel exposes recovery actions on failed handoffs independently of live se
   f.agents[0]!.archivedAt = new Date().toISOString();
   const snapshot = await f.surface.snapshot({ projectRoot: f.root });
   assert.ok(snapshot.ok);
-  assert.deepEqual(snapshot.view.panel?.handoffs[0]?.allowedActions, ['replace-now', 'retry', 'view-handover']);
+  assert.deepEqual(snapshot.view.panel?.handoffs[0]?.allowedActions, ['replace-now', 'retry', 'cancel', 'view-handover']);
 });
 
 
@@ -238,4 +239,70 @@ test('Supervisor completed extraction still finishes with a Substitute when its 
   } finally { clearTimeout(guard); }
   const handover = await f.surface.handoff({ projectRoot: f.root, seat: 'supervisor' }, 'handover');
   assert.ok(handover.ok); assert.equal(handover.progress?.state, 'done'); assert.equal(handover.source, 'substitute');
+});
+
+test('panel offers cancel for a handing-over Supervisor and for a failed Lead, but never for a handing-over Lead', async t => {
+  const f = fixture(t);
+  await f.surface.handoff({ projectRoot: f.root, seat: 'supervisor' }, 'start');
+  const stateDir = projectStateDir(f.stateDir, f.slug);
+  const lane = { provider: 'pi', model: 'zai/glm-5.3' };
+  const lead = { seat: 'lead', reason: 'owner', fromLane: lane, toLane: lane, startedAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+  writeFileSync(join(stateDir, 'handoff-lead.json'), JSON.stringify({ ...lead, state: 'handing-over' }));
+  const handingOver = await f.surface.snapshot({ projectRoot: f.root }); assert.ok(handingOver.ok);
+  const actionsOf = (seat: string) => handingOver.view.panel?.handoffs.find(h => h.seat === seat)?.allowedActions;
+  assert.deepEqual(actionsOf('supervisor'), ['replace-now', 'cancel']);
+  assert.deepEqual(actionsOf('lead'), ['replace-now']);
+  writeFileSync(join(stateDir, 'handoff-lead.json'), JSON.stringify({ ...lead, state: 'failed' }));
+  const failed = await f.surface.snapshot({ projectRoot: f.root }); assert.ok(failed.ok);
+  assert.deepEqual(failed.view.panel?.handoffs.find(h => h.seat === 'lead')?.allowedActions, ['replace-now', 'retry', 'cancel']);
+});
+
+test('Owner cancel during extraction restores the provider-change lane, clears progress, nudges the seat and ignores a late reply', async t => {
+  const f = fixture(t);
+  const original = loadLanes(f.stateDir, f.slug); assert.ok(original.ok);
+  const changed = await f.surface.lanesSet({ projectRoot: f.root, lane: 'supervisor', value: 'claude/opus-4-8' }); assert.equal(changed.ok, true);
+  const before = loadLanes(f.stateDir, f.slug); assert.ok(before.ok); assert.equal(before.lanes.supervisor, 'claude/opus-4-8');
+  const episodePath = join(projectStateDir(f.stateDir, f.slug), 'supervisor-handoff-extraction.json');
+  assert.ok(existsSync(episodePath));
+  const canceled = await f.surface.handoff({ projectRoot: f.root, seat: 'supervisor' }, 'cancel');
+  assert.deepEqual(canceled, { ok: true, progress: null });
+  const lanes = loadLanes(f.stateDir, f.slug); assert.ok(lanes.ok); assert.equal(lanes.lanes.supervisor, original.lanes.supervisor);
+  assert.equal(readHandoffProgress(f.stateDir, f.slug, 'supervisor'), null); assert.equal(existsSync(episodePath), false);
+  assert.equal(readProjectRegistration(f.stateDir, f.slug)?.supervisor, 'old');
+  assert.match(f.sent.filter(s => s.id === 'old').at(-1)?.text ?? '', /Handoff canceled by the Owner — keep working in this chat\./);
+  // A late extraction reply is not a handoff any more.
+  await f.runtime.onLeadTurnEnded({ agentId: 'old', outcome: { kind: 'completed' }, timeline: [{ type: 'assistant_message', text: '## Owner goals\nLate\n## Decisions taken\nLate\n## Open questions\nLate' }] });
+  assert.equal(f.created.length, 0); assert.deepEqual(f.archived, []);
+  assert.equal(readProjectRegistration(f.stateDir, f.slug)?.supervisor, 'old');
+  assert.equal(readHandoffProgress(f.stateDir, f.slug, 'supervisor'), null);
+  // The Owner can choose a model again straight away.
+  const again = await f.surface.lanesSet({ projectRoot: f.root, lane: 'supervisor', value: 'claude/opus-4-8' }); assert.equal(again.ok, true);
+  assert.equal(readHandoffProgress(f.stateDir, f.slug, 'supervisor')?.state, 'handing-over');
+});
+
+test('Owner cancel of a failed Supervisor handoff clears the dead end, drops the half-written handover and restores the lane', async t => {
+  const f = fixture(t);
+  const original = loadLanes(f.stateDir, f.slug); assert.ok(original.ok);
+  f.failCreate(true);
+  const changed = await f.surface.lanesSet({ projectRoot: f.root, lane: 'supervisor', value: 'claude/opus-4-8' }); assert.equal(changed.ok, true);
+  const failed = await f.surface.handoff({ projectRoot: f.root, seat: 'supervisor' }, 'replaceNow'); assert.ok(failed.ok); assert.equal(failed.progress?.state, 'failed');
+  const handoverPath = join(projectStateDir(f.stateDir, f.slug), 'supervisor-handoff.md'); assert.ok(existsSync(handoverPath));
+  const canceled = await f.surface.handoff({ projectRoot: f.root, seat: 'supervisor' }, 'cancel'); assert.deepEqual(canceled, { ok: true, progress: null });
+  assert.equal(readHandoffProgress(f.stateDir, f.slug, 'supervisor'), null); assert.equal(existsSync(handoverPath), false);
+  const lanes = loadLanes(f.stateDir, f.slug); assert.ok(lanes.ok); assert.equal(lanes.lanes.supervisor, original.lanes.supervisor);
+  assert.equal(readProjectRegistration(f.stateDir, f.slug)?.supervisor, 'old'); assert.deepEqual(f.archived, []);
+  f.failCreate(false);
+  const next = await f.surface.handoff({ projectRoot: f.root, seat: 'supervisor' }, 'start'); assert.ok(next.ok); assert.equal(next.progress?.state, 'handing-over');
+});
+
+test('Owner cancel is refused once the successor exists, and when no handoff is active', async t => {
+  const f = fixture(t);
+  const idle = await f.surface.handoff({ projectRoot: f.root, seat: 'supervisor' }, 'cancel'); assert.equal(idle.ok, false); assert.equal(!idle.ok && idle.code, 'handoff-not-active');
+  f.failSend(true);
+  await f.surface.handoff({ projectRoot: f.root, seat: 'supervisor' }, 'start');
+  await f.runtime.onLeadTurnEnded({ agentId: 'old', outcome: { kind: 'completed' }, timeline: [{ type: 'assistant_message', text: '## Owner goals\nKeep going\n## Decisions taken\nNone\n## Open questions\nNone' }] });
+  assert.equal(f.created.length, 1);
+  const past = await f.surface.handoff({ projectRoot: f.root, seat: 'supervisor' }, 'cancel'); assert.equal(past.ok, false); assert.equal(!past.ok && past.code, 'handoff-past-cancel');
+  assert.equal(readProjectRegistration(f.stateDir, f.slug)?.supervisor, 'successor-1');
+  assert.notEqual(readHandoffProgress(f.stateDir, f.slug, 'supervisor'), null);
 });

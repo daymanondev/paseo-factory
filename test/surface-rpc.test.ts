@@ -7308,7 +7308,7 @@ test("panel handoff actions follow progress and retain View handover after done 
     ["handing-over", ["switch-model", "hand-off-now", "replace-now"]],
     ["substitute", ["switch-model", "hand-off-now", "replace-now"]],
     ["creating-successor", ["switch-model", "hand-off-now", "replace-now"]],
-    ["failed", ["switch-model", "hand-off-now", "replace-now", "retry"]],
+    ["failed", ["switch-model", "hand-off-now", "replace-now", "retry", "cancel"]],
     ["done", ["switch-model", "hand-off-now", "view-handover"]],
   ] as const) {
     if (state) writeFileSync(join(dir, "handoff-lead.json"), JSON.stringify({ ...base, state }));
@@ -7321,7 +7321,7 @@ test("panel handoff actions follow progress and retain View handover after done 
         "handing-over": ["replace-now"],
         substitute: ["replace-now"],
         "creating-successor": ["replace-now"],
-        failed: ["replace-now", "retry"],
+        failed: ["replace-now", "retry", "cancel"],
         done: ["view-handover"],
       };
       assert.deepEqual(snapshot.view.panel.handoffs[0]?.allowedActions, progressActions[state], `independent progress ${state}`);
@@ -7371,7 +7371,7 @@ test("panel retains a failed standing handoff when the outgoing seat is absent",
   const snapshot = await handlers.snapshot({ projectRoot: project.root });
   assert.ok(snapshot.ok);
   assert.equal(snapshot.view.panel.seats!.supervisor.handoff?.state, "failed");
-  assert.deepEqual(snapshot.view.panel.seats!.supervisor.allowedActions, ["replace-now", "retry"]);
+  assert.deepEqual(snapshot.view.panel.seats!.supervisor.allowedActions, ["replace-now", "retry", "cancel"]);
   assert.equal(snapshot.view.panel.needsYou.find(i => i.kind === "handoff-failed")?.detail, "provider unavailable");
   const directory = await handlers.seatsDirectory({});
   assert.equal(directory.projects[0]!.needsYouCount, snapshot.view.panel.needsYou.length);
@@ -7418,7 +7418,7 @@ test("panel handoff list retains failed Peers without live agents and drops clos
   writeFileSync(join(dir, "handoff-peer-T-recover.json"), JSON.stringify(progress));
   const snapshot = await handlers.snapshot({ projectRoot: project.root });
   assert.ok(snapshot.ok);
-  assert.deepEqual(snapshot.view.panel.handoffs, [{ ...progress, allowedActions: ["replace-now", "retry"] }]);
+  assert.deepEqual(snapshot.view.panel.handoffs, [{ ...progress, allowedActions: ["replace-now", "retry", "cancel"] }]);
   assert.deepEqual(snapshot.view.panel.seats!.peers, []);
   assert.equal(snapshot.view.panel.needsYou.filter(i => i.kind === "handoff-failed").length, 1);
   factory.ledger.append({ event: "task_closed", task: "T-recover", reason: "superseded", by: "lead" });

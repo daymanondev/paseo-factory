@@ -3175,6 +3175,36 @@ test("A provider-change Lead handoff waits for running Peers, reports them, and 
   assert.equal(lanes.lanes.lead, "pi/zcode/glm-5.3:high");
 });
 
+test("Cancel backs out of a failed Lead handoff: provider-change lane restored, rotation normal, a new handoff starts at once", async (t) => {
+  const f = makeSpooledRuntime(t);
+  f.fake.agents.push({ id: "lead-cancel", labels: { seat: "lead", project: f.slug }, cwd: f.projectRoot });
+  writeProjectRegistration(f.stateDir, f.slug, { root: f.projectRoot, lead: "lead-cancel" });
+  saveLanes(f.stateDir, { lead: "claude/claude-sonnet-4-6" }, f.slug);
+  const create = f.fake.daemon.agents.create;
+  f.fake.daemon.agents.create = async () => { throw new Error("Provider 'antigravity' is not available"); };
+  const failed = await f.leadMail.handoff({ slug: f.slug, action: "replaceNow", reason: "provider-change", fromLane: "pi/zcode/glm-5.3:high", toLane: "claude/claude-sonnet-4-6" });
+  assert.ok(failed.ok); assert.equal(failed.progress?.state, "failed");
+  assert.notEqual(readProjectRegistration(f.stateDir, f.slug)?.rotationState ?? "normal", "normal");
+  const canceled = await f.leadMail.handoff({ slug: f.slug, action: "cancel" });
+  assert.deepEqual(canceled, { ok: true, progress: null });
+  assert.equal(readHandoffProgress(f.stateDir, f.slug, "lead"), null);
+  const reg = readProjectRegistration(f.stateDir, f.slug);
+  assert.ok(reg?.rotationState === undefined || reg.rotationState === "normal");
+  assert.equal(reg?.handoffRequestedAt, undefined);
+  const lanes = loadLanes(f.stateDir, f.slug); assert.ok(lanes.ok);
+  assert.equal(lanes.lanes.lead, "pi/zcode/glm-5.3:high");
+  f.fake.daemon.agents.create = create;
+  const again = await f.leadMail.handoff({ slug: f.slug, action: "start", reason: "provider-change", fromLane: "pi/zcode/glm-5.3:high", toLane: "claude/claude-sonnet-4-6" });
+  assert.ok(again.ok, "a new model choice is accepted after cancel");
+});
+
+test("Cancel is still refused for a Lead handoff that is neither scheduled nor failed", async (t) => {
+  const f = makeSpooledRuntime(t);
+  const refused = await f.leadMail.handoff({ slug: f.slug, action: "cancel" });
+  assert.equal(refused.ok, false);
+  assert.equal(refused.ok === false && refused.code, "handoff-not-scheduled");
+});
+
 test("A failed successor creation retries the stored handover without another extraction", async (t) => {
   const f = makeSpooledRuntime(t);
   f.fake.agents.push({ id: "lead-retry", labels: { seat: "lead", project: f.slug }, cwd: f.projectRoot });

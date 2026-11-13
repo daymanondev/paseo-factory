@@ -289,6 +289,32 @@ export function createPeerHandoffRuntime(deps: PeerHandoffDeps) {
       } catch (error) { deps.log(`Peer handoff ${slug}/${task} deferred: ${String(error)}`); }
     }
   };
+  /**
+   * Owner cancel. Only two states are safe to abandon: a failed successor creation (no successor exists
+   * yet) and an Owner-requested extraction still in flight (the outgoing Peer is stopped, not retired).
+   * A context-mark extraction is refused — the Peer would cross the mark again at once. The handoff
+   * budget counter is never touched.
+   */
+  const cancel = async (slug: string, task: string, contract: ContractSet, saved: PeerHandoffState | undefined): Promise<HandoffReply> => {
+    const seat = `peer:${task}`;
+    const shown = readHandoffProgress(deps.stateDir, slug, seat);
+    const state: PeerHandoffState = saved?.contractEpochSeq === contract.seq ? saved : { contractEpochSeq: contract.seq, peerHandoffCount: 0, phase: "idle" };
+    if (shown && shown.state !== "done" && state.phase === "idle") { writeHandoffProgress(deps.stateDir, slug, null, seat); return { ok: true, progress: null }; } // orphaned display record
+    if (!shown || shown.state === "done") return { ok: false, code: "handoff-not-active", error: "There is no Peer handoff to cancel" };
+    const failed = shown.state === "failed" && state.phase === "spawning";
+    const extracting = state.phase === "extracting" && state.reason === "owner";
+    if (state.successorId || (!failed && !extracting)) return { ok: false, code: "handoff-past-cancel", error: "The Peer handoff is past the point where it can be canceled" };
+    clear(`${slug}:${task}`);
+    rmSync(summaryPath(slug, task), { force: true });
+    const outgoingId = state.outgoingId;
+    save(slug, task, { contractEpochSeq: contract.seq, peerHandoffCount: state.peerHandoffCount, ...(state.ownerLane === undefined ? {} : { ownerLane: state.ownerLane }), phase: "idle" });
+    writeHandoffProgress(deps.stateDir, slug, null, seat);
+    if (extracting && outgoingId) {
+      // The extraction interrupted the outgoing Peer's turn; one line lets it carry on with its Task.
+      try { await bounded(deps.daemon().agents.ref(outgoingId).send("Handoff canceled by the Owner — keep working on your Task.")); } catch { /* an errored seat may reject the note */ }
+    }
+    return { ok: true, progress: null };
+  };
   return {
     async handoff(input: HandoffRequest): Promise<HandoffReply> {
       const task = input.seat?.slice(5) ?? "";
@@ -298,11 +324,11 @@ export function createPeerHandoffRuntime(deps: PeerHandoffDeps) {
       const current = () => readHandoffProgress(deps.stateDir, input.slug, `peer:${task}`);
       if (input.action === "handover") return { ok: true, progress: current(), ...readPeerHandover(deps.stateDir, input.slug, task) };
       if (!contract) return { ok: false, code: "unknown-task", error: "Task has no Contract" };
+      if (input.action === "cancel") return cancel(input.slug, task, contract, state);
       if (!eligible(input.slug, contract)) return { ok: false, code: "peer-task-ineligible", error: "Task is accepted, green, or verifying a Claim" };
       if (state?.contractEpochSeq !== contract.seq) state = { contractEpochSeq: contract.seq, peerHandoffCount: 0, phase: "idle" };
       const page = await deps.daemon().agents.list({ filter: { includeArchived: false, includeBackground: true } });
       const live = page.entries.map(entry => entry.agent).filter(agent => agent.archivedAt === null);
-      if (input.action === "cancel") return { ok: false, code: "handoff-not-scheduled", error: "Peer handoff has already started" };
       if (input.action === "retry" || (input.action === "replaceNow" && current()?.state === "failed")) {
         if (current()?.state !== "failed" || state.phase !== "spawning") return { ok: false, code: "handoff-not-failed", error: "Only a failed handoff can be retried" };
       } else if (input.action === "replaceNow" && state.phase === "extracting") {

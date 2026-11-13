@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { atomicJson, readOptionalJson } from './core/json-store.ts';
-import { loadLanes } from './core/lanes.ts';
+import { loadLanes, saveLanes } from './core/lanes.ts';
 import { projectStateDir, projectNotebookPath, readProjectRegistration, writeProjectRegistration } from './core/project.ts';
 import { readLeadMailbox, requeueLeadMail, deliverLeadMail } from './core/mailbox.ts';
 import { buildSeatKickoffPacket } from './core/preflight.ts';
@@ -146,7 +146,21 @@ export function createSupervisorHandoffRuntime(deps: {
       if (input.action === 'handover') return { ok: true, progress: progress(input.slug), text: textOnDisk(input.slug), source: progress(input.slug)?.handover ?? (textOnDisk(input.slug).startsWith('# Plugin-built') ? 'substitute' : 'extracted') };
       const slug = input.slug; const reg = readProjectRegistration(deps.stateDir, slug); if (!reg) return { ok: false, code: 'unknown-project', error: 'Project not registered' };
       const current = progress(slug);
-      if (input.action === 'cancel') return { ok: false, code: 'handoff-not-scheduled', error: 'Supervisor extraction has started and cannot be canceled' };
+      if (input.action === 'cancel') {
+        if (!current || current.state === 'done') return { ok: false, code: 'handoff-not-active', error: 'There is no Supervisor handoff to cancel' };
+        const data = episode(slug);
+        // A successor id means the successor exists (and may hold held reports): past the point of no return.
+        if (data?.successorId) return { ok: false, code: 'handoff-past-cancel', error: 'The successor Supervisor was already created; the handoff cannot be canceled' };
+        // The outgoing seat is only retired after the successor is created and kicked off, so it is still ours to hand back.
+        clearTimer(slug);
+        const outgoingId = data?.outgoingId ?? reg.supervisor;
+        if (current.reason === 'provider-change') saveLanes(deps.stateDir, { supervisor: laneValue(current.fromLane) }, slug);
+        writeHandoffProgress(deps.stateDir, slug, null, 'supervisor');
+        rmSync(path(slug, 'supervisor-handoff-extraction.json'), { force: true });
+        if (data?.text) rmSync(path(slug, 'supervisor-handoff.md'), { force: true });
+        if (outgoingId) { try { await deps.daemon().agents.ref(outgoingId).send('Handoff canceled by the Owner — keep working in this chat.'); } catch { /* an errored or archived seat may reject the note */ } }
+        return { ok: true, progress: null };
+      }
       if (input.action === 'retry') {
         if (current?.state !== 'failed') return { ok: false, code: 'handoff-not-failed', error: 'Only a failed handoff can be retried' };
         update(slug, { state: 'creating-successor', failure: undefined }); await complete(slug); return { ok: true, progress: progress(slug) };
