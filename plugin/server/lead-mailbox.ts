@@ -2048,8 +2048,13 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       if (!reg) return { ok: false, code: "unknown-project", error: "Project not registered" };
       const current = progressOf(input.slug);
       if (input.action === "cancel") {
-        if (readRotationState(input.slug) !== "rotation_pending") return { ok: false, code: "handoff-not-scheduled", error: "Only a scheduled handoff can be canceled" };
+        // A failed handoff failed at successor creation, after the outgoing Lead was retired — cancelling it
+        // abandons the rotation and returns the mailbox to normal; the next delivery ensures a Lead on the
+        // restored lane. An in-flight extraction or retire step is never cancellable.
+        const failed = current?.state === "failed";
+        if (!failed && readRotationState(input.slug) !== "rotation_pending") return { ok: false, code: "handoff-not-scheduled", error: "Only a scheduled or failed handoff can be canceled" };
         if (current?.reason === "provider-change") saveLanes(deps.stateDir, { lead: laneValue(current.fromLane) }, input.slug);
+        clearHandoffTimer(input.slug); extractionOutstandingBySlug.delete(input.slug); handingOverBySlug.delete(input.slug);
         writeRotationState(input.slug, reg.root, { rotationState: "normal", handoffRequestedAt: null });
         writeHandoffProgress(deps.stateDir, input.slug, null);
         await drainLeadMailbox(input.slug);

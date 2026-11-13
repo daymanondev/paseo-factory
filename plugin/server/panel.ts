@@ -151,12 +151,24 @@ function contextOf(role: "supervisor" | "lead" | "peer", agent: AgentView) {
   return { state: used === null ? "unknown" as const : "used" as const, usedTokens: used, markTokens: mark, label: used === null ? "context unknown" : `${Math.round(used / 1000)}k / ${Math.round(mark / 1000)}k`, fraction: used === null ? null : Math.min(1, used / mark) };
 }
 
+/**
+ * Owner cancel by seat runtime: every seat can back out of a failed handoff (no successor exists yet);
+ * a live extraction can be abandoned for the Supervisor and an Owner-requested Peer handoff, never for
+ * the Lead (its rotation machine only cancels while scheduled) or a context-mark Peer extraction.
+ */
+function handoffCancelable(handoff: HandoffProgress): boolean {
+  if (handoff.state === "scheduled" || handoff.state === "failed") return true;
+  if (handoff.state !== "handing-over") return false;
+  return handoff.seat === "supervisor" || (handoff.seat.startsWith("peer:") && handoff.reason === "owner");
+}
+
 /** Progress action projection also covers handoffs whose outgoing Peer has disappeared. */
 function handoffActions(handoff: HandoffProgress | null, handoverAvailable: boolean): SeatAllowedAction[] {
   const actions: SeatAllowedAction[] = [];
   if (handoff?.state === "scheduled") actions.push("hand-off-now", "cancel");
   if (handoff && ["handing-over", "substitute", "creating-successor", "failed"].includes(handoff.state)) actions.push("replace-now");
   if (handoff?.state === "failed") actions.push("retry");
+  if (handoff && handoffCancelable(handoff) && handoff.state !== "scheduled") actions.push("cancel");
   if (handoverAvailable || handoff?.state === "done") actions.push("view-handover");
   return actions;
 }
