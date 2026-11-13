@@ -16,7 +16,7 @@ import { associateTaskPeer, createTaskPeer, resolvePeerSpawnProvider, resolveSpa
 import { READ_ONLY_DISPOSITION_FENCE, readOnlyDispositionEvidence } from "./core/disposition-prompt.ts";
 import { laneRef, readHandoffProgress, writeHandoffProgress } from "./handoff-progress.ts";
 import type { HandoffRequest, HandoffReply, HandoffProgress } from "../shared/handoff.ts";
-import { buildSubstituteHandover, readNotebook, readHandoverGit } from "./substitute-handover.ts";
+import { buildSubstituteHandover, readNotebook, readHandoverGit, renderOpenTaskEvidence } from "./substitute-handover.ts";
 import { foldTasks, renderLedgerLine } from "./view.ts";
 import { capHandoffText, validHandoffText } from "./handoff-text.ts";
 
@@ -146,7 +146,7 @@ export function createPeerHandoffRuntime(deps: PeerHandoffDeps) {
         let timeline = INTERRUPTED;
         try { const tail = await bounded(daemon.agents.ref(state.outgoingId!).timeline.refetch({ direction: "tail", limit: 10 })); timeline += "\n" + (tail.entries ?? []).map(entry => entry.item?.text ?? "").filter(Boolean).join("\n"); } catch { /* Substitute remains useful without native timeline. */ }
         const events = eventsOf(slug);
-        summary = buildSubstituteHandover({ digest: events.slice(-20).map(renderLedgerLine).join("\n"), notebook: readNotebook(projectNotebookPath(deps.stateDir, slug)), git: readHandoverGit(state.worktree!), tasks: foldTasks(events).filter(task => !task.accepted).map(task => `${task.task}: ${task.status}; Attempts: ${task.attempts.length}`).join("\n"), timeline, maxBytes: SUMMARY_BYTES });
+        summary = buildSubstituteHandover({ digest: events.slice(-20).map(renderLedgerLine).join("\n"), notebook: readNotebook(projectNotebookPath(deps.stateDir, slug)), git: readHandoverGit(state.worktree!), tasks: renderOpenTaskEvidence(foldTasks(events)), timeline, maxBytes: SUMMARY_BYTES });
       }
       writeFileSync(path, capHandoffText(summary, SUMMARY_BYTES));
       state.phase = "retiring";

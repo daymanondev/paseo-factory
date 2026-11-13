@@ -10,8 +10,9 @@ claims the task is finished at a specific commit, and the factory — never the
 agent — runs the gate and records every step in an append-only ledger it
 cannot edit. A green verdict is evidence, not acceptance.
 
-**Status: v0.7.0.** The verification core and installed plugin are covered by
-1370 tests on Node 22 and 24. The Paseo 0.13 plugin owns the Ledger as its single
+**Status: v0.7.0.** The verification core and installed plugin have automated
+validation through `npm run check`; the CI workflow covers Node 22 and 24.
+The Paseo 0.13 plugin owns the Ledger as its single
 writer and serves CLI, MCP and surface RPC entrances. Acceptance uses trusted
 caller authority and shared Task/Attempt state; Vault history is staged before
 writer-owned admission, preserving local evidence addresses.

@@ -15,7 +15,7 @@ import type { SurfaceAgentSnapshot, SurfaceDaemonApi } from './surface-rpc.ts';
 import type { LeadMailItem } from './core/mailbox.ts';
 
 export const SUPERVISOR_HANDOFF_MAX_BYTES = 4 * 1024;
-const EpisodeSchema = z.object({ outgoingId: z.string(), requestedAt: z.string(), successorId: z.string().optional(), text: z.string().optional(), kickoff: z.string().optional(), kickoffDelivered: z.boolean().optional(), noticeSent: z.boolean().optional() });
+const EpisodeSchema = z.object({ outgoingId: z.string(), requestedAt: z.string(), interruptedOwnerTurn: z.boolean().optional(), successorId: z.string().optional(), text: z.string().optional(), kickoff: z.string().optional(), kickoffDelivered: z.boolean().optional(), noticeSent: z.boolean().optional() });
 type Episode = z.infer<typeof EpisodeSchema>;
 export function createSupervisorHandoffRuntime(deps: {
   stateDir: string; daemon(): SurfaceDaemonApi; timeoutMs: number;
@@ -39,15 +39,35 @@ export function createSupervisorHandoffRuntime(deps: {
   const live = async () => (await deps.daemon().agents.list({ filter: { includeArchived: false, includeBackground: true } })).entries.map(e => e.agent).filter(a => !a.archivedAt);
   const textOnDisk = (slug: string) => { try { return readFileSync(path(slug, 'supervisor-handoff.md'), 'utf8'); } catch { return ''; } };
 
-  const complete = async (slug: string, extracted?: string | null): Promise<void> => {
+  const timelineTail = async (id: string) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const page = await Promise.race([
+        deps.daemon().agents.ref(id).timeline.refetch({ direction: 'tail', limit: 10 }),
+        new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('Supervisor timeline timed out')), 1000); }),
+      ]);
+      return page.entries ?? [];
+    } catch { return []; }
+    finally { clearTimeout(timer); }
+  };
+  const complete = async (slug: string, extracted?: string | null, recoverCompletedReply = false): Promise<void> => {
     const reg = readProjectRegistration(deps.stateDir, slug); const current = progress(slug); const data = episode(slug);
     if (!reg || !current || !data) return;
     clearTimer(slug);
     const evidence = deps.evidence(slug);
     if (!data.text) {
-      let timeline = '(outgoing Supervisor unavailable)';
-      try { const entries = (await deps.daemon().agents.ref(data.outgoingId).timeline.refetch({ limit: 10 })).entries; timeline = (entries ?? []).map(e => JSON.stringify(e)).join('\n'); } catch { /* bounded evidence is optional */ }
+      let tail: Awaited<ReturnType<typeof timelineTail>> | undefined;
+      // Some SDKs omit the event timeline. Only a completed extraction may
+      // recover a reply here; error/timeout tails remain substitute evidence.
+      if (recoverCompletedReply && !validHandoffText(extracted)) {
+        tail = await timelineTail(data.outgoingId);
+        extracted = tail.map(entry => entry.item ?? entry as { type?: string; text?: string })
+          .findLast(item => item.type === 'assistant_message' && validHandoffText(item.text))?.text ?? null;
+      }
       const source = validHandoffText(extracted) ? 'extracted' : 'substitute';
+      const timeline = source === 'substitute'
+        ? (tail ?? await timelineTail(data.outgoingId)).map(entry => JSON.stringify(entry)).join('\n') || '(outgoing Supervisor unavailable)'
+        : '';
       if (source === 'substitute') update(slug, { state: 'substitute' });
       data.text = source === 'extracted' ? capHandoffText(extracted!, SUPERVISOR_HANDOFF_MAX_BYTES) : buildSubstituteHandover({ ...evidence, notebook: readNotebook(projectNotebookPath(deps.stateDir, slug)), git: readHandoverGit(reg.root), timeline, maxBytes: SUPERVISOR_HANDOFF_MAX_BYTES });
       writeFileSync(path(slug, 'supervisor-handoff.md'), data.text);
@@ -111,9 +131,16 @@ export function createSupervisorHandoffRuntime(deps: {
     active, pump,
     stop() { for (const timer of timers.values()) clearTimeout(timer); timers.clear(); },
     reset(slug: string) { clearTimer(slug); writeHandoffProgress(deps.stateDir, slug, null, 'supervisor'); rmSync(path(slug, 'supervisor-handoff-extraction.json'), { force: true }); },
-    async turnEnded(slug: string, id: string, text: string | null, completed: boolean) {
+    async turnEnded(slug: string, id: string, text: string | null, outcome: 'completed' | 'failed' | 'canceled') {
       if (!active(slug) || episode(slug)?.outgoingId !== id || progress(slug)?.state !== 'handing-over') return false;
-      await complete(slug, completed ? text : undefined); return true;
+      const data = episode(slug)!;
+      // Default SDK send cancels a running Owner turn before starting extraction.
+      // Consume that one lifecycle event; a later canceled extraction still falls back.
+      if (data.interruptedOwnerTurn && outcome === 'canceled') {
+        save(slug, { ...data, interruptedOwnerTurn: false });
+        return true;
+      }
+      await complete(slug, outcome === 'completed' ? text : undefined, outcome === 'completed'); return true;
     },
     async request(input: HandoffRequest): Promise<HandoffReply> {
       if (input.action === 'handover') return { ok: true, progress: progress(input.slug), text: textOnDisk(input.slug), source: progress(input.slug)?.handover ?? (textOnDisk(input.slug).startsWith('# Plugin-built') ? 'substitute' : 'extracted') };
@@ -131,7 +158,7 @@ export function createSupervisorHandoffRuntime(deps: {
       const lanes = loadLanes(deps.stateDir, slug); if (!lanes.ok) return { ok: false, code: 'lanes-unreadable', error: lanes.reason };
       const outgoing = (await live()).find(a => a.id === reg.supervisor);
       if (!outgoing && !reg.supervisor) return { ok: false, code: 'no-supervisor', error: 'Start a Supervisor before handing it off' };
-      const now = new Date().toISOString(); const data: Episode = { outgoingId: reg.supervisor!, requestedAt: now };
+      const now = new Date().toISOString(); const data: Episode = { outgoingId: reg.supervisor!, requestedAt: now, interruptedOwnerTurn: outgoing?.status === 'running' || outgoing?.status === 'initializing' };
       save(slug, data);
       writeHandoffProgress(deps.stateDir, slug, { seat: 'supervisor', reason: input.reason ?? 'owner', state: 'handing-over', fromLane: laneRef(input.fromLane ?? lanes.lanes.supervisor), toLane: laneRef(input.toLane ?? lanes.lanes.supervisor), startedAt: now, updatedAt: now });
       if (input.action === 'replaceNow' || !outgoing || outgoing.status === 'error') await complete(slug);
