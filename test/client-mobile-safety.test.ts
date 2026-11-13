@@ -34,7 +34,8 @@ async function load(entry: string, platformOs = "ios"): Promise<Exports> {
             loader: "js",
             contents: `
               const React = require('react');
-              const tag = (name) => ({ children, onPress, disabled, ...rest }) => React.createElement(name, { disabled, onClick: onPress, 'data-testid': rest.testID }, children);
+              // Pressable children may be a render function (Tabs): call it unpressed. Role / label / selected / checked are exposed for tab and switch assertions.
+              const tag = (name) => ({ children, onPress, disabled, ...rest }) => React.createElement(name, { disabled, onClick: onPress, 'data-testid': rest.testID, 'data-role': rest.accessibilityRole, 'aria-label': rest.accessibilityLabel, 'data-selected': rest.accessibilityState && rest.accessibilityState.selected !== undefined ? String(rest.accessibilityState.selected) : undefined, 'data-checked': rest.accessibilityState && rest.accessibilityState.checked !== undefined ? String(rest.accessibilityState.checked) : undefined }, typeof children === 'function' ? children({ pressed: false }) : children);
               exports.View = tag('div'); exports.ScrollView = tag('div'); exports.Text = tag('span'); exports.Pressable = tag('button'); exports.TextInput = tag('input');
               exports.Icon = () => null;
               exports.useRpc = contract => input => globalThis.__factoryClientRpc(contract.name, input);
@@ -42,7 +43,7 @@ async function load(entry: string, platformOs = "ios"): Promise<Exports> {
               exports.useToast = () => ({ show() {}, error(message) { globalThis.__factoryClientErrors?.push(message); } });
               exports.Platform = { OS: ${JSON.stringify(platformOs)}, select: (spec) => (spec[${JSON.stringify(platformOs)}] !== undefined ? spec[${JSON.stringify(platformOs)}] : spec.default) };
               exports.DocumentFrame = ({ url }) => React.createElement('section', { 'data-document-frame': url });
-              const Modal = ({ children, open }) => (open ? React.createElement('div', null, children) : null);
+              const Modal = ({ children, open, title }) => (open ? React.createElement('div', { 'data-modal-title': title }, children) : null);
               Modal.Content = tag('div');
               exports.Modal = Modal;
             `,
@@ -258,7 +259,8 @@ test("W11: one tap on every fresh-tab model chip opens the inline picker, includ
       panel.seats.lead.agentId = vacant ? null : "lead";
       panel.seats.lead.allowedActions = vacant ? [] : ["switch-model", "hand-off-now"];
       for (const seat of ["supervisor", "lead", "peer-task-1", "worker"]) {
-        await act(() => root.render(createElement(ProjectPanel, { key: `${vacant}-${seat}`, theme: testTheme, panel, modelView: modelPickerFixture, mobile: false, now: Date.now(), daemonError: null, actions: { ...modelPanelActions, saveSeatModel() {}, setMachineDefault() {} } })));
+        // The Default worker's chip lives on the Models tab; every seat's on Team.
+        await act(() => root.render(createElement(ProjectPanel, { key: `${vacant}-${seat}`, theme: testTheme, panel, modelView: modelPickerFixture, mobile: false, now: Date.now(), daemonError: null, initialUi: { tab: seat === "worker" ? "models" : "team" }, actions: { ...modelPanelActions, saveSeatModel() {}, setMachineDefault() {} } })));
         const chip = container.querySelector(`[data-testid="factory-seat-chip-${seat}"]`);
         assert.equal(chip?.tagName, "BUTTON", `${seat} is editable on the fresh tab`);
         await act(() => (chip as HTMLElement).click());
@@ -328,9 +330,11 @@ test("W11: the tab saves standing models in Project scope, Peer choices through 
   const cases = [
     { seat: "supervisor", provider: "codex", modelLabel: "GPT next", button: "Switch model", method: "factory.lanes.set", input: { projectRoot: "/project", lane: "supervisor", value: "codex/gpt-next" } },
     { seat: "lead", provider: "claude", button: "Hand off to claude", method: "factory.lanes.set", input: { projectRoot: "/project", lane: "lead", value: "claude/opus" } },
-    { seat: "peer-task-1", provider: "codex", button: "Hand off to codex", method: "factory.handoff.start", input: { projectRoot: "/project", seat: "peer:task-1", lane: "codex/gpt-live:high" } },
-    { seat: "peer-task-1", provider: "claude", button: "Hand off to claude", method: "factory.handoff.start", input: { projectRoot: "/project", seat: "peer:task-1", lane: "claude/opus" } },
+    { seat: "peer-task-1", provider: "codex", button: "Hand off Peer", method: "factory.handoff.start", input: { projectRoot: "/project", seat: "peer:task-1", lane: "codex/gpt-live:high" } },
+    { seat: "peer-task-1", provider: "claude", button: "Hand off Peer", method: "factory.handoff.start", input: { projectRoot: "/project", seat: "peer:task-1", lane: "claude/opus" } },
     { seat: "worker", provider: "claude", button: "Save Default worker", method: "factory.lanes.set", input: { projectRoot: "/project", lane: "worker", value: "claude/opus" } },
+    // Value unchanged on a live Lead = rotate: no lane write, a bare handoff start for the seat.
+    { seat: "lead", provider: "codex", button: "Hand off to a fresh session", method: "factory.handoff.start", input: { projectRoot: "/project", seat: "lead" } },
   ];
   try {
     await mountUnderNativeWindow(async (createRoot, container, act) => {
@@ -339,6 +343,7 @@ test("W11: the tab saves standing models in Project scope, Peer choices through 
       await act(() => root.render(createElement(FactoryShell, { theme: testTheme, dir: "/project", layout: { compact: false, platform: "web" } })));
       const click = async (id: string) => { const button = container.querySelector(`[data-testid="${id}"]`) as HTMLElement; assert.ok(button, id); await act(() => button.click()); };
       for (const sample of cases) {
+        await click(`factory-tab-${sample.seat === "worker" ? "models" : "team"}`);
         await click(`factory-seat-chip-${sample.seat}`);
         const editor = container.querySelector('[data-testid="factory-chip-editor"]')!;
         if (sample.provider === "claude") {
@@ -357,20 +362,34 @@ test("W11: the tab saves standing models in Project scope, Peer choices through 
         assert.equal(container.querySelector('[data-testid="factory-chip-editor"]'), null, "no confirmation step follows the labelled action");
       }
       refuse = true;
+      await click("factory-tab-team");
       await click("factory-seat-chip-lead");
+      await click("factory-chip-editor-primary");
+      assert.ok(container.querySelector('[data-testid="factory-chip-editor"]'), "a refused rotate keeps the modal open for retry");
+      // A refused write (a model change) stays open too.
+      const claude = [...container.querySelectorAll('[data-testid="factory-chip-editor"] button')].find(b => b.textContent?.startsWith("claude"))!;
+      await act(() => (claude as HTMLElement).click());
       await click("factory-chip-editor-primary");
       assert.ok(container.querySelector('[data-testid="factory-chip-editor"]'), "a refused save keeps the selection open for retry");
       assert.match(errors.at(-1)!, /Model unavailable/);
       refuse = false;
       await click("factory-chip-editor-machine-default");
-      assert.deepEqual(calls.filter(c => c.method !== "factory.snapshot").at(-1), { method: "factory.lanes.set", input: { lane: "lead", value: "codex/gpt-live:high" } });
+      assert.deepEqual(calls.filter(c => c.method !== "factory.snapshot").at(-1), { method: "factory.lanes.set", input: { lane: "lead", value: "claude/opus" } });
+      // The header chip no longer opens an inline list: it switches to the Models tab, where each profile has an Apply row.
+      await click("factory-tab-team");
       await click("factory-profile-chip");
+      assert.equal(container.querySelector('[data-testid="factory-tab-models"]')?.getAttribute("data-selected"), "true", "the profile chip switches to the Models tab");
+      assert.equal(container.querySelector('[data-testid="factory-profile-chip-menu"]'), null, "the old inline profile list is gone");
       await click("factory-profile-apply-balanced");
       assert.deepEqual(calls.filter(c => c.method !== "factory.snapshot").at(-1), { method: "factory.profiles.apply", input: { projectRoot: "/project", profileId: "balanced" } });
-      assert.equal(container.querySelector('[data-testid="factory-profile-chip"]')?.textContent, "Balanced", "the refreshed profile is visible");
+      assert.equal(container.querySelector('[data-testid="factory-profile-chip"]')?.textContent, "Balanced ▾", "the refreshed profile is visible");
+      await click("factory-tab-project");
       await click("factory-skill-pack-expo");
       assert.deepEqual(calls.filter(c => c.method !== "factory.snapshot").at(-1), { method: "factory.skills.toggle_pack", input: { projectRoot: "/project", pack: "expo", enabled: true } });
-      assert.match(container.querySelector('[data-testid="factory-skill-pack-expo"]')?.textContent ?? "", /Disable Expo/, "the refreshed enabled pack is visible");
+      const pack = container.querySelector('[data-testid="factory-skill-pack-expo"]')!;
+      assert.equal(pack.getAttribute("data-role"), "switch");
+      assert.equal(pack.getAttribute("data-checked"), "true", "the refreshed enabled pack is a checked switch");
+      assert.equal(pack.getAttribute("aria-label"), "Disable Expo");
       await click("factory-skill-pack-expo");
       assert.deepEqual(calls.filter(c => c.method !== "factory.snapshot").at(-1), { method: "factory.skills.toggle_pack", input: { projectRoot: "/project", pack: "expo", enabled: false } });
       } finally { await act(() => root.unmount()); }
@@ -384,11 +403,12 @@ test("W11: mobile keeps every model chip editable and excludes machine-default, 
   const { testTheme } = await import("./client-markup.ts");
   const { createElement } = await import("react");
   const saved: unknown[] = [];
+  const rotated: string[] = [];
   await mountUnderNativeWindow(async (createRoot, container, act) => {
     const root = createRoot(container);
     try {
       for (const seat of ["supervisor", "lead", "peer-task-1", "worker"]) {
-        await act(() => root.render(createElement(ProjectPanel, { key: seat, theme: testTheme, panel: modelPanelFixture(), modelView: modelPickerFixture, mobile: true, now: Date.now(), daemonError: null, skillPacks: [{ id: "expo", label: "Expo", enabled: false }], actions: { ...modelPanelActions, saveSeatModel: (target: string, value: string) => { saved.push({ target, value }); }, setMachineDefault() { assert.fail("mobile machine write"); }, applyProfile() { assert.fail("mobile profile write"); }, toggleSkillPack() { assert.fail("mobile pack write"); } } })));
+        await act(() => root.render(createElement(ProjectPanel, { key: seat, theme: testTheme, panel: modelPanelFixture(), modelView: modelPickerFixture, mobile: true, now: Date.now(), daemonError: null, initialUi: { tab: seat === "worker" ? "models" : "team" }, skillPacks: [{ id: "expo", label: "Expo", enabled: false }], actions: { ...modelPanelActions, handoffStart: (target: string) => { rotated.push(target); }, saveSeatModel: (target: string, value: string) => { saved.push({ target, value }); }, setMachineDefault() { assert.fail("mobile machine write"); }, applyProfile() { assert.fail("mobile profile write"); }, toggleSkillPack() { assert.fail("mobile pack write"); } } })));
         await act(() => (container.querySelector(`[data-testid="factory-seat-chip-${seat}"]`) as HTMLElement).click());
         assert.ok(container.querySelector('[data-testid="factory-chip-editor"]'));
         assert.equal(container.querySelector('[data-testid="factory-chip-editor-machine-default"]'), null);
@@ -398,9 +418,14 @@ test("W11: mobile keeps every model chip editable and excludes machine-default, 
         await act(() => (container.querySelector('[data-testid="factory-chip-editor-primary"]') as HTMLElement).click());
       }
       assert.deepEqual(saved, [
-        { target: "supervisor", value: "codex/gpt-live:high" }, { target: "lead", value: "codex/gpt-live:high" },
+        { target: "supervisor", value: "codex/gpt-live:high" },
         { target: "peer:task-1", value: "codex/gpt-live:high" }, { target: "worker", value: "codex/gpt-live:high" },
       ]);
+      assert.deepEqual(rotated, ["lead"], "an unchanged live Lead rotates instead of writing a lane");
+      // The pack list is read-only on mobile: shown on the Project tab, with no toggle.
+      await act(() => root.render(createElement(ProjectPanel, { key: "project", theme: testTheme, panel: modelPanelFixture(), modelView: modelPickerFixture, mobile: true, now: Date.now(), daemonError: null, initialUi: { tab: "project" }, skillPacks: [{ id: "expo", label: "Expo", enabled: false }], actions: { ...modelPanelActions, toggleSkillPack() { assert.fail("mobile pack write"); } } })));
+      assert.match(container.querySelector('[data-testid="factory-skill-packs"]')!.textContent!, /Expo/);
+      assert.equal(container.querySelector('[data-testid="factory-skill-pack-expo"]'), null);
     } finally { await act(() => root.unmount()); }
   });
 });
@@ -444,8 +469,19 @@ test('W12: handoff actions dispatch the typed RPC, refresh progress and open the
         await click('factory-handoff-replace-now', 'factory.handoff.replace.now', 'lead', 'factory-handoff-lead');
         await click('factory-handoff-retry', 'factory.handoff.retry', 'peer:gone', 'factory-handoff-peer:gone');
         await click('factory-handoff-replace-now', 'factory.handoff.replace.now', 'peer:gone', 'factory-handoff-peer:gone');
-        await click('factory-seat-hand-off-now-supervisor', 'factory.handoff.start', 'supervisor');
-        await click('factory-seat-hand-off-now-peer-task-1', 'factory.handoff.start', 'peer:task-1');
+        // The row's Hand off… opens the modal (no RPC yet); its primary then rotates the seat / hands the Peer to a successor.
+        const rpcCount = () => calls.filter(c => c.method !== 'factory.snapshot').length;
+        const beforeOpen = rpcCount();
+        await act(() => (container.querySelector('[data-testid="factory-seat-hand-off-now-supervisor"]') as HTMLElement).click());
+        assert.ok(container.querySelector('[data-testid="factory-chip-editor"]'), 'Hand off… opens the seat modal');
+        assert.equal(rpcCount(), beforeOpen, 'opening the modal fires nothing');
+        await act(() => (container.querySelector('[data-testid="factory-chip-editor-primary"]') as HTMLElement).click());
+        assert.deepEqual(calls.filter(c => c.method !== 'factory.snapshot').at(-1), { method: 'factory.handoff.start', input: { projectRoot: '/project', seat: 'supervisor' } });
+        assert.equal(container.querySelector('[data-testid="factory-chip-editor"]'), null, 'the modal closes once the handoff starts');
+        await act(() => (container.querySelector('[data-testid="factory-seat-hand-off-now-peer-task-1"]') as HTMLElement).click());
+        assert.equal(container.querySelector('[data-testid="factory-chip-editor-primary"]')?.textContent, 'Hand off Peer');
+        await act(() => (container.querySelector('[data-testid="factory-chip-editor-primary"]') as HTMLElement).click());
+        assert.deepEqual(calls.filter(c => c.method !== 'factory.snapshot').at(-1), { method: 'factory.handoff.start', input: { projectRoot: '/project', seat: 'peer:task-1', lane: 'codex/gpt-live:high' } });
         await click('factory-panel-needs-you-action-mark', 'factory.handoff.start', 'supervisor');
         // The Handoff block owns the failed Peer's retry; the matching Needs-you card is deduped away.
         assert.equal(container.querySelector('[data-testid="factory-panel-needs-you-action-failed-peer"]'), null);
@@ -461,6 +497,33 @@ test('W12: handoff actions dispatch the typed RPC, refresh progress and open the
   } finally { g.__factoryClientRpc = prior; }
 });
 
+
+test("04: the Closed toggle expands and collapses the closed Peers; an editor request switches to the tab holding its chip", async () => {
+  const { ProjectPanel } = await load("plugin/client/factory/project-panel.tsx");
+  const { testTheme } = await import("./client-markup.ts");
+  const { createElement } = await import("react");
+  const panel = modelPanelFixture();
+  panel.seats.peers.push({ ...panel.seats.peers[0], task: "task-old", title: "Old one", agentId: "peer-old", statusLabel: "closed" });
+  await mountUnderNativeWindow(async (createRoot, container, act) => {
+    const root = createRoot(container);
+    try {
+      const props = { theme: testTheme, panel, modelView: modelPickerFixture, mobile: true, now: Date.now(), daemonError: null, actions: { ...modelPanelActions, saveSeatModel() {} } };
+      await act(() => root.render(createElement(ProjectPanel, props)));
+      const toggle = () => container.querySelector('[data-testid="factory-panel-peers-closed-toggle"]') as HTMLElement;
+      assert.match(toggle().textContent!, /▸ Closed \(1\)/);
+      assert.equal(container.querySelector('[data-testid="factory-panel-seat-peer-task-old"]'), null);
+      await act(() => toggle().click());
+      assert.match(toggle().textContent!, /▾ Closed \(1\)/);
+      assert.ok(container.querySelector('[data-testid="factory-panel-peers-closed"] [data-testid="factory-panel-seat-peer-task-old"]'));
+      await act(() => toggle().click());
+      assert.equal(container.querySelector('[data-testid="factory-panel-peers-closed"]'), null);
+      // A request for the Default worker's editor opens on Models; one for a seat returns to Team.
+      await act(() => root.render(createElement(ProjectPanel, { ...props, editorRequest: { sequence: 1, target: "worker" } })));
+      assert.ok(container.querySelector('[data-testid="factory-tab-body-models"]'));
+      assert.ok(container.querySelector('[data-testid="factory-chip-editor"]'), "the worker editor opens");
+    } finally { await act(() => root.unmount()); }
+  });
+});
 
 test('W12: a vacant failed handoff obeys the server model permission while an ordinary vacancy stays editable', async () => {
   const { ProjectPanel } = await load('plugin/client/factory/project-panel.tsx');
@@ -695,23 +758,29 @@ test('W14: iOS and Android expose exactly the Project model, handoff and adoptio
           };
           await click('factory-panel-menu-toggle');
           assert.match(container.querySelector('[data-testid="factory-panel-menu"]')!.textContent!, /on Paseo Desktop/, 'desktop-only Project actions explain where to continue');
+          await click('factory-tab-project');
           for (const id of ['factory-handoff-retry', 'factory-panel-needs-you-action-retry', 'factory-profile-chip-menu', 'factory-skill-pack-expo', 'factory-panel-open-settings', 'factory-panel-menu-reset', 'factory-panel-menu-delete', 'factory-panel-menu-confirm-reset', 'factory-panel-menu-confirm-delete', 'factory-panel-start-supervisor', 'factory-panel-needs-you-action-prerequisites', 'factory-panel-needs-you-action-supervisor', 'factory-panel-needs-you-action-design', 'factory-open-design-sync', 'factory-open-design-studio']) {
             assert.equal(container.querySelector(`[data-testid="${id}"]`), null, `${platform} hides ${id}`);
           }
+          assert.ok(container.querySelector('[data-testid="factory-panel-od"]'), 'the design status shows on the Project tab');
           assert.equal(container.querySelector('[data-testid="factory-panel-od"] button'), null, 'design Sync and Studio never mount on mobile');
+          await click('factory-tab-team');
           assert.equal(container.querySelector('[data-testid="factory-panel-menu"] button'), null, 'the mobile Project menu has no actions');
           assert.deepEqual([...container.querySelectorAll('button')].map(button => button.getAttribute('data-testid')).sort(), [
             'factory-panel-menu-toggle', 'factory-handoff-cancel', 'factory-handoff-now', 'factory-handoff-replace-now', 'factory-handoff-view',
-            'factory-seat-chip-supervisor', 'factory-seat-chip-lead', 'factory-seat-chip-peer-task-1', 'factory-seat-chip-worker',
+            'factory-tab-team', 'factory-tab-models', 'factory-tab-project',
+            'factory-seat-chip-supervisor', 'factory-seat-chip-lead', 'factory-seat-chip-peer-task-1',
             'factory-panel-open-lead', 'factory-panel-open-peer-task-1', 'factory-seat-hand-off-now-lead', 'factory-seat-hand-off-now-peer-task-1',
             'factory-panel-adopt-supervisor',
           ].sort(), 'every mobile action belongs to the allowed write set or read navigation');
           assert.notEqual(container.querySelector('[data-testid="factory-profile-chip"]')?.tagName, 'BUTTON');
           for (const seat of ['supervisor', 'lead', 'peer-task-1', 'worker']) {
+            await click(`factory-tab-${seat === 'worker' ? 'models' : 'team'}`);
             await click(`factory-seat-chip-${seat}`);
             assert.equal(container.querySelector('[data-testid="factory-chip-editor-machine-default"]'), null);
             await click('factory-chip-editor-primary');
           }
+          await click('factory-tab-team');
           await click('factory-handoff-cancel');
           await click('factory-handoff-now');
           await click('factory-handoff-replace-now');
@@ -720,7 +789,7 @@ test('W14: iOS and Android expose exactly the Project model, handoff and adoptio
           await click('factory-panel-open-lead');
           assert.deepEqual(calls.filter(c => c.method !== 'factory.snapshot' && c.method !== 'factory.handoff.handover'), [
             { method: 'factory.lanes.set', input: { projectRoot: '/project', lane: 'supervisor', value: 'codex/gpt-live:high' } },
-            { method: 'factory.lanes.set', input: { projectRoot: '/project', lane: 'lead', value: 'codex/gpt-live:high' } },
+            { method: 'factory.handoff.start', input: { projectRoot: '/project', seat: 'lead' } },
             { method: 'factory.handoff.start', input: { projectRoot: '/project', seat: 'peer:task-1', lane: 'codex/gpt-live:high' } },
             { method: 'factory.lanes.set', input: { projectRoot: '/project', lane: 'worker', value: 'codex/gpt-live:high' } },
             { method: 'factory.handoff.cancel', input: { projectRoot: '/project', seat: 'lead' } },
@@ -734,4 +803,90 @@ test('W14: iOS and Android expose exactly the Project model, handoff and adoptio
       } finally { await act(() => root.unmount()); }
     });
   } finally { g.__factoryClientRpc = prior; }
+});
+
+test("05: Hand off… and the model chip open the same modal; its title and primary label say which act confirming fires", async () => {
+  const { ProjectPanel } = await load("plugin/client/factory/project-panel.tsx");
+  const { testTheme } = await import("./client-markup.ts");
+  const { createElement } = await import("react");
+  const rotated: string[] = [];
+  const viewed: string[] = [];
+  const saved: unknown[] = [];
+  const panel = modelPanelFixture();
+  panel.seats.peers[0].allowedActions = ["switch-model", "hand-off-now", "view-handover"];
+  panel.seats.lead.allowedActions = ["switch-model", "hand-off-now", "view-handover"];
+  const actions = { ...modelPanelActions, handoffStart: (seat: string) => { rotated.push(seat); }, viewHandover: (seat: string) => { viewed.push(seat); }, saveSeatModel: (seat: string, value: string) => { saved.push({ seat, value }); } };
+  await mountUnderNativeWindow(async (createRoot, container, act) => {
+    const root = createRoot(container);
+    try {
+      await act(() => root.render(createElement(ProjectPanel, { theme: testTheme, panel, modelView: modelPickerFixture, mobile: false, now: Date.now(), daemonError: null, actions })));
+      const byId = (id: string) => container.querySelector(`[data-testid="${id}"]`) as HTMLElement | null;
+      const click = (id: string) => act(() => byId(id)!.click());
+      const title = () => container.querySelector("[data-modal-title]")?.getAttribute("data-modal-title");
+      const buttons = (label: string) => [...container.querySelectorAll('[data-testid="factory-chip-editor"] button')].find((b) => b.textContent?.startsWith(label)) as HTMLElement;
+      assert.equal(byId("factory-seat-hand-off-now-lead")?.textContent, "Hand off…");
+      assert.equal(byId("factory-seat-hand-off-now-peer-task-1")?.textContent, "Hand off…");
+      // The row button and the chip open one modal for the seat.
+      await click("factory-seat-hand-off-now-lead");
+      assert.equal(title(), "Hand off Lead");
+      assert.deepEqual(rotated, [], "opening fires nothing");
+      assert.equal(byId("factory-chip-editor-primary")?.textContent, "Hand off to a fresh session");
+      assert.match(byId("factory-chip-editor")!.textContent!, /Starts a fresh Lead session on the same model\. The current session writes a handover first\./);
+      assert.match(byId("lane-picker-summary")!.textContent!, /^gpt-live · high$/, "unchanged: just the value");
+      assert.equal(byId("factory-chip-editor")!.textContent!.includes("EFFECTIVE LANE VALUE"), false);
+      // Another model on the same provider switches in place; the footer shows current → new.
+      await act(() => buttons("GPT next").click());
+      assert.equal(byId("factory-chip-editor-primary")?.textContent, "Switch model");
+      assert.match(byId("lane-picker-summary")!.textContent!, /^gpt-live · high → gpt-next$/);
+      // View last handover closes the modal and asks for the handover.
+      await click("factory-chip-editor-view-handover");
+      assert.deepEqual(viewed, ["lead"]);
+      assert.equal(byId("factory-chip-editor"), null);
+      await click("factory-seat-chip-lead");
+      await click("factory-chip-editor-primary");
+      assert.deepEqual(rotated, ["lead"], "the chip opens the same modal; unchanged confirms a rotate");
+      assert.deepEqual(saved, []);
+      await click("factory-seat-hand-off-now-peer-task-1");
+      assert.equal(title(), "Hand off Peer · task-1");
+      assert.equal(byId("factory-chip-editor-primary")?.textContent, "Hand off Peer");
+      await click("factory-chip-editor-view-handover");
+      assert.deepEqual(viewed, ["lead", "peer:task-1"]);
+      // A vacant standing seat only sets its model; so does the Default worker.
+      await click("factory-seat-chip-supervisor");
+      assert.equal(title(), "Supervisor model");
+      assert.equal(byId("factory-chip-editor-primary")?.textContent, "Save Supervisor model");
+      assert.equal(byId("factory-chip-editor-view-handover"), null);
+      assert.equal(byId("factory-seat-hand-off-now-supervisor"), null, "a vacant seat has no Hand off…");
+      await click("factory-chip-editor-primary");
+      assert.deepEqual(saved, [{ seat: "supervisor", value: "codex/gpt-live:high" }]);
+      await act(() => root.render(createElement(ProjectPanel, { key: "worker", theme: testTheme, panel, modelView: modelPickerFixture, mobile: false, now: Date.now(), daemonError: null, initialUi: { tab: "models" }, actions })));
+      await click("factory-seat-chip-worker");
+      assert.equal(title(), "Default worker model");
+      assert.equal(byId("factory-chip-editor-primary")?.textContent, "Save Default worker");
+    } finally { await act(() => root.unmount()); }
+  });
+});
+
+test("05: a provider whose model list is empty shows the empty state, the warning and the custom ID field directly", async () => {
+  const { ProjectPanel } = await load("plugin/client/factory/project-panel.tsx");
+  const { testTheme } = await import("./client-markup.ts");
+  const { createElement } = await import("react");
+  const modelView = { ...modelPickerFixture, providers: [...modelPickerFixture.providers, { provider: "antigravity", available: true, models: [] }, { provider: "gemini", available: true, models: null }] };
+  await mountUnderNativeWindow(async (createRoot, container, act) => {
+    const root = createRoot(container);
+    try {
+      await act(() => root.render(createElement(ProjectPanel, { theme: testTheme, panel: modelPanelFixture(), modelView, mobile: false, now: Date.now(), daemonError: null, actions: { ...modelPanelActions, saveSeatModel() {} } })));
+      await act(() => (container.querySelector('[data-testid="factory-seat-chip-lead"]') as HTMLElement).click());
+      const editor = container.querySelector('[data-testid="factory-chip-editor"]')!;
+      for (const provider of ["antigravity", "gemini"]) {
+        await act(() => ([...editor.querySelectorAll("button")].find((b) => b.textContent?.startsWith(provider)) as HTMLElement).click());
+        assert.match(editor.textContent!, new RegExp(`Paseo returned no models for ${provider}\\.`));
+        assert.ok(editor.querySelector('[data-testid="lane-picker-unverified-provider"]'), "the unreachable-provider warning shows");
+        assert.equal(editor.querySelector('[data-testid="lane-picker-custom-toggle"]'), null);
+        assert.match(editor.textContent!, /Custom model ID/, "the custom field is shown directly");
+      }
+      await act(() => ([...editor.querySelectorAll("button")].find((b) => b.textContent?.startsWith("codex")) as HTMLElement).click());
+      assert.equal(editor.textContent!.includes("Paseo returned no models"), false, "a provider with models has no empty state");
+    } finally { await act(() => root.unmount()); }
+  });
 });

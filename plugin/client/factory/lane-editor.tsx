@@ -8,9 +8,10 @@
 import type { PluginTheme } from "@getpaseo/plugin";
 import { Icon, ScrollView, TextInput } from "@getpaseo/plugin/client/ui";
 import { useState } from "react";
+import type { ReactNode } from "react";
 import { Pressable, Text, View } from "react-native";
 import type { FactoryView, LaneName, Lanes, ProviderModelView } from "../../shared/view.ts";
-import { Btn, Chip, Pill } from "../kit/pill.tsx";
+import { Btn, Chip } from "../kit/pill.tsx";
 import { CONTROL_H, MONO_FONT, RADIUS, SPACING, hoveredOf, text, tint } from "../kit/theme.ts";
 
 export type LanePickerView = Pick<FactoryView, "lanes" | "providers">;
@@ -68,6 +69,10 @@ export const LANE_CARDS: LaneCard[] = [
 /** Factory's role-routing providers (ADR 0017 §2) — never a lane target of their own. */
 const INTERNAL_PROVIDERS: ReadonlySet<string> = new Set(["factory-supervisor", "factory-lead", "factory-peer", "factory-agent"]);
 
+/** Measured body width from which the picker is two columns (providers left, models right); narrower stacks them. */
+const WIDE_BODY = 560;
+const MODEL_ROW_H = 44;
+
 const FALLBACK_THINKING_OPTIONS: { id: string; label: string }[] = [
   { id: "off", label: "Off" },
   { id: "minimal", label: "Minimal" },
@@ -103,7 +108,7 @@ function modelPrefixOf(modelId: string): string | null {
   return slash === -1 ? null : modelId.slice(0, slash);
 }
 
-/** The live picker: provider buttons, searchable/grouped model list, thinking level selector, and preview. */
+/** The live picker: provider list, searchable model list, thinking level row and a footer with the `current → new` summary and the actions. */
 export function LaneModalBody({
   theme,
   view,
@@ -116,6 +121,7 @@ export function LaneModalBody({
   primaryTestID,
   secondaryAction,
   explanation,
+  footerExtra,
 }: {
   theme: PluginTheme;
   view: LanePickerView;
@@ -128,6 +134,8 @@ export function LaneModalBody({
   primaryTestID?: string;
   secondaryAction?: { label: string; testID: string; onSave(value: string): void };
   explanation?: (value: string) => string;
+  /** Extra footer actions, left of Cancel (the seat modal's "View last handover"). */
+  footerExtra?: ReactNode;
 }) {
   const current = currentValue ?? card.value(view.lanes);
   const initial = splitLaneParts(current);
@@ -136,6 +144,8 @@ export function LaneModalBody({
   const [thinking, setThinking] = useState(initial.thinking);
   const [search, setSearch] = useState("");
   const [familyFilter, setFamilyFilter] = useState<string>("all");
+  // Unmeasured (0) reads as narrow; the first layout pass settles it.
+  const [width, setWidth] = useState(0);
 
   // Factory's own role providers (`factory-supervisor` …) only re-route onto a
   // lane's real provider — a lane pointing at one is circular, so the picker
@@ -231,313 +241,223 @@ export function LaneModalBody({
     }
   };
 
-  return (
-    <View style={{ gap: SPACING[3] }}>
-      {/* Role Header Banner */}
-      <View
-        style={{
-          flexDirection: "row",
-          alignItems: "center",
-          justifyContent: "space-between",
-          flexWrap: "wrap",
-          gap: SPACING[2],
-          padding: SPACING[2.5],
-          borderRadius: RADIUS.md,
-          borderWidth: 1,
-          borderColor: theme.colors.border,
-          backgroundColor: theme.colors.surface1,
-        }}
-      >
-        <View style={{ flex: 1, minWidth: 200, gap: 2 }}>
-          <View style={{ flexDirection: "row", alignItems: "center", gap: SPACING[1.5] }}>
-            <Icon name={card.icon} size={14} color={theme.colors.accent} />
-            <Text style={text(theme, "rowTitle")}>{card.title}</Text>
-            <Pill theme={theme} label={card.tier} tone="accent" lit />
-          </View>
-          <Text style={text(theme, "meta")}>{card.hint}</Text>
-        </View>
-      </View>
+  const laneWords = (raw: string): string => {
+    const parts = splitLaneParts(raw);
+    return `${parts.model}${parts.thinking === "" ? "" : ` · ${parts.thinking}`}`;
+  };
+  /** `current → new` in model · thinking words; the provider only shows when it changes. */
+  const providerChanged = value !== "" && splitLaneParts(current).provider !== provider;
+  const display = (raw: string): string => (providerChanged ? `${splitLaneParts(raw).provider}/${laneWords(raw)}` : laneWords(raw));
+  const summary = value === "" ? "Select a provider and model" : value === current ? display(value) : `${current === "" ? "none" : display(current)} → ${display(value)}`;
 
-      {/* Step 1: Provider */}
-      <View style={{ gap: SPACING[1.5] }}>
-        <Text style={text(theme, "badge")}>PROVIDER</Text>
-        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: SPACING[1.5] }}>
-          {available.map((entry) => (
-            <Chip
-              key={entry.provider}
-              theme={theme}
-              label={entry.provider}
-              active={provider === entry.provider}
-              count={entry.models?.length ?? 0}
-              {...(entry.models === null || entry.models.length === 0 ? { icon: "AlertTriangle" } : {})}
-              onPress={() => switchProvider(entry.provider)}
-            />
-          ))}
-          {allowEyeJson ? (
-            <Chip
-              theme={theme}
-              label="eye.json (HTTP)"
-              active={provider === "eye.json"}
-              count={0}
-              onPress={() => switchProvider("eye.json")}
-            />
-          ) : null}
-          {available.length === 0 ? (
-            <Text style={text(theme, "label", "statusWarning")}>No available providers — daemon unreachable.</Text>
-          ) : null}
-        </View>
-        {unverified ? (
-          <Text testID="lane-picker-unverified-provider" style={text(theme, "label", "statusWarning")}>
-            Paseo lists no models for {provider}, so it may not be reachable right now. A handoff onto it can fail — check the provider in Paseo first.
-          </Text>
+  const wide = width >= WIDE_BODY;
+  const providerEntries = available.map((entry) => ({ id: entry.provider, label: entry.provider, count: entry.models?.length ?? 0, warn: entry.models === null || entry.models.length === 0 }));
+  if (allowEyeJson) providerEntries.push({ id: "eye.json", label: "eye.json (HTTP)", count: 0, warn: false });
+  const noProviders = available.length === 0 ? <Text style={text(theme, "label", "statusWarning")}>No available providers — daemon unreachable.</Text> : null;
+  const providers = wide ? (
+    <View style={{ width: 180, gap: SPACING[0.5] }}>
+      <Text style={text(theme, "badge")}>PROVIDER</Text>
+      {providerEntries.map((entry) => <ProviderRow key={entry.id} theme={theme} label={entry.label} active={provider === entry.id} count={entry.count} warn={entry.warn} onPress={() => switchProvider(entry.id)} />)}
+      {noProviders}
+    </View>
+  ) : (
+    <View style={{ gap: SPACING[1.5] }}>
+      <Text style={text(theme, "badge")}>PROVIDER</Text>
+      <View style={{ flexDirection: "row", flexWrap: "wrap", gap: SPACING[1.5] }}>
+        {providerEntries.map((entry) => <Chip key={entry.id} theme={theme} label={entry.label} active={provider === entry.id} count={entry.count} {...(entry.warn ? { icon: "AlertTriangle" } : {})} onPress={() => switchProvider(entry.id)} />)}
+        {noProviders}
+      </View>
+    </View>
+  );
+
+  const listHeight = Math.max(132, Math.min(Math.max(filteredModels.length, 1) * MODEL_ROW_H, 320));
+  const models = provider === "eye.json" ? null : (
+    <View style={{ flex: 1, minWidth: 0, gap: SPACING[2] }}>
+      <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: SPACING[1.5] }}>
+        <Text style={text(theme, "badge")}>MODEL {activeModels !== null && activeModels.length > 0 ? `(${filteredModels.length} of ${activeModels.length})` : ""}</Text>
+        {families.length > 0 ? (
+          <View style={{ flexDirection: "row", flexWrap: "wrap", gap: SPACING[1] }}>
+            <Chip theme={theme} label="All" active={familyFilter === "all"} count={activeModels?.length ?? 0} onPress={() => setFamilyFilter("all")} />
+            {families.map((fam) => <Chip key={fam.id} theme={theme} label={fam.id} active={familyFilter === fam.id} count={fam.count} onPress={() => setFamilyFilter(fam.id)} />)}
+          </View>
         ) : null}
       </View>
 
-      {/* Step 2: Model */}
-      {provider !== "eye.json" ? (
-        <View style={{ gap: SPACING[2] }}>
-          <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: SPACING[1.5] }}>
-            <Text style={text(theme, "badge")}>
-              MODEL {activeModels !== null ? `(${filteredModels.length} of ${activeModels.length})` : ""}
-            </Text>
-            {families.length > 0 ? (
-              <View style={{ flexDirection: "row", flexWrap: "wrap", gap: SPACING[1] }}>
-                <Chip
-                  theme={theme}
-                  label="All"
-                  active={familyFilter === "all"}
-                  count={activeModels?.length ?? 0}
-                  onPress={() => setFamilyFilter("all")}
-                />
-                {families.map((fam) => (
-                  <Chip
-                    key={fam.id}
-                    theme={theme}
-                    label={fam.id}
-                    active={familyFilter === fam.id}
-                    count={fam.count}
-                    onPress={() => setFamilyFilter(fam.id)}
-                  />
-                ))}
-              </View>
-            ) : null}
-          </View>
-
-          {activeModels !== null && activeModels.length > 0 ? (
-            <View style={{ gap: SPACING[1.5] }}>
-              {/* Search bar */}
-              <View
-                style={{
-                  minHeight: CONTROL_H,
-                  flexDirection: "row",
-                  alignItems: "center",
-                  gap: SPACING[1.5],
-                  paddingHorizontal: SPACING[2.5],
-                  borderWidth: 1,
-                  borderColor: theme.colors.border,
-                  borderRadius: RADIUS.md,
-                  backgroundColor: theme.colors.surface1,
-                }}
-              >
-                <Icon name="Search" size={13} color={theme.colors.foregroundMuted} />
-                <TextInput
-                  value={search}
-                  onChangeText={setSearch}
-                  placeholder={`Search ${activeModels.length} models (e.g. glm-5.3, sonnet, gpt-5.4)…`}
-                  placeholderTextColor={theme.colors.foregroundMuted}
-                  style={{ flex: 1, paddingVertical: 5, color: theme.colors.foreground, fontSize: 12 }}
-                />
-                {search !== "" ? (
-                  <Pressable onPress={() => setSearch("")} style={{ padding: 2 }}>
-                    <Icon name="X" size={12} color={theme.colors.foregroundMuted} />
-                  </Pressable>
-                ) : null}
-              </View>
-
-              {/* Scrollable Model List (no 16-item cutoff) */}
-              <View
-                style={{
-                  maxHeight: 260,
-                  borderWidth: 1,
-                  borderColor: theme.colors.border,
-                  borderRadius: RADIUS.lg,
-                  backgroundColor: theme.colors.surface1,
-                  overflow: "hidden",
-                }}
-              >
-                <ScrollView style={{ maxHeight: 260 }}>
-                  {filteredModels.length === 0 ? (
-                    <View style={{ padding: SPACING[3] }}>
-                      <Text style={text(theme, "meta")}>No models match "{search}" — type a custom model ID below.</Text>
-                    </View>
-                  ) : (
-                    filteredModels.map((m, idx) => {
-                      const isSelected = trimmedModel === m.id;
-                      return (
-                        <Pressable
-                          key={m.id}
-                          accessibilityRole="button"
-                          onPress={() => selectModel(m)}
-                          style={(state) => ({
-                            minHeight: 36,
-                            paddingHorizontal: SPACING[3],
-                            paddingVertical: SPACING[1.5],
-                            borderTopWidth: idx === 0 ? 0 : 1,
-                            borderTopColor: theme.colors.border,
-                            backgroundColor: isSelected
-                              ? tint(theme.colors.accent, "1f")
-                              : state.pressed || hoveredOf(state)
-                                ? theme.colors.surface2
-                                : "transparent",
-                            flexDirection: "row",
-                            alignItems: "center",
-                            justifyContent: "space-between",
-                            gap: SPACING[2],
-                          })}
-                        >
-                          <View style={{ flexDirection: "row", alignItems: "center", gap: SPACING[2], flex: 1 }}>
-                            <View
-                              style={{
-                                width: 16,
-                                height: 16,
-                                borderRadius: 99,
-                                borderWidth: 1,
-                                borderColor: isSelected ? theme.colors.accent : theme.colors.border,
-                                backgroundColor: isSelected ? theme.colors.accent : "transparent",
-                                alignItems: "center",
-                                justifyContent: "center",
-                              }}
-                            >
-                              {isSelected ? <Icon name="Check" size={10} color={theme.colors.surface0} /> : null}
-                            </View>
-                            <View style={{ flex: 1, gap: 1 }}>
-                              <Text
-                                style={{
-                                  ...text(theme, "section"),
-                                  fontWeight: isSelected ? "600" : "500",
-                                  color: isSelected ? theme.colors.accent : theme.colors.foreground,
-                                }}
-                                numberOfLines={1}
-                              >
-                                {m.label ?? m.id}
-                              </Text>
-                              {m.label !== null && m.label !== m.id ? (
-                                <Text style={{ ...text(theme, "code"), fontSize: 11, color: theme.colors.foregroundMuted }} numberOfLines={1}>
-                                  {m.id}
-                                </Text>
-                              ) : null}
-                            </View>
-                          </View>
-                        </Pressable>
-                      );
-                    })
-                  )}
-                </ScrollView>
-              </View>
-            </View>
-          ) : null}
-
-          {/* Manual / Custom Model ID Input — tucked behind a link while the list covers it */}
-          {!showCustom ? (
-            <Pressable testID="lane-picker-custom-toggle" accessibilityRole="button" onPress={() => setCustomOpen(true)} style={{ alignSelf: "flex-start" }}>
-              <Text style={text(theme, "label", "accent")}>Use a custom model ID…</Text>
-            </Pressable>
-          ) : (
-          <View style={{ gap: SPACING[1] }}>
-            <Text style={text(theme, "label")}>Custom model ID</Text>
-            <View
-              style={{
-                minHeight: CONTROL_H,
-                justifyContent: "center",
-                borderWidth: 1,
-                borderColor: theme.colors.border,
-                borderRadius: RADIUS.md,
-                backgroundColor: theme.colors.surface1,
-              }}
-            >
-              <TextInput
-                value={model}
-                onChangeText={setModel}
-                placeholder="e.g. zai/glm-5.3 or claude-sonnet-4-6"
-                placeholderTextColor={theme.colors.foregroundMuted}
-                style={{ paddingHorizontal: SPACING[2.5], paddingVertical: 5, color: theme.colors.foreground, fontSize: 12, fontFamily: MONO_FONT }}
-              />
-            </View>
-          </View>
-          )}
+      {unverified ? (
+        // No list to pick from: say so, warn, and put the custom ID field straight under it.
+        <View style={{ gap: SPACING[1] }}>
+          <Text style={text(theme, "meta")}>Paseo returned no models for {provider}.</Text>
+          <Text testID="lane-picker-unverified-provider" style={text(theme, "label", "statusWarning")}>
+            Paseo lists no models for {provider}, so it may not be reachable right now. A handoff onto it can fail — check the provider in Paseo first.
+          </Text>
         </View>
       ) : null}
 
-      {/* Step 3: Thinking Level / Reasoning Effort */}
+      {activeModels !== null && activeModels.length > 0 ? (
+        <View style={{ gap: SPACING[1.5] }}>
+          <View style={{ minHeight: CONTROL_H, flexDirection: "row", alignItems: "center", gap: SPACING[1.5], paddingHorizontal: SPACING[2.5], borderWidth: 1, borderColor: theme.colors.border, borderRadius: RADIUS.md, backgroundColor: theme.colors.surface1 }}>
+            <Icon name="Search" size={13} color={theme.colors.foregroundMuted} />
+            <TextInput
+              value={search}
+              onChangeText={setSearch}
+              placeholder={`Search ${activeModels.length} models (e.g. glm-5.3, sonnet, gpt-5.4)…`}
+              placeholderTextColor={theme.colors.foregroundMuted}
+              style={{ flex: 1, paddingVertical: 5, color: theme.colors.foreground, fontSize: 12 }}
+            />
+            {search !== "" ? (
+              <Pressable onPress={() => setSearch("")} style={{ padding: 2 }}>
+                <Icon name="X" size={12} color={theme.colors.foregroundMuted} />
+              </Pressable>
+            ) : null}
+          </View>
+
+          {/* An explicit height, never only maxHeight: a bare-maxHeight ScrollView can collapse to nothing inside a host that does not size it. */}
+          <View style={{ height: listHeight, borderWidth: 1, borderColor: theme.colors.border, borderRadius: RADIUS.lg, backgroundColor: theme.colors.surface1, overflow: "hidden" }}>
+            <ScrollView style={{ height: listHeight }}>
+              {filteredModels.length === 0 ? (
+                <View style={{ padding: SPACING[3] }}>
+                  <Text style={text(theme, "meta")}>No models match "{search}" — type a custom model ID below.</Text>
+                </View>
+              ) : (
+                filteredModels.map((m, idx) => {
+                  const isSelected = trimmedModel === m.id;
+                  return (
+                    <Pressable
+                      key={m.id}
+                      accessibilityRole="button"
+                      onPress={() => selectModel(m)}
+                      style={(state) => ({
+                        minHeight: MODEL_ROW_H,
+                        paddingHorizontal: SPACING[3],
+                        paddingVertical: SPACING[1.5],
+                        borderTopWidth: idx === 0 ? 0 : 1,
+                        borderTopColor: theme.colors.border,
+                        backgroundColor: isSelected ? tint(theme.colors.accent, "1f") : state.pressed || hoveredOf(state) ? theme.colors.surface2 : "transparent",
+                        flexDirection: "row",
+                        alignItems: "center",
+                        gap: SPACING[2],
+                      })}
+                    >
+                      <View style={{ width: 16, height: 16, borderRadius: 99, borderWidth: 1, borderColor: isSelected ? theme.colors.accent : theme.colors.border, backgroundColor: isSelected ? theme.colors.accent : "transparent", alignItems: "center", justifyContent: "center" }}>
+                        {isSelected ? <Icon name="Check" size={10} color={theme.colors.surface0} /> : null}
+                      </View>
+                      <View style={{ flex: 1, minWidth: 0, gap: 1 }}>
+                        <Text style={{ ...text(theme, "section"), fontWeight: isSelected ? "600" : "500", color: isSelected ? theme.colors.accent : theme.colors.foreground }} numberOfLines={1}>
+                          {m.label ?? m.id}
+                        </Text>
+                        {m.label !== null && m.label !== m.id ? (
+                          <Text style={{ ...text(theme, "code"), fontSize: 11, color: theme.colors.foregroundMuted }} numberOfLines={1}>
+                            {m.id}
+                          </Text>
+                        ) : null}
+                      </View>
+                    </Pressable>
+                  );
+                })
+              )}
+            </ScrollView>
+          </View>
+        </View>
+      ) : null}
+
+      {/* Custom model ID — tucked behind a link while a list covers it, shown directly when there is none. */}
+      {!showCustom ? (
+        <Pressable testID="lane-picker-custom-toggle" accessibilityRole="button" onPress={() => setCustomOpen(true)} style={{ alignSelf: "flex-start" }}>
+          <Text style={text(theme, "label", "accent")}>Use a custom model ID…</Text>
+        </Pressable>
+      ) : (
+        <View style={{ gap: SPACING[1] }}>
+          <Text style={text(theme, "label")}>Custom model ID</Text>
+          <View style={{ minHeight: CONTROL_H, justifyContent: "center", borderWidth: 1, borderColor: theme.colors.border, borderRadius: RADIUS.md, backgroundColor: theme.colors.surface1 }}>
+            <TextInput
+              value={model}
+              onChangeText={setModel}
+              placeholder="e.g. zai/glm-5.3 or claude-sonnet-4-6"
+              placeholderTextColor={theme.colors.foregroundMuted}
+              style={{ paddingHorizontal: SPACING[2.5], paddingVertical: 5, color: theme.colors.foreground, fontSize: 12, fontFamily: MONO_FONT }}
+            />
+          </View>
+        </View>
+      )}
+    </View>
+  );
+
+  return (
+    <View onLayout={(event) => setWidth(event.nativeEvent.layout.width)} style={{ alignSelf: "stretch", gap: SPACING[3] }}>
+      {wide ? (
+        <View style={{ flexDirection: "row", alignItems: "flex-start", gap: SPACING[4] }}>
+          {providers}
+          {models}
+        </View>
+      ) : (
+        <>
+          {providers}
+          {models}
+        </>
+      )}
+
+      {/* Thinking: one compact row of the levels the selected model advertises, plus its default. */}
       {provider !== "eye.json" ? (
         <View style={{ gap: SPACING[1.5] }}>
-          <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: SPACING[1] }}>
+          <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[1.5] }}>
             <Text style={text(theme, "badge")}>THINKING</Text>
             <Text style={text(theme, "label")}>
-              {noThinkingSupported
-                ? "No thinking variants supported by this model"
-                : defaultThinking !== null
-                  ? `Model default: ${defaultThinking}`
-                  : "Optional — appended as :thinking"}
+              {noThinkingSupported ? "No thinking variants supported by this model" : defaultThinking !== null ? `Model default: ${defaultThinking}` : "Optional — appended as :thinking"}
             </Text>
           </View>
           <View style={{ flexDirection: "row", flexWrap: "wrap", gap: SPACING[1.5] }}>
             <Chip
               theme={theme}
-              label={
-                noThinkingSupported
-                  ? "Default (none)"
-                  : defaultThinking !== null
-                    ? `Provider default (${defaultThinking})`
-                    : "Provider default"
-              }
+              label={noThinkingSupported ? "Default (none)" : defaultThinking !== null ? `Provider default (${defaultThinking})` : "Provider default"}
               active={trimmedThinking === ""}
               count={0}
               onPress={() => setThinking("")}
             />
-            {thinkingChoices.map((opt) => (
-              <Chip
-                key={opt.id}
-                theme={theme}
-                label={opt.label}
-                active={trimmedThinking === opt.id}
-                count={0}
-                onPress={() => setThinking(opt.id)}
-              />
-            ))}
+            {thinkingChoices.map((opt) => <Chip key={opt.id} theme={theme} label={opt.label} active={trimmedThinking === opt.id} count={0} onPress={() => setThinking(opt.id)} />)}
           </View>
         </View>
       ) : null}
 
       {explanation === undefined ? null : <Text style={text(theme, "meta")}>{explanation(value)}</Text>}
-      {/* Preview & Actions */}
-      <View
-        style={{
-          padding: SPACING[2.5],
-          borderRadius: RADIUS.md,
-          borderWidth: 1,
-          borderColor: theme.colors.border,
-          backgroundColor: theme.colors.surface1,
-          flexDirection: "row",
-          alignItems: "center",
-          justifyContent: "space-between",
-          flexWrap: "wrap",
-          gap: SPACING[2],
-        }}
-      >
-        <View style={{ gap: 2, flex: 1 }}>
-          <Text style={text(theme, "badge")}>EFFECTIVE LANE VALUE</Text>
-          <Text style={{ ...text(theme, "code"), color: value === "" ? theme.colors.statusWarning : theme.colors.accent }}>
-            {value === "" ? "Select a provider and model" : value}
-          </Text>
-        </View>
+
+      {/* Footer: always the last thing in the body. Left the summary; right Cancel, the secondary acts, then the one primary. */}
+      <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: SPACING[2], paddingTop: SPACING[3], borderTopWidth: 1, borderTopColor: theme.colors.border }}>
+        <Text testID="lane-picker-summary" style={{ ...text(theme, "code"), flex: 1, minWidth: 160, color: value === "" ? theme.colors.statusWarning : theme.colors.foregroundMuted }} numberOfLines={2}>
+          {summary}
+        </Text>
         <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[2] }}>
-          {secondaryAction === undefined ? null : <Btn theme={theme} testID={secondaryAction.testID} label={secondaryAction.label} tone="foregroundMuted" disabled={value === "" || busy} onPress={() => secondaryAction.onSave(value)} />}
-          <Btn theme={theme} label="Cancel" tone="foregroundMuted" onPress={onClose} />
-          <Btn theme={theme} icon="Check" label={primaryLabel(value)} testID={primaryTestID} solid disabled={value === "" || busy} onPress={() => onSave(value)} />
+          {footerExtra}
+          <Btn theme={theme} variant="ghost" label="Cancel" onPress={onClose} />
+          {secondaryAction === undefined ? null : <Btn theme={theme} variant="secondary" testID={secondaryAction.testID} label={secondaryAction.label} disabled={value === "" || busy} onPress={() => secondaryAction.onSave(value)} />}
+          <Btn theme={theme} variant="primary" icon="Check" label={primaryLabel(value)} {...(primaryTestID === undefined ? {} : { testID: primaryTestID })} disabled={value === "" || busy} onPress={() => onSave(value)} />
         </View>
       </View>
     </View>
+  );
+}
+
+/** One provider in the wide layout's left list: the name first, then a muted model count; the selected row carries the accent tint. */
+function ProviderRow({ theme, label, active, count, warn, onPress }: { theme: PluginTheme; label: string; active: boolean; count: number; warn: boolean; onPress: () => void }) {
+  return (
+    <Pressable
+      accessibilityRole="button"
+      onPress={onPress}
+      style={(state) => ({
+        minHeight: CONTROL_H,
+        paddingHorizontal: SPACING[2.5],
+        borderRadius: RADIUS.md,
+        backgroundColor: active ? tint(theme.colors.accent, "1f") : state.pressed || hoveredOf(state) ? theme.colors.surface2 : "transparent",
+        flexDirection: "row",
+        alignItems: "center",
+        gap: SPACING[1.5],
+      })}
+    >
+      {warn ? <Icon name="AlertTriangle" size={12} color={theme.colors.statusWarning} /> : null}
+      <Text style={{ ...text(theme, "label"), flex: 1, fontWeight: active ? "600" : "500", color: active ? theme.colors.accent : theme.colors.foreground }} numberOfLines={1}>
+        {label}
+      </Text>
+      {count > 0 ? <Text style={{ ...text(theme, "badge"), fontVariant: ["tabular-nums"] }}>{count}</Text> : null}
+    </Pressable>
   );
 }
 

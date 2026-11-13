@@ -61,16 +61,24 @@ export function Pill({
   );
 }
 
-/** The surface's one button — self-sized, aligned height, bordered, hover + press feedback. */
+export type BtnVariant = "primary" | "secondary" | "ghost" | "danger";
+
+/**
+ * The surface's one button — self-sized, aligned height, hover + press feedback.
+ * `variant` carries the hierarchy (one primary per area; the rest secondary/ghost).
+ * Without one, back-compat resolves: `solid` = primary, an explicit `tone` keeps the
+ * old tone-outline look, and a bare Btn is secondary (no more green outline by default).
+ */
 export function Btn({
   theme,
   label,
   onPress,
-  tone = "accent",
+  tone,
   disabled = false,
   small = false,
   icon,
   solid = false,
+  variant,
   testID,
 }: {
   theme: PluginTheme;
@@ -81,11 +89,25 @@ export function Btn({
   small?: boolean;
   icon?: string;
   solid?: boolean;
+  variant?: BtnVariant;
   /** The E2E / structural-test hook (the panel names its actions up front). */
   testID?: string;
 }) {
-  const colour = theme.colors[tone];
+  const mode: BtnVariant | "tone" = variant ?? (solid ? "primary" : tone !== undefined ? "tone" : "secondary");
+  // A `solid` button keeps filling with its own tone (e.g. statusWarning); only the default is accent.
+  const colour = theme.colors[tone ?? "accent"];
   const isMuted = tone === "foregroundMuted";
+  const fg = disabled
+    ? theme.colors.foregroundMuted
+    : mode === "primary"
+      ? theme.colors.surface0
+      : mode === "danger"
+        ? theme.colors.statusDanger
+        : mode === "ghost"
+          ? theme.colors.foregroundMuted
+          : mode === "tone" && !isMuted
+            ? colour
+            : theme.colors.foreground;
   return (
     <Pressable
       accessibilityRole="button"
@@ -94,28 +116,26 @@ export function Btn({
       onPress={onPress}
       style={(state) => {
         const isHovered = hoveredOf(state);
-        const bg = disabled
-          ? theme.colors.surface1
-          : solid
-            ? state.pressed
-              ? tint(colour, "cc")
-              : colour
-            : state.pressed
-              ? tint(colour, "2e")
-              : isHovered
-                ? isMuted
-                  ? theme.colors.surface2
-                  : tint(colour, "18")
-                : isMuted
-                  ? theme.colors.surface1
-                  : tint(colour, "0d");
-        const border = disabled
-          ? theme.colors.border
-          : isMuted
-            ? isHovered
-              ? theme.colors.foregroundMuted
-              : theme.colors.border
-            : tint(colour, state.pressed || isHovered ? "aa" : "66");
+        let bg: string;
+        let border: string;
+        if (mode === "primary") {
+          bg = state.pressed ? tint(colour, "cc") : colour;
+          border = tint(colour, state.pressed || isHovered ? "aa" : "66");
+        } else if (mode === "ghost") {
+          bg = isHovered || state.pressed ? theme.colors.surface2 : "transparent";
+          border = "transparent";
+        } else if (mode === "tone" && !isMuted) {
+          bg = state.pressed ? tint(colour, "2e") : isHovered ? tint(colour, "18") : tint(colour, "0d");
+          border = tint(colour, state.pressed || isHovered ? "aa" : "66");
+        } else {
+          // secondary, danger and the muted tone share one neutral outline.
+          bg = state.pressed || isHovered ? theme.colors.surface2 : theme.colors.surface1;
+          border = isHovered ? theme.colors.foregroundMuted : theme.colors.border;
+        }
+        if (disabled) {
+          bg = mode === "ghost" ? "transparent" : theme.colors.surface1;
+          border = mode === "ghost" ? "transparent" : theme.colors.border;
+        }
         return {
           minHeight: small ? CONTROL_SM : CONTROL_H,
           paddingHorizontal: small ? SPACING[2.5] : SPACING[3],
@@ -133,20 +153,14 @@ export function Btn({
         };
       }}
     >
-      {icon !== undefined ? (
-        <Icon
-          name={icon}
-          size={small ? 12 : 14}
-          color={disabled ? theme.colors.foregroundMuted : solid ? theme.colors.surface0 : isMuted ? theme.colors.foreground : colour}
-        />
-      ) : null}
+      {icon !== undefined ? <Icon name={icon} size={small ? 12 : 14} color={fg} /> : null}
       <Text
         style={{
           ...text(theme, small ? "label" : "section"),
           fontSize: small ? 12 : 13,
           lineHeight: small ? 16 : 18,
           fontWeight: "600",
-          color: disabled ? theme.colors.foregroundMuted : solid ? theme.colors.surface0 : isMuted ? theme.colors.foreground : colour,
+          color: fg,
         }}
         numberOfLines={1}
       >

@@ -37,8 +37,9 @@ async function loadModule(entry: string): Promise<Exports> {
             loader: "js",
             contents: `
               const React = require('react');
-              const tag = (name) => ({ children, onPress, disabled, testID, style, accessibilityRole }) =>
-                React.createElement(name, { disabled, onClick: onPress, 'data-testid': testID, 'data-role': accessibilityRole, 'data-style': typeof style === 'object' && style !== null ? JSON.stringify(style) : undefined }, children);
+              // Pressable children may be a render function (Tabs): call it unpressed; data-selected is the tab state, data-checked the switch state.
+              const tag = (name) => ({ children, onPress, disabled, testID, style, accessibilityRole, accessibilityState, accessibilityLabel }) =>
+                React.createElement(name, { disabled, onClick: onPress, 'data-testid': testID, 'data-role': accessibilityRole, 'aria-label': accessibilityLabel, 'data-checked': accessibilityState && accessibilityState.checked !== undefined ? String(accessibilityState.checked) : undefined, 'data-selected': accessibilityState && accessibilityState.selected !== undefined ? String(accessibilityState.selected) : undefined, 'data-style': typeof style === 'object' && style !== null ? JSON.stringify(style) : undefined }, typeof children === 'function' ? children({ pressed: false }) : children);
               exports.View = tag('div'); exports.Text = tag('span'); exports.Pressable = tag('button');
               exports.Icon = () => null;
               exports.TextInput = ({ value, placeholder, testID }) => React.createElement('input', { value: value ?? '', placeholder, readOnly: true, 'data-testid': testID });
@@ -120,16 +121,19 @@ test("panel renders the header, summary, seats and Open Design card with the nam
   const html = await render(makePanel());
   assert.match(html, /my-app/);
   assert.match(html, /Lead working · 1 Peer · nothing needs you/);
-  for (const hook of ["factory-panel-seat-supervisor", "factory-panel-seat-lead", "factory-panel-seat-peer-T-08", "factory-panel-od"]) {
+  for (const hook of ["factory-panel-seat-supervisor", "factory-panel-seat-lead", "factory-panel-seat-peer-T-08"]) {
     assert.ok(hasHook(html, hook), `${hook} renders`);
   }
+  assert.equal(hasHook(html, "factory-panel-od"), false, "Open Design lives on the Project tab");
   assert.equal(hasHook(html, "factory-panel-needs-you"), false, "Needs you appears only when something needs the Owner");
   assert.match(html, /Peer · T-08/);
   assert.match(html, /reviewer/);
   assert.match(html, /94k \/ 128k/, "the Lead row reads Nk / 128k");
   assert.doesNotMatch(html, /Handoff:/);
-  assert.match(html, /Mobile Redesign/);
-  assert.match(html, /Synced 5m ago/);
+  const project = await render(makePanel(), { initialUi: { tab: "project" } });
+  assert.ok(hasHook(project, "factory-panel-od"));
+  assert.match(project, /Mobile Redesign/);
+  assert.match(project, /Synced 5m ago/);
 });
 
 test("Needs you renders each item with its title, detail and exactly one primary action; no Accept button anywhere", async () => {
@@ -191,17 +195,17 @@ test("a handoff that is waiting is amber words on the Lead row; a vacant Lead on
   assert.equal(hasHook(vacant, "factory-panel-peers"), false, "the Peers section is hidden when no Peer is running");
 });
 
-test("an unlinked Open Design card collapses to one line", async () => {
-  const html = await render(makePanel({ openDesign: { state: "unlinked", projectName: null, syncedAt: null, detail: null } }));
+test("an unlinked Open Design section collapses to one line", async () => {
+  const html = await render(makePanel({ openDesign: { state: "unlinked", projectName: null, syncedAt: null, detail: null } }), { initialUi: { tab: "project" } });
   assert.match(html, /Open Design · not linked/);
 });
 
 test("desktop mounts the Open Design actions on the card; mobile shows the link status alone", async () => {
   const { createElement } = await import("react");
   const actions = createElement("button", { "data-testid": "od-actions" }, "Sync");
-  const desktop = await render(makePanel(), { mobile: false, openDesignActions: actions });
+  const desktop = await render(makePanel(), { mobile: false, openDesignActions: actions, initialUi: { tab: "project" } });
   assert.ok(hasHook(desktop, "od-actions"), "desktop offers Sync / Studio");
-  const mobile = await render(makePanel(), { mobile: true, openDesignActions: actions });
+  const mobile = await render(makePanel(), { mobile: true, openDesignActions: actions, initialUi: { tab: "project" } });
   assert.equal(hasHook(mobile, "od-actions"), false, "mobile never offers Sync or Studio");
   assert.match(mobile, /Mobile Redesign/, "the link status still shows");
 });
@@ -497,27 +501,135 @@ test("W10: Factory palette follows the host background luminance and freezes pi'
   assert.equal(factoryPalette({ colors: { ...theme.colors, surface0: "rgb(255, 255, 255)" } }).bad, "#c8253d");
 });
 
-test("W10: measured width chooses the wide columns and the narrow section order", async () => {
+const at = (html: string, id: string): number => html.indexOf(`data-testid="${id}"`);
+
+/** The balanced `<div>` that carries `data-testid="<id>"` — the harness renders every View as a div. */
+function elementOf(html: string, id: string): string {
+  const start = html.lastIndexOf("<div", at(html, id));
+  let depth = 0;
+  for (const m of html.slice(start).matchAll(/<div\b|<\/div>/g)) {
+    depth += m[0] === "</div>" ? -1 : 1;
+    if (depth === 0) return html.slice(start, start + m.index! + m[0].length);
+  }
+  throw new Error(`unbalanced markup for ${id}`);
+}
+
+test("04: the alert stack renders before the tabs, only the active tab's body renders, and no two-column split remains", async () => {
   const panel = makePanel({
     needsYou: [noSupervisorItem],
     handoffs: [{ ...handoffFixture, seat: "peer:T-absent", state: "failed", failure: "successor unavailable" }],
     defaultWorker: { role: "worker", title: "Default worker", lane: { provider: "pi", model: "worker-model", scope: "project" } },
   });
   const props = { skillPacks: [{ id: "expo", label: "Expo", enabled: true, autoDetected: true }] };
-  const narrow = await render(panel, { ...props, width: 899 });
-  assert.equal(hasHook(narrow, "factory-tab-col-left"), false);
-  const order = ["factory-panel-needs-you", "factory-handoff-block", "factory-panel-seats", "factory-default-worker", "factory-skill-packs", "factory-panel-od"];
-  for (let i = 1; i < order.length; i++) assert.ok(narrow.indexOf(order[i - 1]!) < narrow.indexOf(order[i]!), `${order[i - 1]} precedes ${order[i]}`);
-  assert.match(narrow, /peer:T-absent/);
-  assert.match(narrow, /successor unavailable/);
-  assert.match(narrow, /Expo/);
-  assert.match(narrow, /auto-detected/);
-  assert.ok(hasHook(narrow, "factory-profile-chip"));
-  const wide = await render(panel, { ...props, width: 900 });
-  assert.ok(hasHook(wide, "factory-tab-col-left"));
-  assert.ok(hasHook(wide, "factory-tab-col-right"));
-  assert.ok(wide.indexOf("factory-panel-seats") < wide.indexOf("factory-tab-col-right"));
-  assert.ok(wide.indexOf("factory-tab-col-right") < wide.indexOf("factory-handoff-block"));
+  for (const width of [0, 899, 900, 1400]) {
+    const team = await render(panel, { ...props, width });
+    assert.equal(hasHook(team, "factory-tab-col-left") || hasHook(team, "factory-tab-col-right"), false, `no two-column split at ${width}`);
+    const order = ["factory-alert-stack", "factory-panel-needs-you", "factory-handoff-block", "factory-tab", "factory-tab-body-team", "factory-panel-seats"];
+    for (let i = 1; i < order.length; i++) assert.ok(at(team, order[i - 1]!) >= 0 && at(team, order[i - 1]!) < at(team, order[i]!), `${order[i - 1]} precedes ${order[i]} at ${width}`);
+    for (const absent of ["factory-tab-body-models", "factory-tab-body-project", "factory-default-worker", "factory-skill-packs", "factory-panel-od"]) assert.equal(hasHook(team, absent), false, `${absent} is not on the Team tab`);
+    assert.match(team, /peer:T-absent/);
+    assert.match(team, /successor unavailable/);
+    assert.ok(hasHook(team, "factory-profile-chip"));
+  }
+  const models = await render(panel, { ...props, initialUi: { tab: "models" } });
+  assert.ok(at(models, "factory-tab-body-models") < at(models, "factory-default-worker"), "Models body holds the Default worker");
+  assert.match(models, /worker-model/);
+  for (const absent of ["factory-panel-seats", "factory-skill-packs", "factory-panel-od"]) assert.equal(hasHook(models, absent), false, `${absent} is not on the Models tab`);
+  assert.ok(hasHook(models, "factory-panel-needs-you"), "the alert stack stays above every tab");
+  const project = await render(panel, { ...props, initialUi: { tab: "project" } });
+  assert.ok(at(project, "factory-tab-body-project") < at(project, "factory-skill-packs") && at(project, "factory-skill-packs") < at(project, "factory-panel-od"), "Project body holds the skill packs, then Open Design");
+  assert.match(project, /Expo/);
+  assert.match(project, /Auto-detected/);
+  assert.equal(hasHook(project, "factory-default-worker") || hasHook(project, "factory-panel-seats"), false);
+});
+
+test("04: Team, Models and Project tabs show the seeded tab as selected, and the panel is a centred 1040px column", async () => {
+  const html = await render(makePanel(), { initialUi: { tab: "models" } });
+  for (const [id, selected] of [["team", "false"], ["models", "true"], ["project", "false"]] as const) {
+    assert.match(html, new RegExp(`data-testid="factory-tab-${id}"[^>]*data-selected="${selected}"|data-selected="${selected}"[^>]*data-testid="factory-tab-${id}"`), `${id} selected=${selected}`);
+  }
+  assert.match(html, /Team[\s\S]*Models[\s\S]*Project/);
+  assert.equal(hasHook(await render(makePanel()), "factory-tab-body-team"), true, "Team is the default tab");
+  const panelStyle = elementOf(html, "factory-panel").slice(0, 400);
+  assert.match(panelStyle, /&quot;width&quot;:&quot;100%&quot;,&quot;maxWidth&quot;:1040,&quot;alignSelf&quot;:&quot;center&quot;/);
+});
+
+test("04: wide alerts put their actions on the title line; narrow ones drop them below the detail", async () => {
+  const failed = { ...handoffFixture, seat: "supervisor", state: "failed" as const, failure: "boom", allowedActions: ["retry", "replace-now"] as PanelView["handoffs"][number]["allowedActions"] };
+  const item = { ...noSupervisorItem } as PanelView["needsYou"][number];
+  const panel = makePanel({ needsYou: [item], handoffs: [failed] });
+  const wide = await render(panel, { width: 900 });
+  const narrow = await render(panel, { width: 500 });
+  assert.ok(at(wide, "factory-handoff-retry") < wide.indexOf("Context mark"), "wide: Try again sits on the title line");
+  assert.ok(narrow.indexOf("Context mark") < at(narrow, "factory-handoff-retry"), "narrow: Try again sits below the detail");
+  assert.ok(at(wide, "factory-panel-needs-you-action-no-supervisor") < at(wide, "factory-handoff-supervisor"), "the Needs-you item stays above the handoff row");
+  assert.doesNotMatch(wide, />Needs you<|>Handoff</, "the section titles are gone — the tone bars say enough");
+});
+
+test("04: the header carries the profile chip (name ▾) and the ghost ⋯ toggle; a mobile chip is plain text", async () => {
+  const { createElement } = await import("react");
+  const menu = createElement("div", null, "menu");
+  const desktop = await render(makePanel(), { menu, actions: { applyProfile() {} } });
+  assert.match(desktop, /data-testid="factory-profile-chip"[^>]*>(<span[^>]*>)?No Lane profile ▾/);
+  assert.ok(hasHook(desktop, "factory-panel-menu-toggle"));
+  const mobile = await render(makePanel(), { mobile: true, menu, actions: { applyProfile() {} } });
+  assert.doesNotMatch(mobile, /▾/);
+  assert.match(mobile, /No Lane profile/);
+});
+
+const lanes = { supervisor: "pi/a", lead: "pi/a", worker: "pi/a", watch: "pi/a", freshEyes: "pi/a" };
+const profileOf = (id: string, name: string): PanelView["profile"]["list"][number] => ({ id, name, description: null, lanes, updatedAt: "2026-11-13T00:00:00Z" });
+const modelsPanel = () => makePanel({
+  defaultWorker: { role: "worker", title: "Default worker", lane: { provider: "pi", model: "worker-model", scope: "project" } },
+  profile: { active: profileOf("balanced", "Balanced"), list: [profileOf("balanced", "Balanced"), profileOf("fast", "Fast")], modified: true },
+});
+
+test("06: the Models tab lists Supervisor, Lead and Default worker rows with unique chip hooks, scope words and the Peer note", async () => {
+  const html = await render(modelsPanel(), { initialUi: { tab: "models" } });
+  for (const hook of ["factory-seat-chip-models-supervisor", "factory-seat-chip-models-lead", "factory-seat-chip-worker", "factory-default-worker"]) assert.equal(html.split(`data-testid="${hook}"`).length, 2, `${hook} renders exactly once`);
+  assert.equal(hasHook(html, "factory-seat-chip-supervisor") || hasHook(html, "factory-seat-chip-lead"), false, "the Team tab's chip hooks stay off the Models tab");
+  assert.ok(at(html, "factory-models-row-supervisor") < at(html, "factory-models-row-lead") && at(html, "factory-models-row-lead") < at(html, "factory-default-worker"), "Supervisor, Lead, then Default worker");
+  assert.match(html, /Seat models/);
+  assert.match(html, /Project override/, "the worker's project scope");
+  assert.match(html, /Machine default/, "a machine-scoped seat");
+  assert.match(html, /Default worker applies to new Peers\. Running Peers keep their model\./);
+  assert.equal(hasHook(await render(modelsPanel(), { initialUi: { tab: "team" } }), "factory-seat-chip-models-lead"), false);
+});
+
+test("06: the Lane profile section names the active profile as modified and lists Apply rows on desktop only", async () => {
+  const desktop = await render(modelsPanel(), { initialUi: { tab: "models" }, actions: { applyProfile() {} } });
+  assert.match(desktop, /Lane profile/);
+  assert.match(desktop, /Balanced[\s\S]*modified/);
+  assert.ok(hasHook(desktop, "factory-profile-apply-fast"), "an inactive profile has Apply");
+  assert.equal(hasHook(desktop, "factory-profile-apply-balanced"), false, "the active one shows Active instead");
+  assert.match(desktop, />Active</);
+  const empty = await render(makePanel(), { initialUi: { tab: "models" }, actions: { applyProfile() {} } });
+  assert.match(empty, /Save a Lane profile in Settings to use it here\./);
+  const mobile = await render(modelsPanel(), { mobile: true, initialUi: { tab: "models" }, actions: { applyProfile() {} } });
+  assert.match(mobile, /Balanced/);
+  assert.equal(hasHook(mobile, "factory-profile-apply-fast"), false, "mobile writes no profile");
+  assert.doesNotMatch(mobile, /Save a Lane profile in Settings/);
+});
+
+test("06: a skill pack is a switch whose checked state follows `enabled`; mobile shows the On/Off word and no switch", async () => {
+  const packs = [{ id: "expo", label: "Expo", enabled: true, autoDetected: true }, { id: "web", label: "Web", enabled: false, autoDetected: false }];
+  const desktop = await render(makePanel(), { initialUi: { tab: "project" }, skillPacks: packs, actions: { toggleSkillPack() {} } });
+  const tagOf = (html: string, id: string): string => html.match(new RegExp(`<button[^>]*data-testid="${id}"[^>]*>`))![0];
+  const on = tagOf(desktop, "factory-skill-pack-expo");
+  const off = tagOf(desktop, "factory-skill-pack-web");
+  assert.match(on, /data-role="switch"/); assert.match(on, /data-checked="true"/); assert.match(on, /aria-label="Disable Expo"/);
+  assert.match(off, /data-role="switch"/); assert.match(off, /data-checked="false"/); assert.match(off, /aria-label="Enable Web"/);
+  const mobile = await render(makePanel(), { mobile: true, initialUi: { tab: "project" }, skillPacks: packs, actions: { toggleSkillPack() {} } });
+  assert.equal(hasHook(mobile, "factory-skill-pack-expo"), false, "no switch on mobile");
+  assert.match(mobile, /Expo[\s\S]*Auto-detected[\s\S]*>On</);
+  assert.match(mobile, />Off</);
+});
+
+test("06: the Project tab's sections are hairline-separated, not bordered cards", async () => {
+  const html = await render(makePanel(), { initialUi: { tab: "project" }, skillPacks: [{ id: "expo", label: "Expo", enabled: true, autoDetected: false }] });
+  assert.doesNotMatch(elementOf(html, "factory-skill-packs"), /borderWidth&quot;:1,&quot;borderColor/);
+  assert.doesNotMatch(elementOf(html, "factory-panel-od"), /borderRadius/);
+  assert.match(elementOf(html, "factory-panel-od"), /borderTopWidth&quot;:1/);
 });
 
 test("W10: seat roles, state words and model chips carry semantic colour and context uses the real mark", async () => {
@@ -559,14 +671,15 @@ test("W10: the independent Handoff block names substitute handovers and uses fai
     handoffs: [{ ...handoffFixture, state: "substitute" }, { ...handoffFixture, seat: "peer:T-absent", state: "failed", failure: "creation refused" }],
   }));
   assert.match(html, /Substitute handover/);
-  const block = html.slice(html.indexOf('data-testid="factory-handoff-block"'), html.indexOf('data-testid="factory-panel-seats"'));
-  assert.equal(block.includes("#c8253d1a"), false, "the Handoff block carries no full-card tint");
-  const blockStyle = block.slice(0, block.indexOf("><"));
-  assert.match(blockStyle, /&quot;backgroundColor&quot;:&quot;transparent&quot;/);
-  assert.match(blockStyle, /&quot;borderLeftWidth&quot;:3,&quot;borderLeftColor&quot;:&quot;#c8253d&quot;/, "a 3px left border in the state colour carries the emphasis");
+  const block = elementOf(html, "factory-handoff-block");
+  assert.equal(/&quot;borderWidth&quot;:1/.test(block), false, "no bordered card around the handoff group");
+  const failedRow = elementOf(html, "factory-handoff-peer:T-absent");
+  assert.match(failedRow, /&quot;backgroundColor&quot;:&quot;#c8253d10&quot;/, "the row carries a very faint tint of its state colour");
+  assert.match(failedRow, /&quot;width&quot;:3,&quot;backgroundColor&quot;:&quot;#c8253d&quot;/, "a 3px bar in the state colour carries the emphasis");
+  assert.match(elementOf(html, "factory-handoff-lead"), /&quot;width&quot;:3,&quot;backgroundColor&quot;:&quot;#b23a98&quot;/, "an in-flight handoff is move-coloured");
 });
 
-test("02: a failed handoff renders once — the Handoff block owns it, Needs you drops the duplicate, Try again is the first solid button", async () => {
+test("02: a failed handoff renders once — the Handoff block owns it, Needs you drops the duplicate, Try again is the first primary button", async () => {
   const failed = { ...handoffFixture, seat: "supervisor", state: "failed" as const, failure: "Provider 'antigravity' is not available", handover: "substitute" as const, allowedActions: ["replace-now", "retry", "view-handover"] as PanelView["handoffs"][number]["allowedActions"], fromLane: { provider: "pi", model: "gpt-6.1-sol" }, toLane: { provider: "antigravity", model: "gemini-4-argon-high" } };
   const item = { key: "handoff-failed:supervisor", kind: "handoff-failed", title: "Supervisor handoff failed", detail: failed.failure, action: { kind: "retry-handoff", seat: "supervisor", label: "Try again" } } as PanelView["needsYou"][number];
   const html = await render(makePanel({ needsYou: [item], handoffs: [failed] }), { mobile: false });
@@ -578,10 +691,10 @@ test("02: a failed handoff renders once — the Handoff block owns it, Needs you
   const row = html.slice(html.indexOf('data-testid="factory-handoff-supervisor"'), html.indexOf('data-testid="factory-panel-seats"'));
   const order = ["factory-handoff-retry", "factory-handoff-replace-now", "factory-handoff-view"].map((id) => row.indexOf(`data-testid="${id}"`));
   assert.ok(order[0]! >= 0 && order[0]! < order[1]! && order[1]! < order[2]!, "Try again comes first");
-  // Btn styles are functions (not serialised), but a solid button's label takes the surface colour while a ghost one takes the accent.
+  // Btn styles are functions (not serialised), but a primary button's label takes the surface colour while a secondary one takes the foreground.
   const labelColour = (label: string): string | undefined => new RegExp(`&quot;color&quot;:&quot;(#[0-9a-f]+)&quot;\\}"[^>]*>${label}<`).exec(row)?.[1];
   assert.ok(labelColour("Try again") !== undefined && labelColour("Replace now") !== undefined);
-  assert.notEqual(labelColour("Try again"), labelColour("Replace now"), "Try again is the solid primary, Replace now stays ghost");
+  assert.notEqual(labelColour("Try again"), labelColour("Replace now"), "Try again is the primary, Replace now stays secondary");
   assert.doesNotMatch(html, /Handoff: failed/, "the seat row does not repeat it");
   const mobile = await render(makePanel({ needsYou: [item], handoffs: [failed] }), { mobile: true });
   assert.equal(hasHook(mobile, "factory-handoff-retry"), false, "retry stays desktop-only");
@@ -633,4 +746,64 @@ test('W12: handoff reasons are words and the source and lane transition remain v
     assert.match(html, /pi\/old → codex\/new/);
     assert.match(html, /plugin-built handover/);
   }
+});
+
+// ---- 04: the Team tab -------------------------------------------------------------------------
+
+const peerOf = (task: string, statusLabel: string, extra: Record<string, unknown> = {}) => ({ ...healthySeats.peers[0]!, agentId: `agent-${task}`, task, title: `Peer · ${task}`, statusLabel, ...extra });
+
+test("04: closed Peers collapse behind a toggle by default; active Peers always show", async () => {
+  const seats = { ...healthySeats, peers: [peerOf("T-live", "running"), peerOf("T-old", "closed"), peerOf("T-gone", "Archived")] };
+  const html = await render(makePanel({ seats }));
+  assert.ok(hasHook(html, "factory-panel-peers-closed-toggle"));
+  assert.match(html, /▸ Closed \(2\)/);
+  assert.ok(hasHook(html, "factory-panel-seat-peer-T-live"), "an active Peer shows");
+  assert.equal(hasHook(html, "factory-panel-seat-peer-T-old") || hasHook(html, "factory-panel-seat-peer-T-gone"), false, "closed rows are absent while collapsed");
+  assert.equal(hasHook(html, "factory-panel-peers-closed"), false);
+  const none = await render(makePanel({ seats: { ...healthySeats, peers: [peerOf("T-live", "running")] } }));
+  assert.equal(hasHook(none, "factory-panel-peers-closed-toggle"), false, "no closed Peers, no toggle");
+});
+
+test("04: when every Peer is closed the PEERS heading still shows with the toggle", async () => {
+  const html = await render(makePanel({ seats: { ...healthySeats, peers: [peerOf("T-old", "closed")] } }));
+  assert.ok(hasHook(html, "factory-panel-peers"));
+  assert.match(html, />PEERS</);
+  assert.match(html, /▸ Closed \(1\)/);
+  assert.equal(hasHook(html, "factory-panel-seat-peer-T-old"), false);
+});
+
+test("04: a seat row on a wide panel is one line — role, status, chip, context and actions in one row container", async () => {
+  const wide = await render(makePanel(), { width: 900 });
+  for (const id of ["supervisor", "lead", "peer-T-08"]) {
+    const line = elementOf(wide, `factory-seat-line-${id}`);
+    assert.match(line.slice(0, line.indexOf(">")), /&quot;flexDirection&quot;:&quot;row&quot;/, `${id} line is a row`);
+    assert.match(line, id === "peer-T-08" ? /Peer · T-08/ : id === "lead" ? /Lead/ : /Supervisor/, `${id} role name`);
+    assert.match(line, /idle|working/, `${id} status`);
+    assert.ok(hasHook(line, `factory-seat-chip-${id}`), `${id} model chip`);
+    assert.match(line, /glm-5\.3/);
+    assert.ok(hasHook(line, id === "peer-T-08" ? "factory-panel-open-peer-T-08" : `factory-panel-open-${id}`), `${id} Open`);
+  }
+  assert.match(elementOf(wide, "factory-seat-line-lead"), /94k \/ 128k/, "context sits on the same line");
+  assert.match(elementOf(wide, "factory-seat-line-supervisor"), />—</, "no reading is a muted dash");
+  assert.ok(hasHook(elementOf(wide, "factory-seat-line-lead"), "factory-seat-hand-off-now-lead"));
+  // Narrow stacks: role/status/actions on line 1, chip/context on line 2 — both still inside the one line container.
+  const narrow = elementOf(await render(makePanel(), { width: 500 }), "factory-seat-line-lead");
+  assert.doesNotMatch(narrow.slice(0, narrow.indexOf(">")), /&quot;flexDirection&quot;:&quot;row&quot;/, "narrow stacks its lines");
+  assert.ok(narrow.indexOf("factory-panel-open-lead") < narrow.indexOf("factory-seat-chip-lead"), "narrow: actions on line 1, chip on line 2");
+});
+
+test("04: a Peer's disposition is a muted suffix on its status, and a vacant seat's hint sits on a second line", async () => {
+  const html = await render(makePanel({ seats: { ...healthySeats, lead: { ...healthySeats.lead, vacant: true, agentId: null, statusLabel: "vacant", model: null, hint: "No Lead is running — ask your Supervisor.", context: null, handoff: null } } }), { width: 900 });
+  assert.match(elementOf(html, "factory-seat-line-peer-T-08"), /working<span[^>]*> · reviewer<\/span>/);
+  const row = elementOf(html, "factory-seat-lead");
+  assert.equal(elementOf(html, "factory-seat-line-lead").includes("No Lead is running"), false, "the hint is not on the grid line");
+  assert.ok(row.includes("No Lead is running"), "the hint is on the row's second line");
+});
+
+test("04: the model chip is a quiet pill — no border, surface fill, code-style model, muted scope", async () => {
+  const html = await render(makePanel());
+  const chip = elementOf(html, "factory-seat-chip-lead");
+  assert.equal(chip.includes("borderWidth"), false);
+  assert.match(chip, /&quot;borderRadius&quot;:4,&quot;paddingHorizontal&quot;:8,&quot;paddingVertical&quot;:3,&quot;backgroundColor&quot;:&quot;#f5f5f5&quot;/);
+  assert.match(chip, /&quot;fontFamily&quot;:&quot;Menlo&quot;/, "the model name is in code type");
 });

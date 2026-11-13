@@ -285,9 +285,10 @@ export function FactoryShell({
   const openAgent = (agentId: string): void => {
     navigation?.openAgent({ agentId, serverId });
   };
-  const startHandoff = (seat: string): void => {
+  /** Returns the outcome so the Hand off… modal can stay open when the server refuses; the alert buttons ignore it. */
+  const startHandoff = (seat: string): Promise<boolean> | void => {
     if (projectRoot === undefined) return;
-    void act("Hand off seat", () => handoffStartCall({ projectRoot, seat }));
+    return act("Hand off seat", () => handoffStartCall({ projectRoot, seat }));
   };
   const replaceHandoff = (seat: string): void => {
     if (projectRoot === undefined) return;
