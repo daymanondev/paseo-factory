@@ -130,3 +130,15 @@ test('a failed successor kickoff survives restart and resumes with the same succ
   assert.match(f.sent.find(s => s.id === 'successor-1')!.text, /Resume the same work[\s\S]*Retain this report/);
   assert.equal(f.mailbox().supervisorInFlight?.toAgentId, 'successor-1'); assert.deepEqual(f.archived, ['old']);
 });
+
+test('Supervisor ensure never drops an errored chat history to create a replacement', async t => {
+  const f = fixture(t); f.agents[0]!.status = 'error';
+  const reply = await f.surface.supervisorEnsure({ projectRoot: f.root });
+  assert.equal(reply.ok, false); assert.deepEqual(f.archived, []); assert.equal(f.created.length, 0);
+});
+
+test('Lead ensure cannot bypass handoff for an errored standing seat', async t => {
+  const f = fixture(t); f.agents.find(agent => agent.id === 'lead')!.status = 'error';
+  const reply = await f.surface.leadEnsure({ projectRoot: f.root });
+  assert.equal(reply.ok, false); assert.deepEqual(f.archived, []); assert.equal(f.created.length, 0);
+});

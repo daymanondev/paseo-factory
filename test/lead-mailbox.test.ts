@@ -629,7 +629,7 @@ test("isBlockedByAttention and mailbox drains only block on attentionReason='per
   assert.equal(state.supervisorInFlight?.toAgentId, "agent-sup-attn");
 });
 
-test("onLeadTurnEnded performs a bounded 1-shot self-healing retry per mailId for both Lead and Supervisor and stops on a second failure (v0.0.24, T-02)", async (t) => {
+test("onLeadTurnEnded performs a bounded 1-shot retry per mailId for both Lead and Supervisor and stops on a second failure (v0.0.24, T-02)", async (t) => {
   const { stateDir, slug, projectRoot, surface, leadMail, fake, warnings } = makeSpooledRuntime(t);
   const mailboxPath = join(projectStateDir(stateDir, slug), "mailbox.jsonl");
 
@@ -645,21 +645,21 @@ test("onLeadTurnEnded performs a bounded 1-shot self-healing retry per mailId fo
   assert.equal(leadId1, "agent-created-1");
   assert.equal(fake.sent.length, 1);
 
-  // First Lead turn fails and leaves the Lead seat in status="error"
+  // A failed turn on a still-idle Lead is retried in the same chat.
   const leadAgentObj = fake.agents.find((a) => a.id === leadId1);
   assert.ok(leadAgentObj);
-  leadAgentObj.status = "error";
+  leadAgentObj.status = "idle";
   await leadMail.onLeadTurnEnded({
     agentId: leadId1,
     outcome: { kind: "failed", error: { message: "Variant unavailable" } },
     timeline: [],
   });
 
-  // First failure triggered 1-shot retry -> ensureLead self-healed the errored seat and re-delivered once
+  // A transient failure re-delivers once without replacing the standing Lead.
   let state = readLeadMailbox(mailboxPath);
   assert.equal(state.queued.length, 0);
   assert.ok(state.inFlight !== null, "first failure retried and re-delivered the batch");
-  assert.equal(state.inFlight?.toAgentId, "agent-created-2", "ensureLead replaced the errored Lead seat on retry");
+  assert.equal(state.inFlight?.toAgentId, leadId1, "the Lead keeps its history on retry");
   assert.equal(fake.sent.length, 2);
 
   // Second failure on the SAME mailId -> requeued and held queued WITHOUT re-pumping
@@ -680,7 +680,7 @@ test("onLeadTurnEnded performs a bounded 1-shot self-healing retry per mailId fo
   const startedSup = await surface.supervisorStart({ projectRoot });
   assert.ok(startedSup.ok, startedSup.ok ? "" : startedSup.error);
   const supId1 = startedSup.ok ? startedSup.agentId : "";
-  assert.equal(fake.created.length, 3, "the Supervisor was started explicitly — the dispatch below creates nothing");
+  assert.equal(fake.created.length, 2, "the Supervisor was started explicitly — the dispatch below creates nothing");
 
   const supDisp = await leadMail.dispatchSupervisor({
     id: "sd-retry-1",
@@ -705,7 +705,7 @@ test("onLeadTurnEnded performs a bounded 1-shot self-healing retry per mailId fo
   state = readLeadMailbox(mailboxPath);
   assert.equal(state.supervisorInFlight, null, "the failed batch requeued, nothing in flight");
   assert.equal(state.supervisorQueued.length, 1, "the directive waits on the Supervisor slice");
-  assert.equal(fake.created.length, 3, "no Supervisor was created to heal the errored seat");
+  assert.equal(fake.created.length, 2, "no Supervisor was created to heal the errored seat");
   assert.equal(fake.sent.length, 3, "nothing re-sent — an errored Supervisor is never delivered into");
 
   // The seat recovers (the Owner reopens it): the next pump delivers the held batch.
@@ -896,15 +896,15 @@ test("drainSupervisorMailbox and drainLeadMailbox prepend the Seat kickoff packe
   assert.doesNotMatch(fake.sent[3]!.text, /\[paseo-factory seat kickoff packet/);
   assert.match(fake.sent[3]!.text, /Second Lead directive/);
 
-  // 3. If a seat's cwd drifts away from projectRoot, ensureSeat retires and recreates it, and the new seat gets a fresh kickoff packet
+  // A drifted seat requires an explicit handoff instead of dropping its history.
   await leadMail.onLeadTurnEnded({ agentId: leadId, outcome: { kind: "completed" }, timeline: [] });
   const liveLead = fake.agents.find((a) => a.id === leadId);
   assert.ok(liveLead);
   liveLead.cwd = "/wrong/project/root";
   const reEnsured = await surface.leadEnsure({ projectRoot });
-  assert.ok(reEnsured.ok);
-  assert.equal(reEnsured.created, true, "mismatched cwd seat is retired and recreated");
-  assert.notEqual(reEnsured.agentId, leadId);
+  assert.equal(reEnsured.ok, false);
+  if (!reEnsured.ok) assert.equal(reEnsured.code, "handoff-required");
+  assert.equal(readProjectRegistration(stateDir, slug)?.lead, leadId);
 });
 
 test("completeHandoff resolves Attempt-1 working Agents via live daemon worktree cwd/labels, CorrelationRegistry, and ignores stale records after a contract_set epoch reset (v0.0.28, ADR 0018 §1)", async (t) => {
@@ -3052,7 +3052,7 @@ test("Lead builds a substitute after a plugin restart during failed extraction",
   assert.match(f.fake.sent.find(item => item.agentId !== lead.id)!.text, /Plugin-built handover/);
 });
 
-test("rotation_pending holds when a Peer turn fails to idle on an unsettled Task, and a failed Turn-1 handoff kickoff rests quietly until the next mail pump self-heals the errored Lead", async (t) => {
+test("rotation_pending holds on an unsettled Task and an errored successor retains held mail until an Owner handoff", async (t) => {
   const lead: FakeAgent = { id: "lead-outage", status: "idle", lastUsage: { contextWindowUsedTokens: 132_000 } };
   const { stateDir, slug, projectRoot, factory, surface, leadMail, fake } = makeSpooledRuntime(t, [lead]);
   lead.labels = { seat: "lead", project: slug };
@@ -3104,16 +3104,19 @@ test("rotation_pending holds when a Peer turn fails to idle on an unsettled Task
   assert.equal(readProjectRegistration(stateDir, slug)?.lead, successor1Id, "does not immediately replace and re-pump into an active outage");
   assert.equal(fake.sent.filter((s) => s.agentId === successor1Id).length, 1);
 
-  // 6. Once the Peer's GREEN verdict mail arrives (new mail event), drainLeadMailbox self-heals the errored Lead
-  //    and delivers the full Seat kickoff packet + preserved handoff + GREEN verdict to Successor Lead 2.
+  // New mail holds for the errored successor until the Owner explicitly hands it off.
   await leadMail.notifyPeer({ task: "T-OUTAGE", kind: "verdict", text: "T-OUTAGE attempt 1 ended GREEN" });
-
+  assert.equal(readProjectRegistration(stateDir, slug)?.lead, successor1Id);
+  const held = readLeadMailbox(join(projectStateDir(stateDir, slug), "mailbox.jsonl"));
+  assert.equal(held.queued.length, 1);
+  const replaced = await leadMail.handoff({ slug, seat: "lead", action: "replaceNow" });
+  assert.ok(replaced.ok);
   const successor2Id = readProjectRegistration(stateDir, slug)?.lead!;
-  assert.ok(successor2Id && successor2Id !== successor1Id, "errored Lead was replaced on the next mail pump");
+  assert.notEqual(successor2Id, successor1Id);
   const successor2Sends = fake.sent.filter((s) => s.agentId === successor2Id);
   assert.equal(successor2Sends.length, 1);
   assert.match(successor2Sends[0]!.text, /\[paseo-factory seat kickoff packet · role=lead/);
-  assert.match(successor2Sends[0]!.text, /# Handoff after outage\nWait for T-OUTAGE verdict\./);
+  assert.match(successor2Sends[0]!.text, /Plugin-built handover/);
   assert.match(successor2Sends[0]!.text, /T-OUTAGE attempt 1 ended GREEN/);
 });
 

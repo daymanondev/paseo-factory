@@ -1229,11 +1229,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         agent.cwd === "/tmp" ||
         realpathSafe(agent.cwd) === realpathSafe(project.root);
       if (agent.status === "error" || !sameProviderFamily || !sameCwd) {
-        const retired = await retireSeatUnlocked(seat, project.slug, project.root, context);
-        if (!retired.ok) {
-          return retired;
-        }
-        agent = undefined;
+        return failure("handoff-required", `This ${seat === "supervisor" ? "Supervisor" : "Lead"} needs a successor; use factory.handoff.start or Replace now to preserve its history`);
       } else if (parsed !== undefined) {
         const sync = deps.setAgentModel ?? setAgentModelViaCli;
         const syncThinking = deps.setAgentThinking ?? setAgentThinkingViaCli;
