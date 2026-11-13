@@ -65,6 +65,9 @@ export const LANE_CARDS: LaneCard[] = [
   },
 ];
 
+/** Factory's role-routing providers (ADR 0017 §2) — never a lane target of their own. */
+const INTERNAL_PROVIDERS: ReadonlySet<string> = new Set(["factory-supervisor", "factory-lead", "factory-peer", "factory-agent"]);
+
 const FALLBACK_THINKING_OPTIONS: { id: string; label: string }[] = [
   { id: "off", label: "Off" },
   { id: "minimal", label: "Minimal" },
@@ -134,9 +137,18 @@ export function LaneModalBody({
   const [search, setSearch] = useState("");
   const [familyFilter, setFamilyFilter] = useState<string>("all");
 
-  const available = view.providers.filter((entry) => entry.available);
+  // Factory's own role providers (`factory-supervisor` …) only re-route onto a
+  // lane's real provider — a lane pointing at one is circular, so the picker
+  // hides them unless the current value already names one.
+  const available = view.providers.filter((entry) => entry.available && (!INTERNAL_PROVIDERS.has(entry.provider) || entry.provider === initial.provider));
   const activeModels = available.find((entry) => entry.provider === provider)?.models ?? null;
   const allowEyeJson = card.id === "fresh-eyes";
+  /** A provider whose model list could not be read is likely unreachable — a handoff onto it tends to fail. */
+  const unverified = provider !== "" && provider !== "eye.json" && available.some((entry) => entry.provider === provider) && (activeModels === null || activeModels.length === 0);
+  const [customOpen, setCustomOpen] = useState(
+    initial.model !== "" && !(view.providers.find((entry) => entry.provider === initial.provider)?.models ?? []).some((m) => m.id === initial.model),
+  );
+  const showCustom = customOpen || activeModels === null || activeModels.length === 0;
 
   // Extract sub-families (e.g. "zai", "github-copilot", "google-antigravity" for pi)
   const families: { id: string; count: number }[] = [];
@@ -248,7 +260,7 @@ export function LaneModalBody({
 
       {/* Step 1: Provider */}
       <View style={{ gap: SPACING[1.5] }}>
-        <Text style={text(theme, "badge")}>1. PROVIDER</Text>
+        <Text style={text(theme, "badge")}>PROVIDER</Text>
         <View style={{ flexDirection: "row", flexWrap: "wrap", gap: SPACING[1.5] }}>
           {available.map((entry) => (
             <Chip
@@ -257,6 +269,7 @@ export function LaneModalBody({
               label={entry.provider}
               active={provider === entry.provider}
               count={entry.models?.length ?? 0}
+              {...(entry.models === null || entry.models.length === 0 ? { icon: "AlertTriangle" } : {})}
               onPress={() => switchProvider(entry.provider)}
             />
           ))}
@@ -273,6 +286,11 @@ export function LaneModalBody({
             <Text style={text(theme, "label", "statusWarning")}>No available providers — daemon unreachable.</Text>
           ) : null}
         </View>
+        {unverified ? (
+          <Text testID="lane-picker-unverified-provider" style={text(theme, "label", "statusWarning")}>
+            Paseo lists no models for {provider}, so it may not be reachable right now. A handoff onto it can fail — check the provider in Paseo first.
+          </Text>
+        ) : null}
       </View>
 
       {/* Step 2: Model */}
@@ -280,7 +298,7 @@ export function LaneModalBody({
         <View style={{ gap: SPACING[2] }}>
           <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: SPACING[1.5] }}>
             <Text style={text(theme, "badge")}>
-              2. MODEL {activeModels !== null ? `(${filteredModels.length} of ${activeModels.length})` : ""}
+              MODEL {activeModels !== null ? `(${filteredModels.length} of ${activeModels.length})` : ""}
             </Text>
             {families.length > 0 ? (
               <View style={{ flexDirection: "row", flexWrap: "wrap", gap: SPACING[1] }}>
@@ -339,7 +357,7 @@ export function LaneModalBody({
               {/* Scrollable Model List (no 16-item cutoff) */}
               <View
                 style={{
-                  maxHeight: 210,
+                  maxHeight: 260,
                   borderWidth: 1,
                   borderColor: theme.colors.border,
                   borderRadius: RADIUS.lg,
@@ -347,7 +365,7 @@ export function LaneModalBody({
                   overflow: "hidden",
                 }}
               >
-                <ScrollView style={{ maxHeight: 210 }}>
+                <ScrollView style={{ maxHeight: 260 }}>
                   {filteredModels.length === 0 ? (
                     <View style={{ padding: SPACING[3] }}>
                       <Text style={text(theme, "meta")}>No models match "{search}" — type a custom model ID below.</Text>
@@ -355,7 +373,6 @@ export function LaneModalBody({
                   ) : (
                     filteredModels.map((m, idx) => {
                       const isSelected = trimmedModel === m.id;
-                      const opts = m.thinkingOptions ?? null;
                       return (
                         <Pressable
                           key={m.id}
@@ -411,14 +428,6 @@ export function LaneModalBody({
                               ) : null}
                             </View>
                           </View>
-                          {opts !== null && opts.length > 0 ? (
-                            <Pill
-                              theme={theme}
-                              label={`thinking: ${opts.map((o) => o.id).join("/")}`}
-                              tone={isSelected ? "accent" : "foregroundMuted"}
-                              lit={isSelected}
-                            />
-                          ) : null}
                         </Pressable>
                       );
                     })
@@ -428,9 +437,14 @@ export function LaneModalBody({
             </View>
           ) : null}
 
-          {/* Manual / Custom Model ID Input */}
+          {/* Manual / Custom Model ID Input — tucked behind a link while the list covers it */}
+          {!showCustom ? (
+            <Pressable testID="lane-picker-custom-toggle" accessibilityRole="button" onPress={() => setCustomOpen(true)} style={{ alignSelf: "flex-start" }}>
+              <Text style={text(theme, "label", "accent")}>Use a custom model ID…</Text>
+            </Pressable>
+          ) : (
           <View style={{ gap: SPACING[1] }}>
-            <Text style={text(theme, "label")}>Model ID (select above or type custom):</Text>
+            <Text style={text(theme, "label")}>Custom model ID</Text>
             <View
               style={{
                 minHeight: CONTROL_H,
@@ -450,6 +464,7 @@ export function LaneModalBody({
               />
             </View>
           </View>
+          )}
         </View>
       ) : null}
 
@@ -457,7 +472,7 @@ export function LaneModalBody({
       {provider !== "eye.json" ? (
         <View style={{ gap: SPACING[1.5] }}>
           <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: SPACING[1] }}>
-            <Text style={text(theme, "badge")}>3. THINKING LEVEL (REASONING EFFORT)</Text>
+            <Text style={text(theme, "badge")}>THINKING</Text>
             <Text style={text(theme, "label")}>
               {noThinkingSupported
                 ? "No thinking variants supported by this model"

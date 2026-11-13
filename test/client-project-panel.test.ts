@@ -560,7 +560,43 @@ test("W10: the independent Handoff block names substitute handovers and uses fai
   }));
   assert.match(html, /Substitute handover/);
   const block = html.slice(html.indexOf('data-testid="factory-handoff-block"'), html.indexOf('data-testid="factory-panel-seats"'));
-  assert.ok(block.includes("#c8253d1a"), "the failing block has only a faint failure tint");
+  assert.equal(block.includes("#c8253d1a"), false, "the Handoff block carries no full-card tint");
+  const blockStyle = block.slice(0, block.indexOf("><"));
+  assert.match(blockStyle, /&quot;backgroundColor&quot;:&quot;transparent&quot;/);
+  assert.match(blockStyle, /&quot;borderLeftWidth&quot;:3,&quot;borderLeftColor&quot;:&quot;#c8253d&quot;/, "a 3px left border in the state colour carries the emphasis");
+});
+
+test("02: a failed handoff renders once — the Handoff block owns it, Needs you drops the duplicate, Try again is the first solid button", async () => {
+  const failed = { ...handoffFixture, seat: "supervisor", state: "failed" as const, failure: "Provider 'antigravity' is not available", handover: "substitute" as const, allowedActions: ["replace-now", "retry", "view-handover"] as PanelView["handoffs"][number]["allowedActions"], fromLane: { provider: "pi", model: "gpt-6.1-sol" }, toLane: { provider: "antigravity", model: "gemini-4-argon-high" } };
+  const item = { key: "handoff-failed:supervisor", kind: "handoff-failed", title: "Supervisor handoff failed", detail: failed.failure, action: { kind: "retry-handoff", seat: "supervisor", label: "Try again" } } as PanelView["needsYou"][number];
+  const html = await render(makePanel({ needsYou: [item], handoffs: [failed] }), { mobile: false });
+  assert.equal(html.split('data-testid="factory-handoff-error-supervisor"').length - 1, 1, "one failure line");
+  assert.equal(html.split("is not available").length - 1, 1, "the error text appears once");
+  assert.equal(hasHook(html, "factory-panel-needs-you-handoff-failed:supervisor"), false);
+  assert.equal(hasHook(html, "factory-panel-needs-you"), false, "no Needs-you block when that was the only item");
+  assert.match(html, /Context mark · pi\/gpt-6.1-sol → antigravity\/gemini-4-argon-high · plugin-built handover/, "one meta line");
+  const row = html.slice(html.indexOf('data-testid="factory-handoff-supervisor"'), html.indexOf('data-testid="factory-panel-seats"'));
+  const order = ["factory-handoff-retry", "factory-handoff-replace-now", "factory-handoff-view"].map((id) => row.indexOf(`data-testid="${id}"`));
+  assert.ok(order[0]! >= 0 && order[0]! < order[1]! && order[1]! < order[2]!, "Try again comes first");
+  // Btn styles are functions (not serialised), but a solid button's label takes the surface colour while a ghost one takes the accent.
+  const labelColour = (label: string): string | undefined => new RegExp(`&quot;color&quot;:&quot;(#[0-9a-f]+)&quot;\\}"[^>]*>${label}<`).exec(row)?.[1];
+  assert.ok(labelColour("Try again") !== undefined && labelColour("Replace now") !== undefined);
+  assert.notEqual(labelColour("Try again"), labelColour("Replace now"), "Try again is the solid primary, Replace now stays ghost");
+  assert.doesNotMatch(html, /Handoff: failed/, "the seat row does not repeat it");
+  const mobile = await render(makePanel({ needsYou: [item], handoffs: [failed] }), { mobile: true });
+  assert.equal(hasHook(mobile, "factory-handoff-retry"), false, "retry stays desktop-only");
+  assert.ok(hasHook(mobile, "factory-handoff-error-supervisor"));
+  assert.ok(hasHook(mobile, "factory-handoff-retry-hint-supervisor"), "mobile keeps the Desktop retry hint the deduped card carried");
+  assert.equal(hasHook(html, "factory-handoff-retry-hint-supervisor"), false, "desktop shows the button, not the hint");
+});
+
+test("02: a handoff-failed Needs-you item with no matching handoff row still renders in Needs you", async () => {
+  const item = { key: "handoff-failed:peer:gone", kind: "handoff-failed", title: "Peer handoff failed", detail: "boom", action: { kind: "retry-handoff", seat: "peer:gone", label: "Try again" } } as PanelView["needsYou"][number];
+  const unrelated = { ...handoffFixture, seat: "lead", state: "failed" as const, failure: "x", allowedActions: [] as PanelView["handoffs"][number]["allowedActions"] };
+  const html = await render(makePanel({ needsYou: [item], handoffs: [unrelated] }), { mobile: false });
+  assert.ok(hasHook(html, "factory-panel-needs-you"));
+  assert.ok(hasHook(html, "factory-panel-needs-you-handoff-failed:peer:gone"));
+  assert.ok(hasHook(html, "factory-panel-needs-you-action-handoff-failed:peer:gone"));
 });
 
 test("W10: a vacant seat still displays its configured model chip", async () => {

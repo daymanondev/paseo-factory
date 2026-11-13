@@ -6,7 +6,7 @@
  * adoption and existing handoff/Open Design actions retain their host gates.
  */
 import type { PluginTheme } from "@getpaseo/plugin";
-import { TextInput } from "@getpaseo/plugin/client/ui";
+import { Modal, TextInput } from "@getpaseo/plugin/client/ui";
 import { createContext, useContext, useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { Pressable, Text, View } from "react-native";
@@ -147,6 +147,11 @@ function NeedsYouRow({ theme, item, mobile, actions }: { theme: PluginTheme; ite
   );
 }
 
+/** The Handoff block owns a failed handoff it shows; a duplicate Needs-you card would say the same failure twice. A failure with no handoff row (nothing to show it) stays. */
+function withoutShownHandoffFailures(items: PanelNeedsYouItem[], handoffs: PanelView["handoffs"]): PanelNeedsYouItem[] {
+  return items.filter(({ kind, action }) => !(kind === "handoff-failed" && action.kind === "retry-handoff" && handoffs.some((h) => h.seat === action.seat)));
+}
+
 function NeedsYou({ theme, items, mobile, actions }: { theme: PluginTheme; items: PanelNeedsYouItem[]; mobile: boolean; actions: ProjectPanelActions }) {
   if (items.length === 0) return null;
   return (
@@ -218,7 +223,7 @@ function SeatRow({
       </View>
       {row.hint !== null ? <Text style={text(theme, "meta", colour)}>{row.hint}</Text> : null}
       {row.context !== null ? <ContextBar theme={theme} context={row.context} /> : null}
-      {row.handoff !== null ? <Text style={{ ...text(theme, "meta"), color: row.handoff.state === "failed" ? factoryPalette(theme).bad : row.handoff.state === "done" ? factoryPalette(theme).ok : factoryPalette(theme).move }}>Handoff: {row.handoff.state === "scheduled" ? `Scheduled · waiting for ${row.handoff.waitingPeers ?? 0} Peers` : row.handoff.state}</Text> : null}
+      {row.handoff !== null && row.handoff.state !== "failed" ? <Text style={{ ...text(theme, "meta"), color: row.handoff.state === "done" ? factoryPalette(theme).ok : factoryPalette(theme).move }}>Handoff: {row.handoff.state === "scheduled" ? `Scheduled · waiting for ${row.handoff.waitingPeers ?? 0} Peers` : row.handoff.state}</Text> : null}
       {live && agentId !== null ? (
         <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[1.5] }}>
           <Btn theme={theme} small testID={`factory-panel-open-${row.role}`} label="Open" onPress={() => actions.openAgent(agentId)} />
@@ -413,10 +418,26 @@ export function SeatModelChip({ theme, lane, pendingLane, seat, target = seat, l
   </>;
   const style = { flexDirection: "row" as const, alignItems: "center" as const, flexWrap: "wrap" as const, gap: SPACING[1], borderWidth: 1, borderColor: theme.colors.border, borderRadius: RADIUS.sm, paddingHorizontal: SPACING[1.5], paddingVertical: SPACING[0.5] };
   const open = canEdit && editor.editingSeat === target;
-  return <View style={{ gap: SPACING[2], flexShrink: 1 }}>
+  // The picker opens in a modal, never inline: an inline picker grew the seat
+  // row to hundreds of pixels and pushed the role name out of line. The modal
+  // mounts only while open so static-markup hosts need no Modal export.
+  return <View style={{ flexShrink: 1, alignSelf: "flex-start" }}>
     {canEdit ? <Pressable testID={`factory-seat-chip-${seat}`} accessibilityRole="button" accessibilityLabel={`Change ${target.startsWith("peer:") ? "Peer" : seat} model`} disabled={editor.actions.busy} onPress={() => editor.edit(open ? null : target)} style={style}>{body}</Pressable> : <View testID={`factory-seat-chip-${seat}`} style={style}>{body}</View>}
-    {open ? <SeatModelEditor theme={theme} lane={lane} target={target} live={live} editor={editor} /> : null}
+    {open ? (
+      <Modal open onOpenChange={(next) => (next ? undefined : editor.edit(null))} title={`Change ${seatTitleOf(target)} model`}>
+        <Modal.Content>
+          <SeatModelEditor theme={theme} lane={lane} target={target} live={live} editor={editor} />
+        </Modal.Content>
+      </Modal>
+    ) : null}
   </View>;
+}
+
+/** The modal title's seat name — `peer:<task>` reads as `Peer · <task>`. */
+function seatTitleOf(target: string): string {
+  if (target.startsWith("peer:")) return `Peer · ${target.slice(5)}`;
+  if (target === "worker") return "Default worker";
+  return target.charAt(0).toUpperCase() + target.slice(1);
 }
 
 /** Uses the same provider/model/thinking picker as Settings and onboarding. */
@@ -436,7 +457,7 @@ function SeatModelEditor({ theme, lane, target, live, editor }: { theme: PluginT
     const result = machine ? editor.actions.setMachineDefault?.(target, value) : editor.actions.saveSeatModel?.(target, value);
     void Promise.resolve(result).then((ok) => { if (ok !== false) editor.edit(null); });
   };
-  return <View testID="factory-chip-editor" style={{ alignSelf: "stretch", gap: SPACING[2], paddingVertical: SPACING[2] }}>
+  return <View testID="factory-chip-editor" style={{ alignSelf: "stretch", gap: SPACING[2] }}>
     <LaneModalBody theme={theme} view={editor.modelView!} card={card} currentValue={current} busy={editor.actions.busy} onSave={(value) => save(value, false)} onClose={() => editor.edit(null)} primaryLabel={label} primaryTestID="factory-chip-editor-primary"
       explanation={(value) => target === "worker" ? "Applies to future Peers in this Project. Running Peers keep their model." : !live ? `Sets the ${card.title} model for this Project. The seat starts on this model.` : peer ? "The primary action hands this Peer to a successor with the selected model. Keeps its worktree, Contract and Attempts, and leaves the Default worker unchanged." : splitLaneParts(value).provider === lane.provider ? "Switches this Project's live seat in place and keeps the session." : "Hands this Project's live seat over to a new session with its handover."}
       {...(!editor.mobile && editor.actions.setMachineDefault !== undefined ? { secondaryAction: { label: "Set as machine default", testID: "factory-chip-editor-machine-default", onSave: (value: string) => save(value, true) } } : {})}
@@ -451,25 +472,31 @@ export function HandoffBlock({ theme, handoffs, mobile, actions }: { theme: Plug
   const palette = factoryPalette(theme);
   const colour = handoffs.some((h) => h.state === "failed") ? palette.bad : handoffs.every((h) => h.state === "done") ? palette.ok : palette.move;
   const stateLabel = { scheduled: "Scheduled", "handing-over": "Handing over", "creating-successor": "Creating successor", done: "Done", substitute: "Substitute handover", failed: "Failed" };
-  return <View testID="factory-handoff-block" style={{ gap: SPACING[2], padding: SPACING[3], borderRadius: RADIUS.lg, borderWidth: 1, borderColor: colour, backgroundColor: tint(colour, "1a") }}>
+  return <View testID="factory-handoff-block" style={{ gap: SPACING[2], padding: SPACING[3], borderRadius: RADIUS.lg, borderWidth: 1, borderColor: colour, borderLeftWidth: 3, borderLeftColor: colour, backgroundColor: "transparent" }}>
     <SectionTitle theme={theme} label="Handoff" />
-    {handoffs.map((handoff) => <View key={handoff.seat} testID={`factory-handoff-${handoff.seat}`} style={{ gap: SPACING[1] }}>
+    {handoffs.map((handoff) => {
+      // A failed handoff's primary act is Try again (desktop only): solid and first. Other states keep the old order, all ghost.
+      const retry = !mobile && handoff.allowedActions.includes("retry") ? <Btn theme={theme} small solid={handoff.state === "failed"} testID="factory-handoff-retry" label="Try again" disabled={actions.busy} onPress={() => actions.handoffRetry(handoff.seat)} /> : null;
+      return <View key={handoff.seat} testID={`factory-handoff-${handoff.seat}`} style={{ gap: SPACING[1] }}>
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: SPACING[1.5] }}>
         <RoleName theme={theme} role={handoff.seat.startsWith("peer:") ? "peer" : handoff.seat === "supervisor" ? "supervisor" : "lead"} label={handoff.seat.startsWith("peer:") ? `Peer · ${handoff.seat.slice(5)}` : handoff.seat === "supervisor" ? "Supervisor" : "Lead"} />
         <Text style={{ ...text(theme, "rowTitle"), color: handoff.state === "failed" ? palette.bad : palette.move }}>{stateLabel[handoff.state]}</Text>
       </View>
-      <Text style={text(theme, "meta")}>{handoff.reason === "context-mark" ? "Context mark" : handoff.reason === "provider-change" ? "Provider change" : "Owner requested"} · {handoff.fromLane.provider}/{handoff.fromLane.model} → {handoff.toLane.provider}/{handoff.toLane.model}</Text>
+      <Text style={text(theme, "meta")}>{`${handoff.reason === "context-mark" ? "Context mark" : handoff.reason === "provider-change" ? "Provider change" : "Owner requested"} · ${handoff.fromLane.provider}/${handoff.fromLane.model} → ${handoff.toLane.provider}/${handoff.toLane.model}${handoff.handover === "substitute" ? " · plugin-built handover" : ""}`}</Text>
       {handoff.state !== "scheduled" ? null : <Text style={text(theme, "meta")}>Scheduled · waiting for {handoff.waitingPeers ?? 0} Peers</Text>}
-      {handoff.handover === "substitute" ? <Text style={text(theme, "meta")}>plugin-built handover</Text> : null}
-      {handoff.failure === undefined ? null : <Text style={{ ...text(theme, "meta"), color: palette.bad }}>{handoff.failure}</Text>}
+      {handoff.failure === undefined ? null : <Text testID={`factory-handoff-error-${handoff.seat}`} style={{ ...text(theme, "meta"), color: palette.bad }}>{handoff.failure}</Text>}
+      {/* Retry is Desktop-only; the deduped Needs-you card used to carry this hint on mobile. */}
+      {mobile && handoff.allowedActions.includes("retry") ? <Text testID={`factory-handoff-retry-hint-${handoff.seat}`} style={text(theme, "meta")}>Try again on Paseo Desktop{handoff.allowedActions.includes("replace-now") ? ", or use Replace now." : "."}</Text> : null}
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: SPACING[1.5] }}>
+        {handoff.state === "failed" ? retry : null}
         {handoff.allowedActions.includes("cancel") ? <Btn theme={theme} small testID="factory-handoff-cancel" label="Cancel" disabled={actions.busy} onPress={() => actions.handoffCancel(handoff.seat)} /> : null}
         {handoff.allowedActions.includes("hand-off-now") ? <Btn theme={theme} small testID="factory-handoff-now" label="Hand off now" disabled={actions.busy} onPress={() => actions.handoffStart(handoff.seat)} /> : null}
         {handoff.allowedActions.includes("replace-now") ? <Btn theme={theme} small testID="factory-handoff-replace-now" label="Replace now" disabled={actions.busy} onPress={() => actions.handoffReplaceNow(handoff.seat)} /> : null}
-        {!mobile && handoff.allowedActions.includes("retry") ? <Btn theme={theme} small testID="factory-handoff-retry" label="Try again" disabled={actions.busy} onPress={() => actions.handoffRetry(handoff.seat)} /> : null}
+        {handoff.state === "failed" ? null : retry}
         {handoff.allowedActions.includes("view-handover") ? <Btn theme={theme} small testID="factory-handoff-view" label="View handover" disabled={actions.busy} onPress={() => actions.viewHandover(handoff.seat)} /> : null}
       </View>
-    </View>)}
+    </View>;
+    })}
   </View>;
 }
 
@@ -528,7 +555,7 @@ export function ProjectPanel({
   }, [editorRequest, onEditorRequestHandled]);
   const hasMenu = panel.isProject && menu !== null;
   const boundary = (section: string, children: ReactNode) => <FactoryTabErrorBoundary theme={theme} section={section}>{children}</FactoryTabErrorBoundary>;
-  const needsYou = <NeedsYou theme={theme} items={panel.needsYou} mobile={mobile} actions={actions} />;
+  const needsYou = <NeedsYou theme={theme} items={withoutShownHandoffFailures(panel.needsYou, panel.handoffs)} mobile={mobile} actions={actions} />;
   const handoff = <HandoffBlock theme={theme} handoffs={panel.handoffs} mobile={mobile} actions={actions} />;
   const seats = panel.seats === null ? null : <Seats theme={theme} seats={panel.seats} mobile={mobile} actions={actions} {...(initialUi === undefined ? {} : { initialUi })} />;
   const worker = panel.defaultWorker === null ? null : <Block theme={theme} testID="factory-default-worker"><SectionTitle theme={theme} label="Default worker" /><SeatModelChip theme={theme} seat="worker" lane={panel.defaultWorker.lane} pendingLane={null} /></Block>;

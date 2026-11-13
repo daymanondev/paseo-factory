@@ -272,6 +272,36 @@ test("W11: one tap on every fresh-tab model chip opens the inline picker, includ
   });
 });
 
+test("model picker hides Factory's role providers, warns on a provider whose models could not be listed, and tucks the custom ID behind a link", async () => {
+  const { ProjectPanel } = await load("plugin/client/factory/project-panel.tsx");
+  const { testTheme } = await import("./client-markup.ts");
+  const { createElement } = await import("react");
+  const modelView = {
+    ...modelPickerFixture,
+    providers: [
+      ...modelPickerFixture.providers,
+      { provider: "antigravity", available: true, models: null },
+      { provider: "factory-supervisor", available: true, models: [{ id: "seat", label: null }] },
+    ],
+  };
+  await mountUnderNativeWindow(async (createRoot, container, act) => {
+    const root = createRoot(container);
+    try {
+      await act(() => root.render(createElement(ProjectPanel, { theme: testTheme, panel: modelPanelFixture(), modelView, mobile: false, now: Date.now(), daemonError: null, actions: { ...modelPanelActions, saveSeatModel() {} } })));
+      await act(() => (container.querySelector('[data-testid="factory-seat-chip-lead"]') as HTMLElement).click());
+      const editor = container.querySelector('[data-testid="factory-chip-editor"]')!;
+      const buttons = () => [...editor.querySelectorAll("button")].map((b) => b.textContent ?? "");
+      assert.ok(!buttons().some((label) => label.startsWith("factory-supervisor")), "role providers are not lane targets");
+      assert.equal(editor.querySelector('[data-testid="lane-picker-unverified-provider"]'), null);
+      assert.ok(editor.querySelector('[data-testid="lane-picker-custom-toggle"]'), "a listed model keeps the custom ID behind a link");
+      assert.doesNotMatch(editor.textContent!, /thinking: /, "model rows carry no repeated thinking pill");
+      const antigravity = [...editor.querySelectorAll("button")].find((b) => b.textContent?.startsWith("antigravity"))!;
+      await act(() => antigravity.click());
+      assert.ok(editor.querySelector('[data-testid="lane-picker-unverified-provider"]'), "an unlisted provider is flagged before the handoff");
+      assert.equal(editor.querySelector('[data-testid="lane-picker-custom-toggle"]'), null, "no list means the custom ID field shows directly");
+    } finally { await act(() => root.unmount()); }
+  });
+});
 
 test("W11: the tab saves standing models in Project scope, Peer choices through handoff, and explicit machine defaults separately", async () => {
   const { FactoryShell } = await load("plugin/client/factory/shell.tsx");
@@ -417,7 +447,8 @@ test('W12: handoff actions dispatch the typed RPC, refresh progress and open the
         await click('factory-seat-hand-off-now-supervisor', 'factory.handoff.start', 'supervisor');
         await click('factory-seat-hand-off-now-peer-task-1', 'factory.handoff.start', 'peer:task-1');
         await click('factory-panel-needs-you-action-mark', 'factory.handoff.start', 'supervisor');
-        await click('factory-panel-needs-you-action-failed-peer', 'factory.handoff.retry', 'peer:gone');
+        // The Handoff block owns the failed Peer's retry; the matching Needs-you card is deduped away.
+        assert.equal(container.querySelector('[data-testid="factory-panel-needs-you-action-failed-peer"]'), null);
         panel.handoffs = [];
         panel.seats.lead.allowedActions = ['view-handover'];
         await act(() => { globalThis.window.dispatchEvent(new globalThis.window.Event('focus')); });
