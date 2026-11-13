@@ -7,13 +7,14 @@
  */
 import type { PluginTheme } from "@getpaseo/plugin";
 import { TextInput } from "@getpaseo/plugin/client/ui";
-import { createContext, useContext, useState } from "react";
+import { createContext, useContext, useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { Pressable, Text, View } from "react-native";
 import type { PanelNeedsYouItem, PanelOpenDesign, PanelPeerRow, PanelSeatRow, PanelSupervisorCandidateRow, PanelTone, PanelView } from "../../shared/view.ts";
 import { Btn } from "../kit/pill.tsx";
 import { CONTROL_H, RADIUS, SPACING, factoryPalette, text, thinkingColour, tint } from "../kit/theme.ts";
 import type { Colour } from "../kit/theme.ts";
+import type { SeatEditorRequest } from "./editor-request.ts";
 import { FactoryTabErrorBoundary } from "./tab-error-boundary.tsx";
 import type { MenuSkillPack } from "./project-menu.tsx";
 import { LANE_CARDS, LaneModalBody, splitLaneParts } from "./lane-editor.tsx";
@@ -490,11 +491,15 @@ export function ProjectPanel({
   menu = null,
   onboarding = null,
   initialUi,
+  editorRequest,
+  onEditorRequestHandled,
   width = 0,
   skillPacks = [],
   modelView,
 }: {
   modelView?: LanePickerView;
+  editorRequest?: SeatEditorRequest;
+  onEditorRequestHandled?: () => void;
   width?: number;
   skillPacks?: readonly MenuSkillPack[];
   theme: PluginTheme;
@@ -516,6 +521,11 @@ export function ProjectPanel({
   const [menuOpen, setMenuOpen] = useState(initialUi?.menuOpen === true);
   const [editingSeat, edit] = useState<string | null>(initialUi?.editingSeat ?? null);
   const [profileOpen, setProfileOpen] = useState(false);
+  useEffect(() => {
+    if (!editorRequest) return;
+    edit(editorRequest.target);
+    onEditorRequestHandled?.();
+  }, [editorRequest, onEditorRequestHandled]);
   const hasMenu = panel.isProject && menu !== null;
   const boundary = (section: string, children: ReactNode) => <FactoryTabErrorBoundary theme={theme} section={section}>{children}</FactoryTabErrorBoundary>;
   const needsYou = <NeedsYou theme={theme} items={panel.needsYou} mobile={mobile} actions={actions} />;

@@ -7092,7 +7092,7 @@ function makeSeatedTwinSurface(
 }
 
 test("seat directory: every live seat across two Projects carries its identity, context mark and unrecorded handoff state", async (t) => {
-  const { rootB, slugA, slugB, registry, handlers } = makeSeatedTwinSurface(t, (p, which) => {
+  const { rootA, rootB, slugA, slugB, registry, handlers } = makeSeatedTwinSurface(t, (p, which) => {
     if (which === "a") {
       return [
         { id: "agent-sup-a", labels: seatLabels(p, "supervisor"), cwd: p.root, workspaceId: "ws-a", model: "glm-5.3", thinkingOptionId: "high", lastUsage: { contextWindowUsedTokens: 40_000, contextWindowMaxTokens: 200_000 } },
@@ -7161,6 +7161,8 @@ test("seat directory: every live seat across two Projects carries its identity, 
   assert.equal(reply.projects.length, 2, "one row per registered Project");
   const projA = reply.projects.find((row) => row.slug === slugA);
   assert.ok(projA !== undefined);
+  assert.equal(projA.root, rootA, "pill writes carry the owning Project root, never its worktree");
+  assert.equal(reply.projects.find(row => row.slug === slugB)?.root, rootB);
   assert.equal(projA.workspaceId, "ws-a", "the registration names no workspace — the live Supervisor's stands in");
   assert.equal(projA.needsYouCount, 0, "a healthy Project needs nobody");
   const projB = reply.projects.find((row) => row.slug === slugB);

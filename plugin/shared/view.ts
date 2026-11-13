@@ -595,6 +595,8 @@ export type SeatDirectoryEntry = z.infer<typeof SeatDirectoryEntrySchema>;
  */
 export const ProjectDirectoryEntrySchema = z.object({
   slug: z.string(),
+  /** Owning Project root; every composer pill write explicitly uses this scope. */
+  root: z.string(),
   /** The Project's root workspace id — the registration's, else the live Supervisor's or Lead's; null when none is known. */
   workspaceId: z.string().nullable(),
   /** How many Needs-you items the Project's panel view carries. */

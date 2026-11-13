@@ -6,7 +6,7 @@
  * sidebar header item and every other palette action are gone.
  * v0.6.1 (W4 spike, ADR 0057 §8/§11) adds the seat-directory starter: a
  * 20-second `factory.seats.directory` poll that registers one header button
- * per Project root workspace and one read-only composer pill per live seat
+ * per Project root workspace and one composer pill per live seat
  * agent — the first app-wide contributions since the slim-down, and the only
  * door through which they register.
  * The daemon discovers this file by filename convention (`index.client.tsx`)
@@ -15,16 +15,18 @@
  */
 import type { PluginClientContext } from "@getpaseo/plugin/client";
 import { FactoryPanel, FactorySettings, PANEL_ID } from "./client/factory/entries.tsx";
+import { createSeatEditorRequests } from "./client/factory/editor-request.ts";
 import { startSeatDirectory } from "./client/factory/directory.tsx";
 
 export default function contribute(client: PluginClientContext) {
+  const editorRequests = createSeatEditorRequests();
   const cleanups = [
     client.addWorkspacePanel({
       id: PANEL_ID,
       title: "Factory",
       icon: "Activity",
       locations: ["explorer", "workspace"],
-      Component: (props) => <FactoryPanel {...props} openSettings={() => client.openSettings("paseo-factory")} />,
+      Component: (props) => <FactoryPanel {...props} editorRequests={editorRequests} openSettings={() => client.openSettings("paseo-factory")} />,
     }),
     client.addSettingsScreen({ id: "paseo-factory", title: "Factory", icon: "Settings2", Component: FactorySettings }),
     client.addCommandCenterItem({
@@ -37,7 +39,7 @@ export default function contribute(client: PluginClientContext) {
         openPanel(PANEL_ID);
       },
     }),
-    startSeatDirectory(client),
+    startSeatDirectory(client, editorRequests),
   ];
   return () => {
     for (const off of cleanups) off();

@@ -7,6 +7,8 @@
  */
 import type { PluginSurfaceProps, PluginWorkspacePanelProps } from "@getpaseo/plugin/client";
 import { useWorkspace } from "@getpaseo/plugin/client";
+import { useSyncExternalStore } from "react";
+import type { SeatEditorRequests } from "./editor-request.ts";
 import { FactoryShell } from "./shell.tsx";
 import { FactoryTabErrorBoundary } from "./tab-error-boundary.tsx";
 
@@ -18,7 +20,8 @@ export function FactorySettings({ theme, layout, navigation, host }: PluginSurfa
 }
 
 /** The workspace panel: the Project panel scoped to this workspace's directory. */
-export function FactoryPanel({ theme, layout, navigation, host, workspaceId, openSettings }: PluginWorkspacePanelProps & { openSettings?: () => void }) {
+export function FactoryPanel({ theme, layout, navigation, host, workspaceId, openSettings, editorRequests }: PluginWorkspacePanelProps & { openSettings?: () => void; editorRequests?: SeatEditorRequests }) {
   const dir = useWorkspace(workspaceId, (workspace) => workspace.directory);
-  return <FactoryTabErrorBoundary theme={theme} section="Factory tab"><FactoryShell theme={theme} layout={layout} dir={dir ?? undefined} navigation={navigation} serverId={host.id} {...(openSettings === undefined ? {} : { openSettings })} /></FactoryTabErrorBoundary>;
+  const request = useSyncExternalStore(editorRequests?.subscribe ?? (() => () => {}), () => editorRequests?.get(workspaceId) ?? null);
+  return <FactoryTabErrorBoundary theme={theme} section="Factory tab"><FactoryShell theme={theme} layout={layout} dir={dir ?? undefined} navigation={navigation} serverId={host.id} {...(request === null ? {} : { editorRequest: request, onEditorRequestHandled: () => editorRequests?.consume(workspaceId, request) })} {...(openSettings === undefined ? {} : { openSettings })} /></FactoryTabErrorBoundary>;
 }

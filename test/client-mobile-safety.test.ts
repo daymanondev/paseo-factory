@@ -38,6 +38,7 @@ async function load(entry: string, platformOs = "ios"): Promise<Exports> {
               exports.View = tag('div'); exports.ScrollView = tag('div'); exports.Text = tag('span'); exports.Pressable = tag('button'); exports.TextInput = tag('input');
               exports.Icon = () => null;
               exports.useRpc = contract => input => globalThis.__factoryClientRpc(contract.name, input);
+              exports.useWorkspace = () => "/project";
               exports.useToast = () => ({ show() {}, error(message) { globalThis.__factoryClientErrors?.push(message); } });
               exports.Platform = { OS: ${JSON.stringify(platformOs)}, select: (spec) => (spec[${JSON.stringify(platformOs)}] !== undefined ? spec[${JSON.stringify(platformOs)}] : spec.default) };
               exports.DocumentFrame = ({ url }) => React.createElement('section', { 'data-document-frame': url });
@@ -488,4 +489,135 @@ test('W12: mobile handoffs expose start, force, cancel and read while excluding 
       } finally { await act(() => root.unmount()); }
     });
   } finally { g.__factoryClientRpc = prior; }
+});
+
+test("W13: pills quick-switch in Project scope, hand off Peers, and respect allowed actions", async () => {
+  const { startSeatDirectory } = await load("plugin/client/factory/directory.tsx", "web");
+  const { testTheme } = await import("./client-markup.ts");
+  const { createElement } = await import("react");
+  const calls: any[] = [], buttons = new Map<string, any>();
+  const base = { slug: "app", workspaceId: "root-ws", role: "lead", provider: "codex", model: "gpt-live", thinking: "high", lane: { provider: "codex", model: "gpt-live", scope: "project" }, context: { label: "Context unknown" }, contextUsedTokens: null, markTokens: 128000, handoffState: null, handoff: null, task: null, allowedActions: ["switch-model", "hand-off-now"], quickSwitchModels: [{ provider: "codex", model: "gpt-next", thinking: "high" }, { provider: "claude", model: "opus" }] };
+  const reply = { ok: true, daemonError: null, projects: [{ slug: "app", root: "/project-root", workspaceId: "root-ws", needsYouCount: 0 }], seats: [{ ...base, agentId: "lead" }, { ...base, role: "peer", task: "task-1", agentId: "peer", workspaceId: "worktree-ws" }, { ...base, agentId: "locked", allowedActions: [] }] };
+  const stop = startSeatDirectory({ rpc: async (contract: any, input: any) => { if (contract.name === "factory.seats.directory") return reply; calls.push({ method: contract.name, input }); return { ok: true }; }, addHeaderButton: () => ({ update() {}, remove() {} }), addComposerPill: ({ agentId, button }: any) => { buttons.set(agentId, button); return { update() {}, remove() {} }; } });
+  try {
+    await new Promise<void>(resolve => setImmediate(resolve));
+    await mountUnderNativeWindow(async (createRoot, container, act) => {
+      const root = createRoot(container);
+      try {
+        for (const role of ["lead", "peer", "locked"]) {
+          await act(() => root.render(createElement(buttons.get(role).behavior.Content, { theme: testTheme, host: { id: "server" }, layout: { platform: "web" }, close() {} })));
+          if (role === "locked") {
+            assert.equal(container.querySelector('[data-testid="factory-pill-model-0"]'), null);
+            assert.equal(container.querySelector('[data-testid="factory-pill-hand-off-now"]'), null);
+            continue;
+          }
+          const first = container.querySelector('[data-testid="factory-pill-model-0"]') as HTMLElement;
+          assert.ok(first, "quick choice renders");
+          assert.match(first.textContent!, role === "peer" ? /Hand off/ : /Switch/);
+          await act(() => first.click());
+          assert.deepEqual(calls.at(-1), role === "peer" ? { method: "factory.handoff.start", input: { projectRoot: "/project-root", seat: "peer:task-1", lane: "codex/gpt-next:high" } } : { method: "factory.lanes.set", input: { projectRoot: "/project-root", lane: "lead", value: "codex/gpt-next:high" } });
+          const cross = container.querySelector('[data-testid="factory-pill-model-1"]') as HTMLElement;
+          assert.match(cross.textContent!, /Hand off/);
+          await act(() => cross.click());
+          assert.deepEqual(calls.at(-1), role === "peer" ? { method: "factory.handoff.start", input: { projectRoot: "/project-root", seat: "peer:task-1", lane: "claude/opus" } } : { method: "factory.lanes.set", input: { projectRoot: "/project-root", lane: "lead", value: "claude/opus" } });
+          await act(() => (container.querySelector('[data-testid="factory-pill-hand-off-now"]') as HTMLElement).click());
+          assert.deepEqual(calls.at(-1), { method: "factory.handoff.start", input: { projectRoot: "/project-root", seat: role === "peer" ? "peer:task-1" : "lead" } });
+        }
+      } finally { await act(() => root.unmount()); }
+    });
+  } finally { stop(); }
+});
+
+test("W13: Other model opens the Project root tab and focuses fresh and already-open Peer editors once", async () => {
+  const { default: contribute } = await load("plugin/index.client.tsx", "web");
+  const { testTheme } = await import("./client-markup.ts");
+  const { createElement } = await import("react");
+  const panel = modelPanelFixture();
+  const view = { ...modelPickerFixture, panel, project: { root: "/project", slug: "app", missingRoot: true }, kpis: { running: 0, needsHuman: 0 }, companionTools: [], corePlugin: {}, vault: {}, daemonError: null };
+  const prior = (globalThis as any).__factoryClientRpc;
+  (globalThis as any).__factoryClientRpc = async () => ({ ok: true, view });
+  let Panel: any, pill: any;
+  const opens: any[] = [];
+  const off = contribute({
+    addWorkspacePanel: ({ Component }: any) => { Panel = Component; return () => {}; }, addSettingsScreen: () => () => {}, addCommandCenterItem: () => () => {},
+    rpc: async () => ({ ok: true, daemonError: null, projects: [{ slug: "app", root: "/project", workspaceId: "project-root-workspace", needsYouCount: 0 }], seats: [{ slug: "app", workspaceId: "peer-worktree-workspace", agentId: "peer", role: "peer", task: "task-1", provider: "codex", model: "gpt-live", thinking: "high", lane: { provider: "codex", model: "gpt-live" }, quickSwitchModels: [], allowedActions: ["switch-model"], contextUsedTokens: null, markTokens: 128000, handoffState: null }] }),
+    addHeaderButton: () => ({ update() {}, remove() {} }), addComposerPill: ({ button }: any) => { pill = button; return { update() {}, remove() {} }; },
+    openPanel: (id: string, options: any) => opens.push({ id, options }),
+  });
+  const props = { theme: testTheme, host: { id: "server-1" }, workspaceId: "project-root-workspace", layout: { compact: false, platform: "web" } };
+  try {
+    await new Promise<void>(resolve => setImmediate(resolve));
+    await mountUnderNativeWindow(async (createRoot, container, act) => {
+      let root = createRoot(container);
+      const popoverContainer = container.ownerDocument.createElement("div");
+      const popover = createRoot(popoverContainer);
+      try {
+        const request = async () => {
+          await act(() => popover.render(createElement(pill.behavior.Content, { ...props, close() {} })));
+          await act(() => (popoverContainer.querySelector('[data-testid="factory-pill-other-model"]') as HTMLElement).click());
+        };
+        await request();
+        assert.deepEqual(opens.at(-1), { id: "paseo-factory", options: { workspaceId: "project-root-workspace", location: "workspace" } });
+        await act(() => root.render(createElement(Panel, props)));
+        assert.ok(container.querySelector('[data-testid="factory-chip-editor"]'), "fresh tab opens the requested editor");
+        assert.match(container.querySelector('[data-testid="factory-chip-editor"]')!.textContent!, /Peer/);
+        await act(() => (container.querySelector('[data-testid="factory-seat-chip-peer-task-1"]') as HTMLElement).click());
+        assert.equal(container.querySelector('[data-testid="factory-chip-editor"]'), null);
+        await request();
+        assert.ok(container.querySelector('[data-testid="factory-chip-editor"]'), "already-open tab sees the next request for the same seat");
+        await act(() => (container.querySelector('[data-testid="factory-seat-chip-peer-task-1"]') as HTMLElement).click());
+        await act(() => root.render(createElement(Panel, { ...props, revision: 2 })));
+        assert.equal(container.querySelector('[data-testid="factory-chip-editor"]'), null, "consumed focus does not reopen on refresh");
+        await act(() => root.unmount());
+        root = createRoot(container);
+        await act(() => root.render(createElement(Panel, props)));
+        assert.equal(container.querySelector('[data-testid="factory-chip-editor"]'), null, "consumed request does not reopen a fresh tab later");
+      } finally { await act(() => root.unmount()); await act(() => popover.unmount()); }
+    });
+  } finally { off(); (globalThis as any).__factoryClientRpc = prior; }
+});
+
+test("W13: native mobile pills open the owning Project Factory tab directly", async () => {
+  for (const platform of ["ios", "android"]) {
+    const { startSeatDirectory } = await load("plugin/client/factory/directory.tsx", platform);
+    let pill: any;
+    const opens: any[] = [];
+    const stop = startSeatDirectory({ rpc: async () => ({ ok: true, daemonError: null, projects: [{ slug: "app", root: "/project", workspaceId: "root", needsYouCount: 0 }], seats: [{ slug: "app", workspaceId: "worktree", agentId: "peer", role: "peer", task: "task-1", handoffState: "handing-over" }] }), addHeaderButton: () => ({ update() {}, remove() {} }), addComposerPill: ({ button }: any) => { pill = button; return { update() {}, remove() {} }; }, openPanel: (id: string, options: any) => opens.push({ id, options }) });
+    try {
+      await new Promise<void>(resolve => setImmediate(resolve));
+      assert.equal(pill.label, "peer · handing off");
+      assert.equal(pill.behavior.kind, "action");
+      pill.behavior.onPress();
+      assert.deepEqual(opens, [{ id: "paseo-factory", options: { workspaceId: "root", location: "workspace" } }]);
+    } finally { stop(); }
+  }
+});
+
+test("W13: the pill bounds quick choices, reports a refused write and never writes without Project scope", async () => {
+  const { startSeatDirectory } = await load("plugin/client/factory/directory.tsx", "web");
+  const { testTheme } = await import("./client-markup.ts");
+  const { createElement } = await import("react");
+  const buttons = new Map<string, any>();
+  const calls: any[] = [];
+  const base = { workspaceId: "root", role: "lead", provider: "codex", model: "gpt-live", thinking: "high", lane: { provider: "codex", model: "gpt-live" }, allowedActions: ["switch-model", "hand-off-now"], contextUsedTokens: null, markTokens: 128000, handoffState: "scheduled", quickSwitchModels: Array.from({ length: 8 }, (_, i) => ({ provider: "codex", model: `gpt-${i}` })) };
+  const stop = startSeatDirectory({ rpc: async (contract: any, input: any) => { if (contract.name === "factory.seats.directory") return { ok: true, daemonError: null, projects: [{ slug: "app", root: "/project", workspaceId: "root", needsYouCount: 0 }], seats: [{ ...base, slug: "app", agentId: "lead" }, { ...base, slug: "missing-project", agentId: "unknown" }] }; calls.push({ method: contract.name, input }); return { ok: false, error: "Provider unavailable" }; }, addHeaderButton: () => ({ update() {}, remove() {} }), addComposerPill: ({ agentId, button }: any) => { buttons.set(agentId, button); return { update() {}, remove() {} }; } });
+  try {
+    await new Promise<void>(resolve => setImmediate(resolve));
+    await mountUnderNativeWindow(async (createRoot, container, act) => {
+      const root = createRoot(container);
+      try {
+        await act(() => root.render(createElement(buttons.get("lead").behavior.Content, { theme: testTheme, layout: { platform: "web" }, close() { assert.fail("a refused write stays open"); } })));
+        assert.equal(container.querySelectorAll('[data-testid^="factory-pill-model-"]').length, 6);
+        assert.match(container.textContent!, /Context unknown/);
+        assert.match(container.textContent!, /scheduled/);
+        await act(() => (container.querySelector('[data-testid="factory-pill-model-0"]') as HTMLElement).click());
+        assert.match(container.textContent!, /Provider unavailable/);
+        assert.equal((container.querySelector('[data-testid="factory-pill-model-0"]') as HTMLButtonElement).disabled, false, "a refused write can be retried");
+        await act(() => root.render(createElement(buttons.get("unknown").behavior.Content, { theme: testTheme, layout: { platform: "web" }, close() {} })));
+        assert.equal(container.querySelector('[data-testid="factory-pill-model-0"]'), null);
+        assert.equal(container.querySelector('[data-testid="factory-pill-hand-off-now"]'), null);
+        assert.equal(calls.length, 1, "no unscoped RPC is ever sent");
+      } finally { await act(() => root.unmount()); }
+    });
+  } finally { stop(); }
 });

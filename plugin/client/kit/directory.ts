@@ -61,7 +61,7 @@ export function pillPlans(seats: readonly SeatDirectoryEntry[]): PillPlan[] {
       id: pillId(seat.agentId),
       workspaceId: seat.workspaceId,
       agentId: seat.agentId,
-      label: seat.role,
+      label: ["scheduled", "handing-over", "substitute", "creating-successor"].includes(seat.handoffState ?? "") ? `${seat.role} · handing off` : seat.role,
       seat,
       fingerprint: JSON.stringify(seat),
     });
