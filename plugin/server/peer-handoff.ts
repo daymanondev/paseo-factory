@@ -4,7 +4,7 @@ import { readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Factory } from "./core/factory.ts";
 import type { ContractSet, LedgerEvent } from "./core/events.ts";
-import { projectStateDir } from "./core/project.ts";
+import { projectStateDir, projectNotebookPath } from "./core/project.ts";
 import { projectTask } from "./core/task-state.ts";
 import { atomicJson, readOptionalJson } from "./core/json-store.ts";
 import { taskWorktreeBranch } from "./core/workspace.ts";
@@ -14,6 +14,10 @@ import { stopAgentViaCli, type DaemonReply } from "./daemon-cli.ts";
 import { boundTaskPeers, peerIsRunning } from "./task-peers.ts";
 import { associateTaskPeer, createTaskPeer, resolvePeerSpawnProvider, resolveSpawnWorkspaceAndParent } from "./spool.ts";
 import { READ_ONLY_DISPOSITION_FENCE, readOnlyDispositionEvidence } from "./core/disposition-prompt.ts";
+import { laneRef, readHandoffProgress, writeHandoffProgress } from "./handoff-progress.ts";
+import type { HandoffRequest, HandoffReply, HandoffProgress } from "../shared/handoff.ts";
+import { buildSubstituteHandover, readNotebook, readHandoverGit } from "./substitute-handover.ts";
+import { foldTasks, renderLedgerLine } from "./view.ts";
 import { capHandoffText, validHandoffText } from "./handoff-text.ts";
 
 export const PEER_HANDOFF_TOKENS = 160_000;
@@ -29,7 +33,14 @@ interface PeerHandoffState {
   requestedAt?: number;
   localHandoffStamp?: string | null;
   worktree?: string;
-  provider?: string;
+  reason?: "owner" | "context-mark";
+  ownerLane?: string;
+  fromLane?: string;
+  toLane?: string;
+  handover?: "extracted" | "substitute";
+  successorId?: string;
+  noticeQueued?: boolean;
+  forceSubstitute?: boolean;
 }
 
 interface PeerHandoffDeps {
@@ -48,6 +59,8 @@ interface PeerHandoffDeps {
   daemon: () => SurfaceDaemonApi;
   stopAgent?: (id: string, home?: string) => Promise<DaemonReply>;
   timeoutMs: number;
+  ownerTimeoutMs?: number;
+  queueNotice?: (slug: string, task: string, key: string, text: string) => void;
   readTokens: (agent: SurfaceAgentSnapshot) => { usedTokens: number | null };
   /**
    * The usage-rollup flush (v0.0.87, ADR 0043 §3): the outgoing Peer's final
@@ -68,24 +81,29 @@ export function createPeerHandoffRuntime(deps: PeerHandoffDeps) {
   const statePath = (slug: string, task: string) => join(projectStateDir(deps.stateDir, slug), `peer-handoff-${task}.json`);
   const summaryPath = (slug: string, task: string) => join(projectStateDir(deps.stateDir, slug), `peer-handoff-${task}.md`);
   const save = (slug: string, task: string, state: PeerHandoffState) => atomicJson(statePath(slug, task), state);
-  const arm = (slug: string, task: string, requestedAt: number) => {
+  const extractionTimeout = (state: PeerHandoffState) => state.reason === "owner" ? deps.ownerTimeoutMs ?? 90_000 : deps.timeoutMs;
+  const progress = (slug: string, task: string, state: PeerHandoffState, phase: HandoffProgress["state"], failure?: string) => {
+    const now = new Date().toISOString();
+    writeHandoffProgress(deps.stateDir, slug, { seat: `peer:${task}`, reason: state.reason ?? "context-mark", state: phase, fromLane: laneRef(state.fromLane ?? "unknown/unknown"), toLane: laneRef(state.toLane ?? state.ownerLane ?? "worker"), handover: state.handover, failure, startedAt: new Date(state.requestedAt ?? Date.now()).toISOString(), updatedAt: now });
+  };
+  const arm = (slug: string, task: string, requestedAt: number, timeoutMs: number) => {
     const key = `${slug}:${task}`;
     if (timers.has(key)) return;
     const timer = setTimeout(() => {
       timers.delete(key);
       void deps.wake(slug).catch(error => deps.log(`Peer handoff timeout recovery: ${String(error)}`));
-    }, Math.max(0, requestedAt + deps.timeoutMs - Date.now()));
+    }, Math.max(0, requestedAt + timeoutMs - Date.now()));
     timer.unref?.();
     timers.set(key, timer);
   };
-  const bounded = async <T>(job: Promise<T>): Promise<T> => {
+  const bounded = async <T>(job: Promise<T>, timeoutMs = deps.timeoutMs): Promise<T> => {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      return await Promise.race([job, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("Peer handoff operation timed out")), deps.timeoutMs); timer.unref?.(); })]);
+      return await Promise.race([job, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("Peer handoff operation timed out")), timeoutMs); timer.unref?.(); })]);
     } finally { if (timer) clearTimeout(timer); }
   };
-  const stopPeer = async (id: string) => {
-    const result = await bounded((deps.stopAgent ?? stopAgentViaCli)(id, deps.home));
+  const stopPeer = async (id: string, timeoutMs = deps.timeoutMs) => {
+    const result = await bounded((deps.stopAgent ?? stopAgentViaCli)(id, deps.home), timeoutMs);
     if (!result.ok) throw new Error(`cannot stop Peer ${id}: ${result.reason}`);
   };
   const eligible = (slug: string, contract: ContractSet) => {
@@ -98,7 +116,7 @@ export function createPeerHandoffRuntime(deps: PeerHandoffDeps) {
     const task = contract.task, path = summaryPath(slug, task), daemon = deps.daemon();
     if (state.phase === "extracting") {
       let summary: string | undefined;
-      if (input?.outcome.kind === "completed") {
+      if (!state.forceSubstitute && input?.outcome.kind === "completed") {
         const reply = input.timeline.filter(item => item.type === "assistant_message").at(-1)?.text;
         if (validHandoffText(reply)) summary = reply;
         if (summary === undefined) {
@@ -110,7 +128,7 @@ export function createPeerHandoffRuntime(deps: PeerHandoffDeps) {
         }
       }
       for (const candidate of [path, join(state.worktree!, ".paseo-peer-handoff.md")]) {
-        if (summary !== undefined) break;
+        if (summary !== undefined || state.forceSubstitute) break;
         try {
           const unchangedLocal = candidate !== path && state.localHandoffStamp !== undefined && fileStamp(candidate) === state.localHandoffStamp;
           if (!unchangedLocal && statSync(candidate).mtimeMs + 1 >= state.requestedAt!) {
@@ -120,7 +138,15 @@ export function createPeerHandoffRuntime(deps: PeerHandoffDeps) {
         } catch { /* Extraction file absent or unreadable. */ }
       }
       if (!eligible(slug, contract)) return;
-      writeFileSync(path, capHandoffText(summary ?? INTERRUPTED, SUMMARY_BYTES));
+      state.handover = summary === undefined ? "substitute" : "extracted";
+      if (summary === undefined) {
+        progress(slug, task, state, "substitute");
+        let timeline = INTERRUPTED;
+        try { const tail = await bounded(daemon.agents.ref(state.outgoingId!).timeline.refetch({ direction: "tail", limit: 10 })); timeline += "\n" + (tail.entries ?? []).map(entry => entry.item?.text ?? "").filter(Boolean).join("\n"); } catch { /* Substitute remains useful without native timeline. */ }
+        const events = eventsOf(slug);
+        summary = buildSubstituteHandover({ digest: events.slice(-20).map(renderLedgerLine).join("\n"), notebook: readNotebook(projectNotebookPath(deps.stateDir, slug)), git: readHandoverGit(state.worktree!), tasks: foldTasks(events).filter(task => !task.accepted).map(task => `${task.task}: ${task.status}; Attempts: ${task.attempts.length}`).join("\n"), timeline, maxBytes: SUMMARY_BYTES });
+      }
+      writeFileSync(path, capHandoffText(summary, SUMMARY_BYTES));
       state.phase = "retiring";
       save(slug, task, state);
       clear(`${slug}:${task}`);
@@ -134,10 +160,10 @@ export function createPeerHandoffRuntime(deps: PeerHandoffDeps) {
         await bounded(daemon.agents.ref(outgoing.id).archive());
       }
       if (!eligible(slug, contract)) return;
-      state.phase = state.peerHandoffCount >= MAX_PEER_HANDOFFS ? "blocked" : "spawning";
+      state.phase = state.reason !== "owner" && state.peerHandoffCount >= MAX_PEER_HANDOFFS ? "blocked" : "spawning";
       // Reserve the sole successor before creating it. Restart recovery adopts
       // a matching labelled session instead of creating a second successor.
-      if (state.phase === "spawning") state.peerHandoffCount = 1;
+      if (state.phase === "spawning" && state.reason !== "owner") state.peerHandoffCount = 1;
       save(slug, task, state);
     }
     const digest = worktreeDigest(state.worktree!, contract);
@@ -145,20 +171,23 @@ export function createPeerHandoffRuntime(deps: PeerHandoffDeps) {
       deps.queueBlocked(slug, task, contract.seq, `BLOCKED (context-ceiling): Task ${task} exhausted both its initial Peer and 1 automatic Peer handoff (2 x 160,000 tokens) in the current Contract epoch without reaching a green Claim.\n\n${digest}\n\nHandoff: ${path}\nInspect the partial Task worktree progress, land or preserve verified work, and re-contract / split the remaining scope into a narrower follow-up wave.`);
       // Idle with the spent budget avoids duplicate escalation on every sweep.
       state.phase = "idle";
+      writeHandoffProgress(deps.stateDir, slug, null, `peer:${task}`);
       save(slug, task, state);
       return;
     }
     if (state.phase !== "spawning") return;
+    progress(slug, task, state, "creating-successor");
     const handoffKey = `${contract.seq}:${state.outgoingId}`;
     const census = await daemon.agents.list({ filter: { includeArchived: true, includeBackground: true } });
     const all = census.entries.map(entry => entry.agent);
     if (!eligible(slug, contract)) return;
-    let successorId = all.find(agent => agent.labels.peerHandoff === handoffKey && agent.labels.project === slug && agent.labels.task === task)?.id;
+    let successorId = state.successorId ?? all.find(agent => agent.labels.peerHandoff === handoffKey && agent.labels.project === slug && agent.labels.task === task)?.id;
     // Another caller may have supplied a replacement after a failed create.
     // Adopt it, and count even an already archived automatic successor.
     successorId ??= boundTaskPeers({ stateDir: deps.stateDir, slug, task, events: eventsOf(slug), live: all }).find(agent => agent.id !== state.outgoingId)?.id;
     if (!successorId) {
-      const provider = await resolvePeerSpawnProvider(factoryOf(slug, task), state.provider ?? "", slug);
+      const provider = await resolvePeerSpawnProvider(factoryOf(slug, task), state.ownerLane ?? "worker", slug);
+      state.toLane = provider; save(slug, task, state); progress(slug, task, state, "creating-successor");
       const meta = await resolveSpawnWorkspaceAndParent(factoryOf(slug, task), daemon, task, state.worktree, deps.home);
       const labels = { seat: "agent", project: slug, task, epoch: String(contract.seq), peerHandoff: handoffKey };
       // The disposition-aware completion (v0.5.0 ticket 03, ADR 0054 §3): the
@@ -183,10 +212,20 @@ export function createPeerHandoffRuntime(deps: PeerHandoffDeps) {
         ].join("\n\n");
       if (!eligible(slug, contract)) return;
       // Never reallocate/reset the worktree: this is continuation, including dirty files.
-      successorId = await createTaskPeer({ factory: factoryOf(slug, task), daemon, task, worktree: state.worktree, provider, prompt, home: deps.home, spawnMeta: meta, extraLabels: labels });
-      if (!successorId) throw new Error("daemon did not create a successor Peer");
+      try { successorId = await createTaskPeer({ factory: factoryOf(slug, task), daemon, task, worktree: state.worktree, provider, prompt, home: deps.home, spawnMeta: meta, extraLabels: labels }); } catch (error) { progress(slug, task, state, "failed", String(error)); throw error; }
+      if (!successorId) { progress(slug, task, state, "failed", "daemon did not create a successor Peer"); throw new Error("daemon did not create a successor Peer"); }
     }
+    state.successorId = successorId;
+    save(slug, task, state);
     associateTaskPeer(factoryOf(slug, task), task, successorId);
+    if (state.reason === "owner" && !state.noticeQueued) {
+      const successor = all.find(agent => agent.id === successorId);
+      if (successor) state.toLane = snapshotLane(successor);
+      state.toLane ??= state.ownerLane ?? await resolvePeerSpawnProvider(factoryOf(slug, task), "worker", slug);
+      deps.queueNotice?.(slug, task, handoffKey, `Owner replaced Peer for Task ${task}: ${state.fromLane} → ${state.toLane}. Handover: ${state.handover ?? "extracted"}. Successor: ${successorId}.`);
+      state.noticeQueued = true;
+    }
+    progress(slug, task, state, "done");
     state.phase = "idle";
     save(slug, task, state);
   };
@@ -210,10 +249,11 @@ export function createPeerHandoffRuntime(deps: PeerHandoffDeps) {
         }
         if (projected.acceptance || projected.attempts.some(attempt => attempt.gateOpen) || projected.verdict === "green") { clear(key); continue; }
         if (state.phase !== "idle") {
+          if (readHandoffProgress(deps.stateDir, slug, `peer:${task}`)?.state === "failed") continue;
           const outgoingId = state.outgoingId;
-          if (state.phase !== "extracting" || (input !== undefined && input.agentId === outgoingId && input.outcome.kind !== "canceled") || Date.now() >= state.requestedAt! + deps.timeoutMs || !live.some(agent => agent.id === outgoingId && agent.status !== "error")) {
+          if (state.phase !== "extracting" || (input !== undefined && input.agentId === outgoingId && input.outcome.kind !== "canceled") || Date.now() >= state.requestedAt! + extractionTimeout(state) || !live.some(agent => agent.id === outgoingId && agent.status !== "error")) {
             await finish(slug, contract, state, live, input?.agentId === state.outgoingId ? input : undefined);
-          } else arm(slug, task, state.requestedAt!);
+          } else arm(slug, task, state.requestedAt!, extractionTimeout(state));
           continue;
         }
         const peers = boundTaskPeers({ stateDir: deps.stateDir, slug, task, events, live });
@@ -222,14 +262,11 @@ export function createPeerHandoffRuntime(deps: PeerHandoffDeps) {
         const worktree = factoryOf(slug, task).worktreeFor(task);
         if (!worktree) continue; // A standing seat/shared checkout is never a Task worktree.
         worktreeDigest(worktree, contract); // Refuse missing/wrong-branch worktrees before interrupting.
-        const baseProvider = peer.provider.replace(/:[^/]+$/, "");
-        const modelLane = peer.model && !baseProvider.includes("/") ? `${baseProvider}/${peer.model}` : baseProvider;
-        const thinking = peer.thinkingOptionId ?? peer.provider.match(/:([^/]+)$/)?.[1];
-        const provider = thinking ? `${modelLane}:${thinking}` : modelLane;
-        state = { ...state, phase: "extracting", outgoingId: peer.id, requestedAt: Date.now(), worktree, provider, localHandoffStamp: fileStamp(join(worktree, ".paseo-peer-handoff.md")) };
+        state = { contractEpochSeq: contract.seq, peerHandoffCount: state.peerHandoffCount, ownerLane: state.ownerLane, phase: "extracting", reason: "context-mark", outgoingId: peer.id, requestedAt: Date.now(), worktree, fromLane: snapshotLane(peer), toLane: await resolvePeerSpawnProvider(factoryOf(slug, task), state.ownerLane ?? "worker", slug), localHandoffStamp: fileStamp(join(worktree, ".paseo-peer-handoff.md")) };
+        progress(slug, task, state, "handing-over");
         save(slug, task, state);
         rmSync(summaryPath(slug, task), { force: true }); // An earlier epoch/extraction is never continuity evidence.
-        arm(slug, task, state.requestedAt!);
+        arm(slug, task, state.requestedAt!, extractionTimeout(state));
         try {
           if (peer.status === "error") throw new Error("outgoing Peer in error state");
           if (peerIsRunning(peer)) await stopPeer(peer.id);
@@ -248,6 +285,46 @@ export function createPeerHandoffRuntime(deps: PeerHandoffDeps) {
     }
   };
   return {
+    async handoff(input: HandoffRequest): Promise<HandoffReply> {
+      const task = input.seat?.slice(5) ?? "";
+      if (!task || !/^peer:/.test(input.seat ?? "")) return { ok: false, code: "handoff-seat-unavailable", error: "Unknown Peer seat" };
+      const projected = projectTask(eventsOf(input.slug), task), contract = projected.contract;
+      let state = readOptionalJson(statePath(input.slug, task)) as PeerHandoffState | undefined;
+      const current = () => readHandoffProgress(deps.stateDir, input.slug, `peer:${task}`);
+      if (input.action === "handover") return { ok: true, progress: current(), ...readPeerHandover(deps.stateDir, input.slug, task) };
+      if (!contract) return { ok: false, code: "unknown-task", error: "Task has no Contract" };
+      if (!eligible(input.slug, contract)) return { ok: false, code: "peer-task-ineligible", error: "Task is accepted, green, or verifying a Claim" };
+      if (state?.contractEpochSeq !== contract.seq) state = { contractEpochSeq: contract.seq, peerHandoffCount: 0, phase: "idle" };
+      const page = await deps.daemon().agents.list({ filter: { includeArchived: false, includeBackground: true } });
+      const live = page.entries.map(entry => entry.agent).filter(agent => agent.archivedAt === null);
+      if (input.action === "cancel") return { ok: false, code: "handoff-not-scheduled", error: "Peer handoff has already started" };
+      if (input.action === "retry" || (input.action === "replaceNow" && current()?.state === "failed")) {
+        if (current()?.state !== "failed" || state.phase !== "spawning") return { ok: false, code: "handoff-not-failed", error: "Only a failed handoff can be retried" };
+      } else if (input.action === "replaceNow" && state.phase === "extracting") {
+        state.forceSubstitute = true; save(input.slug, task, state);
+      } else {
+        if (state.phase !== "idle") return { ok: false, code: "handoff-in-progress", error: "A Peer handoff is already active" };
+        const peer = boundTaskPeers({ stateDir: deps.stateDir, slug: input.slug, task, events: eventsOf(input.slug), live })[0];
+        if (!peer) return { ok: false, code: "peer-unavailable", error: "Task has no live Peer" };
+        const worktree = factoryOf(input.slug, task).worktreeFor(task);
+        if (!worktree) return { ok: false, code: "peer-worktree-unavailable", error: "Task has no worktree" };
+        try { worktreeDigest(worktree, contract); } catch (error) { return { ok: false, code: "peer-worktree-unavailable", error: String(error) }; }
+        const ownerLane = input.lane ?? state.ownerLane;
+        state = { contractEpochSeq: contract.seq, peerHandoffCount: state.peerHandoffCount, ownerLane, reason: "owner", phase: "extracting", outgoingId: peer.id, requestedAt: Date.now(), worktree, fromLane: snapshotLane(peer), toLane: await resolvePeerSpawnProvider(factoryOf(input.slug, task), ownerLane ?? "worker", input.slug), localHandoffStamp: fileStamp(join(worktree, ".paseo-peer-handoff.md")), forceSubstitute: input.action === "replaceNow" };
+        save(input.slug, task, state); rmSync(summaryPath(input.slug, task), { force: true }); progress(input.slug, task, state, "handing-over");
+        if (!state.forceSubstitute && peer.status !== "error") {
+          arm(input.slug, task, state.requestedAt!, extractionTimeout(state));
+          try {
+            if (peerIsRunning(peer)) await stopPeer(peer.id, Math.max(1, state.requestedAt! + extractionTimeout(state) - Date.now()));
+            if (!eligible(input.slug, contract)) return { ok: false, code: "peer-task-ineligible", error: "A Claim started during handoff" };
+            await bounded(deps.daemon().agents.ref(peer.id).send(`# Peer handoff extraction — Task ${task}\n\nThe Owner requested a successor. Start no new work and submit no Claim. Preserve committed work and uncommitted edits. Put the entire Markdown handoff directly in your final assistant message, in one piece, without running shell commands or writing files to disk. Use four sections: Completed & Verified Slice; Worktree Git Status & Uncommitted Edits; Remaining Requirements & Failing Checks; Read-First Files for Successor. End your turn after this handoff (12 KB maximum).`), Math.max(1, state.requestedAt! + extractionTimeout(state) - Date.now()));
+            return { ok: true, progress: current() };
+          } catch (error) { deps.log(`Peer Owner extraction bypassed: ${String(error)}`); }
+        }
+      }
+      try { await finish(input.slug, contract, state, live); } catch (error) { deps.log(`Peer handoff deferred: ${String(error)}`); }
+      return { ok: true, progress: current() };
+    },
     observeProject,
     reset(slug: string) { for (const key of timers.keys()) if (key.startsWith(`${slug}:`)) clear(key); },
     stop() { for (const key of timers.keys()) clear(key); },
@@ -270,4 +347,21 @@ function worktreeDigest(cwd: string, contract: ContractSet): string {
   const branch = git(["branch", "--show-current"]);
   if (branch !== taskWorktreeBranch(contract.task)) throw new Error(`unexpected Task worktree branch ${branch}`);
   return [`Worktree: ${cwd}`, `Branch: ${branch}`, `HEAD: ${git(["rev-parse", "HEAD"])}`, `git status --short:\n${git(["status", "--short"])}`, `git log --oneline ${contract.base ?? "HEAD"}..HEAD:\n${git(["log", "--oneline", `${contract.base ?? "HEAD"}..HEAD`])}`].join("\n\n");
+}
+
+function snapshotLane(peer: SurfaceAgentSnapshot): string {
+  const base = peer.provider.replace(/:[^/]+$/, "");
+  const model = peer.model && !base.includes("/") ? `${base}/${peer.model}` : base;
+  const thinking = peer.thinkingOptionId ?? peer.provider.match(/:([^/]+)$/)?.[1];
+  return thinking ? `${model}:${thinking}` : model;
+}
+
+/** Durable handover availability/source survives the transient done progress display. */
+export function readPeerHandover(stateDir: string, slug: string, task: string): { text: string; source?: "extracted" | "substitute" } {
+  const directory = projectStateDir(stateDir, slug);
+  let text = "";
+  try { text = readFileSync(join(directory, `peer-handoff-${task}.md`), "utf8"); } catch { /* No handover yet. */ }
+  const state = readOptionalJson(join(directory, `peer-handoff-${task}.json`)) as PeerHandoffState | undefined;
+  const source = state?.handover ?? (text ? text.startsWith("# Plugin-built handover") ? "substitute" : "extracted" : undefined);
+  return { text, source };
 }
