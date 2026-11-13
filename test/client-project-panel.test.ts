@@ -262,16 +262,16 @@ test("every live seat row has an Open action — Supervisor, Lead and each Peer 
   }
 });
 
-test("Rotate Lead sits on the live Lead row on desktop and mobile; a vacant Lead carries none", async () => {
+test("Hand off now sits on the live Lead row on desktop and mobile; a vacant Lead carries none", async () => {
   for (const mobile of [false, true]) {
     const html = await render(makePanel(), { mobile });
     const leadRow = html.slice(html.indexOf("factory-panel-seat-lead"), html.indexOf("factory-panel-peers"));
-    assert.ok(hasHook(leadRow, "factory-panel-rotate-lead"), `Rotate Lead on the Lead row (mobile=${mobile})`);
-    assert.equal((html.match(/factory-panel-rotate-lead/g) ?? []).length, 1);
+    assert.ok(hasHook(leadRow, "factory-panel-handoff-lead"), `Rotate Lead on the Lead row (mobile=${mobile})`);
+    assert.equal((html.match(/factory-panel-handoff-lead/g) ?? []).length, 1);
   }
   const vacantLead = makePanel({ seats: { ...healthySeats, lead: { ...healthySeats.lead, vacant: true, agentId: null, statusLabel: "vacant", model: null, hint: "No Lead is running — ask your Supervisor.", context: null, handoff: null } } });
   const html = await render(vacantLead);
-  assert.equal(hasHook(html, "factory-panel-rotate-lead"), false);
+  assert.equal(hasHook(html, "factory-panel-handoff-lead"), false);
   assert.equal(hasHook(html, "factory-panel-open-lead"), false);
 });
 
@@ -471,7 +471,7 @@ test("the shell reads mobile from the host layout platform, mounts the panel on 
 
 test("W6 shell wiring: every action rides its RPC — Rotate, Revoke, Start Supervisor (then opens the new seat), Reset, Delete — and no Lead start or accept RPC is bound", () => {
   const shell = read("plugin/client/factory/shell.tsx");
-  for (const rpc of ["leadRotate", "supervisorRevoke", "supervisorStart", "projectReset", "projectDelete"]) {
+  for (const rpc of ["handoffStart", "supervisorRevoke", "supervisorStart", "projectReset", "projectDelete"]) {
     assert.match(shell, new RegExp(`useRpc\\(${rpc}\\)`), `${rpc} is bound`);
   }
   assert.doesNotMatch(shell, /useRpc\((leadEnsure|supervisorEnsure|leadDispatch)\)/, "the only seat creation is Start Supervisor");

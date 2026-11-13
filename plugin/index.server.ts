@@ -316,6 +316,7 @@ export default function contribute(server: PluginServerContext) {
   // pipeline the spool's lead_dispatch rides.
   const surface = createSurfaceHandlers({
     ...surfaceDeps,
+    handoff: input => leadMail.handoff(input),
     handoffPending: slug => leadMail.hasPendingHandoff(slug),
     onLeadRetired: (input) => leadMail.settleLeadRotation(input.slug),
     onSeatKickoffSent: (input) => leadMail.markKickoffSent(input.agentId),
@@ -441,10 +442,11 @@ export default function contribute(server: PluginServerContext) {
     ordinaryReady: () => booted && mailRecovered,
     onLog: log,
     ask: choke.spoolAskHandler,
+    // Legacy CLI spelling now enters the same handoff engine as the Owner surface.
     leadRotate: async (request) => {
-      const reply = await surface.leadRotate({ projectRoot: request.projectRoot }, { paseo: paseoApi as never });
+      const reply = await surface.handoff({ projectRoot: request.projectRoot, seat: "lead" }, "start", { paseo: paseoApi as never });
       return reply.ok
-        ? { id: request.id, ok: true as const, summary: `lead rotated — agent ${reply.agentId} cancelled + archived`, agentId: reply.agentId }
+        ? { id: request.id, ok: true as const, summary: `Lead handoff ${reply.progress?.state ?? "scheduled"}` }
         : { id: request.id, ok: false as const, code: reply.code, message: reply.error };
     },
     leadDispatch: (request) => leadMail.dispatchLead(request),

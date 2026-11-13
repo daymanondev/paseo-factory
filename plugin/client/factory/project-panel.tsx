@@ -208,7 +208,7 @@ function SeatRow({
         <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[1.5] }}>
           <Btn theme={theme} small testID={`factory-panel-open-${row.role}`} label="Open" onPress={() => actions.openAgent(agentId)} />
           {row.role === "lead" ? (
-            <Btn theme={theme} small testID="factory-panel-rotate-lead" label="Rotate" tone="foregroundMuted" disabled={actions.busy} onPress={actions.rotateLead} />
+            <Btn theme={theme} small testID="factory-panel-handoff-lead" label="Hand off now" tone="foregroundMuted" disabled={actions.busy} onPress={actions.rotateLead} />
           ) : null}
           {isSupervisor ? (
             <Btn theme={theme} small testID="factory-panel-supervisor-menu" label="⋯" tone="foregroundMuted" onPress={() => setMenuOpen(!menuOpen)} />

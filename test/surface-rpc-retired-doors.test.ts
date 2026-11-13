@@ -49,7 +49,7 @@ test("v0.6.0 W4: the Retro, task-detail, accept and host-folder-picker doors are
   for (const gone of ["factory.retro", "factory.retro.ratify", "factory.accept", "factory.task.detail", "factory.project.pick.folder"]) {
     assert.equal(names.includes(gone), false, `${gone} must not be registered`);
   }
-  for (const kept of ["factory.snapshot", "factory.lead.rotate", "factory.supervisor.revoke", "factory.project.reset", "factory.project.delete", "factory.lanes.set"]) {
+  for (const kept of ["factory.snapshot", "factory.handoff.start", "factory.supervisor.revoke", "factory.project.reset", "factory.project.delete", "factory.lanes.set"]) {
     assert.ok(names.includes(kept), `${kept} stays registered`);
   }
 });
@@ -57,7 +57,7 @@ test("v0.6.0 W4: the Retro, task-detail, accept and host-folder-picker doors are
 test("v0.6.0 W6: Start Supervisor is a registered door — and the surface still has no Lead-start or accept door for the Owner's UI", (t) => {
   const names = registeredMethods(t);
   assert.ok(names.includes("factory.supervisor.start"), "the vacant Supervisor row's Start Supervisor door");
-  for (const kept of ["factory.lead.rotate", "factory.supervisor.revoke", "factory.project.reset", "factory.project.delete", "factory.lanes.set", "factory.skills.toggle_pack", "factory.open_design.unlink", "factory.open_design.sync"]) {
+  for (const kept of ["factory.handoff.start", "factory.supervisor.revoke", "factory.project.reset", "factory.project.delete", "factory.lanes.set", "factory.skills.toggle_pack", "factory.open_design.unlink", "factory.open_design.sync"]) {
     assert.ok(names.includes(kept), `${kept} stays registered`);
   }
   assert.equal(names.includes("factory.lead.start"), false);
@@ -100,4 +100,11 @@ test("v0.6.0 W7: the paste-path door (factory.project.add) is gone; onboarding r
   const factory = createFactory({ stateDir, eyeCliProbe: () => false });
   const handlers = createSurfaceHandlers({ factory, stateDir, home, daemon: {} as never }) as unknown as Record<string, unknown>;
   assert.equal("projectAdd" in handlers, false);
+});
+
+
+test("v0.7.0 Lead replacement uses handoff doors; the retired rotate method is unknown", t => {
+  const names = registeredMethods(t);
+  assert.equal(names.includes("factory.lead.rotate"), false);
+  for (const name of ["factory.handoff.start", "factory.handoff.replace.now", "factory.handoff.cancel", "factory.handoff.retry", "factory.handoff.handover"]) assert.ok(names.includes(name), name);
 });

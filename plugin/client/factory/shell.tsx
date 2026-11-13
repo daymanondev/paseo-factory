@@ -22,7 +22,7 @@ import { useRpc } from "@getpaseo/plugin/client";
 import { ScrollView, useToast } from "@getpaseo/plugin/client/ui";
 import { useEffect, useRef, useState } from "react";
 import { Text, View } from "react-native";
-import { skillsImport, skillsTogglePack, lanesReset, lanesSet, lanesSetBatch, leadRotate, onboardingCommit, onboardingInspect, openDesignCatalog, openDesignSync, helperMcpsSyncAndProbe, helperMcpsSetEnabled, pluginsInstall, pluginsManage, pluginsCheckUpdates, profilesApply, profilesDelete, profilesSave, projectDelete, projectReset, snapshot, supervisorAdopt, supervisorRevoke, supervisorStart, vaultConfigure, vaultHydrate, vaultImport, vaultSync } from "../../shared/rpc.ts";
+import { skillsImport, skillsTogglePack, lanesReset, lanesSet, lanesSetBatch, handoffStart, onboardingCommit, onboardingInspect, openDesignCatalog, openDesignSync, helperMcpsSyncAndProbe, helperMcpsSetEnabled, pluginsInstall, pluginsManage, pluginsCheckUpdates, profilesApply, profilesDelete, profilesSave, projectDelete, projectReset, snapshot, supervisorAdopt, supervisorRevoke, supervisorStart, vaultConfigure, vaultHydrate, vaultImport, vaultSync } from "../../shared/rpc.ts";
 import type { ManageablePluginId } from "../../shared/companions.ts";
 import type { FactoryView, LaneName } from "../../shared/view.ts";
 import { SPACING, text } from "../kit/theme.ts";
@@ -72,7 +72,7 @@ export function FactoryShell({
   // The panel's seat and Project acts (v0.6.0 W6, ADR 0056): Rotate, Revoke,
   // Start Supervisor (the ADR 0017 amendment — the only seat the plugin may
   // create), Reset and Delete. There is no Lead start and no accept RPC here.
-  const leadRotateCall = useRpc(leadRotate);
+  const handoffStartCall = useRpc(handoffStart);
   const supervisorRevokeCall = useRpc(supervisorRevoke);
   const supervisorStartCall = useRpc(supervisorStart);
   const supervisorAdoptCall = useRpc(supervisorAdopt);
@@ -269,7 +269,7 @@ export function FactoryShell({
   };
   const rotateLead = (): void => {
     if (projectRoot === undefined) return;
-    void act("Rotate Lead", () => leadRotateCall({ projectRoot }));
+    void act("Hand off Lead", () => handoffStartCall({ projectRoot, seat: "lead" }));
   };
   const revokeSupervisor = (): void => {
     if (projectRoot === undefined) return;

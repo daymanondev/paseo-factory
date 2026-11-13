@@ -1,3 +1,5 @@
+import { readHandoffProgress } from "./handoff-progress.ts";
+import type { HandoffAction, HandoffRequest, HandoffReply } from "../shared/handoff.ts";
 import { readProjectSettings, setProjectSkillPacks } from "./core/project-settings.ts";
 import { linkedPreviewBundle } from "./core/open-design/preview-bundle.ts";
 import { serveLinkedPreview } from "./core/open-design/preview-server.ts";
@@ -81,7 +83,7 @@ import {
   lanesSetBatch,
   leadDispatch,
   leadEnsure,
-  leadRotate,
+  handoffStart, handoffReplaceNow, handoffCancel, handoffRetry, handoffHandover,
   helperMcpsSyncAndProbe,
   helperMcpsSetEnabled,
   pluginsCheckUpdates,
@@ -351,6 +353,7 @@ export interface SurfaceDeps {
    * thrown settle is logged, never a failed rotation (startup recovery
    * remains the net).
    */
+  handoff?: (input: HandoffRequest) => Promise<HandoffReply>;
   handoffPending?: (slug: string) => boolean;
   onLeadRetired?: (input: { slug: string; agentId: string }) => void;
   /**
@@ -760,7 +763,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
    */
   const leadTelemetryOf = (
     agent: SurfaceAgentSnapshot,
-  ): Pick<AgentView, "contextUsedTokens" | "contextMaxTokens" | "rotationState" | "queuedMailCount"> => {
+  ): Pick<AgentView, "contextUsedTokens" | "contextMaxTokens" | "rotationState" | "queuedMailCount" | "handoffProgress"> => {
     if (agent.labels.seat !== "lead" || agent.labels.project === undefined) return {};
     const tokens = {
       contextUsedTokens: agent.lastUsage?.contextWindowUsedTokens ?? null,
@@ -773,7 +776,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       return tokens; // an unreadable mailbox is not a snapshot failure — the count stays unset
     }
     const rotationState = readProjectRegistration(deps.stateDir, agent.labels.project)?.rotationState;
-    return { ...tokens, queuedMailCount: queued, ...(rotationState === undefined ? {} : { rotationState }) };
+    return { ...tokens, handoffProgress: readHandoffProgress(deps.stateDir, agent.labels.project, "lead"), queuedMailCount: queued, ...(rotationState === undefined ? {} : { rotationState }) };
   };
 
   /** One agent → AgentView. */
@@ -1935,24 +1938,16 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         }
         continue;
       }
-      // Cross-provider family: retire/rotate through the same door the Owner's
-      // rotate/revoke acts ride — cancel + archive, clear the registration
-      // binding, and (Lead) settle the mailbox so queued mail requeues. A
-      // Supervisor whose live Lead is still parented to it is released
-      // instead of archived (v0.6.1, ADR 0057 §4).
-      const retired = await retireSeat(seat, input.projectSlug, input.projectRoot, input.context);
-      if (retired.ok) {
-        if (seat === "lead") {
-          parts.push(`retired — agent ${agent.id.slice(0, 8)} rotated onto ${toLane}'s provider family (queued Lead mail requeues for the next Lead)`);
-        } else if (retired.releasedAgentIds.includes(agent.id)) {
-          parts.push(
-            `released — agent ${agent.id.slice(0, 8)} stays live until its parented Lead's next handoff (a Supervisor archive would cascade onto it); the next turn/dispatch spawns a fresh Supervisor on ${toLane}'s family`,
-          );
-        } else {
-          parts.push(`retired — agent ${agent.id.slice(0, 8)} rotated onto ${toLane}'s provider family (the next turn/dispatch spawns a fresh Supervisor)`);
-        }
+      if (seat === "supervisor") {
+        saveLanes(deps.stateDir, { supervisor: fromLane }, input.projectSlug);
+        parts.push("refused — Supervisor provider handoff is not available yet; the previous lane is restored");
+      } else if (deps.handoff !== undefined) {
+        const reply = await deps.handoff({ slug: input.projectSlug, seat, action: "start", reason: "provider-change", fromLane, toLane });
+        if (!reply.ok) saveLanes(deps.stateDir, { lead: fromLane }, input.projectSlug);
+        parts.push(reply.ok ? `handoff scheduled — ${agent.id.slice(0, 8)} to ${toLane}` : `handoff refused — ${reply.error}`);
       } else {
-        parts.push(`retire failed — ${retired.error}`);
+        saveLanes(deps.stateDir, { lead: fromLane }, input.projectSlug);
+        parts.push("refused — Lead handoff unavailable; the previous lane is restored");
       }
     }
     if (parts.length === 0) {
@@ -2655,7 +2650,8 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       // never rewrites the daemon-wide `factory-*` entries — the before-create
       // rewrite applies it at launch.
       reconcileRoleProvidersFromScope(projectSlug === undefined ? saved.lanes : undefined);
-      return { ok: true as const, lanes: saved.lanes, modelSync };
+      const effective = loadLanes(deps.stateDir, projectSlug);
+      return { ok: true as const, lanes: effective.ok ? effective.lanes : saved.lanes, modelSync };
     },
 
     /**
@@ -2716,7 +2712,8 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       // daemon globals from the table it wrote; a Project batch stays
       // machine-anchored (the before-create rewrite applies the override).
       reconcileRoleProvidersFromScope(projectSlug === undefined ? saved.lanes : undefined);
-      return { ok: true as const, lanes: saved.lanes, modelSync };
+      const effective = loadLanes(deps.stateDir, projectSlug);
+      return { ok: true as const, lanes: effective.ok ? effective.lanes : saved.lanes, modelSync };
     },
 
     /**
@@ -2748,7 +2745,8 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       // globals reconcile from the machine scope — never the reset Project's
       // inherited table (which equals the machine table anyway).
       reconcileRoleProvidersFromScope();
-      return { ok: true as const, lanes: reset.lanes, removed: reset.removed, modelSync };
+      const effective = loadLanes(deps.stateDir, project.slug);
+      return { ok: true as const, lanes: effective.ok ? effective.lanes : reset.lanes, removed: reset.removed, modelSync };
     },
 
     /**
@@ -2831,7 +2829,8 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       // reconciles the globals from it; a profile applied to a Project stays
       // machine-anchored (the Project's override applies at agent create).
       reconcileRoleProvidersFromScope(projectSlug === undefined ? applied.lanes : undefined);
-      return { ok: true as const, lanes: applied.lanes, modelSync };
+      const effective = loadLanes(deps.stateDir, projectSlug);
+      return { ok: true as const, lanes: effective.ok ? effective.lanes : applied.lanes, modelSync };
     },
 
     /**
@@ -2972,6 +2971,13 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       const project = projectOrRefusal(input.projectRoot);
       if (!project.ok) return project;
       return retireSeat("supervisor", project.slug, project.root, context);
+    },
+
+    async handoff(input: { projectRoot: string; seat: string; lane?: string }, action: HandoffAction, _context?: SurfaceCallContext): Promise<HandoffReply> {
+      const project = projectOrRefusal(input.projectRoot);
+      if (!project.ok) return project;
+      if (!deps.handoff) return failure("handoff-unavailable", "Handoff runtime is unavailable");
+      return deps.handoff({ slug: project.slug, seat: input.seat, action, ...(input.lane ? { lane: input.lane } : {}) });
     },
 
     async leadRotate(input: { projectRoot: string }, context?: SurfaceCallContext) {
@@ -3988,7 +3994,11 @@ export function registerSurfaceRpc(
   server.handle(supervisorStart, (input, context) => handlers.supervisorStart(input, pass(context)));
   server.handle(supervisorRevoke, (input, context) => handlers.supervisorRevoke(input, pass(context)));
   server.handle(leadEnsure, (input, context) => handlers.leadEnsure(input, pass(context)));
-  server.handle(leadRotate, (input, context) => handlers.leadRotate(input, pass(context)));
+  server.handle(handoffStart, (input, context) => handlers.handoff(input, "start", pass(context)));
+  server.handle(handoffReplaceNow, (input, context) => handlers.handoff(input, "replaceNow", pass(context)));
+  server.handle(handoffCancel, (input, context) => handlers.handoff(input, "cancel", pass(context)));
+  server.handle(handoffRetry, (input, context) => handlers.handoff(input, "retry", pass(context)));
+  server.handle(handoffHandover, (input, context) => handlers.handoff(input, "handover", pass(context)));
   server.handle(onboardingInspect, (input, context) => handlers.onboardingInspect(input, pass(context)));
   server.handle(onboardingCommit, (input, context) => handlers.onboardingCommit(input, pass(context)));
   server.handle(projectDelete, (input, context) => handlers.projectDelete(input, pass(context)));
