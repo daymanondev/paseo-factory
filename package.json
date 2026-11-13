@@ -32,6 +32,7 @@
     "@types/react": "19.2.18",
     "@types/react-dom": "^19.1.0",
     "esbuild": "0.25.12",
+    "jsdom": "29.1.1",
     "react": "19.1.0",
     "react-dom": "^19.1.0",
     "react-native": "0.81.5",

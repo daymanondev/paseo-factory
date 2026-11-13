@@ -67,7 +67,7 @@ const WARNING = "#aa8800";
 const DANGER = "#cc0000";
 
 const seatDefaults = { lane: { provider: "pi", model: "glm-5.3", scope: "machine" as const }, pendingLane: null, markTokens: 128_000, allowedActions: ["switch-model", "hand-off-now"] as ("switch-model" | "hand-off-now")[] };
-const handoffFixture = { seat: "lead", reason: "context-mark" as const, fromLane: { provider: "pi", model: "glm-5.3" }, toLane: { provider: "pi", model: "glm-5.3" }, startedAt: "2026-11-13T00:00:00Z", updatedAt: "2026-11-13T00:00:00Z" };
+const handoffFixture = { allowedActions: [] as PanelView["handoffs"][number]["allowedActions"], seat: "lead", reason: "context-mark" as const, fromLane: { provider: "pi", model: "glm-5.3" }, toLane: { provider: "pi", model: "glm-5.3" }, startedAt: "2026-11-13T00:00:00Z", updatedAt: "2026-11-13T00:00:00Z" };
 const healthySeats: NonNullable<PanelView["seats"]> = {
   supervisor: { ...seatDefaults, role: "supervisor", vacant: false, agentId: "agent-sup", statusLabel: "idle", tone: "normal", model: "opus-4-8", hint: null, context: null, handoff: null },
   lead: {
@@ -95,7 +95,7 @@ function makePanel(overrides: Partial<PanelView> = {}): PanelView {
 }
 
 const noopActions = () => ({
-  openAgent() {}, installPrerequisites() {}, handoffLead() {}, revokeSupervisor() {}, startSupervisor() {}, syncOpenDesign() {}, adoptSupervisor() {}, busy: false,
+  openAgent() {}, installPrerequisites() {}, handoffStart() {}, handoffReplaceNow() {}, handoffCancel() {}, handoffRetry() {}, viewHandover() {}, startSupervisor() {}, syncOpenDesign() {}, adoptSupervisor() {}, busy: false,
 });
 
 async function render(panel: PanelView, props: { mobile?: boolean; openDesignActions?: unknown; menu?: unknown; initialUi?: Record<string, unknown>; actions?: Record<string, unknown>; width?: number; skillPacks?: unknown[] } = {}): Promise<string> {
@@ -272,28 +272,26 @@ test("Hand off now sits on the live Lead row on desktop and mobile; a vacant Lea
   for (const mobile of [false, true]) {
     const html = await render(makePanel(), { mobile });
     const leadRow = html.slice(html.indexOf("factory-panel-seat-lead"), html.indexOf("factory-panel-peers"));
-    assert.ok(hasHook(leadRow, "factory-panel-handoff-lead"), `Rotate Lead on the Lead row (mobile=${mobile})`);
-    assert.equal((html.match(/factory-panel-handoff-lead/g) ?? []).length, 1);
+    assert.ok(hasHook(leadRow, "factory-seat-hand-off-now-lead"), `Hand off on the Lead row (mobile=${mobile})`);
+    assert.equal((html.match(/factory-seat-hand-off-now-lead/g) ?? []).length, 1);
   }
   const vacantLead = makePanel({ seats: { ...healthySeats, lead: { ...healthySeats.lead, vacant: true, agentId: null, statusLabel: "vacant", model: null, hint: "No Lead is running — ask your Supervisor.", context: null, handoff: null } } });
   const html = await render(vacantLead);
-  assert.equal(hasHook(html, "factory-panel-handoff-lead"), false);
+  assert.equal(hasHook(html, "factory-seat-hand-off-now-lead"), false);
   assert.equal(hasHook(html, "factory-panel-open-lead"), false);
 });
 
-test("Revoke Supervisor lives behind the Supervisor row's ⋯ — closed by default, present once opened, on desktop and mobile; never on the Lead row", async () => {
+test("Supervisor Hand off now is a direct live-row action on Desktop and mobile and honors server permission", async () => {
   for (const mobile of [false, true]) {
-    const closed = await render(makePanel(), { mobile });
-    assert.ok(hasHook(closed, "factory-panel-supervisor-menu"), "the row ⋯ toggle is there");
-    assert.equal(hasHook(closed, "factory-panel-revoke-supervisor"), false, "Revoke is not prominent");
-    const open = await render(makePanel(), { mobile, initialUi: { supervisorMenuOpen: true } });
-    assert.ok(hasHook(open, "factory-panel-revoke-supervisor"), `Revoke Supervisor once the ⋯ opens (mobile=${mobile})`);
-    assert.match(open, /Hand off now/);
-    const leadRow = open.slice(open.indexOf("factory-panel-seat-lead"));
-    assert.doesNotMatch(leadRow, /Revoke/);
+    const html = await render(makePanel(), { mobile });
+    assert.ok(hasHook(html, "factory-seat-hand-off-now-supervisor"));
+    assert.equal(hasHook(html, "factory-panel-supervisor-menu"), false);
+    assert.doesNotMatch(html, /revoke/i);
+    const blocked = await render(makePanel({ seats: { ...healthySeats, supervisor: { ...healthySeats.supervisor, allowedActions: [] } } }), { mobile });
+    assert.equal(hasHook(blocked, "factory-seat-hand-off-now-supervisor"), false);
   }
-  const vacant = await render(makePanel({ seats: vacantSupervisorSeats }), { initialUi: { supervisorMenuOpen: true } });
-  assert.equal(hasHook(vacant, "factory-panel-revoke-supervisor"), false, "a vacant Supervisor has nothing to revoke");
+  const vacant = await render(makePanel({ seats: vacantSupervisorSeats }));
+  assert.equal(hasHook(vacant, "factory-seat-hand-off-now-supervisor"), false);
 });
 
 test("a vacant Supervisor offers Start Supervisor with a directive box on desktop; mobile offers neither; a live Supervisor never does", async () => {
@@ -465,7 +463,7 @@ test("the shell reads mobile from the host layout platform, mounts the panel on 
   assert.match(entries, /surface="settings"/, "the settings screen is the other host");
 });
 
-test("W6 shell wiring: every action rides its RPC — Rotate, Revoke, Start Supervisor (then opens the new seat), Reset, Delete — and no Lead start or accept RPC is bound", () => {
+test("shell wiring: every action rides its RPC — handoff, Start Supervisor (then opens the new seat), Reset, Delete — and no Lead start or accept RPC is bound", () => {
   const shell = read("plugin/client/factory/shell.tsx");
   for (const rpc of ["handoffStart", "supervisorStart", "projectReset", "projectDelete"]) {
     assert.match(shell, new RegExp(`useRpc\\(${rpc}\\)`), `${rpc} is bound`);
@@ -568,4 +566,35 @@ test("W10: the independent Handoff block names substitute handovers and uses fai
 test("W10: a vacant seat still displays its configured model chip", async () => {
   const html = await render(makePanel({ seats: { ...healthySeats, lead: { ...healthySeats.lead, vacant: true, agentId: null, model: null, hint: "Ask your Supervisor.", context: null } } }));
   assert.ok(hasHook(html, "factory-seat-chip-lead"));
+});
+
+test('W12: all six handoff states render exactly their projected actions, independent of seat rows', async () => {
+  const cases = [
+    ['scheduled', ['hand-off-now', 'cancel'], ['now', 'cancel'], 'Scheduled'],
+    ['handing-over', ['replace-now'], ['replace-now'], 'Handing over'],
+    ['substitute', ['replace-now'], ['replace-now'], 'Substitute handover'],
+    ['creating-successor', ['replace-now'], ['replace-now'], 'Creating successor'],
+    ['failed', ['replace-now', 'retry'], ['replace-now', 'retry'], 'Failed'],
+    ['done', ['view-handover'], ['view'], 'Done'],
+  ] as const;
+  for (const [state, allowedActions, hooks, label] of cases) {
+    const html = await render(makePanel({ handoffs: [{ ...handoffFixture, seat: 'peer:T-absent', state, allowedActions: [...allowedActions], ...(state === 'scheduled' ? { waitingPeers: 3 } : {}), ...(state === 'substitute' ? { handover: 'substitute' } : {}) }] }));
+    const block = html.slice(html.indexOf('data-testid="factory-handoff-block"'), html.indexOf('data-testid="factory-panel-seats"'));
+    assert.match(block, new RegExp(label));
+    for (const action of ['now', 'cancel', 'replace-now', 'retry', 'view']) assert.equal(hasHook(block, `factory-handoff-${action}`), (hooks as readonly string[]).includes(action), `${state}: ${action}`);
+    if (state === 'scheduled') assert.match(block, /waiting for 3 Peers/i);
+    if (state === 'substitute') assert.match(block, /plugin-built handover/);
+    if (state === 'failed') assert.ok(block.includes('#c8253d'));
+  }
+  const html = await render(makePanel({ handoffs: [{ ...handoffFixture, state: 'failed', allowedActions: [] }] }));
+  assert.equal(hasHook(html, 'factory-handoff-retry'), false, 'state alone never invents an action');
+});
+
+test('W12: handoff reasons are words and the source and lane transition remain visible', async () => {
+  for (const [reason, label] of [['context-mark', 'Context mark'], ['provider-change', 'Provider change'], ['owner', 'Owner requested']] as const) {
+    const html = await render(makePanel({ handoffs: [{ ...handoffFixture, reason, state: 'done', handover: 'substitute', allowedActions: ['view-handover'], fromLane: { provider: 'pi', model: 'old' }, toLane: { provider: 'codex', model: 'new' } }] }));
+    assert.match(html, new RegExp(label));
+    assert.match(html, /pi\/old → codex\/new/);
+    assert.match(html, /plugin-built handover/);
+  }
 });

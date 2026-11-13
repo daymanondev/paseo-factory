@@ -240,7 +240,7 @@ async function renderPanel(mobile: boolean): Promise<string> {
   const wizard = createElement("div", { "data-testid": "wizard-slot" }, "wizard");
   return renderToStaticMarkup(createElement(ProjectPanel, {
     theme, panel: notAProject, mobile, now: Date.now(), daemonError: null,
-    actions: { openAgent() {}, installPrerequisites() {}, handoffLead() {}, revokeSupervisor() {}, startSupervisor() {}, busy: false },
+    actions: { openAgent() {}, installPrerequisites() {}, handoffStart() {}, handoffReplaceNow() {}, handoffCancel() {}, handoffRetry() {}, viewHandover() {}, startSupervisor() {}, busy: false },
     onboarding: wizard,
   }));
 }

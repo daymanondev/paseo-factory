@@ -151,13 +151,22 @@ function contextOf(role: "supervisor" | "lead" | "peer", agent: AgentView) {
   return { state: used === null ? "unknown" as const : "used" as const, usedTokens: used, markTokens: mark, label: used === null ? "context unknown" : `${Math.round(used / 1000)}k / ${Math.round(mark / 1000)}k`, fraction: used === null ? null : Math.min(1, used / mark) };
 }
 
+/** Progress action projection also covers handoffs whose outgoing Peer has disappeared. */
+function handoffActions(handoff: HandoffProgress | null, handoverAvailable: boolean): SeatAllowedAction[] {
+  const actions: SeatAllowedAction[] = [];
+  if (handoff?.state === "scheduled") actions.push("hand-off-now", "cancel");
+  if (handoff && ["handing-over", "substitute", "creating-successor", "failed"].includes(handoff.state)) actions.push("replace-now");
+  if (handoff?.state === "failed") actions.push("retry");
+  if (handoverAvailable || handoff?.state === "done") actions.push("view-handover");
+  return actions;
+}
+
 function seatFields(agent: AgentView | null, lane: ScopedLaneRef, progress?: HandoffProgress, handoverAvailable = false) {
   const handoff = progress ?? agent?.handoffProgress ?? null;
-  const allowedActions: SeatAllowedAction[] = agent ? ["switch-model", "hand-off-now"] : [];
-  if (handoff?.state === "scheduled") allowedActions.push("cancel");
-  if (handoff && ["handing-over", "substitute", "creating-successor", "failed"].includes(handoff.state)) allowedActions.push("replace-now");
-  if (handoff?.state === "failed") allowedActions.push("retry");
-  if (handoverAvailable || agent?.handoverAvailable || handoff?.state === "done") allowedActions.push("view-handover");
+  const allowedActions = [...new Set<SeatAllowedAction>([
+    ...(agent ? ["switch-model", "hand-off-now"] as const : []),
+    ...handoffActions(handoff, handoverAvailable || agent?.handoverAvailable === true),
+  ])];
   const active = handoff && handoff.state !== "done";
   return { lane: active ? { ...handoff.fromLane, scope: lane.scope } : agent?.lane ?? lane, pendingLane: active && handoff.reason === "provider-change" ? { ...handoff.toLane, scope: lane.scope } : agent?.pendingLane ?? null, markTokens: agent?.markTokens ?? handoffMarkTokens("lead", null), handoff, allowedActions };
 }
@@ -378,7 +387,7 @@ export function foldPanel(input: PanelInput): PanelView {
   return {
     profile: input.profile ?? { active: null, list: [], modified: false },
     defaultWorker: { role: "worker", title: "Default worker", lane: input.seatLanes?.worker ?? fallbackLane },
-    handoffs: handoffsOf(input),
+    handoffs: handoffsOf(input).map(handoff => ({ ...handoff, allowedActions: handoffActions(handoff, input.handovers?.includes(handoff.seat) === true) })),
     isProject: true,
     name: input.project.name ?? input.project.slug,
     summary: summaryOf(input, items.length, peers.length),
