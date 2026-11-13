@@ -769,8 +769,6 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     agent: SurfaceAgentSnapshot,
   ): Pick<AgentView, "contextUsedTokens" | "contextMaxTokens" | "rotationState" | "queuedMailCount" | "handoffProgress"> => {
     if (agent.labels.seat === "supervisor" && agent.labels.project !== undefined) return {
-      contextUsedTokens: agent.lastUsage?.contextWindowUsedTokens ?? null,
-      contextMaxTokens: agent.lastUsage?.contextWindowMaxTokens ?? null,
       handoffProgress: readHandoffProgress(deps.stateDir, agent.labels.project, "supervisor"),
     };
     if (agent.labels.seat !== "lead" || agent.labels.project === undefined) return {};

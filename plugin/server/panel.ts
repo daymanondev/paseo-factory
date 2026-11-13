@@ -290,8 +290,7 @@ function needsYou(input: PanelInput): PanelNeedsYouItem[] {
     });
   }
   const supervisor = input.supervisor;
-  const window = supervisor?.contextMaxTokens;
-  const mark = typeof window === "number" && Number.isFinite(window) && window > 0 ? Math.min(128_000, Math.floor(window * 0.65)) : 128_000;
+  const mark = supervisor?.markTokens ?? handoffMarkTokens("supervisor", supervisor?.contextMaxTokens);
   if (supervisor && supervisor.contextUsedTokens != null && supervisor.contextUsedTokens >= mark && (!supervisor.handoffProgress || supervisor.handoffProgress.state === "done")) {
     items.push({ key: "supervisor-near-mark", kind: "supervisor-near-mark", title: "Supervisor is near its handoff mark", detail: "Hand off when you are ready to continue in a fresh chat.", action: { kind: "handoff-supervisor", label: "Hand off now" } });
   }
