@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-13
+
+**Factory tab redesign**: one alert stack, three tabs, and one Hand off modal.
+
+### Changed
+
+- **Header, alert stack, three tabs.** The tab is a centred column (max ~1040px) instead of two columns of bordered cards. Needs-you items and handoff progress sit in one alert stack under the header, each a row with a tone bar and its primary action; then **Team**, **Models** and **Project** tabs.
+- **Team tab.** Supervisor, Lead and Peers read as aligned one-line rows — role, status, model, context bar, actions. Closed Peers fold behind "Closed (n)".
+- **One "Hand off…" modal for rotate, successor choice and model change.** The seat's model chip and its Hand off… button open the same modal with the current model preselected. Confirming unchanged starts a fresh session on the same model (the old Rotate); another model on the same provider switches in place; another provider hands off to that successor. Peers hand off to the chosen model. The primary button names what will happen.
+- **Model picker.** Providers on the left and models on the right (stacked on narrow widths); the model list always has a fixed height, so it never collapses. A provider with no listed models says so and offers the custom ID field.
+- **Models tab** lists the Supervisor, Lead and Default worker models with their scope, and applies saved Lane profiles; the header profile chip opens it. **Project tab** holds Skill packs as switches and Open Design.
+- **Button hierarchy.** Buttons default to a neutral secondary style; each area has at most one solid primary; ghost and danger variants replace the green outlines.
+
 ## [0.7.1] - 2026-11-13
 
 **Factory tab polish**: the model picker and handoff failures no longer flood the tab.
