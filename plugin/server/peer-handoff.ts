@@ -20,7 +20,9 @@ import { buildSubstituteHandover, readNotebook, readHandoverGit } from "./substi
 import { foldTasks, renderLedgerLine } from "./view.ts";
 import { capHandoffText, validHandoffText } from "./handoff-text.ts";
 
-export const PEER_HANDOFF_TOKENS = 160_000;
+import { handoffMarkTokens, PEER_CONTEXT_MARK_TOKENS } from "./handoff-limits.ts";
+
+export const PEER_HANDOFF_TOKENS = PEER_CONTEXT_MARK_TOKENS;
 const MAX_PEER_HANDOFFS = 1;
 const SUMMARY_BYTES = 12 * 1024;
 const INTERRUPTED = "The outgoing Peer was interrupted during handoff extraction. Rely on the machine-verified worktree digest and inspect the remaining requirements and checks.";
@@ -61,7 +63,7 @@ interface PeerHandoffDeps {
   timeoutMs: number;
   ownerTimeoutMs?: number;
   queueNotice?: (slug: string, task: string, key: string, text: string) => void;
-  readTokens: (agent: SurfaceAgentSnapshot) => { usedTokens: number | null };
+  readTokens: (agent: SurfaceAgentSnapshot) => { usedTokens: number | null; maxTokens?: number | null };
   /**
    * The usage-rollup flush (v0.0.87, ADR 0043 §3): the outgoing Peer's final
    * cumulative usage lands in `<projectStateDir>/usage.json` BEFORE the seat
@@ -258,7 +260,10 @@ export function createPeerHandoffRuntime(deps: PeerHandoffDeps) {
         }
         const peers = boundTaskPeers({ stateDir: deps.stateDir, slug, task, events, live });
         const peer = peers[0];
-        if (!peer || (input && input.agentId !== peer.id) || (deps.readTokens(peer).usedTokens ?? 0) < PEER_HANDOFF_TOKENS) continue;
+        if (!peer || (input && input.agentId !== peer.id)) continue;
+        const reading = deps.readTokens(peer);
+        const mark = handoffMarkTokens("peer", reading.maxTokens);
+        if (reading.usedTokens === null || reading.usedTokens < mark) continue;
         const worktree = factoryOf(slug, task).worktreeFor(task);
         if (!worktree) continue; // A standing seat/shared checkout is never a Task worktree.
         worktreeDigest(worktree, contract); // Refuse missing/wrong-branch worktrees before interrupting.
@@ -272,7 +277,7 @@ export function createPeerHandoffRuntime(deps: PeerHandoffDeps) {
           if (peerIsRunning(peer)) await stopPeer(peer.id);
           if (!eligible(slug, contract)) continue;
           await bounded(deps.daemon().agents.ref(peer.id).send([
-            `# Peer handoff extraction — Task ${task}`, "Your context crossed 160,000 tokens. Start no new work and submit no Claim during extraction.",
+            `# Peer handoff extraction — Task ${task}`, `Your context crossed ${mark.toLocaleString("en-US")} tokens. Start no new work and submit no Claim during extraction.`,
             "Preserve the existing committed work and uncommitted edits. Put the entire Markdown handoff directly in your final assistant message, in one piece, without running shell commands or writing files to disk. The plugin server reads your reply and persists it automatically, capping it at 12 KB. Use these four sections:",
             "1. Completed & Verified Slice", "2. Worktree Git Status & Uncommitted Edits", "3. Remaining Requirements & Failing Checks", "4. Read-First Files for Successor",
             "Record completed checks and exact remaining failures. This bounded handoff is this turn's only deliverable; end your turn after the complete Markdown document.",
