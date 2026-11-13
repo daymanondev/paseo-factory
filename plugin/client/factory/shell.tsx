@@ -6,10 +6,10 @@
  */
 import type { PluginTheme } from "@getpaseo/plugin";
 import { useRpc } from "@getpaseo/plugin/client";
-import { ScrollView, useToast } from "@getpaseo/plugin/client/ui";
+import { Modal, ScrollView, useToast } from "@getpaseo/plugin/client/ui";
 import { useEffect, useRef, useState } from "react";
 import { Text, View } from "react-native";
-import { skillsImport, skillsTogglePack, lanesSet, lanesSetBatch, handoffStart, onboardingCommit, onboardingInspect, openDesignCatalog, openDesignSync, helperMcpsSyncAndProbe, helperMcpsSetEnabled, pluginsInstall, pluginsManage, pluginsCheckUpdates, profilesApply, profilesDelete, profilesSave, projectDelete, projectReset, snapshot, supervisorAdopt, supervisorStart, vaultConfigure, vaultHydrate, vaultImport, vaultSync } from "../../shared/rpc.ts";
+import { skillsImport, skillsTogglePack, lanesSet, lanesSetBatch, handoffStart, handoffReplaceNow, handoffCancel, handoffRetry, handoffHandover, onboardingCommit, onboardingInspect, openDesignCatalog, openDesignSync, helperMcpsSyncAndProbe, helperMcpsSetEnabled, pluginsInstall, pluginsManage, pluginsCheckUpdates, profilesApply, profilesDelete, profilesSave, projectDelete, projectReset, snapshot, supervisorAdopt, supervisorStart, vaultConfigure, vaultHydrate, vaultImport, vaultSync } from "../../shared/rpc.ts";
 import type { ManageablePluginId } from "../../shared/companions.ts";
 import type { FactoryView, LaneName } from "../../shared/view.ts";
 import { SPACING, text } from "../kit/theme.ts";
@@ -58,10 +58,12 @@ export function FactoryShell({
   const toast = useToast();
   const snapshotCall = useRpc(snapshot);
   const lanesSetCall = useRpc(lanesSet);
-  // The panel's seat and Project acts (v0.6.0 W6, ADR 0056): Handoff, Revoke,
-  // Start Supervisor (the ADR 0017 amendment — the only seat the plugin may
-  // create), Reset and Delete. There is no Lead start and no accept RPC here.
+  // Per-seat handoff contracts are shared by live rows and independent recovery entries.
   const handoffStartCall = useRpc(handoffStart);
+  const handoffReplaceNowCall = useRpc(handoffReplaceNow);
+  const handoffCancelCall = useRpc(handoffCancel);
+  const handoffRetryCall = useRpc(handoffRetry);
+  const handoffHandoverCall = useRpc(handoffHandover);
   const supervisorStartCall = useRpc(supervisorStart);
   const supervisorAdoptCall = useRpc(supervisorAdopt);
   // The onboarding wizard's doors (v0.6.0 W7): a read-only folder inspection, the Start commit, and the Open Design catalog.
@@ -95,6 +97,7 @@ export function FactoryShell({
 
   const [bump, setBump] = useState(0);
   const [busy, setBusy] = useState(false);
+  const [handover, setHandover] = useState<{ seat: string; text: string; source: "extracted" | "substitute" } | null>(null);
   const [busyAct, setBusyAct] = useState<string | null>(null);
   const [checkingUpdates, setCheckingUpdates] = useState(false);
   const [autoCheckedPlugins, setAutoCheckedPlugins] = useState(false);
@@ -128,6 +131,7 @@ export function FactoryShell({
         ? 1000
         : pollEvery(
             (view?.kpis.running ?? 0) + (view?.kpis.needsHuman ?? 0) > 0 ||
+              (view?.panel.handoffs ?? []).some(handoff => handoff.state !== "done") ||
               (view?.vault.historyImports ?? []).some((item) => item.status === "pending" || item.status === "staged"),
           ),
   );
@@ -276,20 +280,31 @@ export function FactoryShell({
   const openAgent = (agentId: string): void => {
     navigation?.openAgent({ agentId, serverId });
   };
-  const handoffLead = (): void => {
+  const startHandoff = (seat: string): void => {
     if (projectRoot === undefined) return;
-    void act("Hand off Lead", () => handoffStartCall({ projectRoot, seat: "lead" }));
+    void act("Hand off seat", () => handoffStartCall({ projectRoot, seat }));
   };
-  const revokeSupervisor = (): void => {
+  const replaceHandoff = (seat: string): void => {
     if (projectRoot === undefined) return;
-    void act("Hand off Supervisor", () => handoffStartCall({ projectRoot, seat: "supervisor" }));
+    void act("Replace now", () => handoffReplaceNowCall({ projectRoot, seat }));
   };
-  /**
-   * "Use this chat as Supervisor" (v0.6.1, ADR 0057 §5): adopt a live candidate
-   * chat as the Project's Supervisor. The one seat write mobile may perform
-   * (ADR 0057 §10), so it carries no `mobile` guard; success opens the adopted
-   * conversation.
-   */
+  const cancelHandoff = (seat: string): void => {
+    if (projectRoot === undefined) return;
+    void act("Cancel handoff", () => handoffCancelCall({ projectRoot, seat }));
+  };
+  const retryHandoff = (seat: string): void => {
+    if (projectRoot === undefined || mobile) return;
+    void act("Try handoff again", () => handoffRetryCall({ projectRoot, seat }));
+  };
+  const viewHandover = (seat: string): void => {
+    if (projectRoot === undefined) return;
+    void act("View handover", async () => {
+      const reply = await handoffHandoverCall({ projectRoot, seat });
+      if (reply.ok) setHandover({ seat, text: reply.text ?? "No handover saved yet.", source: reply.source ?? "extracted" });
+      return reply;
+    });
+  };
+  /** Adopt the candidate Supervisor and open its chat; also available on mobile. */
   const adoptSupervisor = (agentId: string): void => {
     if (projectRoot === undefined) return;
     void act("Use this chat as Supervisor", async () => {
@@ -681,7 +696,7 @@ export function FactoryShell({
             mobile={mobile}
             now={now}
             daemonError={view.daemonError}
-            actions={{ openAgent, installPrerequisites, handoffLead, revokeSupervisor, startSupervisor, syncOpenDesign, adoptSupervisor, saveSeatModel, setMachineDefault, applyProfile: applyProjectProfile, toggleSkillPack: toggleProjectSkillPack, busy: busy || activePluginAct !== null }}
+            actions={{ openAgent, installPrerequisites, handoffStart: startHandoff, handoffReplaceNow: replaceHandoff, handoffCancel: cancelHandoff, handoffRetry: retryHandoff, viewHandover, startSupervisor, syncOpenDesign, adoptSupervisor, saveSeatModel, setMachineDefault, applyProfile: applyProjectProfile, toggleSkillPack: toggleProjectSkillPack, busy: busy || activePluginAct !== null }}
             openDesignActions={
               !mobile && view.project !== null && view.project.missingRoot !== true ? (
                 <>
@@ -729,7 +744,14 @@ export function FactoryShell({
           settingsScreen
         )}
       </ScrollView>
-
+      <Modal open={handover !== null} onOpenChange={open => { if (!open) setHandover(null); }} title={`Handover · ${handover?.seat ?? ""}`}>
+        <Modal.Content>
+          <View testID="factory-handover-modal" style={{ gap: SPACING[2], padding: SPACING[3] }}>
+            <Text style={text(theme, "rowTitle")}>{handover?.source === "substitute" ? "plugin-built handover" : "Extracted handover"}</Text>
+            <ScrollView style={{ maxHeight: 480 }}><Text selectable style={text(theme, "meta")}>{handover?.text}</Text></ScrollView>
+          </View>
+        </Modal.Content>
+      </Modal>
     </View>
   );
 }

@@ -537,7 +537,7 @@ export type PanelOnboarding = z.infer<typeof PanelOnboardingSchema>;
 /** The workspace panel's whole world: header, Needs you, Seats, Open Design — or the not-a-Project readiness. */
 export const PanelViewSchema = z.object({
   /** Includes failures whose outgoing agent is gone; seat is the stable recovery key. */
-  handoffs: z.array(HandoffProgressSchema),
+  handoffs: z.array(HandoffProgressSchema.extend({ allowedActions: z.array(SeatAllowedActionSchema) })),
   profile: PanelProfileSchema,
   defaultWorker: z.object({ role: z.literal("worker"), title: z.literal("Default worker"), lane: ScopedLaneRefSchema }).nullable(),
   isProject: z.boolean(),

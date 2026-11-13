@@ -137,7 +137,7 @@ test("the Project panel mounts under a RN-like window on mobile and renders the 
     goNative();
     await act(() => root.render(createElement(ProjectPanel, {
       theme, panel, mobile: true, now: Date.now(), daemonError: null,
-      actions: { openAgent() {}, installPrerequisites() {}, handoffLead() {}, revokeSupervisor() {}, startSupervisor() {}, syncOpenDesign() {}, adoptSupervisor() {}, busy: false },
+      actions: { openAgent() {}, installPrerequisites() {}, handoffStart() {}, handoffReplaceNow() {}, handoffCancel() {}, handoffRetry() {}, viewHandover() {}, startSupervisor() {}, syncOpenDesign() {}, adoptSupervisor() {}, busy: false },
     })));
     const markup = container.innerHTML;
     await act(() => root.unmount());
@@ -240,7 +240,7 @@ const modelPickerFixture = {
     { provider: "claude", available: true, models: [{ id: "opus", label: "Opus", thinkingOptions: [] }] },
   ],
 };
-const modelPanelActions = { openAgent() {}, installPrerequisites() {}, handoffLead() {}, revokeSupervisor() {}, startSupervisor() {}, syncOpenDesign() {}, adoptSupervisor() {}, busy: false };
+const modelPanelActions = { openAgent() {}, installPrerequisites() {}, handoffStart() {}, handoffReplaceNow() {}, handoffCancel() {}, handoffRetry() {}, viewHandover() {}, startSupervisor() {}, syncOpenDesign() {}, adoptSupervisor() {}, busy: false };
 
 test("W11: one tap on every fresh-tab model chip opens the inline picker, including vacant standing seats", async () => {
   const { ProjectPanel } = await load("plugin/client/factory/project-panel.tsx");
@@ -372,4 +372,120 @@ test("W11: mobile keeps every model chip editable and excludes machine-default, 
       ]);
     } finally { await act(() => root.unmount()); }
   });
+});
+
+test('W12: handoff actions dispatch the typed RPC, refresh progress and open the sourced handover', async () => {
+  const { FactoryShell } = await load('plugin/client/factory/shell.tsx');
+  const { testTheme } = await import('./client-markup.ts');
+  const { createElement } = await import('react');
+  const panel = modelPanelFixture();
+  const progress = { seat: 'lead', reason: 'provider-change', state: 'scheduled', allowedActions: ['cancel', 'hand-off-now'], waitingPeers: 2, fromLane: { provider: 'pi', model: 'old' }, toLane: { provider: 'codex', model: 'new' }, startedAt: '', updatedAt: '' };
+  panel.handoffs = [progress, { ...progress, seat: 'peer:gone', state: 'failed', allowedActions: ['retry', 'replace-now'], failure: 'Provider unavailable' }];
+  panel.seats.supervisor.vacant = false; panel.seats.supervisor.agentId = 'supervisor'; panel.seats.supervisor.allowedActions = ['hand-off-now'];
+  panel.needsYou = [{ key: 'mark', kind: 'supervisor-near-mark', title: 'Supervisor is near its mark', detail: null, action: { kind: 'handoff-supervisor', label: 'Hand off now' } }, { key: 'failed-peer', kind: 'handoff-failed', title: 'Peer failed', detail: null, action: { kind: 'retry-handoff', seat: 'peer:gone', label: 'Try again' } }];
+  const view = { ...modelPickerFixture, panel, project: { root: '/project', slug: 'my-app', missingRoot: true }, kpis: { running: 0, needsHuman: 0 }, companionTools: [], corePlugin: {}, vault: {}, skillHub: { projectPacks: [] }, daemonError: null };
+  const calls: { method: string; input: unknown }[] = [];
+  const g = globalThis as Record<string, any>, prior = g.__factoryClientRpc;
+  g.__factoryClientRpc = async (method: string, input: any) => {
+    calls.push({ method, input });
+    if (method === 'factory.snapshot') return { ok: true, view: structuredClone(view) };
+    if (method === 'factory.handoff.handover') return { ok: true, progress: null, text: 'Keep the Owner goals and the held reports.', source: 'substitute' };
+    if (input.seat === 'lead' && method === 'factory.handoff.start') panel.handoffs[0] = { ...progress, state: 'handing-over', allowedActions: ['replace-now'] };
+    return { ok: true, progress: null };
+  };
+  try {
+    await mountUnderNativeWindow(async (createRoot, container, act) => {
+      const root = createRoot(container);
+      try {
+        await act(() => root.render(createElement(FactoryShell, { theme: testTheme, dir: '/project', layout: { compact: false, platform: 'web' } })));
+        const click = async (id: string, method: string, seat: string, parent?: string) => {
+          const before = calls.filter(c => c.method === 'factory.snapshot').length;
+          const scope = parent ? container.querySelector(`[data-testid="${parent}"]`)! : container;
+          const button = scope.querySelector(`[data-testid="${id}"]`) as HTMLElement;
+          assert.ok(button, id); await act(() => button.click());
+          assert.deepEqual(calls.filter(c => c.method !== 'factory.snapshot').at(-1), { method, input: { projectRoot: '/project', seat } });
+          assert.ok(calls.filter(c => c.method === 'factory.snapshot').length > before, 'action triggers the next snapshot');
+        };
+        await click('factory-handoff-cancel', 'factory.handoff.cancel', 'lead');
+        await click('factory-handoff-now', 'factory.handoff.start', 'lead');
+        assert.match(container.querySelector('[data-testid="factory-handoff-lead"]')!.textContent!, /Handing over/);
+        assert.equal(container.querySelector('[data-testid="factory-handoff-lead"] [data-testid="factory-handoff-cancel"]'), null);
+        await click('factory-handoff-replace-now', 'factory.handoff.replace.now', 'lead', 'factory-handoff-lead');
+        await click('factory-handoff-retry', 'factory.handoff.retry', 'peer:gone', 'factory-handoff-peer:gone');
+        await click('factory-handoff-replace-now', 'factory.handoff.replace.now', 'peer:gone', 'factory-handoff-peer:gone');
+        await click('factory-seat-hand-off-now-supervisor', 'factory.handoff.start', 'supervisor');
+        await click('factory-seat-hand-off-now-peer-task-1', 'factory.handoff.start', 'peer:task-1');
+        await click('factory-panel-needs-you-action-mark', 'factory.handoff.start', 'supervisor');
+        await click('factory-panel-needs-you-action-failed-peer', 'factory.handoff.retry', 'peer:gone');
+        panel.handoffs = [];
+        panel.seats.lead.allowedActions = ['view-handover'];
+        await act(() => { globalThis.window.dispatchEvent(new globalThis.window.Event('focus')); });
+        assert.equal(container.querySelector('[data-testid="factory-handoff-block"]'), null, 'the recent done block has expired');
+        await click('factory-seat-view-handover-lead', 'factory.handoff.handover', 'lead');
+        const modal = container.querySelector('[data-testid="factory-handover-modal"]');
+        assert.ok(modal); assert.match(modal.textContent!, /plugin-built handover/); assert.match(modal.textContent!, /Keep the Owner goals and the held reports/);
+      } finally { await act(() => root.unmount()); }
+    });
+  } finally { g.__factoryClientRpc = prior; }
+});
+
+
+test('W12: a vacant failed handoff obeys the server model permission while an ordinary vacancy stays editable', async () => {
+  const { ProjectPanel } = await load('plugin/client/factory/project-panel.tsx');
+  const { testTheme } = await import('./client-markup.ts');
+  const { createElement } = await import('react');
+  await mountUnderNativeWindow(async (createRoot, container, act) => {
+    const root = createRoot(container);
+    try {
+      const panel = modelPanelFixture();
+      panel.seats.lead.vacant = true; panel.seats.lead.agentId = null; panel.seats.lead.allowedActions = [];
+      panel.seats.lead.handoff = { state: 'failed' };
+      await act(() => root.render(createElement(ProjectPanel, { theme: testTheme, panel, modelView: modelPickerFixture, mobile: false, now: Date.now(), daemonError: null, actions: { ...modelPanelActions, saveSeatModel() {} } })));
+      assert.notEqual(container.querySelector('[data-testid="factory-seat-chip-lead"]')?.tagName, 'BUTTON', 'an active recovery must honor switch-model permission');
+      panel.seats.lead.handoff = null;
+      await act(() => root.render(createElement(ProjectPanel, { theme: testTheme, panel, modelView: modelPickerFixture, mobile: false, now: Date.now(), daemonError: null, actions: { ...modelPanelActions, saveSeatModel() {} } })));
+      assert.equal(container.querySelector('[data-testid="factory-seat-chip-lead"]')?.tagName, 'BUTTON');
+    } finally { await act(() => root.unmount()); }
+  });
+});
+
+test('W12: mobile handoffs expose start, force, cancel and read while excluding both retry doors', async () => {
+  const { FactoryShell } = await load('plugin/client/factory/shell.tsx');
+  const { testTheme } = await import('./client-markup.ts');
+  const { createElement } = await import('react');
+  const panel = modelPanelFixture();
+  const base = { seat: 'lead', reason: 'owner', state: 'scheduled', fromLane: { provider: 'pi', model: 'old' }, toLane: { provider: 'codex', model: 'new' }, startedAt: '', updatedAt: '' };
+  panel.handoffs = [{ ...base, allowedActions: ['cancel', 'hand-off-now'] }, { ...base, seat: 'peer:gone', state: 'failed', allowedActions: ['retry', 'replace-now', 'view-handover'] }];
+  panel.needsYou = [{ key: 'failed-peer', kind: 'handoff-failed', title: 'Peer failed', detail: null, action: { kind: 'retry-handoff', seat: 'peer:gone', label: 'Try again' } }];
+  const view = { ...modelPickerFixture, panel, project: { root: '/project', slug: 'my-app', missingRoot: true }, kpis: { running: 0, needsHuman: 0 }, companionTools: [], corePlugin: {}, vault: {}, skillHub: { projectPacks: [] }, daemonError: null };
+  const calls: { method: string; input: unknown }[] = [];
+  const g = globalThis as Record<string, any>, prior = g.__factoryClientRpc;
+  g.__factoryClientRpc = async (method: string, input: any) => {
+    calls.push({ method, input });
+    return method === 'factory.snapshot' ? { ok: true, view } : { ok: true, progress: null, text: 'Extracted goals', source: 'extracted' };
+  };
+  try {
+    await mountUnderNativeWindow(async (createRoot, container, act) => {
+      const root = createRoot(container);
+      try {
+        for (const platform of ['ios', 'android']) {
+          await act(() => root.render(createElement(FactoryShell, { key: platform, theme: testTheme, dir: '/project', layout: { compact: true, platform } })));
+          assert.equal(container.querySelector('[data-testid="factory-handoff-retry"]'), null);
+          assert.equal(container.querySelector('[data-testid="factory-panel-needs-you-action-failed-peer"]'), null);
+          for (const [id, method, seat] of [
+            ['factory-handoff-cancel', 'factory.handoff.cancel', 'lead'],
+            ['factory-handoff-now', 'factory.handoff.start', 'lead'],
+            ['factory-handoff-replace-now', 'factory.handoff.replace.now', 'peer:gone'],
+            ['factory-handoff-view', 'factory.handoff.handover', 'peer:gone'],
+          ]) {
+            const button = container.querySelector(`[data-testid="${id}"]`) as HTMLElement;
+            assert.ok(button); await act(() => button.click());
+            assert.deepEqual(calls.filter(c => c.method !== 'factory.snapshot').at(-1), { method, input: { projectRoot: '/project', seat } });
+          }
+          assert.match(container.querySelector('[data-testid="factory-handover-modal"]')!.textContent!, /Extracted handover.*Extracted goals/);
+        }
+        assert.equal(calls.some(c => c.method === 'factory.handoff.retry'), false);
+      } finally { await act(() => root.unmount()); }
+    });
+  } finally { g.__factoryClientRpc = prior; }
 });

@@ -142,3 +142,27 @@ test('Lead ensure cannot bypass handoff for an errored standing seat', async t =
   const reply = await f.surface.leadEnsure({ projectRoot: f.root });
   assert.equal(reply.ok, false); assert.deepEqual(f.archived, []); assert.equal(f.created.length, 0);
 });
+
+test('Replace now recovers a failed Supervisor successor through the public handoff door', async t => {
+  const f = fixture(t);
+  f.failCreate(true);
+  const failed = await f.surface.handoff({ projectRoot: f.root, seat: 'supervisor' }, 'replaceNow');
+  assert.ok(failed.ok); assert.equal(failed.progress?.state, 'failed');
+  const before = await f.surface.handoff({ projectRoot: f.root, seat: 'supervisor' }, 'handover');
+  assert.ok(before.ok);
+  f.failCreate(false);
+  const replaced = await f.surface.handoff({ projectRoot: f.root, seat: 'supervisor' }, 'replaceNow');
+  assert.ok(replaced.ok); assert.equal(replaced.progress?.state, 'done');
+  assert.equal(f.created.length, 1);
+  assert.ok(f.sent.find(s => s.id === 'successor-1')?.text.includes(before.text!));
+});
+
+test('panel exposes recovery actions on failed handoffs independently of live seat rows', async t => {
+  const f = fixture(t);
+  f.failCreate(true);
+  await f.surface.handoff({ projectRoot: f.root, seat: 'supervisor' }, 'replaceNow');
+  f.agents[0]!.archivedAt = new Date().toISOString();
+  const snapshot = await f.surface.snapshot({ projectRoot: f.root });
+  assert.ok(snapshot.ok);
+  assert.deepEqual(snapshot.view.panel?.handoffs[0]?.allowedActions, ['replace-now', 'retry', 'view-handover']);
+});

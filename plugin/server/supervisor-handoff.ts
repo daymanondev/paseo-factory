@@ -125,7 +125,7 @@ export function createSupervisorHandoffRuntime(deps: {
         update(slug, { state: 'creating-successor', failure: undefined }); await complete(slug); return { ok: true, progress: progress(slug) };
       }
       if (active(slug)) {
-        if (input.action === 'replaceNow' && current?.state === 'handing-over') { await complete(slug); return { ok: true, progress: progress(slug) }; }
+        if (input.action === 'replaceNow' && current && ['handing-over', 'substitute', 'creating-successor', 'failed'].includes(current.state)) { await complete(slug); return { ok: true, progress: progress(slug) }; }
         return { ok: false, code: 'handoff-in-progress', error: 'A Supervisor handoff is already active' };
       }
       const lanes = loadLanes(deps.stateDir, slug); if (!lanes.ok) return { ok: false, code: 'lanes-unreadable', error: lanes.reason };

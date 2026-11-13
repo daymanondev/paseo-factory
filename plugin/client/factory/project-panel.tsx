@@ -26,15 +26,17 @@ export interface ProjectPanelActions {
   openAgent(agentId: string): void;
   /** Install the missing required skills & tools (desktop only — a settings write). */
   installPrerequisites(): void;
-  /** Request a continuity handoff for the live Lead (also on mobile). */
-  handoffLead(): void;
-  /** Existing Supervisor handoff callback; W12 brings actions onto each seat row. */
-  revokeSupervisor(): void;
+  handoffStart(seat: string): void;
+  handoffReplaceNow(seat: string): void;
+  handoffCancel(seat: string): void;
+  /** Failed handoff retry is Desktop-only. */
+  handoffRetry(seat: string): void;
+  viewHandover(seat: string): void;
   /** Start the Supervisor on a vacant seat with the Owner's optional first directive (desktop only). */
   startSupervisor(directive: string): void;
   /** Sync the linked Open Design project again from the host — a broken link's primary action (desktop only). */
   syncOpenDesign(): void;
-  /** "Use this chat as Supervisor" (v0.6.1, ADR 0057 §5) — adopt a candidate chat; the one seat write mobile may perform (ADR 0057 §10). */
+  /** "Use this chat as Supervisor" (v0.6.1, ADR 0057 §5) — adopt a candidate chat; available on mobile (ADR 0057 §10). */
   adoptSupervisor(agentId: string): void;
   /** Every Peer choice requests a handoff; worker choices configure future Peers. */
   saveSeatModel?(seat: string, value: string): Promise<boolean> | void;
@@ -54,7 +56,6 @@ export interface ProjectPanelActions {
  */
 export interface ProjectPanelInitialUi {
   menuOpen?: boolean;
-  supervisorMenuOpen?: boolean;
   directive?: string;
   /** Stable targets: supervisor, lead, peer:<task>, worker. */
   editingSeat?: string;
@@ -131,8 +132,8 @@ function NeedsYouRow({ theme, item, mobile, actions }: { theme: PluginTheme; ite
       {action.kind === "open-agent" ? (
         <Btn theme={theme} small testID={buttonId} label={action.label} onPress={() => actions.openAgent(action.agentId)} />
       ) : action.kind === "handoff-supervisor" ? (
-        <Btn theme={theme} small testID={buttonId} label={action.label} disabled={actions.busy} onPress={actions.revokeSupervisor} />
-      ) : action.kind === "retry-handoff" ? null : mobile ? (
+        <Btn theme={theme} small testID={buttonId} label={action.label} disabled={actions.busy} onPress={() => actions.handoffStart("supervisor")} />
+      ) : action.kind === "retry-handoff" ? (mobile ? <Text style={text(theme, "meta")}>Try again on Paseo Desktop, or use Replace now below.</Text> : <Btn theme={theme} small testID={buttonId} label={action.label} disabled={actions.busy} onPress={() => actions.handoffRetry(action.seat)} />) : mobile ? (
         <Text testID={`factory-panel-needs-you-hint-${item.key}`} style={text(theme, "meta")}>{DESKTOP_ONLY_HINT[action.kind]}</Text>
       ) : action.kind === "install-prerequisites" ? (
         <Btn theme={theme} small testID={buttonId} label={action.label} disabled={actions.busy} onPress={actions.installPrerequisites} />
@@ -203,7 +204,6 @@ function SeatRow({
   initialUi?: ProjectPanelInitialUi;
 }) {
   const colour = toneColour(row.tone);
-  const [menuOpen, setMenuOpen] = useState(initialUi?.supervisorMenuOpen === true);
   const [directive, setDirective] = useState(initialUi?.directive ?? "");
   const isSupervisor = row.role === "supervisor";
   const live = !row.vacant && row.agentId !== null;
@@ -213,7 +213,7 @@ function SeatRow({
       <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[2] }}>
         <RoleName theme={theme} role={row.role} label={name} />
         <Text style={{ ...text(theme, "label"), color: seatStateColour(theme, row) }}>{row.statusLabel}</Text>
-        <SeatModelChip theme={theme} seat={row.role} lane={row.lane} pendingLane={row.pendingLane} live={live} editable={!live || row.allowedActions.includes("switch-model")} />
+        <SeatModelChip theme={theme} seat={row.role} lane={row.lane} pendingLane={row.pendingLane} live={live} editable={(!live && (row.handoff === null || row.handoff.state === "done")) || row.allowedActions.includes("switch-model")} />
       </View>
       {row.hint !== null ? <Text style={text(theme, "meta", colour)}>{row.hint}</Text> : null}
       {row.context !== null ? <ContextBar theme={theme} context={row.context} /> : null}
@@ -221,30 +221,10 @@ function SeatRow({
       {live && agentId !== null ? (
         <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[1.5] }}>
           <Btn theme={theme} small testID={`factory-panel-open-${row.role}`} label="Open" onPress={() => actions.openAgent(agentId)} />
-          {row.role === "lead" ? (
-            <Btn theme={theme} small testID="factory-panel-handoff-lead" label="Hand off now" tone="foregroundMuted" disabled={actions.busy} onPress={actions.handoffLead} />
-          ) : null}
-          {isSupervisor ? (
-            <Btn theme={theme} small testID="factory-panel-supervisor-menu" label="⋯" tone="foregroundMuted" onPress={() => setMenuOpen(!menuOpen)} />
-          ) : null}
+          {row.allowedActions.includes("hand-off-now") ? <Btn theme={theme} small testID={`factory-seat-hand-off-now-${row.role}`} label="Hand off now" disabled={actions.busy} onPress={() => actions.handoffStart(row.role)} /> : null}
         </View>
       ) : null}
-      {isSupervisor && live && menuOpen ? (
-        <View testID="factory-panel-supervisor-menu-open" style={{ flexDirection: "row", flexWrap: "wrap", gap: SPACING[1.5] }}>
-          <Btn
-            theme={theme}
-            small
-            testID="factory-panel-revoke-supervisor"
-            label="Hand off now"
-            tone="statusWarning"
-            disabled={actions.busy}
-            onPress={() => {
-              setMenuOpen(false);
-              actions.revokeSupervisor();
-            }}
-          />
-        </View>
-      ) : null}
+      {row.allowedActions.includes("view-handover") ? <Btn theme={theme} small testID={`factory-seat-view-handover-${row.role}`} label="View handover" disabled={actions.busy} onPress={() => actions.viewHandover(row.role)} /> : null}
       {isSupervisor && row.vacant && !mobile ? (
         <View style={{ gap: SPACING[1.5] }}>
           <TextInput
@@ -291,15 +271,19 @@ function PeerRowView({ theme, row, actions }: { theme: PluginTheme; row: PanelPe
       </View>
       <SeatModelChip theme={theme} seat={`peer-${row.task}`} target={`peer:${row.task}`} lane={row.lane} pendingLane={row.pendingLane} editable={row.allowedActions.includes("switch-model")} />
       <ContextBar theme={theme} context={row.context} />
-      <Btn theme={theme} small testID={`factory-panel-open-peer-${row.task}`} label="Open" onPress={() => actions.openAgent(row.agentId)} />
+      <View style={{ flexDirection: "row", flexWrap: "wrap", gap: SPACING[1.5] }}>
+        <Btn theme={theme} small testID={`factory-panel-open-peer-${row.task}`} label="Open" onPress={() => actions.openAgent(row.agentId)} />
+        {row.allowedActions.includes("hand-off-now") ? <Btn theme={theme} small testID={`factory-seat-hand-off-now-peer-${row.task}`} label="Replace this Peer" disabled={actions.busy} onPress={() => actions.handoffStart(`peer:${row.task}`)} /> : null}
+        {row.allowedActions.includes("view-handover") ? <Btn theme={theme} small testID={`factory-seat-view-handover-peer-${row.task}`} label="View handover" disabled={actions.busy} onPress={() => actions.viewHandover(`peer:${row.task}`)} /> : null}
+      </View>
     </View></View>
   );
 }
 
 /**
  * One Supervisor candidate chat (v0.6.1, ADR 0057 §5) — the Owner's way to
- * choose it over the still-live bound Supervisor. The adopt button is the one
- * seat write mobile may perform (ADR 0057 §10), so it never gates on `mobile`.
+ * choose it over the still-live bound Supervisor. Adoption is available on mobile
+ * (ADR 0057 §10), so this action never gates on `mobile`.
  */
 function SupervisorCandidateRow({ theme, row, actions }: { theme: PluginTheme; row: PanelSupervisorCandidateRow; actions: ProjectPanelActions }) {
   const colour = toneColour(row.tone);
@@ -461,7 +445,7 @@ function SeatModelEditor({ theme, lane, target, live, editor }: { theme: PluginT
 }
 
 /** Independent progress also includes failed handoffs whose outgoing Peer no longer exists. */
-export function HandoffBlock({ theme, handoffs }: { theme: PluginTheme; handoffs: PanelView["handoffs"] }) {
+export function HandoffBlock({ theme, handoffs, mobile, actions }: { theme: PluginTheme; handoffs: PanelView["handoffs"]; mobile: boolean; actions: ProjectPanelActions }) {
   if (handoffs.length === 0) return null;
   const palette = factoryPalette(theme);
   const colour = handoffs.some((h) => h.state === "failed") ? palette.bad : handoffs.every((h) => h.state === "done") ? palette.ok : palette.move;
@@ -469,11 +453,21 @@ export function HandoffBlock({ theme, handoffs }: { theme: PluginTheme; handoffs
   return <View testID="factory-handoff-block" style={{ gap: SPACING[2], padding: SPACING[3], borderRadius: RADIUS.lg, borderWidth: 1, borderColor: colour, backgroundColor: tint(colour, "1a") }}>
     <SectionTitle theme={theme} label="Handoff" />
     {handoffs.map((handoff) => <View key={handoff.seat} testID={`factory-handoff-${handoff.seat}`} style={{ gap: SPACING[1] }}>
-      <Text style={{ ...text(theme, "rowTitle"), color: handoff.state === "failed" ? palette.bad : handoff.state === "done" ? palette.ok : palette.move }}>{handoff.seat} · {stateLabel[handoff.state]}</Text>
-      <Text style={text(theme, "meta")}>{handoff.reason === "context-mark" ? "Context mark" : handoff.reason === "provider-change" ? "Provider change" : "Owner requested"} · {handoff.fromLane.model} → {handoff.toLane.model}</Text>
-      {handoff.waitingPeers === undefined ? null : <Text style={text(theme, "meta")}>Waiting for {handoff.waitingPeers} Peers</Text>}
-      {handoff.handover === "substitute" ? <Text style={text(theme, "meta")}>Substitute handover</Text> : null}
+      <View style={{ flexDirection: "row", flexWrap: "wrap", gap: SPACING[1.5] }}>
+        <RoleName theme={theme} role={handoff.seat.startsWith("peer:") ? "peer" : handoff.seat === "supervisor" ? "supervisor" : "lead"} label={handoff.seat.startsWith("peer:") ? `Peer · ${handoff.seat.slice(5)}` : handoff.seat === "supervisor" ? "Supervisor" : "Lead"} />
+        <Text style={{ ...text(theme, "rowTitle"), color: handoff.state === "failed" ? palette.bad : palette.move }}>{stateLabel[handoff.state]}</Text>
+      </View>
+      <Text style={text(theme, "meta")}>{handoff.reason === "context-mark" ? "Context mark" : handoff.reason === "provider-change" ? "Provider change" : "Owner requested"} · {handoff.fromLane.provider}/{handoff.fromLane.model} → {handoff.toLane.provider}/{handoff.toLane.model}</Text>
+      {handoff.state !== "scheduled" ? null : <Text style={text(theme, "meta")}>Scheduled · waiting for {handoff.waitingPeers ?? 0} Peers</Text>}
+      {handoff.handover === "substitute" ? <Text style={text(theme, "meta")}>plugin-built handover</Text> : null}
       {handoff.failure === undefined ? null : <Text style={{ ...text(theme, "meta"), color: palette.bad }}>{handoff.failure}</Text>}
+      <View style={{ flexDirection: "row", flexWrap: "wrap", gap: SPACING[1.5] }}>
+        {handoff.allowedActions.includes("cancel") ? <Btn theme={theme} small testID="factory-handoff-cancel" label="Cancel" disabled={actions.busy} onPress={() => actions.handoffCancel(handoff.seat)} /> : null}
+        {handoff.allowedActions.includes("hand-off-now") ? <Btn theme={theme} small testID="factory-handoff-now" label="Hand off now" disabled={actions.busy} onPress={() => actions.handoffStart(handoff.seat)} /> : null}
+        {handoff.allowedActions.includes("replace-now") ? <Btn theme={theme} small testID="factory-handoff-replace-now" label="Replace now" disabled={actions.busy} onPress={() => actions.handoffReplaceNow(handoff.seat)} /> : null}
+        {!mobile && handoff.allowedActions.includes("retry") ? <Btn theme={theme} small testID="factory-handoff-retry" label="Try again" disabled={actions.busy} onPress={() => actions.handoffRetry(handoff.seat)} /> : null}
+        {handoff.allowedActions.includes("view-handover") ? <Btn theme={theme} small testID="factory-handoff-view" label="View handover" disabled={actions.busy} onPress={() => actions.viewHandover(handoff.seat)} /> : null}
+      </View>
     </View>)}
   </View>;
 }
@@ -525,7 +519,7 @@ export function ProjectPanel({
   const hasMenu = panel.isProject && menu !== null;
   const boundary = (section: string, children: ReactNode) => <FactoryTabErrorBoundary theme={theme} section={section}>{children}</FactoryTabErrorBoundary>;
   const needsYou = <NeedsYou theme={theme} items={panel.needsYou} mobile={mobile} actions={actions} />;
-  const handoff = <HandoffBlock theme={theme} handoffs={panel.handoffs} />;
+  const handoff = <HandoffBlock theme={theme} handoffs={panel.handoffs} mobile={mobile} actions={actions} />;
   const seats = panel.seats === null ? null : <Seats theme={theme} seats={panel.seats} mobile={mobile} actions={actions} {...(initialUi === undefined ? {} : { initialUi })} />;
   const worker = panel.defaultWorker === null ? null : <Block theme={theme} testID="factory-default-worker"><SectionTitle theme={theme} label="Default worker" /><SeatModelChip theme={theme} seat="worker" lane={panel.defaultWorker.lane} pendingLane={null} /></Block>;
   const packs = <SkillPacks theme={theme} packs={skillPacks} busy={actions.busy} {...(!mobile && actions.toggleSkillPack !== undefined ? { onToggle: actions.toggleSkillPack } : {})} />;
