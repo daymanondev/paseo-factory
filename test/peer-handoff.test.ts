@@ -61,13 +61,14 @@ function fixture(t: TestContext, handoffTimeoutMs?: number) {
     providers: { listAvailable: async () => ({ providers: [] }), listModels: async () => ({ models: [] }) },
   };
   const stopAgent = async (id: string) => { stopped.push(id); if (stopFails) return { ok: false as const, reason: "stop failed" }; const agent = agents.find(a => a.id === id); if (agent) agent.status = "idle"; return { ok: true as const }; };
-  const surface = createSurfaceHandlers({ factory, stateDir, home: join(dir, "home"), daemon, stopAgent });
+  let runtime: ReturnType<typeof createLeadMailRuntime>;
+  const surface = createSurfaceHandlers({ factory, stateDir, home: join(dir, "home"), daemon, stopAgent, handoff: input => runtime.handoff(input) });
   const logs: string[] = [];
   const makeRuntime = () => createLeadMailRuntime({ factory, stateDir, home: join(dir, "home"), daemon, stopAgent, handoffTimeoutMs, ensureLead: input => surface.leadEnsure(input), retireLead: input => surface.leadRotate(input), onLog: text => logs.push(text) });
-  const runtime = makeRuntime();
+  runtime = makeRuntime();
   const spool = startSpool(stateDir, factory, { daemon, stopAgent, peerMail: runtime.notifyPeer });
   t.after(() => { runtime.stop(); spool.stop(); });
-  return { dir, root, slug, stateDir, factory, cwd, sha, peer, agents, daemon, sent, created, stopped, archived, runtime, makeRuntime, logs, failSend: () => { sendFails = true; }, failStop: (value = true) => { stopFails = value; }, failArchive: (value = true) => { archiveFails = value; }, handoff: join(projectStateDir(stateDir, slug), "peer-handoff-T-04.md") };
+  return { dir, root, slug, stateDir, factory, cwd, sha, peer, agents, daemon, sent, created, stopped, archived, runtime, surface, makeRuntime, logs, failSend: () => { sendFails = true; }, failStop: (value = true) => { stopFails = value; }, failArchive: (value = true) => { archiveFails = value; }, handoff: join(projectStateDir(stateDir, slug), "peer-handoff-T-04.md") };
 }
 
 const ended = (agentId: string, text = "") => ({ agentId, outcome: { kind: "completed" as const }, timeline: text ? [{ type: "assistant_message", text }] : [] });
@@ -258,7 +259,7 @@ test("re-contracting during extraction invalidates the pending handoff instead o
 });
 
 for (const snapshot of ["split", "combined"] as const) {
-test(`successor reuses the Task's Paseo workspace and ${snapshot} provider lane`, async t => {
+test(`successor reuses the Task workspace and current worker lane instead of the outgoing ${snapshot} lane`, async t => {
   const f = fixture(t);
   f.peer.provider = "antigravity";
   f.peer.model = "claude-sonnet-5-5-high";
@@ -275,7 +276,7 @@ test(`successor reuses the Task's Paseo workspace and ${snapshot} provider lane`
   await f.runtime.onLeadTurnEnded(ended(f.peer.id));
   await f.runtime.onLeadTurnEnded(ended(f.peer.id, "Existing Task workspace."));
   assert.deepEqual(workspaces, ["task-workspace"]);
-  assert.deepEqual(f.created[0]!.config, { provider: "antigravity/claude-sonnet-5-5-high", thinkingOptionId: "max" });
+  assert.deepEqual(f.created[0]!.config, { provider: "pi/zcode/glm-5.3" });
 });
 }
 
@@ -304,7 +305,7 @@ test("failed successor creation adopts a replacement supplied by another caller 
   f.daemon.agents.create = create;
   const replacement = { ...f.peer, id: "manual-replacement", status: "running", lastUsage: null, archivedAt: null };
   f.agents.unshift(replacement);
-  await f.runtime.sweepPeers();
+  await f.runtime.handoff({ slug: f.slug, seat: "peer:T-04", action: "retry" });
   assert.equal(f.created.length, 0, "recovery must not create a second active Peer");
   assert.deepEqual(f.agents.filter(a => a.archivedAt === null && a.labels.seat === "agent").map(a => a.id), [replacement.id]);
 });
@@ -386,7 +387,7 @@ test("restart recovery counts an automatic successor even if it was already arch
   f.daemon.agents.create = create;
   const restarted = f.makeRuntime();
   t.after(() => restarted.stop());
-  await restarted.sweepPeers();
+  await restarted.handoff({ slug: f.slug, seat: "peer:T-04", action: "retry" });
   assert.equal(f.created.length, 1, "archived successor still spends the allowance");
 });
 
@@ -483,4 +484,117 @@ test("Peer rejects a pre-existing local handoff even if its file timestamp is ah
   await f.runtime.onLeadTurnEnded(ended(f.peer.id));
   await f.runtime.onLeadTurnEnded(ended(f.peer.id));
   assert.match(readFileSync(f.handoff, "utf8"), /outgoing Peer was interrupted/);
+});
+
+
+test("Owner Peer handoff uses its chosen lane, preserves Task continuity, and leaves automatic succession available", async t => {
+  const f = fixture(t);
+  f.peer.lastUsage = null;
+  const before = f.factory.ledger.events.filter(event => "task" in event && event.task === "T-04");
+  const started = await f.surface.handoff({ projectRoot: f.root, seat: "peer:T-04", lane: "codex/chosen:high" }, "start");
+  assert.equal(started.ok, true);
+  if (started.ok) assert.equal(started.progress?.state, "handing-over");
+  await f.runtime.onLeadTurnEnded(ended(f.peer.id, "# Peer handoff\nContinue verified progress."));
+  assert.equal(f.created.length, 1, f.logs.join("\n"));
+  assert.deepEqual(f.created[0]!.config, { provider: "codex/chosen", thinkingOptionId: "high" });
+  assert.equal(f.created[0]!.cwd, f.cwd);
+  assert.deepEqual(f.factory.ledger.events.filter(event => "task" in event && event.task === "T-04"), before);
+  assert.equal(readFileSync(join(f.cwd, "pending.txt"), "utf8"), "unfinished work\n");
+  assert.ok(f.sent.some(message => message.id === "lead" && /T-04/.test(message.text) && /pi\/model/.test(message.text) && /codex\/chosen/.test(message.text) && /extracted/.test(message.text)), "Lead receives the Owner replacement notice");
+  const successor = f.agents.find(agent => agent.id === "successor-1")!;
+  successor.lastUsage = { contextWindowUsedTokens: 165_000 };
+  await f.runtime.onLeadTurnEnded(ended(successor.id));
+  await f.runtime.onLeadTurnEnded(ended(successor.id, "Automatic continuation."));
+  assert.equal(f.created.length, 2, "Owner replacement did not consume automatic budget");
+  assert.deepEqual(f.created[1]!.config, { provider: "codex/chosen", thinkingOptionId: "high" }, "per-Peer choice survives automatic succession");
+});
+
+
+test("worker changes leave the running Peer alone and successors use the latest Project lane at creation", async t => {
+  const f = fixture(t);
+  await f.runtime.onLeadTurnEnded(ended(f.peer.id));
+  const saved = await f.surface.lanesSet({ projectRoot: f.root, lane: "worker", value: "codex/current:medium" });
+  assert.equal(saved.ok, true);
+  assert.deepEqual(f.archived, []);
+  assert.equal(f.peer.provider, "pi/model");
+  await f.runtime.onLeadTurnEnded(ended(f.peer.id, "Continue using the latest worker lane."));
+  assert.deepEqual(f.created[0]!.config, { provider: "codex/current", thinkingOptionId: "medium" });
+});
+
+test("Owner Replace now persists a substitute and failed creation retries across restart without another extraction", async t => {
+  const f = fixture(t);
+  f.peer.lastUsage = null;
+  const create = f.daemon.agents.create;
+  f.daemon.agents.create = async () => { throw new Error("provider unavailable"); };
+  const failed = await f.surface.handoff({ projectRoot: f.root, seat: "peer:T-04", lane: "codex/retry:high" }, "replaceNow");
+  assert.equal(failed.ok, true);
+  if (failed.ok) { assert.equal(failed.progress?.state, "failed"); assert.equal(failed.progress?.handover, "substitute"); }
+  assert.equal(f.sent.filter(message => message.id === f.peer.id).length, 0);
+  const saved = readFileSync(f.handoff, "utf8");
+  for (const section of ["Plugin-built handover", "Ledger digest", "Project notebook", "Git state", "Open Tasks", "Recent timeline"]) assert.ok(saved.includes(section));
+  f.runtime.stop();
+  const restarted = f.makeRuntime(); t.after(() => restarted.stop());
+  f.daemon.agents.create = create;
+  const retried = await restarted.handoff({ slug: f.slug, seat: "peer:T-04", action: "retry" });
+  assert.equal(retried.ok, true);
+  if (retried.ok) assert.equal(retried.progress?.state, "done");
+  assert.equal(f.created.length, 1);
+  assert.deepEqual(f.created[0]!.config, { provider: "codex/retry", thinkingOptionId: "high" });
+  assert.ok(f.created[0]!.prompt!.includes(saved));
+  await restarted.sweepPeers();
+  const mailbox = readLeadMailbox(join(projectStateDir(f.stateDir, f.slug), "mailbox.jsonl"));
+  assert.equal([...mailbox.queued, ...(mailbox.inFlight?.items ?? [])].filter(item => item.text.includes("Owner replaced Peer")).length, 1);
+});
+
+test("Owner no-reply handoff uses the 90-second fuse and keeps handover source after done expires", async t => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"] });
+  const f = fixture(t);
+  f.peer.lastUsage = null;
+  await f.surface.handoff({ projectRoot: f.root, seat: "peer:T-04" }, "start");
+  t.mock.timers.tick(89_999);
+  await f.runtime.sweepPeers();
+  assert.equal(f.created.length, 0);
+  t.mock.timers.tick(1);
+  await f.runtime.sweepPeers();
+  assert.equal(f.created.length, 1);
+  t.mock.timers.tick(20_001);
+  const handover = await f.surface.handoff({ projectRoot: f.root, seat: "peer:T-04" }, "handover");
+  assert.equal(handover.ok, true);
+  if (handover.ok) { assert.equal(handover.progress, null); assert.equal(handover.source, "substitute"); assert.match(handover.text!, /^# Plugin-built handover/); }
+});
+
+
+test("automatic successor creation failure stays visible until Owner retry and preserves the automatic budget", async t => {
+  const f = fixture(t);
+  const create = f.daemon.agents.create;
+  f.daemon.agents.create = async () => { throw new Error("quota exhausted"); };
+  await f.runtime.onLeadTurnEnded(ended(f.peer.id));
+  await f.runtime.onLeadTurnEnded(ended(f.peer.id, "# Verified partial work\nContinue from README."));
+  f.daemon.agents.create = create;
+  await f.runtime.sweepPeers();
+  assert.equal(f.created.length, 0, "sweep must preserve the failed state for Owner action");
+  const failed = await f.surface.handoff({ projectRoot: f.root, seat: "peer:T-04" }, "handover");
+  assert.equal(failed.ok, true);
+  if (failed.ok) assert.equal(failed.progress?.state, "failed");
+  const retried = await f.surface.handoff({ projectRoot: f.root, seat: "peer:T-04" }, "retry");
+  assert.equal(retried.ok, true);
+  assert.equal(f.created.length, 1);
+  const successor = f.agents.find(agent => agent.id === "successor-1")!;
+  successor.lastUsage = null;
+  const owner = await f.surface.handoff({ projectRoot: f.root, seat: "peer:T-04" }, "replaceNow");
+  assert.equal(owner.ok, true);
+  assert.equal(f.created.length, 2, "Owner replacement still works after the automatic budget is spent");
+});
+
+test("Owner Peer handoff refuses protected or missing Tasks before interrupting the Peer", async t => {
+  const f = fixture(t);
+  const missing = await f.surface.handoff({ projectRoot: f.root, seat: "peer:T-99" }, "start");
+  assert.equal(missing.ok, false);
+  if (!missing.ok) assert.equal(missing.code, "unknown-task");
+  f.factory.ledger.append({ event: "gate_started", task: "T-04", attempt: 1, cmd: "true" });
+  const verifying = await f.surface.handoff({ projectRoot: f.root, seat: "peer:T-04" }, "start");
+  assert.equal(verifying.ok, false);
+  if (!verifying.ok) assert.equal(verifying.code, "peer-task-ineligible");
+  assert.equal(f.sent.length, 0);
+  assert.equal(f.stopped.length, 0);
 });
