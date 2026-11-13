@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-11-14
+
+**Every provider reachable, a quieter seat pill, and later handoffs.**
+
+### Changed
+
+- **Provider dropdown in the model picker.** The one-line provider row (where providers past the edge were invisible on Desktop) is now a dropdown beside the search: `All providers` with the total, then every provider with its model count and a warning icon when it lists none.
+- **Seat pill popover.** Title + close, one `model · thinking · provider` line, a handoff line only while one is in flight or failed, a Recent models list showing each model's provider and whether it switches or hands off, then "Hand off to a fresh session" and "Other model…". The Role / Context / Project / Handoff rows and the Close button are gone.
+- **Later handoff marks.** Supervisor and Lead hand off at 160k tokens (was 128k), Peers at 200k (was 160k). A model with a known smaller window still hands off at 65% (Supervisor/Lead) / 80% (Peer) of it, so the handover turn has room.
+
+### Fixed
+
+- The seat pill no longer offers the seat's current model as a "Switch" (a no-op); other thinking levels of the same model are still offered.
+
 ## [0.8.1] - 2026-11-13
 
 **Cancel a handoff, and a model picker that fits.**
