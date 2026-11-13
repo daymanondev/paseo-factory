@@ -7271,7 +7271,7 @@ test("snapshot and directory recover opencode context after restart from the lat
   insert.run("later-no-usage", "ses-restart", "assistant", 4, 40, "{}");
   const snap = await handlers.snapshot({ projectRoot: project.root });
   assert.ok(snap.ok, snap.ok ? "" : snap.error);
-  assert.deepEqual(snap.view.panel.seats!.lead.context, { usedTokens: 86_000, markTokens: 83_200, label: "86k / 83k", fraction: 1 });
+  assert.deepEqual(snap.view.panel.seats!.lead.context, { state: "used", usedTokens: 86_000, markTokens: 83_200, label: "86k / 83k", fraction: 1 });
   const directory = await handlers.seatsDirectory({});
   assert.ok(directory.ok);
   assert.equal(directory.seats[0]!.contextUsedTokens, 86_000);
