@@ -469,15 +469,17 @@ test('W12: mobile handoffs expose start, force, cancel and read while excluding 
     await mountUnderNativeWindow(async (createRoot, container, act) => {
       const root = createRoot(container);
       try {
-        for (const platform of ['ios', 'android']) {
-          await act(() => root.render(createElement(FactoryShell, { key: platform, theme: testTheme, dir: '/project', layout: { compact: true, platform } })));
+        for (const [platform, failedSeat] of [['ios', 'lead'], ['android', 'lead'], ['ios', 'peer:gone'], ['android', 'peer:gone']]) {
+          const scheduledSeat = failedSeat === 'lead' ? 'supervisor' : 'lead';
+          panel.handoffs = [{ ...base, seat: scheduledSeat, allowedActions: ['cancel', 'hand-off-now'] }, { ...base, seat: failedSeat, state: 'failed', allowedActions: ['retry', 'replace-now', 'view-handover'] }];
+          await act(() => root.render(createElement(FactoryShell, { key: `${platform}-${failedSeat}`, theme: testTheme, dir: '/project', layout: { compact: true, platform } })));
           assert.equal(container.querySelector('[data-testid="factory-handoff-retry"]'), null);
           assert.equal(container.querySelector('[data-testid="factory-panel-needs-you-action-failed-peer"]'), null);
           for (const [id, method, seat] of [
-            ['factory-handoff-cancel', 'factory.handoff.cancel', 'lead'],
-            ['factory-handoff-now', 'factory.handoff.start', 'lead'],
-            ['factory-handoff-replace-now', 'factory.handoff.replace.now', 'peer:gone'],
-            ['factory-handoff-view', 'factory.handoff.handover', 'peer:gone'],
+            ['factory-handoff-cancel', 'factory.handoff.cancel', scheduledSeat],
+            ['factory-handoff-now', 'factory.handoff.start', scheduledSeat],
+            ['factory-handoff-replace-now', 'factory.handoff.replace.now', failedSeat],
+            ['factory-handoff-view', 'factory.handoff.handover', failedSeat],
           ]) {
             const button = container.querySelector(`[data-testid="${id}"]`) as HTMLElement;
             assert.ok(button); await act(() => button.click());

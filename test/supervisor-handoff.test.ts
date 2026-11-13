@@ -32,7 +32,7 @@ function fixture(t: TestContext, options: { parented?: boolean; backgroundLead?:
   const makeRuntime = () => createLeadMailRuntime({ factory, stateDir, daemon, home: dir, ensureLead: input => surface.leadEnsure(input), retireLead: input => surface.leadRotate(input), ownerHandoffTimeoutMs: options.timeout ?? 10000, stopAgent: async id => { stopped.push(id); return { ok: true }; } });
   let runtime = makeRuntime();
   t.after(() => runtime.stop());
-  return { ...project, stateDir, surface, get runtime() { return runtime; }, restart() { runtime.stop(); runtime = makeRuntime(); runtime.startupRecovery(); }, sent, archived, stopped, created, agents, factory, mailbox: () => readLeadMailbox(join(projectStateDir(stateDir, project.slug), 'mailbox.jsonl')), failCreate: (value: boolean) => { failCreate = value; }, failSend: (value: boolean) => { failSend = value; } };
+  return { ...project, stateDir, surface, get runtime() { return runtime; }, restart() { runtime.stop(); runtime = makeRuntime(); runtime.startupRecovery(); }, sent, archived, stopped, created, agents, factory, daemon, mailbox: () => readLeadMailbox(join(projectStateDir(stateDir, project.slug), 'mailbox.jsonl')), failCreate: (value: boolean) => { failCreate = value; }, failSend: (value: boolean) => { failSend = value; } };
 }
 
 test('Supervisor provider handoff carries Owner goals and held reports into its successor while the Lead keeps working', async t => {
@@ -165,4 +165,77 @@ test('panel exposes recovery actions on failed handoffs independently of live se
   const snapshot = await f.surface.snapshot({ projectRoot: f.root });
   assert.ok(snapshot.ok);
   assert.deepEqual(snapshot.view.panel?.handoffs[0]?.allowedActions, ['replace-now', 'retry', 'view-handover']);
+});
+
+
+test('running Supervisor ignores the interrupted Owner turn and hands over only after its extraction reply', async t => {
+  const f = fixture(t);
+  f.agents[0]!.status = 'running';
+  const started = await f.surface.handoff({ projectRoot: f.root, seat: 'supervisor' }, 'start');
+  assert.ok(started.ok); assert.equal(started.progress?.state, 'handing-over');
+  // SDK default send interrupts the previous Owner turn before the extraction turn ends.
+  await f.runtime.onLeadTurnEnded({ agentId: 'old', outcome: { kind: 'canceled' }, timeline: [] });
+  const waiting = await f.surface.handoff({ projectRoot: f.root, seat: 'supervisor' }, 'handover');
+  assert.ok(waiting.ok); assert.equal(waiting.progress?.state, 'handing-over');
+  assert.equal(f.created.length, 0); assert.deepEqual(f.archived, []);
+  await f.runtime.onLeadTurnEnded({ agentId: 'old', outcome: { kind: 'completed' }, timeline: [{ type: 'assistant_message', text: '## Owner goals\nPreserve the active conversation\n## Decisions taken\nKeep the Lead working\n## Open questions\nNext milestone' }] });
+  const completed = await f.surface.handoff({ projectRoot: f.root, seat: 'supervisor' }, 'handover');
+  assert.ok(completed.ok); assert.equal(completed.progress?.state, 'done'); assert.equal(completed.source, 'extracted');
+  assert.match(f.sent.find(s => s.id === 'successor-1')?.text ?? '', /Preserve the active conversation/);
+  assert.deepEqual(f.archived, ['old']);
+});
+
+
+for (const extractionOutcome of ['failed', 'canceled', 'timeout'] as const) {
+  test(`running Supervisor falls back after Owner cancellation when extraction ${extractionOutcome}`, async t => {
+    const f = fixture(t, { timeout: extractionOutcome === 'timeout' ? 25 : 10000 });
+    f.agents[0]!.status = 'running';
+    await f.surface.handoff({ projectRoot: f.root, seat: 'supervisor' }, 'start');
+    await f.runtime.onLeadTurnEnded({ agentId: 'old', outcome: { kind: 'canceled' }, timeline: [] });
+    assert.equal(f.created.length, 0);
+    const ref = f.daemon.agents.ref;
+    f.daemon.agents.ref = id => ({ ...ref(id), timeline: { refetch: async () => ({ entries: [{ item: { type: 'assistant_message', text: '# Previous Owner turn\nThis is old conversation evidence.' } }] }) } });
+    if (extractionOutcome === 'timeout') {
+      const deadline = Date.now() + 2000;
+      while (!f.created.length && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+    } else await f.runtime.onLeadTurnEnded({ agentId: 'old', outcome: { kind: extractionOutcome }, timeline: [] });
+    const handover = await f.surface.handoff({ projectRoot: f.root, seat: 'supervisor' }, 'handover');
+    assert.ok(handover.ok); assert.equal(handover.progress?.state, 'done'); assert.equal(handover.source, 'substitute');
+    assert.equal(f.created.length, 1);
+    assert.equal(f.sent.filter(s => s.id === 'old' && /reply first/.test(s.text)).length, 1);
+  });
+}
+
+
+test('Supervisor handoff survives restart and recovers an empty completed event from the SDK tail', async t => {
+  const f = fixture(t);
+  f.agents[0]!.status = 'initializing';
+  await f.surface.handoff({ projectRoot: f.root, seat: 'supervisor' }, 'start');
+  f.restart();
+  await f.runtime.pumpProjectSupervisor(f.slug);
+  await f.runtime.onLeadTurnEnded({ agentId: 'old', outcome: { kind: 'canceled' }, timeline: [] });
+  assert.equal(f.created.length, 0);
+  const ref = f.daemon.agents.ref;
+  f.daemon.agents.ref = id => ({ ...ref(id), timeline: { refetch: async () => ({ entries: [{ item: { type: 'assistant_message', text: '## Owner goals\nFinish the SDK-compatible handoff\n## Decisions taken\nKeep the running Lead\n## Open questions\nNone' } }] }) } });
+  await f.runtime.onLeadTurnEnded({ agentId: 'old', outcome: { kind: 'completed' }, timeline: [] });
+  const handover = await f.surface.handoff({ projectRoot: f.root, seat: 'supervisor' }, 'handover');
+  assert.ok(handover.ok); assert.equal(handover.progress?.state, 'done'); assert.equal(handover.source, 'extracted');
+  assert.match(f.sent.find(s => s.id === 'successor-1')?.text ?? '', /Finish the SDK-compatible handoff/);
+});
+
+
+test('Supervisor completed extraction still finishes with a Substitute when its SDK tail never answers', async t => {
+  const f = fixture(t);
+  await f.surface.handoff({ projectRoot: f.root, seat: 'supervisor' }, 'start');
+  const ref = f.daemon.agents.ref;
+  f.daemon.agents.ref = id => ({ ...ref(id), timeline: { refetch: () => new Promise(() => {}) } });
+  let guard: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      f.runtime.onLeadTurnEnded({ agentId: 'old', outcome: { kind: 'completed' }, timeline: [] }),
+      new Promise<never>((_, reject) => { guard = setTimeout(() => reject(new Error('Supervisor timeline stalled recovery')), 2500); }),
+    ]);
+  } finally { clearTimeout(guard); }
+  const handover = await f.surface.handoff({ projectRoot: f.root, seat: 'supervisor' }, 'handover');
+  assert.ok(handover.ok); assert.equal(handover.progress?.state, 'done'); assert.equal(handover.source, 'substitute');
 });

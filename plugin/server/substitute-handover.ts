@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import type { TaskView } from "../shared/view.ts";
 import { capHandoffText } from "./handoff-text.ts";
 
 /** Shared continuity document for a dead or unresponsive Supervisor, Lead or Peer. */
@@ -37,4 +38,10 @@ export function readHandoverGit(root: string): string {
     return result.status === 0 ? result.stdout.trim() : "(unavailable)";
   };
   return `Branch: ${git(["branch", "--show-current"])}\nHEAD: ${git(["rev-parse", "HEAD"])}\nDirty files:\n${git(["status", "--short"]) || "(clean)"}`;
+}
+
+/** Open continuity work excludes both terminal Task outcomes. */
+export function renderOpenTaskEvidence(tasks: readonly TaskView[]): string {
+  return tasks.filter(task => task.status !== "accepted" && task.status !== "closed")
+    .map(task => `${task.task}: ${task.status}; Attempts: ${task.attempts.length}`).join("\n");
 }

@@ -3309,3 +3309,80 @@ test("View handover remains readable through the surface after done progress exp
   assert.ok(handover.ok); assert.equal(handover.progress, null); assert.equal(handover.source, "substitute");
   assert.match(handover.text!, /Plugin-built handover/);
 });
+
+
+test("Replace now retries a failed Lead successor through the mobile handoff RPC with the stored extraction", async t => {
+  const f = makeSpooledRuntime(t);
+  f.fake.agents.push({ id: "lead-mobile-recovery", labels: { seat: "lead", project: f.slug }, cwd: f.projectRoot });
+  writeProjectRegistration(f.stateDir, f.slug, { root: f.projectRoot, lead: "lead-mobile-recovery" });
+  await f.surface.handoff({ projectRoot: f.projectRoot, seat: "lead" }, "start");
+  const create = f.fake.daemon.agents.create;
+  f.fake.daemon.agents.create = async () => { throw new Error("provider unavailable"); };
+  await f.leadMail.onLeadTurnEnded({ agentId: "lead-mobile-recovery", outcome: { kind: "completed" }, timeline: [{ type: "assistant_message", text: "# Lead continuity\nRetain the extracted release decision." }] });
+  const failed = await f.surface.handoff({ projectRoot: f.projectRoot, seat: "lead" }, "handover");
+  assert.ok(failed.ok); assert.equal(failed.progress?.state, "failed"); assert.equal(failed.source, "extracted");
+  await f.leadMail.enqueueLeadMail(f.slug, { from: "supervisor", kind: "directive", text: "Held during failed succession" });
+  f.fake.daemon.agents.create = create;
+  const { registerSurfaceRpc } = await import("../plugin/server/surface-rpc.ts");
+  const routes = new Map<string, (input: any, context: any) => Promise<any>>();
+  registerSurfaceRpc({ handle: (rpc: { name: string }, handler: any) => routes.set(rpc.name, handler) } as never, f.surface);
+  const replaced = await routes.get("factory.handoff.replace.now")!({ projectRoot: f.projectRoot, seat: "lead" }, {});
+  assert.ok(replaced.ok); assert.equal(replaced.progress?.state, "done"); assert.equal(replaced.progress?.handover, "extracted");
+  const successor = f.fake.sent.find(send => send.agentId !== "lead-mobile-recovery");
+  assert.ok(successor?.text.includes(failed.text!));
+  assert.match(successor!.text, /Held during failed succession/);
+  assert.equal(f.fake.sent.filter(send => send.agentId === "lead-mobile-recovery").length, 1, "recovery never requests a second extraction");
+});
+
+
+for (const prior of ["stale", "missing"]) {
+  test(`lost Lead with ${prior} handover carries its available archived timeline into the successor kickoff`, async t => {
+    const f = makeSpooledRuntime(t);
+    f.fake.agents.push({ id: "lead-archived-tail", labels: { seat: "lead", project: f.slug }, cwd: f.projectRoot });
+    writeProjectRegistration(f.stateDir, f.slug, { root: f.projectRoot, lead: "lead-archived-tail" });
+    if (prior === "stale") writeFileSync(join(projectStateDir(f.stateDir, f.slug), "lead-handoff.md"), "# Old handover\nOutdated wave.");
+    const ref = f.fake.daemon.agents.ref;
+    f.fake.daemon.agents.ref = id => ({ ...ref(id), timeline: { refetch: async () => ({ entries: [{ item: { type: "assistant_message", text: "Latest decision: preserve the active deployment window." } }] }) } });
+    await f.leadMail.enqueueLeadMail(f.slug, { from: "supervisor", kind: "directive", text: "Continue the unfinished work" });
+    await f.leadMail.pumpProjectLead(f.slug);
+    await f.fake.emitArchive("lead-archived-tail");
+    const successor = f.fake.sent.find(send => send.agentId !== "lead-archived-tail");
+    assert.match(successor?.text ?? "", /Plugin-built handover/);
+    assert.match(successor?.text ?? "", /Recent timeline[\s\S]*Latest decision: preserve the active deployment window/);
+  });
+}
+
+
+test("lost Lead still recovers when its optional archived timeline never answers", async t => {
+  const f = makeSpooledRuntime(t);
+  f.fake.agents.push({ id: "lead-hung-tail", labels: { seat: "lead", project: f.slug }, cwd: f.projectRoot });
+  writeProjectRegistration(f.stateDir, f.slug, { root: f.projectRoot, lead: "lead-hung-tail" });
+  await f.leadMail.enqueueLeadMail(f.slug, { from: "supervisor", kind: "directive", text: "Recover despite missing evidence" });
+  await f.leadMail.pumpProjectLead(f.slug);
+  const ref = f.fake.daemon.agents.ref;
+  f.fake.daemon.agents.ref = id => ({ ...ref(id), timeline: { refetch: () => new Promise(() => {}) } });
+  let guard: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      f.fake.emitArchive("lead-hung-tail"),
+      new Promise<never>((_, reject) => { guard = setTimeout(() => reject(new Error("optional timeline stalled recovery")), 2500); }),
+    ]);
+  } finally { clearTimeout(guard); }
+  assert.match(f.fake.sent.find(send => send.agentId !== "lead-hung-tail")?.text ?? "", /Plugin-built handover[\s\S]*Recover despite missing evidence/);
+});
+
+test("Substitute Open Tasks evidence lists live work and omits accepted and closed Tasks", async t => {
+  const f = makeSpooledRuntime(t);
+  for (const task of ["T-open", "T-accepted", "T-closed"]) f.factory.setContract({ task, workspace: f.projectRoot, gate: "true" });
+  writeFileSync(join(f.projectRoot, "work.txt"), "Completed work");
+  await f.factory.claim({ task: "T-accepted", sha: gitCommitAll(f.projectRoot), handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
+  await f.factory.accept({ task: "T-accepted", attempt: 1 });
+  await f.factory.close({ task: "T-closed", reason: "Superseded" });
+  f.fake.agents.push({ id: "lead-open-tasks", labels: { seat: "lead", project: f.slug }, cwd: f.projectRoot });
+  writeProjectRegistration(f.stateDir, f.slug, { root: f.projectRoot, lead: "lead-open-tasks" });
+  await f.surface.handoff({ projectRoot: f.projectRoot, seat: "lead" }, "replaceNow");
+  const handover = await f.surface.handoff({ projectRoot: f.projectRoot, seat: "lead" }, "handover");
+  assert.ok(handover.ok);
+  const section = handover.text!.split("## Open Tasks\n")[1]!.split("\n\n## Recent timeline")[0]!;
+  assert.equal(section, "T-open: waiting; Attempts: 0");
+});

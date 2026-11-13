@@ -103,7 +103,7 @@ import type { SurfaceAgentSnapshot, SurfaceDaemonApi } from "./surface-rpc.ts";
 import { capHandoffText, parseHandoffFile, renderHandoffFile, validHandoffText } from "./handoff-text.ts";
 import type { HandoffFileMetadata } from "./handoff-text.ts";
 import { readHandoffProgress, writeHandoffProgress, laneRef, laneValue } from "./handoff-progress.ts";
-import { buildSubstituteHandover, readNotebook, readHandoverGit } from "./substitute-handover.ts";
+import { buildSubstituteHandover, readNotebook, readHandoverGit, renderOpenTaskEvidence } from "./substitute-handover.ts";
 import type { HandoffProgress, HandoffRequest, HandoffReply } from "../shared/handoff.ts";
 import { createSupervisorHandoffRuntime } from "./supervisor-handoff.ts";
 import { stopAgentViaCli } from "./daemon-cli.ts";
@@ -484,7 +484,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     markKickoffSent: id => { kickoffSentAgentIds.add(id); inFlightKickoffAgentIds.add(id); },
     evidence: slug => {
       const events = projectStreamOf(slug);
-      return { events, digest: renderLedgerDigest(events), tasks: foldTasks(events).filter(task => !task.accepted).map(task => `${task.task}: ${task.status}; Attempts: ${task.attempts.length}`).join("\n") };
+      return { events, digest: renderLedgerDigest(events), tasks: renderOpenTaskEvidence(foldTasks(events)) };
     },
     retire: async (slug, agent) => {
       const reg = readProjectRegistration(deps.stateDir, slug);
@@ -962,7 +962,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       const { slug } = ownedSupervisor;
       await projectLane(slug, async () => {
         try {
-          if (await supervisorHandoff.turnEnded(slug, input.agentId, lastAssistantText(input.timeline), input.outcome.kind === "completed")) return;
+          if (await supervisorHandoff.turnEnded(slug, input.agentId, lastAssistantText(input.timeline), input.outcome.kind)) return;
           const path = mailboxPath(slug);
           const state = readLeadMailbox(path);
           let retryingFailedSupervisorBatch = false;
@@ -1240,7 +1240,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
         timeline = (page.entries ?? []).map(entry => { const item = entry.item ?? entry as { text?: string }; return item.text ?? ""; }).join("\n\n");
       } catch { /* timeline is best effort */ }
       const events = projectEventsOf(slug, root);
-      handoffText = buildSubstituteHandover({ digest: renderLedgerDigest(events), notebook: readNotebook(projectNotebookPath(deps.stateDir, slug)), git: readHandoverGit(root), tasks: foldTasks(events).filter(task => !task.accepted).map(task => `${task.task}: ${task.status}; Attempts: ${task.attempts.length}`).join("\n"), timeline, maxBytes: LEAD_HANDOFF_MAX_BYTES });
+      handoffText = buildSubstituteHandover({ digest: renderLedgerDigest(events), notebook: readNotebook(projectNotebookPath(deps.stateDir, slug)), git: readHandoverGit(root), tasks: renderOpenTaskEvidence(foldTasks(events)), timeline, maxBytes: LEAD_HANDOFF_MAX_BYTES });
     } else handoffText = capHandoffText(handoffText!, LEAD_HANDOFF_MAX_BYTES);
     updateProgress(slug, { handover: substitute ? "substitute" : "extracted" });
     atomicJson(extractionPath(slug), { requestedAt, prior, stale, ...(snapshot?.sends === undefined ? {} : { sends: snapshot.sends }) });
@@ -1939,7 +1939,19 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
           const fresh = disk?.meta !== undefined && lastTurnAt !== undefined && Date.parse(disk.meta.writtenAt) >= Date.parse(lastTurnAt);
           if (!fresh) {
             const events = projectEventsOf(registration.slug, registration.root);
-            const body = buildSubstituteHandover({ digest: renderLedgerDigest(events), notebook: readNotebook(projectNotebookPath(deps.stateDir, registration.slug)), git: readHandoverGit(registration.root), tasks: foldTasks(events).filter(task => !task.accepted).map(task => `${task.task}: ${task.status}; Attempts: ${task.attempts.length}`).join("\n"), timeline: "(outgoing Lead was archived)", maxBytes: LEAD_HANDOFF_MAX_BYTES });
+            let timeline = "(outgoing Lead was archived)";
+            let evidenceTimer: ReturnType<typeof setTimeout> | undefined;
+            try {
+              // An archived agent may retain its timeline. Optional evidence gets
+              // one second, so a dead daemon response cannot block succession.
+              const page = await Promise.race([
+                resolveDaemon().agents.ref(agentId).timeline.refetch({ direction: "tail", limit: 6 }),
+                new Promise<never>((_, reject) => { evidenceTimer = setTimeout(() => reject(new Error("Archived Lead timeline timed out")), 1000); }),
+              ]);
+              timeline = (page.entries ?? []).map(entry => (entry.item ?? entry as { text?: string }).text ?? "").filter(Boolean).join("\n\n") || timeline;
+            } catch { /* Lost-Lead recovery remains useful without optional evidence. */ }
+            finally { clearTimeout(evidenceTimer); }
+            const body = buildSubstituteHandover({ digest: renderLedgerDigest(events), notebook: readNotebook(projectNotebookPath(deps.stateDir, registration.slug)), git: readHandoverGit(registration.root), tasks: renderOpenTaskEvidence(foldTasks(events)), timeline, maxBytes: LEAD_HANDOFF_MAX_BYTES });
             mkdirSync(projectStateDir(deps.stateDir, registration.slug), { recursive: true });
             writeFileSync(join(projectStateDir(deps.stateDir, registration.slug), "lead-handoff.md"), renderHandoffFile(body, { leadId: agentId, writtenAt: new Date().toISOString() }));
           }
@@ -2043,7 +2055,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
         await drainLeadMailbox(input.slug);
         return { ok: true, progress: null };
       }
-      if (input.action === "retry") {
+      if (input.action === "retry" || (input.action === "replaceNow" && current?.state === "failed")) {
         if (current?.state !== "failed") return { ok: false, code: "handoff-not-failed", error: "Only a failed handoff can be retried" };
         updateProgress(input.slug, { state: "creating-successor", failure: undefined });
         const ensured = await deps.ensureLead({ projectRoot: reg.root }).catch(error => ({ ok: false as const, code: "successor-create-failed", error: messageOf(error) }));
