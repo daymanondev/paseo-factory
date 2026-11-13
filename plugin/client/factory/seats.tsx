@@ -7,21 +7,18 @@
  * the Settings screen (W8) and the panel's `⋯` menu (W6) relocate this pane.
  * A multi-lane card saves through ONE
  * atomic setLanesBatch RPC (v0.0.38, ADR 0026 §5 — the dual-RPC race is
- * gone), and any lane act that moves a live Supervisor/Lead seat crosses
- * the Live-Seat Transition Law first (ADR 0026 §3): no impact → straight
- * through; an impact → the Confirm & Apply modal before the RPC.
+ * gone). Model writes use the same server-owned handoff rules as the
+ * inline Project chip editor (ADR 0057 §8).
  */
 import type { PluginTheme } from "@getpaseo/plugin";
 import { Icon, Modal, TextInput } from "@getpaseo/plugin/client/ui";
 import { useEffect, useState } from "react";
 import { Text, View } from "react-native";
-import type { FactoryView, LaneName, LaneProfileView, Lanes, ProjectUsageView } from "../../shared/view.ts";
+import type { FactoryView, LaneName, LaneProfileView, ProjectUsageView } from "../../shared/view.ts";
 import { Btn, Card, Chip, Pill } from "../kit/pill.tsx";
 import { CONTROL_H, RADIUS, SPACING, text } from "../kit/theme.ts";
 import { LANE_CARDS, LaneModalBody, PROJECT_OVERRIDE_CARDS, findModelMeta, splitLaneParts } from "./lane-editor.tsx";
 import type { LaneCard } from "./lane-editor.tsx";
-import { planLiveSeatTransitions } from "../kit/live-seats.ts";
-import type { LiveSeatTransition } from "../kit/live-seats.ts";
 
 /** The Seats tab's whole action surface — the Shell owns the RPC calls. */
 export interface SeatsActions {
@@ -42,14 +39,6 @@ export interface SeatsActions {
   /** Remove the Project's lane override so it inherits the machine table again. */
   resetLanes(): void;
   busy: boolean;
-}
-
-/** One confirmed-pending lane act — the live-seat impact modal's whole world. */
-type PendingLaneAct = { transitions: LiveSeatTransition[]; run: () => void };
-
-/** The modal's seat label — the standing seats' own names. */
-function seatLabel(seat: "supervisor" | "lead"): string {
-  return seat === "supervisor" ? "Supervisor" : "Lead";
 }
 
 /**
@@ -165,67 +154,6 @@ function LaneProfilesBar({
   );
 }
 
-/**
- * The Live-Seat Transition Law's confirmation modal (v0.0.38, ADR 0026 §3):
- * each affected standing seat, its fromLane → toLane, and whether confirming
- * updates the model in-place or retires/rotates the session. Confirm &
- * Apply dispatches the parked RPC; Cancel drops it.
- */
-function LiveSeatConfirmModal({ theme, pending, busy, onConfirm, onCancel }: { theme: PluginTheme; pending: PendingLaneAct | null; busy: boolean; onConfirm: () => void; onCancel: () => void }) {
-  const rows: { seat: "supervisor" | "lead"; agentId: string; fromLane: string; toLane: string; impact: string; danger: boolean }[] =
-    pending === null
-      ? []
-      : pending.transitions.map((transition) => ({
-          seat: transition.seat,
-          agentId: transition.agentId,
-          fromLane: transition.fromLane,
-          toLane: transition.toLane,
-          impact:
-            transition.mode === "in-place"
-              ? "Update model in-place (keeps current session)"
-              : "Retire/Rotate live seat (provider family changed — current session will be archived and recreated on next turn)",
-          danger: transition.mode === "retire",
-        }));
-  return (
-    <Modal open={pending !== null} onOpenChange={(open) => (open ? undefined : onCancel())} title="Confirm live seat impact">
-      <Modal.Content>
-        {pending === null ? null : (
-          <View style={{ gap: SPACING[3] }}>
-            <Text style={text(theme, "meta")}>
-              This lane change moves a live standing seat — Confirm & Apply executes it; Cancel leaves every lane and session untouched.
-            </Text>
-            {rows.map((row) => (
-              <Card key={`${row.seat}-${row.agentId}`} theme={theme} gap={SPACING[1.5]}>
-                <View style={{ flexDirection: "row", alignItems: "center", gap: SPACING[1.5], flexWrap: "wrap" }}>
-                  <Icon name={row.seat === "supervisor" ? "Shield" : "Compass"} size={14} color={theme.colors.accent} />
-                  <Text style={text(theme, "rowTitle")}>{seatLabel(row.seat)}</Text>
-                  <Pill theme={theme} label={row.agentId.slice(0, 12)} mono />
-                </View>
-                <Text style={text(theme, "code")}>
-                  {row.fromLane} → {row.toLane}
-                </Text>
-                <Text style={text(theme, "label", row.danger ? "statusDanger" : "statusWarning")}>{row.impact}</Text>
-              </Card>
-            ))}
-            <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "flex-end", gap: SPACING[2] }}>
-              <Btn theme={theme} label="Cancel" tone="foregroundMuted" disabled={busy} onPress={onCancel} />
-              <Btn
-                theme={theme}
-                solid
-                icon="Check"
-                label="Confirm & Apply"
-                tone={rows.some((row) => row.danger) ? "statusDanger" : "statusWarning"}
-                disabled={busy}
-                onPress={onConfirm}
-              />
-            </View>
-          </View>
-        )}
-      </Modal.Content>
-    </Modal>
-  );
-}
-
 /** `166,621,161` → `166.6M` — the one token format the usage surfaces print. */
 function formatTokenCount(value: number): string {
   if (value >= 1_000_000_000) return `${(value / 1_000_000_000).toFixed(1)}B`;
@@ -298,11 +226,10 @@ export function ProjectUsageCard({ theme, usage }: { theme: PluginTheme; usage: 
   );
 }
 
-
 /**
  * Per-Project Supervisor / Lead / Worker model overrides — the Project menu's
  * Models section (v0.6.0 W6, ADR 0056). Compact rows over the same picker
- * modal, Live-Seat Transition Law gate and `lanes.set` act the Models pane
+ * modal and `lanes.set` act the Models pane
  * uses; every write targets the Project's own override file. `readOnly` is the
  * mobile form: the effective models are listed, nothing is editable.
  */
@@ -320,15 +247,9 @@ export function ProjectModelOverrides({
   readOnly: boolean;
 }) {
   const [editing, setEditing] = useState<LaneCard | null>(null);
-  const [pending, setPending] = useState<PendingLaneAct | null>(null);
-  const requestLaneChange = (nextLanes: Lanes, run: () => void): void => {
-    const transitions = planLiveSeatTransitions(view.lanes, nextLanes, { supervisor: view.supervisor, lead: view.lead });
-    if (transitions.length === 0) run();
-    else setPending({ transitions, run });
-  };
   const save = (card: LaneCard, value: string): void => {
     const lane = card.lanes[0]!;
-    requestLaneChange({ ...view.lanes, [lane]: value }, () => actions.setLane(lane, value));
+    actions.setLane(lane, value);
     setEditing(null);
   };
   return (
@@ -350,7 +271,7 @@ export function ProjectModelOverrides({
         {view.hasProjectLaneOverride ? "This Project overrides the machine defaults." : "Inheriting the machine defaults."}
       </Text>
       {!readOnly && view.hasProjectLaneOverride ? (
-        <Btn theme={theme} small testID="factory-panel-lane-reset" label="Reset to machine default" tone="foregroundMuted" disabled={actions.busy} onPress={() => requestLaneChange(view.machineLanes, actions.resetLanes)} />
+        <Btn theme={theme} small testID="factory-panel-lane-reset" label="Reset to machine default" tone="foregroundMuted" disabled={actions.busy} onPress={actions.resetLanes} />
       ) : null}
       {readOnly ? null : (
         <>
@@ -366,17 +287,6 @@ export function ProjectModelOverrides({
               )}
             </Modal.Content>
           </Modal>
-          <LiveSeatConfirmModal
-            theme={theme}
-            pending={pending}
-            busy={actions.busy}
-            onConfirm={() => {
-              const run = pending?.run;
-              setPending(null);
-              if (run !== undefined) run();
-            }}
-            onCancel={() => setPending(null)}
-          />
         </>
       )}
     </View>
@@ -401,8 +311,6 @@ export function SeatsPane({
   const [descriptionDraft, setDescriptionDraft] = useState("");
   /** The chip two-step Delete's armed profile (the header Reset/Delete pattern). */
   const [deletingProfileId, setDeletingProfileId] = useState<string | null>(null);
-  /** The Live-Seat Transition Law's parked act (v0.0.38, ADR 0026 §3). */
-  const [pending, setPending] = useState<PendingLaneAct | null>(null);
 
   // The two-step confirm auto-rearms after 5s — the header's Reset/Delete law.
   useEffect(() => {
@@ -411,39 +319,12 @@ export function SeatsPane({
     return () => clearTimeout(timer);
   }, [deletingProfileId]);
 
-  /**
-   * The Live-Seat Transition Law's gate (v0.0.38, ADR 0026 §3): on a Project
-   * scope, an act that changes supervisor/lead while that seat is live parks
-   * behind the Confirm & Apply modal; everything else — and every act on the
-   * machine-wide scope — goes straight through with no modal.
-   */
-  const requestLaneChange = (nextLanes: Lanes, run: () => void): void => {
-    if (view.project === null) {
-      run();
-      return;
-    }
-    const transitions = planLiveSeatTransitions(view.lanes, nextLanes, { supervisor: view.supervisor, lead: view.lead });
-    if (transitions.length === 0) {
-      run();
-      return;
-    }
-    setPending({ transitions, run });
-  };
-
-  /**
-   * Reset rides the same exact gate (v0.0.38, ADR 0026 §3, Implementation
-   * Decision 4): the machine table the Project re-inherits rides the view
-   * (`machineLanes`), so the reset plans its live-seat transitions like every
-   * other act — an override that leaves supervisor/lead untouched runs
-   * immediately with no modal (User Story 17).
-   */
+  /** Reset returns this scope to the machine lane table. */
   const requestResetLanes = (): void => {
-    requestLaneChange(view.machineLanes, actions.resetLanes);
+    actions.resetLanes();
   };
 
   const save = (card: LaneCard, value: string): void => {
-    const next: Lanes = { ...view.lanes };
-    for (const lane of card.lanes) next[lane] = value;
     // v0.0.38 (ADR 0026 §5): a multi-lane card rides ONE atomic setLanesBatch
     // RPC — two concurrent single-lane saves raced; a single-lane card keeps
     // the single setLane act.
@@ -451,7 +332,7 @@ export function SeatsPane({
       if (card.lanes.length === 1) actions.setLane(card.lanes[0]!, value);
       else actions.setLanesBatch(card.lanes, value);
     };
-    requestLaneChange(next, commit);
+    commit();
     setEditing(null);
   };
 
@@ -477,7 +358,7 @@ export function SeatsPane({
             <Text style={text(theme, "section")}>Model & Thinking Lanes</Text>
             <Text style={text(theme, "label")}>
               {view.project === null
-                ? "Machine default lanes — every new Project starts on these. A Project overrides them from its panel's ⋯ menu."
+                ? "Machine default lanes — every new Project starts on these. A Project overrides them from its model chips."
                 : `Configure provider, model, and thinking level per role (project override: ${view.project.slug}).`}
             </Text>
           </View>
@@ -491,7 +372,7 @@ export function SeatsPane({
           deletingProfileId={deletingProfileId}
           onRequestDelete={setDeletingProfileId}
           onApplyProfile={(profile) => {
-            requestLaneChange(profile.lanes, () => actions.applyProfile(profile.id));
+            actions.applyProfile(profile.id);
           }}
           onUpdateProfile={(profile) => {
             actions.updateProfile(profile.id, profile.name);
@@ -662,18 +543,6 @@ export function SeatsPane({
           </View>
         </Modal.Content>
       </Modal>
-
-      <LiveSeatConfirmModal
-        theme={theme}
-        pending={pending}
-        busy={actions.busy}
-        onConfirm={() => {
-          const run = pending?.run;
-          setPending(null);
-          if (run !== undefined) run();
-        }}
-        onCancel={() => setPending(null)}
-      />
 
       {/* Section 3: Project Token & Model Usage (v0.0.87, ADR 0043 §4) */}
       <ProjectUsageCard theme={theme} usage={view.projectUsage ?? null} />

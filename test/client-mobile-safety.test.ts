@@ -35,8 +35,10 @@ async function load(entry: string, platformOs = "ios"): Promise<Exports> {
             contents: `
               const React = require('react');
               const tag = (name) => ({ children, onPress, disabled, ...rest }) => React.createElement(name, { disabled, onClick: onPress, 'data-testid': rest.testID }, children);
-              exports.View = tag('div'); exports.Text = tag('span'); exports.Pressable = tag('button'); exports.TextInput = tag('input');
+              exports.View = tag('div'); exports.ScrollView = tag('div'); exports.Text = tag('span'); exports.Pressable = tag('button'); exports.TextInput = tag('input');
               exports.Icon = () => null;
+              exports.useRpc = contract => input => globalThis.__factoryClientRpc(contract.name, input);
+              exports.useToast = () => ({ show() {}, error(message) { globalThis.__factoryClientErrors?.push(message); } });
               exports.Platform = { OS: ${JSON.stringify(platformOs)}, select: (spec) => (spec[${JSON.stringify(platformOs)}] !== undefined ? spec[${JSON.stringify(platformOs)}] : spec.default) };
               exports.DocumentFrame = ({ url }) => React.createElement('section', { 'data-document-frame': url });
               const Modal = ({ children, open }) => (open ? React.createElement('div', null, children) : null);
@@ -217,4 +219,157 @@ test("W10: a descendant render throw shows the tab fallback with the section and
       await act(() => root.unmount());
     });
   } finally { console.error = savedError; }
+});
+
+
+/** The Owner's fresh-tab model controls; the lane table intentionally differs from live lanes. */
+function modelPanelFixture(): any {
+  const lane = { provider: "codex", model: "gpt-live", thinking: "high", scope: "machine" };
+  const row = { lane, pendingLane: null, markTokens: 128000, allowedActions: ["switch-model", "hand-off-now"], vacant: false, statusLabel: "idle", tone: "normal", model: "gpt-live", hint: null, context: null, handoff: null };
+  return {
+    handoffs: [], profile: { active: null, list: [{ id: "balanced", name: "Balanced" }], modified: false }, defaultWorker: { role: "worker", title: "Default worker", lane },
+    isProject: true, name: "my-app", summary: "Ready", needsYou: [],
+    seats: { supervisor: { ...row, role: "supervisor", vacant: true, agentId: null, allowedActions: [] }, lead: { ...row, role: "lead", agentId: "lead" }, peers: [{ ...row, task: "task-1", title: "Build it", agentId: "peer", disposition: "implementation", context: { state: "unknown", usedTokens: null, markTokens: 128000, fraction: null, label: "Context unknown" } }], supervisorCandidates: [] },
+    openDesign: null, onboarding: null,
+  };
+}
+const modelPickerFixture = {
+  lanes: { supervisor: "claude/configured", lead: "claude/configured", worker: "codex/gpt-live", watch: "codex/gpt-live", freshEyes: "codex/gpt-live" },
+  providers: [
+    { provider: "codex", available: true, models: [{ id: "gpt-live", label: "GPT live", thinkingOptions: [{ id: "high", label: "High" }], defaultThinkingOptionId: "high" }, { id: "gpt-next", label: "GPT next", thinkingOptions: [] }] },
+    { provider: "claude", available: true, models: [{ id: "opus", label: "Opus", thinkingOptions: [] }] },
+  ],
+};
+const modelPanelActions = { openAgent() {}, installPrerequisites() {}, handoffLead() {}, revokeSupervisor() {}, startSupervisor() {}, syncOpenDesign() {}, adoptSupervisor() {}, busy: false };
+
+test("W11: one tap on every fresh-tab model chip opens the inline picker, including vacant standing seats", async () => {
+  const { ProjectPanel } = await load("plugin/client/factory/project-panel.tsx");
+  const { testTheme } = await import("./client-markup.ts");
+  const { createElement } = await import("react");
+  await mountUnderNativeWindow(async (createRoot, container, act) => {
+    const root = createRoot(container);
+    const panel = modelPanelFixture();
+    for (const vacant of [true, false]) {
+      panel.seats.supervisor.vacant = vacant;
+      panel.seats.supervisor.agentId = vacant ? null : "supervisor";
+      panel.seats.supervisor.allowedActions = vacant ? [] : ["switch-model", "hand-off-now"];
+      panel.seats.lead.vacant = vacant;
+      panel.seats.lead.agentId = vacant ? null : "lead";
+      panel.seats.lead.allowedActions = vacant ? [] : ["switch-model", "hand-off-now"];
+      for (const seat of ["supervisor", "lead", "peer-task-1", "worker"]) {
+        await act(() => root.render(createElement(ProjectPanel, { key: `${vacant}-${seat}`, theme: testTheme, panel, modelView: modelPickerFixture, mobile: false, now: Date.now(), daemonError: null, actions: { ...modelPanelActions, saveSeatModel() {}, setMachineDefault() {} } })));
+        const chip = container.querySelector(`[data-testid="factory-seat-chip-${seat}"]`);
+        assert.equal(chip?.tagName, "BUTTON", `${seat} is editable on the fresh tab`);
+        await act(() => (chip as HTMLElement).click());
+        const editor = container.querySelector('[data-testid="factory-chip-editor"]');
+        assert.ok(editor, `${seat} opens inline in one tap`);
+        assert.match(editor.textContent!, /gpt-live/, "the picker starts from the displayed seat lane");
+        assert.ok(container.querySelector('[data-testid="factory-chip-editor-machine-default"]'));
+      }
+    }
+    await act(() => root.unmount());
+  });
+});
+
+
+test("W11: the tab saves standing models in Project scope, Peer choices through handoff, and explicit machine defaults separately", async () => {
+  const { FactoryShell } = await load("plugin/client/factory/shell.tsx");
+  const { testTheme } = await import("./client-markup.ts");
+  const { createElement } = await import("react");
+  const calls: { method: string; input: any }[] = [];
+  const errors: string[] = [];
+  let refuse = false;
+  const panel = modelPanelFixture();
+  panel.seats.supervisor.vacant = false; panel.seats.supervisor.agentId = "supervisor"; panel.seats.supervisor.allowedActions = ["switch-model"];
+  const view = { ...modelPickerFixture, panel, project: { root: "/project", slug: "my-app", missingRoot: true }, kpis: { running: 0, needsHuman: 0 }, companionTools: [], corePlugin: {}, vault: {}, skillHub: { projectPacks: [{ id: "expo", label: "Expo", enabled: false, autoDetected: false }] }, daemonError: null };
+  const globals = globalThis as Record<string, any>;
+  const prior = globals.__factoryClientRpc;
+  const priorErrors = globals.__factoryClientErrors;
+  globals.__factoryClientErrors = errors;
+  globals.__factoryClientRpc = async (method: string, input: any) => {
+    calls.push({ method, input });
+    if (method === "factory.snapshot") return { ok: true, view };
+    if (refuse) return { ok: false, code: "MODEL_UNAVAILABLE", error: "Model unavailable" };
+    if (method === "factory.skills.toggle_pack") view.skillHub.projectPacks[0]!.enabled = input.enabled;
+    if (method === "factory.profiles.apply") view.panel.profile.active = { id: "balanced", name: "Balanced" };
+    return { ok: true };
+  };
+  const cases = [
+    { seat: "supervisor", provider: "codex", modelLabel: "GPT next", button: "Switch model", method: "factory.lanes.set", input: { projectRoot: "/project", lane: "supervisor", value: "codex/gpt-next" } },
+    { seat: "lead", provider: "claude", button: "Hand off to claude", method: "factory.lanes.set", input: { projectRoot: "/project", lane: "lead", value: "claude/opus" } },
+    { seat: "peer-task-1", provider: "codex", button: "Hand off to codex", method: "factory.handoff.start", input: { projectRoot: "/project", seat: "peer:task-1", lane: "codex/gpt-live:high" } },
+    { seat: "peer-task-1", provider: "claude", button: "Hand off to claude", method: "factory.handoff.start", input: { projectRoot: "/project", seat: "peer:task-1", lane: "claude/opus" } },
+    { seat: "worker", provider: "claude", button: "Save Default worker", method: "factory.lanes.set", input: { projectRoot: "/project", lane: "worker", value: "claude/opus" } },
+  ];
+  try {
+    await mountUnderNativeWindow(async (createRoot, container, act) => {
+      const root = createRoot(container);
+      try {
+      await act(() => root.render(createElement(FactoryShell, { theme: testTheme, dir: "/project", layout: { compact: false, platform: "web" } })));
+      const click = async (id: string) => { const button = container.querySelector(`[data-testid="${id}"]`) as HTMLElement; assert.ok(button, id); await act(() => button.click()); };
+      for (const sample of cases) {
+        await click(`factory-seat-chip-${sample.seat}`);
+        const editor = container.querySelector('[data-testid="factory-chip-editor"]')!;
+        if (sample.provider === "claude") {
+          const provider = [...editor.querySelectorAll("button")].find(b => b.textContent?.startsWith("claude"))!;
+          await act(() => provider.click());
+        }
+        if (sample.modelLabel) {
+          const model = [...editor.querySelectorAll("button")].find(b => b.textContent?.startsWith(sample.modelLabel!))!;
+          await act(() => model.click());
+        }
+        assert.equal(container.querySelector('[data-testid="factory-chip-editor-primary"]')?.textContent, sample.button);
+        const before = calls.filter(c => c.method === "factory.snapshot").length;
+        await click("factory-chip-editor-primary");
+        assert.deepEqual(calls.filter(c => c.method !== "factory.snapshot").at(-1), { method: sample.method, input: sample.input });
+        assert.ok(calls.filter(c => c.method === "factory.snapshot").length > before, "every save refreshes the snapshot");
+        assert.equal(container.querySelector('[data-testid="factory-chip-editor"]'), null, "no confirmation step follows the labelled action");
+      }
+      refuse = true;
+      await click("factory-seat-chip-lead");
+      await click("factory-chip-editor-primary");
+      assert.ok(container.querySelector('[data-testid="factory-chip-editor"]'), "a refused save keeps the selection open for retry");
+      assert.match(errors.at(-1)!, /Model unavailable/);
+      refuse = false;
+      await click("factory-chip-editor-machine-default");
+      assert.deepEqual(calls.filter(c => c.method !== "factory.snapshot").at(-1), { method: "factory.lanes.set", input: { lane: "lead", value: "codex/gpt-live:high" } });
+      await click("factory-profile-chip");
+      await click("factory-profile-apply-balanced");
+      assert.deepEqual(calls.filter(c => c.method !== "factory.snapshot").at(-1), { method: "factory.profiles.apply", input: { projectRoot: "/project", profileId: "balanced" } });
+      assert.equal(container.querySelector('[data-testid="factory-profile-chip"]')?.textContent, "Balanced", "the refreshed profile is visible");
+      await click("factory-skill-pack-expo");
+      assert.deepEqual(calls.filter(c => c.method !== "factory.snapshot").at(-1), { method: "factory.skills.toggle_pack", input: { projectRoot: "/project", pack: "expo", enabled: true } });
+      assert.match(container.querySelector('[data-testid="factory-skill-pack-expo"]')?.textContent ?? "", /Disable Expo/, "the refreshed enabled pack is visible");
+      await click("factory-skill-pack-expo");
+      assert.deepEqual(calls.filter(c => c.method !== "factory.snapshot").at(-1), { method: "factory.skills.toggle_pack", input: { projectRoot: "/project", pack: "expo", enabled: false } });
+      } finally { await act(() => root.unmount()); }
+    });
+  } finally { globals.__factoryClientRpc = prior; globals.__factoryClientErrors = priorErrors; }
+});
+
+
+test("W11: mobile keeps every model chip editable and excludes machine-default, profile and skill-pack writes", async () => {
+  const { ProjectPanel } = await load("plugin/client/factory/project-panel.tsx");
+  const { testTheme } = await import("./client-markup.ts");
+  const { createElement } = await import("react");
+  const saved: unknown[] = [];
+  await mountUnderNativeWindow(async (createRoot, container, act) => {
+    const root = createRoot(container);
+    try {
+      for (const seat of ["supervisor", "lead", "peer-task-1", "worker"]) {
+        await act(() => root.render(createElement(ProjectPanel, { key: seat, theme: testTheme, panel: modelPanelFixture(), modelView: modelPickerFixture, mobile: true, now: Date.now(), daemonError: null, skillPacks: [{ id: "expo", label: "Expo", enabled: false }], actions: { ...modelPanelActions, saveSeatModel: (target: string, value: string) => { saved.push({ target, value }); }, setMachineDefault() { assert.fail("mobile machine write"); }, applyProfile() { assert.fail("mobile profile write"); }, toggleSkillPack() { assert.fail("mobile pack write"); } } })));
+        await act(() => (container.querySelector(`[data-testid="factory-seat-chip-${seat}"]`) as HTMLElement).click());
+        assert.ok(container.querySelector('[data-testid="factory-chip-editor"]'));
+        assert.equal(container.querySelector('[data-testid="factory-chip-editor-machine-default"]'), null);
+        assert.notEqual(container.querySelector('[data-testid="factory-profile-chip"]')?.tagName, "BUTTON");
+        assert.equal(container.querySelector('[data-testid="factory-profile-chip-menu"]'), null);
+        assert.equal(container.querySelector('[data-testid="factory-skill-pack-expo"]'), null);
+        await act(() => (container.querySelector('[data-testid="factory-chip-editor-primary"]') as HTMLElement).click());
+      }
+      assert.deepEqual(saved, [
+        { target: "supervisor", value: "codex/gpt-live:high" }, { target: "lead", value: "codex/gpt-live:high" },
+        { target: "peer:task-1", value: "codex/gpt-live:high" }, { target: "worker", value: "codex/gpt-live:high" },
+      ]);
+    } finally { await act(() => root.unmount()); }
+  });
 });

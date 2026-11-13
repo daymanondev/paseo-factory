@@ -1,9 +1,9 @@
 /**
  * The lane editor (split out of seats.tsx, v0.6.0 review S6, ADR 0056): the
  * Lane Cards that name which lanes a card covers, and the live
- * provider/model/thinking picker modal every lane write opens — the Settings
- * screen's default models, the Project menu's overrides and the onboarding
- * wizard's Models step all edit through `LaneModalBody`.
+ * provider/model/thinking picker body — the Settings screen's defaults,
+ * inline Project model chips and the onboarding wizard's Models step all
+ * edit through `LaneModalBody`.
  */
 import type { PluginTheme } from "@getpaseo/plugin";
 import { Icon, ScrollView, TextInput } from "@getpaseo/plugin/client/ui";
@@ -12,6 +12,8 @@ import { Pressable, Text, View } from "react-native";
 import type { FactoryView, LaneName, Lanes, ProviderModelView } from "../../shared/view.ts";
 import { Btn, Chip, Pill } from "../kit/pill.tsx";
 import { CONTROL_H, MONO_FONT, RADIUS, SPACING, hoveredOf, text, tint } from "../kit/theme.ts";
+
+export type LanePickerView = Pick<FactoryView, "lanes" | "providers">;
 
 /** Which lanes a card covers — one value written to every lane the card names. */
 export interface LaneCard {
@@ -106,15 +108,25 @@ export function LaneModalBody({
   onSave,
   onClose,
   busy,
+  currentValue,
+  primaryLabel = () => "Save lane",
+  primaryTestID,
+  secondaryAction,
+  explanation,
 }: {
   theme: PluginTheme;
-  view: FactoryView;
+  view: LanePickerView;
   card: LaneCard;
   onSave: (value: string) => void;
   onClose: () => void;
   busy: boolean;
+  currentValue?: string;
+  primaryLabel?: (value: string) => string;
+  primaryTestID?: string;
+  secondaryAction?: { label: string; testID: string; onSave(value: string): void };
+  explanation?: (value: string) => string;
 }) {
-  const current = card.value(view.lanes);
+  const current = currentValue ?? card.value(view.lanes);
   const initial = splitLaneParts(current);
   const [provider, setProvider] = useState(initial.provider);
   const [model, setModel] = useState(initial.model);
@@ -482,6 +494,7 @@ export function LaneModalBody({
         </View>
       ) : null}
 
+      {explanation === undefined ? null : <Text style={text(theme, "meta")}>{explanation(value)}</Text>}
       {/* Preview & Actions */}
       <View
         style={{
@@ -503,9 +516,10 @@ export function LaneModalBody({
             {value === "" ? "Select a provider and model" : value}
           </Text>
         </View>
-        <View style={{ flexDirection: "row", alignItems: "center", gap: SPACING[2] }}>
+        <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[2] }}>
+          {secondaryAction === undefined ? null : <Btn theme={theme} testID={secondaryAction.testID} label={secondaryAction.label} tone="foregroundMuted" disabled={value === "" || busy} onPress={() => secondaryAction.onSave(value)} />}
           <Btn theme={theme} label="Cancel" tone="foregroundMuted" onPress={onClose} />
-          <Btn theme={theme} icon="Check" label="Save lane" solid disabled={value === "" || busy} onPress={() => onSave(value)} />
+          <Btn theme={theme} icon="Check" label={primaryLabel(value)} testID={primaryTestID} solid disabled={value === "" || busy} onPress={() => onSave(value)} />
         </View>
       </View>
     </View>

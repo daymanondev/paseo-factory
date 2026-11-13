@@ -1,21 +1,23 @@
 /**
- * The native Factory tab's read surface (v0.7.0 W10, ADR 0057 §8–9).
+ * The native Factory tab (v0.7.0 W10–11, ADR 0057 §8–9).
  * The server owns seat, lane, profile and progress data; the Shell owns RPCs.
  * Measured width selects the wide columns or the narrow reading order.
- * Model/profile/pack chips are display-only in this wave. Onboarding,
+ * Inline model/profile/pack controls dispatch through the Shell. Onboarding,
  * adoption and existing handoff/Open Design actions retain their host gates.
  */
 import type { PluginTheme } from "@getpaseo/plugin";
 import { TextInput } from "@getpaseo/plugin/client/ui";
-import { useState } from "react";
+import { createContext, useContext, useState } from "react";
 import type { ReactNode } from "react";
-import { Text, View } from "react-native";
+import { Pressable, Text, View } from "react-native";
 import type { PanelNeedsYouItem, PanelOpenDesign, PanelPeerRow, PanelSeatRow, PanelSupervisorCandidateRow, PanelTone, PanelView } from "../../shared/view.ts";
 import { Btn } from "../kit/pill.tsx";
 import { CONTROL_H, RADIUS, SPACING, factoryPalette, text, thinkingColour, tint } from "../kit/theme.ts";
 import type { Colour } from "../kit/theme.ts";
 import { FactoryTabErrorBoundary } from "./tab-error-boundary.tsx";
 import type { MenuSkillPack } from "./project-menu.tsx";
+import { LANE_CARDS, LaneModalBody, splitLaneParts } from "./lane-editor.tsx";
+import type { LanePickerView } from "./lane-editor.tsx";
 import type { ScopedLaneRef } from "../../shared/view.ts";
 
 /** The panel's action surface — the Shell owns the RPC and navigation calls. */
@@ -34,6 +36,12 @@ export interface ProjectPanelActions {
   syncOpenDesign(): void;
   /** "Use this chat as Supervisor" (v0.6.1, ADR 0057 §5) — adopt a candidate chat; the one seat write mobile may perform (ADR 0057 §10). */
   adoptSupervisor(agentId: string): void;
+  /** Every Peer choice requests a handoff; worker choices configure future Peers. */
+  saveSeatModel?(seat: string, value: string): Promise<boolean> | void;
+  /** Explicit secondary action: writes the machine lane only. */
+  setMachineDefault?(seat: string, value: string): Promise<boolean> | void;
+  applyProfile?(profileId: string): void;
+  toggleSkillPack?(pack: string, enabled: boolean): void;
   busy: boolean;
 }
 
@@ -48,6 +56,8 @@ export interface ProjectPanelInitialUi {
   menuOpen?: boolean;
   supervisorMenuOpen?: boolean;
   directive?: string;
+  /** Stable targets: supervisor, lead, peer:<task>, worker. */
+  editingSeat?: string;
 }
 
 /** Items the Owner must resolve themselves are red; items that wait on the Owner's attention are amber. */
@@ -203,7 +213,7 @@ function SeatRow({
       <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[2] }}>
         <RoleName theme={theme} role={row.role} label={name} />
         <Text style={{ ...text(theme, "label"), color: seatStateColour(theme, row) }}>{row.statusLabel}</Text>
-        <SeatModelChip theme={theme} seat={row.role} lane={row.lane} pendingLane={row.pendingLane} />
+        <SeatModelChip theme={theme} seat={row.role} lane={row.lane} pendingLane={row.pendingLane} live={live} editable={!live || row.allowedActions.includes("switch-model")} />
       </View>
       {row.hint !== null ? <Text style={text(theme, "meta", colour)}>{row.hint}</Text> : null}
       {row.context !== null ? <ContextBar theme={theme} context={row.context} /> : null}
@@ -279,7 +289,7 @@ function PeerRowView({ theme, row, actions }: { theme: PluginTheme; row: PanelPe
         <Text style={text(theme, "label")}>{row.disposition}</Text>
         <Text style={{ ...text(theme, "label"), color: seatStateColour(theme, row) }}>{row.statusLabel}</Text>
       </View>
-      <SeatModelChip theme={theme} seat={`peer-${row.task}`} lane={row.lane} pendingLane={row.pendingLane} />
+      <SeatModelChip theme={theme} seat={`peer-${row.task}`} target={`peer:${row.task}`} lane={row.lane} pendingLane={row.pendingLane} editable={row.allowedActions.includes("switch-model")} />
       <ContextBar theme={theme} context={row.context} />
       <Btn theme={theme} small testID={`factory-panel-open-peer-${row.task}`} label="Open" onPress={() => actions.openAgent(row.agentId)} />
     </View></View>
@@ -398,12 +408,55 @@ function NotAProject({ theme, mobile, wizard }: { theme: PluginTheme; mobile: bo
   );
 }
 
-/** Shared display body for seat and worker chips; W11 adds their editor actions. */
-export function SeatModelChip({ theme, lane, pendingLane, seat }: { theme: PluginTheme; lane: ScopedLaneRef; pendingLane: ScopedLaneRef | null; seat: string }) {
-  return <View testID={`factory-seat-chip-${seat}`} style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[1], borderWidth: 1, borderColor: theme.colors.border, borderRadius: RADIUS.sm, paddingHorizontal: SPACING[1.5], paddingVertical: SPACING[0.5] }}>
+interface ChipEditorState {
+  modelView?: LanePickerView;
+  mobile: boolean;
+  actions: ProjectPanelActions;
+  editingSeat: string | null;
+  edit(seat: string | null): void;
+}
+const ChipEditorContext = createContext<ChipEditorState | null>(null);
+
+/** Display and inline editing use the same chip, including the vacant standing seats. */
+export function SeatModelChip({ theme, lane, pendingLane, seat, target = seat, live = seat !== "worker", editable = true }: { theme: PluginTheme; lane: ScopedLaneRef; pendingLane: ScopedLaneRef | null; seat: string; target?: string; live?: boolean; editable?: boolean }) {
+  const editor = useContext(ChipEditorContext);
+  const canEdit = editable && editor?.modelView !== undefined && editor.actions.saveSeatModel !== undefined;
+  const body = <>
     <Text style={text(theme, "label")}>{lane.model || lane.provider}{pendingLane === null ? "" : ` → ${pendingLane.model || pendingLane.provider}`}</Text>
     <Text style={{ ...text(theme, "label"), color: thinkingColour(theme, pendingLane?.thinking ?? lane.thinking) }}>{pendingLane?.thinking ?? lane.thinking ?? "off"}</Text>
     <Text style={text(theme, "meta")}>{lane.scope === "project" ? "Project" : "Machine"}</Text>
+  </>;
+  const style = { flexDirection: "row" as const, alignItems: "center" as const, flexWrap: "wrap" as const, gap: SPACING[1], borderWidth: 1, borderColor: theme.colors.border, borderRadius: RADIUS.sm, paddingHorizontal: SPACING[1.5], paddingVertical: SPACING[0.5] };
+  const open = canEdit && editor.editingSeat === target;
+  return <View style={{ gap: SPACING[2], flexShrink: 1 }}>
+    {canEdit ? <Pressable testID={`factory-seat-chip-${seat}`} accessibilityRole="button" accessibilityLabel={`Change ${target.startsWith("peer:") ? "Peer" : seat} model`} disabled={editor.actions.busy} onPress={() => editor.edit(open ? null : target)} style={style}>{body}</Pressable> : <View testID={`factory-seat-chip-${seat}`} style={style}>{body}</View>}
+    {open ? <SeatModelEditor theme={theme} lane={lane} target={target} live={live} editor={editor} /> : null}
+  </View>;
+}
+
+/** Uses the same provider/model/thinking picker as Settings and onboarding. */
+function SeatModelEditor({ theme, lane, target, live, editor }: { theme: PluginTheme; lane: ScopedLaneRef; target: string; live: boolean; editor: ChipEditorState }) {
+  const role = target.startsWith("peer:") ? "worker" : target;
+  const baseCard = LANE_CARDS.find((card) => card.id === role)!;
+  const peer = target.startsWith("peer:");
+  const card = peer ? { ...baseCard, title: "Peer", hint: "Choose the model for this Peer's successor." } : baseCard;
+  const current = `${lane.provider}/${lane.model}${lane.thinking ? `:${lane.thinking}` : ""}`;
+  const label = (value: string): string => {
+    if (target === "worker") return "Save Default worker";
+    if (!live) return `Save ${card.title} model`;
+    const provider = splitLaneParts(value).provider;
+    return peer || provider !== lane.provider ? `Hand off to ${provider || "provider"}` : "Switch model";
+  };
+  const save = (value: string, machine: boolean): void => {
+    const result = machine ? editor.actions.setMachineDefault?.(target, value) : editor.actions.saveSeatModel?.(target, value);
+    void Promise.resolve(result).then((ok) => { if (ok !== false) editor.edit(null); });
+  };
+  return <View testID="factory-chip-editor" style={{ alignSelf: "stretch", gap: SPACING[2], paddingVertical: SPACING[2] }}>
+    <LaneModalBody theme={theme} view={editor.modelView!} card={card} currentValue={current} busy={editor.actions.busy} onSave={(value) => save(value, false)} onClose={() => editor.edit(null)} primaryLabel={label} primaryTestID="factory-chip-editor-primary"
+      explanation={(value) => target === "worker" ? "Applies to future Peers in this Project. Running Peers keep their model." : !live ? `Sets the ${card.title} model for this Project. The seat starts on this model.` : peer ? "The primary action hands this Peer to a successor with the selected model. Keeps its worktree, Contract and Attempts, and leaves the Default worker unchanged." : splitLaneParts(value).provider === lane.provider ? "Switches this Project's live seat in place and keeps the session." : "Hands this Project's live seat over to a new session with its handover."}
+      {...(!editor.mobile && editor.actions.setMachineDefault !== undefined ? { secondaryAction: { label: "Set as machine default", testID: "factory-chip-editor-machine-default", onSave: (value: string) => save(value, true) } } : {})}
+    />
+    {!editor.mobile && editor.actions.setMachineDefault !== undefined ? <Text style={text(theme, "meta")}>Machine defaults apply to Projects that inherit the {peer || target === "worker" ? "Default worker" : card.title} model.</Text> : null}
   </View>;
 }
 
@@ -425,10 +478,10 @@ export function HandoffBlock({ theme, handoffs }: { theme: PluginTheme; handoffs
   </View>;
 }
 
-export function SkillPacks({ theme, packs }: { theme: PluginTheme; packs: readonly MenuSkillPack[] }) {
+export function SkillPacks({ theme, packs, onToggle, busy = false }: { theme: PluginTheme; packs: readonly MenuSkillPack[]; onToggle?: (pack: string, enabled: boolean) => void; busy?: boolean }) {
   return <Block theme={theme} testID="factory-skill-packs">
     <SectionTitle theme={theme} label="Skill packs" />
-    {packs.length === 0 ? <Text style={text(theme, "meta")}>No skill packs available.</Text> : packs.map((pack) => <Text key={pack.id} testID={`factory-panel-skill-${pack.id}`} style={text(theme, "meta")}>{pack.label} · {pack.enabled ? "on" : "off"}{pack.autoDetected ? " (auto-detected)" : ""}</Text>)}
+    {packs.length === 0 ? <Text style={text(theme, "meta")}>No skill packs available.</Text> : packs.map((pack) => <View key={pack.id} testID={`factory-panel-skill-${pack.id}`} style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[2] }}><Text style={text(theme, "meta")}>{pack.label} · {pack.enabled ? "on" : "off"}{pack.autoDetected ? " (auto-detected)" : ""}</Text>{onToggle === undefined ? null : <Btn theme={theme} small testID={`factory-skill-pack-${pack.id}`} label={`${pack.enabled ? "Disable" : "Enable"} ${pack.label}`} disabled={busy} onPress={() => onToggle(pack.id, !pack.enabled)} />}</View>)}
   </Block>;
 }
 
@@ -445,7 +498,9 @@ export function ProjectPanel({
   initialUi,
   width = 0,
   skillPacks = [],
+  modelView,
 }: {
+  modelView?: LanePickerView;
   width?: number;
   skillPacks?: readonly MenuSkillPack[];
   theme: PluginTheme;
@@ -465,27 +520,31 @@ export function ProjectPanel({
   initialUi?: ProjectPanelInitialUi;
 }) {
   const [menuOpen, setMenuOpen] = useState(initialUi?.menuOpen === true);
+  const [editingSeat, edit] = useState<string | null>(initialUi?.editingSeat ?? null);
+  const [profileOpen, setProfileOpen] = useState(false);
   const hasMenu = panel.isProject && menu !== null;
   const boundary = (section: string, children: ReactNode) => <FactoryTabErrorBoundary theme={theme} section={section}>{children}</FactoryTabErrorBoundary>;
   const needsYou = <NeedsYou theme={theme} items={panel.needsYou} mobile={mobile} actions={actions} />;
   const handoff = <HandoffBlock theme={theme} handoffs={panel.handoffs} />;
   const seats = panel.seats === null ? null : <Seats theme={theme} seats={panel.seats} mobile={mobile} actions={actions} {...(initialUi === undefined ? {} : { initialUi })} />;
   const worker = panel.defaultWorker === null ? null : <Block theme={theme} testID="factory-default-worker"><SectionTitle theme={theme} label="Default worker" /><SeatModelChip theme={theme} seat="worker" lane={panel.defaultWorker.lane} pendingLane={null} /></Block>;
-  const packs = <SkillPacks theme={theme} packs={skillPacks} />;
+  const packs = <SkillPacks theme={theme} packs={skillPacks} busy={actions.busy} {...(!mobile && actions.toggleSkillPack !== undefined ? { onToggle: actions.toggleSkillPack } : {})} />;
   const design = panel.openDesign === null ? null : <OpenDesign theme={theme} openDesign={panel.openDesign} now={now} desktopActions={mobile ? null : openDesignActions} />;
   return (
+    <ChipEditorContext.Provider value={{ modelView, mobile, actions, editingSeat, edit }}>
     <View testID="factory-panel" style={{ gap: SPACING[3] }}>
       <View style={{ gap: SPACING[1] }}>
         <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: SPACING[2] }}>
           <Text accessibilityRole="header" style={{ ...text(theme, "detailTitle"), flexShrink: 1 }}>
             {panel.name ?? "Factory"}
           </Text>
-          {panel.isProject ? <View testID="factory-profile-chip" style={{ flexShrink: 1, borderWidth: 1, borderColor: theme.colors.border, borderRadius: RADIUS.sm, padding: SPACING[1.5] }}><Text style={text(theme, "label")}>{panel.profile.active?.name ?? "No Lane profile"}{panel.profile.modified ? " (modified)" : ""}</Text></View> : null}
+          {panel.isProject ? (!mobile && actions.applyProfile !== undefined ? <Btn theme={theme} small testID="factory-profile-chip" label={`${panel.profile.active?.name ?? "No Lane profile"}${panel.profile.modified ? " (modified)" : ""}`} disabled={actions.busy} onPress={() => setProfileOpen(!profileOpen)} /> : <View testID="factory-profile-chip"><Text style={text(theme, "label")}>{panel.profile.active?.name ?? "No Lane profile"}{panel.profile.modified ? " (modified)" : ""}</Text></View>) : null}
           {hasMenu ? <Btn theme={theme} small testID="factory-panel-menu-toggle" label="⋯" tone="foregroundMuted" onPress={() => setMenuOpen(!menuOpen)} /> : null}
         </View>
         <Text style={text(theme, "meta")}>{panel.summary}</Text>
         {daemonError !== null ? <Text style={text(theme, "label", "statusWarning")}>{daemonError}</Text> : null}
       </View>
+      {panel.isProject && !mobile && profileOpen && actions.applyProfile !== undefined ? <View testID="factory-profile-chip-menu" style={{ gap: SPACING[1.5] }}><Text style={text(theme, "meta")}>Apply a Lane profile to this Project.</Text>{panel.profile.list.length === 0 ? <Text style={text(theme, "meta")}>Save a Lane profile in Settings to use it here.</Text> : panel.profile.list.map((profile) => <Btn key={profile.id} theme={theme} small testID={`factory-profile-apply-${profile.id}`} label={profile.name} disabled={actions.busy} onPress={() => { actions.applyProfile?.(profile.id); setProfileOpen(false); }} />)}</View> : null}
       {hasMenu && menuOpen ? <Block theme={theme} testID="factory-panel-menu">{menu}</Block> : null}
       {panel.isProject ? (
         <>
@@ -498,5 +557,6 @@ export function ProjectPanel({
         <NotAProject theme={theme} mobile={mobile} wizard={onboarding} />
       )}
     </View>
+    </ChipEditorContext.Provider>
   );
 }
