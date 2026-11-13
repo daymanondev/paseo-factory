@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-11-13
+
+**Cancel a handoff, and a model picker that fits.**
+
+### Added
+
+- **Cancel a handoff.** The Supervisor's handoff can be canceled while the outgoing seat is writing its handover or after it failed: the Project's previous model is restored, the current Supervisor keeps working (and is told so), and a new handoff or model change can start at once. A failed Lead or Peer handoff can be canceled too (the Lead is re-ensured on the restored lane; the Lead respawns the Peer); an Owner-requested Peer extraction can be canceled while it runs. Cancel is refused once a successor exists.
+
+### Changed
+
+- **One-screen model picker.** One search across every provider, providers as a single scrolling row with All, and a list that fills the modal so the footer — summary, ⋯, Cancel and the primary action — is never cut off. Machine default, View last handover and custom model ID sit behind ⋯.
+
+### Fixed
+
+- **"Loading providers…" instead of a bare custom-ID field** while Paseo is still listing providers; the tab polls again shortly until the list arrives.
+
 ## [0.8.0] - 2026-11-13
 
 **Factory tab redesign**: one alert stack, three tabs, and one Hand off modal.
