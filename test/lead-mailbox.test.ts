@@ -14,6 +14,8 @@ import { createSurfaceHandlers } from "../plugin/server/surface-rpc.ts";
 import type { SurfaceDaemonApi } from "../plugin/server/surface-rpc.ts";
 import { handleSpoolRequest, parseSpoolRequest, spoolRootFor, startSpool } from "../plugin/server/spool.ts";
 import { createLeadMailRuntime, HANDOFF_EXTRACTION_MAX_SENDS, HANDOFF_EXTRACTION_TIMEOUT_MS, isBlockedByAttention, LEAD_HANDOFF_MAX_BYTES } from "../plugin/server/lead-mailbox.ts";
+import { loadLanes, saveLanes } from "../plugin/server/core/lanes.ts";
+import { readHandoffProgress } from "../plugin/server/handoff-progress.ts";
 import { parseHandoffFile } from "../plugin/server/handoff-text.ts";
 import { disposeDir, gitCommitAll, makeTempDir } from "./helpers.ts";
 
@@ -112,7 +114,7 @@ function fakeDaemon(agents: FakeAgent[]) {
   return { daemon, created, sent, agents, emitArchive, archiveListeners };
 }
 
-function makeSpooledRuntime(t: TestContext, agents: FakeAgent[] = [], options?: { handoffTimeoutMs?: number }) {
+function makeSpooledRuntime(t: TestContext, agents: FakeAgent[] = [], options?: { handoffTimeoutMs?: number; ownerHandoffTimeoutMs?: number }) {
   const dir = makeTempDir();
   disposeDir(t, dir);
   const projectRoot = join(dir, "repo");
@@ -136,6 +138,7 @@ function makeSpooledRuntime(t: TestContext, agents: FakeAgent[] = [], options?: 
     home,
     daemon: fake.daemon,
     stopAgent: async () => ({ ok: true }),
+    handoff: (input) => leadMail.handoff(input),
     onLeadRetired: (input) => leadMail.settleLeadRotation(input.slug),
     onSeatKickoffSent: (input) => leadMail.markKickoffSent(input.agentId),
     markPluginArchive: (input) => leadMail.markPluginArchive(input.agentId),
@@ -150,6 +153,7 @@ function makeSpooledRuntime(t: TestContext, agents: FakeAgent[] = [], options?: 
     retireLead: (input) => surface.leadRotate(input),
     settleReleasedSupervisor: (input) => surface.settleReleasedSupervisor(input),
     ...(options?.handoffTimeoutMs === undefined ? {} : { handoffTimeoutMs: options.handoffTimeoutMs }),
+    ...(options?.ownerHandoffTimeoutMs === undefined ? {} : { ownerHandoffTimeoutMs: options.ownerHandoffTimeoutMs }),
     onLog: (msg) => logs.push(msg),
     logger: { warn: (msg) => warnings.push(msg) },
   });
@@ -1217,7 +1221,7 @@ test("Fuse 1: beginHandoff immediately completes handoff when extraction prompt 
     assert.equal(successorSends.length, 1);
     assert.match(
       successorSends[0]!.text,
-      /\(the outgoing Lead was interrupted during handoff extraction — rely on the Machine-Verified Active Peer Roster and Ledger State Digest above\)/,
+      /Plugin-built handover/,
     );
     assert.match(successorSends[0]!.text, /task T-FUSE1/);
     assert.match(successorSends[0]!.text, /Continue after send throw/);
@@ -1256,7 +1260,7 @@ test("Fuse 1: beginHandoff immediately completes handoff when extraction prompt 
     assert.equal(successorSends.length, 1);
     assert.match(
       successorSends[0]!.text,
-      /\(the outgoing Lead was interrupted during handoff extraction — rely on the Machine-Verified Active Peer Roster and Ledger State Digest above\)/,
+      /Plugin-built handover/,
     );
     assert.match(successorSends[0]!.text, /Directive for errored Lead handoff/);
     void surface;
@@ -1283,7 +1287,7 @@ test("Fuse 1: beginHandoff immediately completes handoff when extraction prompt 
     assert.equal(successorSends.length, 1);
     assert.match(
       successorSends[0]!.text,
-      /\(the outgoing Lead was interrupted during handoff extraction — rely on the Machine-Verified Active Peer Roster and Ledger State Digest above\)/,
+      /Plugin-built handover/,
     );
     assert.match(successorSends[0]!.text, /Directive when outgoing Lead vanished/);
   }
@@ -1348,9 +1352,9 @@ test("Fuse 2: handing_over timeout (via scheduled timer and via pumpProjectLead)
 
     const successorSends = fake.sent.filter((s) => s.agentId === successorId);
     assert.equal(successorSends.length, 1);
-    assert.match(successorSends[0]!.text, /latest extraction did not complete.*last-known-good handoff/);
-    assert.match(successorSends[0]!.text, /Stale Handoff From Yesterday/);
-    assert.equal(handoffBodyOnDisk(handoffPath), "# Stale Handoff From Yesterday\nDo not use.");
+    assert.match(successorSends[0]!.text, /Plugin-built handover/);
+    assert.doesNotMatch(successorSends[0]!.text, /Stale Handoff From Yesterday/);
+    assert.match(handoffBodyOnDisk(handoffPath), /Plugin-built handover/);
     assert.match(successorSends[0]!.text, /task T-FUSE2-TIMER/);
     assert.match(successorSends[0]!.text, /Held mail drained by timer fuse/);
     // v0.2.2 (ADR 0050 Decision 4): the degraded completion is loud — exactly one
@@ -1399,7 +1403,7 @@ test("Fuse 2: handing_over timeout (via scheduled timer and via pumpProjectLead)
     assert.equal(successorSends.length, 1);
     assert.match(
       successorSends[0]!.text,
-      /\(the outgoing Lead was interrupted during handoff extraction — rely on the Machine-Verified Active Peer Roster and Ledger State Digest above\)/,
+      /Plugin-built handover/,
     );
     assert.match(successorSends[0]!.text, /Held mail drained by pump fuse/);
   }
@@ -1558,8 +1562,8 @@ test("a handing_over episode sends at most 3 extraction prompts — at the ceili
   assert.ok(successorId && successorId !== "agent-lead-thrice-stopped");
   const successorSends = fake.sent.filter((s) => s.agentId === successorId);
   assert.equal(successorSends.length, 1);
-  assert.match(successorSends[0]!.text, /latest extraction did not complete.*last-known-good handoff/);
-  assert.ok(successorSends[0]!.text.includes("# Prior Handoff\nThe last-known-good baton."));
+  assert.match(successorSends[0]!.text, /Plugin-built handover/);
+  assert.doesNotMatch(successorSends[0]!.text, /# Prior Handoff/);
   const snapshot = JSON.parse(readFileSync(join(projectStateDir(stateDir, slug), "lead-handoff-extraction.json"), "utf8")) as { sends?: number };
   assert.equal(snapshot.sends, 3, "the durable episode record counted exactly 3 sends");
 });
@@ -1605,7 +1609,7 @@ test("loud degraded completion: every degraded handoff completion appends exactl
     assert.equal(mails.length, 1, "exactly one Supervisor needs_human mail per degraded completion");
     assert.equal(mails[0]!.from, "system");
     assert.match(mails[0]!.text as string, /extraction-send-failed/);
-    assert.match(mails[0]!.text as string, /no completed extraction/i, "the mail states the successor's handoff layer is not a fresh extraction");
+    assert.match(mails[0]!.text as string, /Plugin-built handover/i, "the mail labels the substitute handover");
 
     // The Supervisor seat received the notice through the existing needs-human delivery path…
     const supSends = fake.sent.filter((s) => s.agentId === supervisor.id);
@@ -1652,7 +1656,7 @@ test("loud degraded completion: every degraded handoff completion appends exactl
     const mails = supervisorNeedsHuman(stateDir, slug);
     assert.equal(mails.length, 1, "exactly one Supervisor needs_human mail");
     assert.match(mails[0]!.text as string, /extraction-timeout/);
-    assert.match(mails[0]!.text as string, /preserved prior with the staleness notice/);
+    assert.match(mails[0]!.text as string, /Plugin-built handover/);
     assert.ok(fake.sent.some((s) => s.agentId === supervisor.id && s.text.includes("extraction-timeout")), "the Supervisor seat received the notice");
   }
 
@@ -1691,7 +1695,7 @@ test("loud degraded completion: every degraded handoff completion appends exactl
     const mails = supervisorNeedsHuman(stateDir, slug);
     assert.equal(mails.length, 1, "exactly one mail across the whole pumped episode — never one per pump");
     assert.match(mails[0]!.text as string, /extraction-send-cap/);
-    assert.match(mails[0]!.text as string, /preserved prior with the staleness notice/);
+    assert.match(mails[0]!.text as string, /Plugin-built handover/);
   }
 
   // Case D: a healthy rotation (completed extraction turn with valid text) appends nothing — and so does a
@@ -1763,8 +1767,8 @@ test("pause-aware fuse (timer path): the elapsed window over an alive idle or cl
     assert.ok(successorId && successorId !== "agent-lead-paused-fuse");
     const successorSends = fake.sent.filter((s) => s.agentId === successorId);
     assert.equal(successorSends.length, 1);
-    assert.match(successorSends[0]!.text, /latest extraction did not complete.*last-known-good handoff/);
-    assert.ok(successorSends[0]!.text.includes("# Prior Paused Fuse\nContinuity through the pause."));
+    assert.match(successorSends[0]!.text, /Plugin-built handover/);
+    assert.match(successorSends[0]!.text, /Plugin-built handover/);
   }
 
   // Block 2: Paseo's idle-runtime-collected "closed" is the same alive-paused shape.
@@ -1820,8 +1824,8 @@ test("pause-aware fuse (pump path): an absent or error Lead trips immediately ev
     assert.ok(successorId && successorId !== "agent-lead-vanished");
     const successorSends = fake.sent.filter((s) => s.agentId === successorId);
     assert.equal(successorSends.length, 1);
-    assert.match(successorSends[0]!.text, /latest extraction did not complete.*last-known-good handoff/);
-    assert.ok(successorSends[0]!.text.includes("# Prior Vanished\nThe absent Lead keeps continuity."));
+    assert.match(successorSends[0]!.text, /Plugin-built handover/);
+    assert.match(successorSends[0]!.text, /Plugin-built handover/);
   }
 
   // Block B: the outgoing Lead fell into error mid-episode.
@@ -1881,8 +1885,8 @@ test("pause-aware fuse (pump path): an absent or error Lead trips immediately ev
     assert.ok(successorId && successorId !== "agent-lead-resend-throw");
     const successorSends = fake.sent.filter((s) => s.agentId === successorId);
     assert.equal(successorSends.length, 1);
-    assert.match(successorSends[0]!.text, /latest extraction did not complete.*last-known-good handoff/);
-    assert.ok(successorSends[0]!.text.includes("# Prior Resend Throw\nContinuity despite the dead socket."));
+    assert.match(successorSends[0]!.text, /Plugin-built handover/);
+    assert.match(successorSends[0]!.text, /Plugin-built handover/);
   }
 });
 
@@ -2431,9 +2435,9 @@ test("v0.6.1 (ADR 0057 §11 hygiene): a lost Lead's successor kickoff marks a DA
   const successorId = `agent-created-${successorIndex + 1}`;
   const successorSends = fake.sent.filter((entry) => entry.agentId === successorId);
   assert.equal(successorSends.length, 1);
-  assert.match(successorSends[0]!.text, /# Dated handoff\nMorning state snapshot\./, "the dated handover body rides the kickoff");
-  assert.match(successorSends[0]!.text, /Staleness notice: this handover was written before the outgoing Lead's last activity/, "the dated-old handover carries the staleness line");
-  assert.match(successorSends[0]!.text, /Re-read the Ledger and the repository/, "the notice tells the successor to re-read the Ledger and repository");
+  assert.doesNotMatch(successorSends[0]!.text, /# Dated handoff\nMorning state snapshot\./, "a stale disk handover is replaced");
+  assert.match(successorSends[0]!.text, /Plugin-built handover/, "a lost Lead gets a substitute for a dated-old handover");
+  assert.match(successorSends[0]!.text, /Plugin-built handover/);
   assert.doesNotMatch(successorSends[0]!.text, /paseo-factory handoff:/, "the metadata header never leaks");
 });
 
@@ -2472,9 +2476,9 @@ test("v0.6.1 (ADR 0057 §4): an outside archive of the bound Lead (agent.archive
   assert.equal(successorSends.length, 1, "the successor received its Turn-1 kickoff");
   assert.match(successorSends[0]!.text, /\[paseo-factory seat kickoff packet · role=lead/);
   assert.match(successorSends[0]!.text, /# Lead handoff — project/);
-  assert.match(successorSends[0]!.text, /# Old handoff\nWave 2 was mid-flight\./, "the on-disk handover rides the kickoff");
-  assert.match(successorSends[0]!.text, /Staleness notice: this handover may predate the lost Lead's last activity/, "the stale-unknown notice rides it");
-  assert.match(successorSends[0]!.text, /Re-read the Ledger and the repository/, "the notice tells the successor to re-read the Ledger and repository");
+  assert.doesNotMatch(successorSends[0]!.text, /# Old handoff\nWave 2 was mid-flight\./);
+  assert.match(successorSends[0]!.text, /Plugin-built handover/);
+  assert.match(successorSends[0]!.text, /Plugin-built handover/);
   assert.match(successorSends[0]!.text, /Directive the lost Lead never acked/, "the requeued mail is delivered to the successor");
 });
 
@@ -2495,7 +2499,7 @@ test("v0.6.1 (ADR 0057 §4): a lost Lead with NO on-disk handover spawns a succe
   const successorSends = fake.sent.filter((entry) => entry.agentId === successorId);
   assert.equal(successorSends.length, 1);
   assert.doesNotMatch(successorSends[0]!.text, /Staleness notice/, "no handover on disk — no staleness line to carry");
-  assert.doesNotMatch(successorSends[0]!.text, /# Lead handoff — project/, "no handoff layer without a file");
+  assert.match(successorSends[0]!.text, /Plugin-built handover/, "missing disk handover gets a substitute");
   assert.match(successorSends[0]!.text, /Directive for the bare successor/, "the requeued mail still reaches the successor");
 });
 
@@ -2959,7 +2963,7 @@ test("Turn-1 kickoff delivery deduplicates the packet against config.systemPromp
 // 3-send cap (pinned by the hold and ceiling tests above), so the failed-turn
 // shape left this family; `refusal` keeps the completed-but-invalid-text arm.
 for (const failure of ["refusal", "send", "timeout"] as const) {
-  test(`Lead preserves the prior handoff after ${failure} and warns its successor`, async t => {
+  test(`Lead builds a substitute handover after ${failure}`, async t => {
     const lead: FakeAgent = { id: "prior-lead", status: "idle", lastUsage: { contextWindowUsedTokens: 128_000 } };
     const f = makeSpooledRuntime(t, [lead], { handoffTimeoutMs: failure === "timeout" ? 40 : 180_000 });
     lead.labels = { seat: "lead", project: f.slug };
@@ -2987,12 +2991,12 @@ for (const failure of ["refusal", "send", "timeout"] as const) {
       lead.status = "running";
     }
     await until(() => assert.equal(readProjectRegistration(f.stateDir, f.slug)?.rotationState, "normal"));
-    assert.equal(handoffBodyOnDisk(path), prior);
+    assert.match(handoffBodyOnDisk(path), /Plugin-built handover/);
     const kickoff = f.fake.sent.find(item => item.agentId !== lead.id)!.text;
-    assert.match(kickoff, /latest extraction did not complete.*last-known-good handoff/i);
-    assert.ok(kickoff.includes(prior));
-    assert.ok(kickoff.indexOf("Machine-Verified Active Peer Roster") < kickoff.indexOf(prior));
-    assert.ok(kickoff.indexOf("Ledger State Digest") < kickoff.indexOf(prior));
+    assert.match(kickoff, /Plugin-built handover/i);
+    assert.ok(kickoff.includes("Plugin-built handover"));
+    assert.ok(kickoff.indexOf("Machine-Verified Active Peer Roster") < kickoff.indexOf("Plugin-built handover"));
+    assert.ok(kickoff.indexOf("Ledger State Digest") < kickoff.indexOf("Plugin-built handover"));
   });
 }
 
@@ -3026,7 +3030,7 @@ test("Lead extraction waits the full 180-second fuse before retiring a stuck sea
 });
 
 
-test("Lead restores its last-known-good snapshot after a plugin restart during extraction", async t => {
+test("Lead builds a substitute after a plugin restart during failed extraction", async t => {
   const lead: FakeAgent = { id: "restarting-lead", status: "idle", lastUsage: { contextWindowUsedTokens: 128_000 } };
   const f = makeSpooledRuntime(t, [lead]);
   lead.labels = { seat: "lead", project: f.slug };
@@ -3044,8 +3048,8 @@ test("Lead restores its last-known-good snapshot after a plugin restart during e
   // over the shutdown trips immediately and restores the snapshot prior.
   lead.status = "error";
   await restarted.pumpProjectLead(f.slug);
-  assert.equal(handoffBodyOnDisk(path), "# Durable prior handoff\nArchitecture survives restart.");
-  assert.match(f.fake.sent.find(item => item.agentId !== lead.id)!.text, /latest extraction did not complete.*last-known-good handoff/);
+  assert.match(handoffBodyOnDisk(path), /Plugin-built handover/);
+  assert.match(f.fake.sent.find(item => item.agentId !== lead.id)!.text, /Plugin-built handover/);
 });
 
 test("rotation_pending holds when a Peer turn fails to idle on an unsettled Task, and a failed Turn-1 handoff kickoff rests quietly until the next mail pump self-heals the errored Lead", async (t) => {
@@ -3111,4 +3115,154 @@ test("rotation_pending holds when a Peer turn fails to idle on an unsettled Task
   assert.match(successor2Sends[0]!.text, /\[paseo-factory seat kickoff packet · role=lead/);
   assert.match(successor2Sends[0]!.text, /# Handoff after outage\nWait for T-OUTAGE verdict\./);
   assert.match(successor2Sends[0]!.text, /T-OUTAGE attempt 1 ended GREEN/);
+});
+
+test("Owner Replace now creates a plugin-built handover and delivers held mail to the successor", async (t) => {
+  const f = makeSpooledRuntime(t);
+  f.fake.agents.push({ id: "lead-owner", provider: "pi/zai/glm-5.3", labels: { seat: "lead", project: f.slug }, cwd: f.projectRoot });
+  writeProjectRegistration(f.stateDir, f.slug, { root: f.projectRoot, lead: "lead-owner" });
+  await f.leadMail.enqueueLeadMail(f.slug, { from: "supervisor", kind: "directive", text: "Keep the Owner's requested outcome" });
+  const reply = await f.leadMail.handoff({ slug: f.slug, action: "replaceNow" });
+  assert.equal(reply.ok, true);
+  assert.ok(reply.ok);
+  assert.equal(reply.progress?.reason, "owner");
+  assert.equal(reply.progress?.state, "done");
+  assert.equal(reply.progress?.handover, "substitute");
+  const successor = f.fake.sent.find(send => send.agentId !== "lead-owner");
+  assert.ok(successor);
+  for (const section of ["Plugin-built handover", "Ledger digest", "Project notebook", "Git state", "Open Tasks", "Recent timeline", "Keep the Owner's requested outcome"]) assert.ok(successor.text.includes(section), section);
+  assert.equal(f.fake.agents.some(agent => agent.id === "lead-owner"), false);
+});
+
+test("Owner Lead handoff starts extraction through the surface RPC door", async (t) => {
+  const f = makeSpooledRuntime(t);
+  f.fake.agents.push({ id: "lead-start", labels: { seat: "lead", project: f.slug }, cwd: f.projectRoot });
+  writeProjectRegistration(f.stateDir, f.slug, { root: f.projectRoot, lead: "lead-start" });
+  const reply = await f.surface.handoff({ projectRoot: f.projectRoot, seat: "lead" }, "start");
+  assert.equal(reply.ok, true);
+  if (reply.ok) assert.equal(reply.progress?.state, "handing-over");
+  assert.match(f.fake.sent[0]!.text, /handoff/i);
+});
+
+test("Owner no-reply window falls back once to a substitute even while the outgoing Lead is running", async (t) => {
+  const f = makeSpooledRuntime(t, [], { handoffTimeoutMs: 1000, ownerHandoffTimeoutMs: 25 });
+  f.fake.agents.push({ id: "lead-timeout", status: "running", labels: { seat: "lead", project: f.slug }, cwd: f.projectRoot });
+  writeProjectRegistration(f.stateDir, f.slug, { root: f.projectRoot, lead: "lead-timeout" });
+  await f.leadMail.handoff({ slug: f.slug, action: "start" });
+  await until(() => assert.equal(readHandoffProgress(f.stateDir, f.slug, "lead")?.state, "done"));
+  assert.equal(readHandoffProgress(f.stateDir, f.slug, "lead")?.handover, "substitute");
+  assert.equal(f.fake.sent.filter(send => send.agentId === "lead-timeout").length, 1);
+});
+
+test("A provider-change Lead handoff waits for running Peers, reports them, and cancel restores the exact previous lane", async (t) => {
+  const f = makeSpooledRuntime(t);
+  f.factory.setContract({ task: "T-handoff-owner", workspace: f.projectRoot, gate: "true" });
+  f.factory.requestSpawn({ task: "T-handoff-owner", provider: "pi/model", arity: 1, worktree: taskWorktreePath(f.stateDir, f.slug, "T-handoff-owner") });
+  f.fake.agents.push({ id: "lead-lane", labels: { seat: "lead", project: f.slug }, cwd: f.projectRoot }, { id: "peer-lane", status: "running", labels: { task: "T-handoff-owner", project: f.slug }, cwd: taskWorktreePath(f.stateDir, f.slug, "T-handoff-owner") });
+  writeProjectRegistration(f.stateDir, f.slug, { root: f.projectRoot, lead: "lead-lane" });
+  saveLanes(f.stateDir, { lead: "claude/claude-sonnet-4-6" }, f.slug);
+  const scheduled = await f.leadMail.handoff({ slug: f.slug, action: "start", reason: "provider-change", fromLane: "pi/zcode/glm-5.3:high", toLane: "claude/claude-sonnet-4-6" });
+  assert.ok(scheduled.ok);
+  assert.equal(scheduled.progress?.state, "scheduled");
+  assert.equal(scheduled.progress?.waitingPeers, 1);
+  assert.equal(f.fake.sent.length, 0);
+  const canceled = await f.leadMail.handoff({ slug: f.slug, action: "cancel" });
+  assert.deepEqual(canceled, { ok: true, progress: null });
+  const lanes = loadLanes(f.stateDir, f.slug); assert.ok(lanes.ok);
+  assert.equal(lanes.lanes.lead, "pi/zcode/glm-5.3:high");
+});
+
+test("A failed successor creation retries the stored handover without another extraction", async (t) => {
+  const f = makeSpooledRuntime(t);
+  f.fake.agents.push({ id: "lead-retry", labels: { seat: "lead", project: f.slug }, cwd: f.projectRoot });
+  writeProjectRegistration(f.stateDir, f.slug, { root: f.projectRoot, lead: "lead-retry" });
+  f.factory.setContract({ task: "T-retry-peer", workspace: f.projectRoot, gate: "true" });
+  const peerCwd = taskWorktreePath(f.stateDir, f.slug, "T-retry-peer");
+  f.factory.requestSpawn({ task: "T-retry-peer", provider: "pi/model", arity: 1, worktree: peerCwd });
+  f.fake.agents.push({ id: "retry-peer", status: "running", cwd: peerCwd, labels: { task: "T-retry-peer", project: f.slug } });
+  const create = f.fake.daemon.agents.create;
+  f.fake.daemon.agents.create = async () => { throw new Error("provider unavailable"); };
+  const failed = await f.leadMail.handoff({ slug: f.slug, action: "replaceNow" });
+  assert.ok(failed.ok); assert.equal(failed.progress?.state, "failed");
+  const handover = await f.leadMail.handoff({ slug: f.slug, action: "handover" });
+  assert.ok(handover.ok); assert.match(handover.text!, /Plugin-built handover/);
+  f.fake.daemon.agents.create = create;
+  const retried = await f.leadMail.handoff({ slug: f.slug, action: "retry" });
+  assert.ok(retried.ok); assert.equal(retried.progress?.state, "done");
+  const text = f.fake.sent.find(send => send.agentId !== "lead-retry")?.text ?? "";
+  assert.ok(text.includes(handover.text!));
+  assert.match(text, /agent retry-peer \(live: running\)/);
+  assert.equal(f.fake.sent.filter(send => send.agentId === "lead-retry").length, 0);
+});
+
+test("Hand off now skips a scheduled Lead quiet point and holds a running Peer's report for the extracted successor", async (t) => {
+  const f = makeSpooledRuntime(t);
+  f.factory.setContract({ task: "T-skip", workspace: f.projectRoot, gate: "true" });
+  const cwd = taskWorktreePath(f.stateDir, f.slug, "T-skip");
+  f.factory.requestSpawn({ task: "T-skip", provider: "pi/model", arity: 1, worktree: cwd });
+  f.fake.agents.push({ id: "lead-skip", labels: { seat: "lead", project: f.slug }, cwd: f.projectRoot }, { id: "peer-skip", status: "running", labels: { task: "T-skip", project: f.slug }, cwd });
+  writeProjectRegistration(f.stateDir, f.slug, { root: f.projectRoot, lead: "lead-skip" });
+  await f.leadMail.handoff({ slug: f.slug, action: "start", reason: "provider-change", fromLane: "pi/zcode/glm-5.3", toLane: "pi/zcode/glm-5.4" });
+  const started = await f.leadMail.handoff({ slug: f.slug, action: "start" });
+  assert.ok(started.ok); assert.equal(started.progress?.state, "handing-over");
+  await f.leadMail.notifyPeer({ task: "T-skip", kind: "verdict", text: "Peer report during extraction" });
+  assert.equal(f.fake.sent.filter(send => send.text.includes("Peer report during extraction")).length, 0);
+  await f.leadMail.onLeadTurnEnded({ agentId: "lead-skip", outcome: { kind: "completed" }, timeline: [{ type: "assistant_message", text: "# Lead continuity\nKeep the running Peer." }] });
+  const progress = await f.leadMail.handoff({ slug: f.slug, action: "handover" });
+  assert.ok(progress.ok); assert.equal(progress.progress?.state, "done"); assert.equal(progress.source, "extracted");
+  assert.ok(f.fake.sent.some(send => send.agentId !== "lead-skip" && send.text.includes("Peer report during extraction") && send.text.includes("Keep the running Peer")));
+  assert.equal(f.fake.agents.find(agent => agent.id === "peer-skip")?.status, "running");
+});
+
+test("Replace now interrupts an active extraction and keeps its reason while producing a substitute", async t => {
+  const f = makeSpooledRuntime(t);
+  f.fake.agents.push({ id: "lead-interrupt", labels: { seat: "lead", project: f.slug }, cwd: f.projectRoot });
+  writeProjectRegistration(f.stateDir, f.slug, { root: f.projectRoot, lead: "lead-interrupt" });
+  await f.leadMail.handoff({ slug: f.slug, action: "start" });
+  const replaced = await f.leadMail.handoff({ slug: f.slug, action: "replaceNow" });
+  assert.ok(replaced.ok);
+  assert.equal(replaced.progress?.state, "done");
+  assert.equal(replaced.progress?.reason, "owner");
+  assert.equal(replaced.progress?.handover, "substitute");
+});
+
+for (const reason of ["context-mark", "provider-change", "owner"] as const) {
+  test(`${reason} exposes creating-successor, failed and done while retry preserves extracted continuity`, async t => {
+    const f = makeSpooledRuntime(t);
+    f.fake.agents.push({ id: `lead-${reason}`, labels: { seat: "lead", project: f.slug }, cwd: f.projectRoot, lastUsage: { contextWindowUsedTokens: reason === "context-mark" ? 135_000 : 1000 } });
+    writeProjectRegistration(f.stateDir, f.slug, { root: f.projectRoot, lead: `lead-${reason}` });
+    if (reason === "context-mark") await f.leadMail.onLeadTurnEnded({ agentId: `lead-${reason}`, outcome: { kind: "completed" }, timeline: [] });
+    else if (reason === "provider-change") await f.surface.lanesSet({ lane: "lead", value: "claude/claude-sonnet-4-6", projectRoot: f.projectRoot });
+    else await f.surface.handoff({ projectRoot: f.projectRoot, seat: "lead" }, "start");
+    const extracting = await f.leadMail.handoff({ slug: f.slug, action: "handover" });
+    assert.ok(extracting.ok); assert.equal(extracting.progress?.state, "handing-over"); assert.equal(extracting.progress?.reason, reason);
+    const create = f.fake.daemon.agents.create;
+    const observed: string[] = [];
+    f.fake.daemon.agents.create = async () => {
+      const handover = await f.leadMail.handoff({ slug: f.slug, action: "handover" });
+      assert.ok(handover.ok); observed.push(handover.progress!.state);
+      throw new Error("successor unavailable");
+    };
+    await f.leadMail.onLeadTurnEnded({ agentId: `lead-${reason}`, outcome: { kind: "completed" }, timeline: [{ type: "assistant_message", text: "# Extracted continuity\nThe bounded next wave remains open." }] });
+    assert.deepEqual(observed, ["creating-successor"]);
+    const failed = await f.leadMail.handoff({ slug: f.slug, action: "handover" });
+    assert.ok(failed.ok); assert.equal(failed.progress?.state, "failed"); assert.equal(failed.progress?.reason, reason); assert.equal(failed.source, "extracted");
+    f.fake.daemon.agents.create = create;
+    const retry = await f.leadMail.handoff({ slug: f.slug, action: "retry" });
+    assert.ok(retry.ok); assert.equal(retry.progress?.state, "done"); assert.equal(retry.progress?.reason, reason);
+    assert.ok(f.fake.sent.some(send => send.agentId !== `lead-${reason}` && send.text.includes("The bounded next wave remains open.")));
+  });
+}
+
+test("A second provider change cannot overwrite the lane of a scheduled handoff", async t => {
+  const f = makeSpooledRuntime(t);
+  f.factory.setContract({ task: "T-lane-held", workspace: f.projectRoot, gate: "true" });
+  const cwd = taskWorktreePath(f.stateDir, f.slug, "T-lane-held");
+  f.factory.requestSpawn({ task: "T-lane-held", provider: "pi/model", arity: 1, worktree: cwd });
+  f.fake.agents.push({ id: "lead-lane-held", labels: { seat: "lead", project: f.slug }, cwd: f.projectRoot }, { id: "peer-lane-held", status: "running", labels: { task: "T-lane-held", project: f.slug }, cwd });
+  writeProjectRegistration(f.stateDir, f.slug, { root: f.projectRoot, lead: "lead-lane-held" });
+  await f.surface.lanesSet({ lane: "lead", value: "claude/claude-sonnet-4-6", projectRoot: f.projectRoot });
+  const second = await f.surface.lanesSet({ lane: "lead", value: "codex/gpt-5.4", projectRoot: f.projectRoot });
+  assert.ok(second.ok); assert.match(second.modelSync, /handoff refused/);
+  assert.equal(second.lanes.lead, "claude/claude-sonnet-4-6");
 });

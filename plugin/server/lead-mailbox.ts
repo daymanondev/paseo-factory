@@ -75,9 +75,9 @@ import type { Factory } from "./core/factory.ts";
 import { readCorrelations } from "./core/correlations.ts";
 import { MAX_ATTEMPTS } from "./core/events.ts";
 import type { LedgerEvent } from "./core/events.ts";
-import { ensureProjectRegistered, listProjectRegistrations, projectStateDir, readProjectRegistration, resolveProject, writeProjectRegistration } from "./core/project.ts";
+import { ensureProjectRegistered, listProjectRegistrations, projectStateDir, projectNotebookPath, readProjectRegistration, resolveProject, writeProjectRegistration } from "./core/project.ts";
 import type { LeadRotationState, ProjectRegistration } from "./core/project.ts";
-import { loadLanes } from "./core/lanes.ts";
+import { loadLanes, saveLanes } from "./core/lanes.ts";
 import { buildSeatKickoffPacket } from "./core/preflight.ts";
 import { taskWorktreeBranch, taskWorktreePath } from "./core/workspace.ts";
 import { inferRoleFromProviderId } from "./roles.ts";
@@ -102,6 +102,9 @@ import type {
 import type { SurfaceAgentSnapshot, SurfaceDaemonApi } from "./surface-rpc.ts";
 import { capHandoffText, parseHandoffFile, renderHandoffFile, validHandoffText } from "./handoff-text.ts";
 import type { HandoffFileMetadata } from "./handoff-text.ts";
+import { readHandoffProgress, writeHandoffProgress, laneRef, laneValue } from "./handoff-progress.ts";
+import { buildSubstituteHandover, readNotebook, readHandoverGit } from "./substitute-handover.ts";
+import type { HandoffProgress, HandoffRequest, HandoffReply } from "../shared/handoff.ts";
 import { createPeerHandoffRuntime } from "./peer-handoff.ts";
 import type { DaemonReply } from "./daemon-cli.ts";
 import { readNativeContextWindowTokens, type UsagePaths } from "./core/usage-extractor.ts";
@@ -303,6 +306,7 @@ export interface LeadMailRuntimeDeps {
    * (v0.0.28, ADR 0018 §3; defaults to `HANDOFF_EXTRACTION_TIMEOUT_MS = 180_000`).
    */
   handoffTimeoutMs?: number;
+  ownerHandoffTimeoutMs?: number;
   /**
    * The released-Supervisor settle door (v0.6.1 review fix, ADR 0057 §4): the
    * surface's `settleReleasedSupervisor` is the implementation. The lost-Lead
@@ -318,6 +322,7 @@ export interface LeadMailRuntimeDeps {
 
 /** One runtime's public face — see the module doc for each member's law. */
 export interface LeadMailRuntime {
+  handoff(input: HandoffRequest): Promise<HandoffReply>;
   hasPendingHandoff(slug: string): boolean;
   /** Gates, spawned/running Task Peers, and delivered standing-seat turns. */
   hasActiveWork(): Promise<boolean>;
@@ -431,7 +436,22 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
    * carry the decision without it.
    */
   const extractionOutstandingBySlug = new Set<string>();
+  const countWaitingPeers = (slug: string, events: readonly LedgerEvent[], live: Map<string, SurfaceAgentSnapshot>) =>
+    foldTasks(events).filter(task => !task.accepted && boundTaskPeers({
+      stateDir: deps.stateDir, slug, task: task.task, events, live: [...live.values()],
+    }).some(peer => peer.status !== "error")).length;
+  const progressOf = (slug: string) => readHandoffProgress(deps.stateDir, slug, "lead");
+  const updateProgress = (slug: string, patch: Partial<HandoffProgress>): void => {
+    const previous = progressOf(slug);
+    const current = previous?.state === "done" && patch.state === "scheduled" ? null : previous;
+    const loaded = loadLanes(deps.stateDir, slug);
+    const lane = loaded.ok ? loaded.lanes.lead : "pi/zcode/glm-5.3";
+    const now = new Date().toISOString();
+    writeHandoffProgress(deps.stateDir, slug, { seat: "lead", reason: "context-mark", state: "scheduled", fromLane: laneRef(lane), toLane: laneRef(lane), startedAt: now, ...current, ...patch, updatedAt: now });
+  };
+  const extractionTimeout = (slug: string) => progressOf(slug)?.reason === "context-mark" || progressOf(slug) === null ? handoffTimeoutMs : deps.ownerHandoffTimeoutMs ?? 90_000;
   const handoffTimeoutMs = deps.handoffTimeoutMs ?? HANDOFF_EXTRACTION_TIMEOUT_MS;
+  const lastLeadTurnAt = new Map<string, string>();
   const retriedFailedMailIds = new Set<string>();
   const kickoffSentAgentIds = new Set<string>();
   const inFlightKickoffAgentIds = new Set<string>();
@@ -596,7 +616,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
 
   const extractionPath = (slug: string) => join(projectStateDir(deps.stateDir, slug), "lead-handoff-extraction.json");
   const readExtraction = (slug: string) =>
-    readOptionalJson(extractionPath(slug)) as { requestedAt?: string; prior?: string; stale?: boolean; sends?: number; leadLostAt?: string } | undefined;
+    readOptionalJson(extractionPath(slug)) as { requestedAt?: string; prior?: string; stale?: boolean; sends?: number; kickoff?: string; leadLostAt?: string } | undefined;
   /**
    * The parsed on-disk handover (v0.6.1, ADR 0057 §11 hygiene): the body the
    * kickoff feeds, plus the file's own metadata header — the outgoing Lead id
@@ -689,6 +709,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       const extractionSnapshot = readExtraction(slug);
       const lostLeadAt = typeof extractionSnapshot?.leadLostAt === "string" ? extractionSnapshot.leadLostAt : undefined;
       const diskFile = readDiskHandoffFile(slug);
+      const pluginBuilt = diskHandoffText.startsWith("# Plugin-built handover");
       const undated = diskFile !== undefined && diskFile.meta === undefined;
       const writtenMs = diskFile?.meta !== undefined ? Date.parse(diskFile.meta.writtenAt) : Number.NaN;
       const lostMs = lostLeadAt !== undefined ? Date.parse(lostLeadAt) : Number.NaN;
@@ -699,7 +720,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
         roster,
         digest,
         handoffText: diskHandoffText,
-        stale: undated || datedOld || extractionStale,
+        stale: !pluginBuilt && (undated || datedOld || extractionStale),
         ...(datedOld
           ? { staleSource: "dated" as const }
           : undated || lostLeadAt !== undefined
@@ -828,6 +849,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     const tokens = readLeadContextTokens(lead, deps.usagePaths);
     if (tokens.usedTokens === null || tokens.usedTokens < LEAD_ROTATE_TOKENS) return;
     writeRotationState(slug, registration.root, { rotationState: "rotation_pending" });
+    updateProgress(slug, { state: "scheduled" });
     log(`lead-mailbox: ${slug}'s lead crossed ${LEAD_ROTATE_TOKENS} tokens (${tokens.usedTokens}, ${tokens.source}) — rotation pending, the turn runs on`);
   };
 
@@ -840,7 +862,12 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
    * non-Lead/non-Supervisor `agent.turn_ended` and `sweepPeers` doors).
    */
   const tryBeginPendingHandoff = async (slug: string): Promise<boolean> => {
-    if (readRotationState(slug) !== "rotation_pending" || (await projectPeerInFlight(slug))) return false;
+    if (readRotationState(slug) !== "rotation_pending") return false;
+    if (await projectPeerInFlight(slug)) {
+      const events = projectStreamOf(slug); const live = await liveAgentsById();
+      updateProgress(slug, { state: "scheduled", waitingPeers: countWaitingPeers(slug, events, live) });
+      return false;
+    }
     const reg = readProjectRegistration(deps.stateDir, slug);
     if (reg?.root === undefined) return false;
     const lead = await liveLeadAgent(resolveDaemon(), slug).catch(() => undefined);
@@ -1075,6 +1102,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
         retryingFailedLeadBatch = true;
       }
     }
+    lastLeadTurnAt.set(input.agentId, new Date().toISOString());
     const rotation = readRotationState(slug);
     if (rotation === "handing_over") {
       // (2) The outgoing Lead just finished its Handoff Extraction turn. Only
@@ -1083,6 +1111,9 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       // lock, keeps every mail item queued, and clears the outstanding-send
       // marker so the next pump re-sends the fixed extraction prompt to the
       // seat-ready Lead within the episode's send cap.
+      if (input.outcome.kind === "failed" && progressOf(slug)?.reason !== "context-mark" && progressOf(slug) !== null) {
+        await completeHandoff(slug, root, { ...input, fuseReason: "extraction-send-failed" }); return;
+      }
       if (input.outcome.kind !== "completed") {
         extractionOutstandingBySlug.delete(slug);
         log(`lead-mailbox: ${slug}'s handoff extraction turn ${input.outcome.kind} — handing_over holds and the extraction prompt re-sends on the next pump`);
@@ -1123,6 +1154,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       // Peer's own terminal `notifyPeer` pump starts the handoff the moment
       // the wave settles.
       writeRotationState(slug, root, { rotationState: "rotation_pending" });
+      updateProgress(slug, { state: "scheduled" });
       if (await projectPeerInFlight(slug)) {
         log(`lead-mailbox: ${slug}'s lead rotation held in rotation_pending — a Task Peer is still running, the outgoing Lead stays live`);
         return;
@@ -1147,6 +1179,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
 
   /** Arm 3 — lock the mailbox (holding all mail), then steer the one bounded Handoff Extraction prompt (with Fuse 1 immediate bypass). */
   const beginHandoff = async (slug: string, root: string): Promise<void> => {
+    updateProgress(slug, { state: "handing-over", waitingPeers: undefined });
     const handoffRequestedAt = new Date().toISOString();
     // Persist the snapshot before the outgoing seat can overwrite its previous handoff.
     const prior = readDiskHandoffText(slug);
@@ -1173,7 +1206,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       return;
     }
     try {
-      await resolveDaemon().agents.ref(lead.id).send(renderHandoffExtractionPrompt(slug));
+      await resolveDaemon().agents.ref(lead.id).send(renderHandoffExtractionPrompt(slug, progressOf(slug)?.reason));
     } catch (err) {
       log(`lead-mailbox: ${slug} handoff extraction send failed (${messageOf(err)}) — completing handoff immediately`);
       await completeHandoff(slug, root, {
@@ -1246,8 +1279,19 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
         }
       } catch { /* No earlier disk handoff. */ }
     }
-    const stale = !validHandoffText(handoffText) && prior !== undefined;
-    handoffText = validHandoffText(handoffText) ? capHandoffText(handoffText, LEAD_HANDOFF_MAX_BYTES) : prior ?? INTERRUPTED_HANDOFF_EXTRACTION_NOTE;
+    const substitute = !validHandoffText(handoffText);
+    const stale = false;
+    if (substitute) {
+      updateProgress(slug, { state: "substitute", handover: "substitute" });
+      let timeline = input.timeline.map(item => item.text ?? "").filter(Boolean).slice(-6).join("\n\n");
+      if (!timeline && input.agentId) try {
+        const page = await resolveDaemon().agents.ref(input.agentId).timeline.refetch({ direction: "tail", limit: 6 });
+        timeline = (page.entries ?? []).map(entry => { const item = entry.item ?? entry as { text?: string }; return item.text ?? ""; }).join("\n\n");
+      } catch { /* timeline is best effort */ }
+      const events = projectEventsOf(slug, root);
+      handoffText = buildSubstituteHandover({ digest: renderLedgerDigest(events), notebook: readNotebook(projectNotebookPath(deps.stateDir, slug)), git: readHandoverGit(root), tasks: foldTasks(events).filter(task => !task.accepted).map(task => `${task.task}: ${task.status}; Attempts: ${task.attempts.length}`).join("\n"), timeline, maxBytes: LEAD_HANDOFF_MAX_BYTES });
+    } else handoffText = capHandoffText(handoffText!, LEAD_HANDOFF_MAX_BYTES);
+    updateProgress(slug, { handover: substitute ? "substitute" : "extracted" });
     atomicJson(extractionPath(slug), { requestedAt, prior, stale, ...(snapshot?.sends === undefined ? {} : { sends: snapshot.sends }) });
     try {
       mkdirSync(statePath, { recursive: true });
@@ -1271,6 +1315,8 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       events,
     });
     const digest = renderLedgerDigest(events);
+    const handoffBundle = renderSuccessorKickoff({ slug, roster, digest, handoffText, stale, reason: progressOf(slug)?.reason });
+    atomicJson(extractionPath(slug), { ...readExtraction(slug), kickoff: handoffBundle });
     // The outgoing Lead's final cumulative usage is flushed BEFORE the seat
     // archives (ADR 0043 §3) — the rotated session's tokens land in the
     // Project's rollup, never lost to the archive boundary.
@@ -1287,15 +1333,18 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     if (!retired.ok && retired.code === "no-lead") {
       settleLeadRotation(slug);
     }
-    const ensured = await deps.ensureLead({ projectRoot: root });
+    updateProgress(slug, { state: "creating-successor", failure: undefined });
+    let ensured: EnsureLeadResult;
+    try { ensured = await deps.ensureLead({ projectRoot: root }); } catch (error) { ensured = { ok: false, code: "successor-create-failed", error: messageOf(error) }; }
     if (!ensured.ok) {
+      updateProgress(slug, { state: "failed", failure: ensured.error });
       log(`lead-mailbox: handoff of ${slug} could not spawn the successor (${ensured.code}: ${ensured.error}) — the mailbox stays locked, mail holds queued`);
       return;
     }
-    const handoffBundle = renderSuccessorKickoff({ slug, roster, digest, handoffText, stale });
     pendingHandoffByAgentId.set(ensured.agentId, handoffBundle);
     handingOverBySlug.delete(slug);
     writeRotationState(slug, root, { rotationState: "normal", handoffRequestedAt: null });
+    updateProgress(slug, { state: "done", waitingPeers: undefined, failure: undefined });
     await drainLeadMailbox(slug);
     const retiredLabel = retired.ok ? retired.agentId : (input.agentId || "absent-lead");
     // Loud degraded completion (v0.2.2, ADR 0050 Decision 4, amending ADR 0018
@@ -1313,11 +1362,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
           kind: "needs_human",
           text: [
             `Degraded Lead handoff of ${slug} completed — reason: ${input.fuseReason} (${DEGRADED_HANDOFF_COMPLETION_REASONS[input.fuseReason]}).`,
-            stale
-              ? "The successor's handoff layer is the preserved prior with the staleness notice (the latest extraction did not complete) — brief the successor on fresh state before it relies on the handoff layer."
-              : handoffText === INTERRUPTED_HANDOFF_EXTRACTION_NOTE
-                ? "No completed extraction backs the successor's handoff layer and no prior was preserved — it carries only the interrupted-extraction fallback note over the machine-verified roster and digest."
-                : "No completed extraction backs the successor's handoff layer — it carries the machine-recovered handoff text, never a fresh extraction.",
+            substitute ? "The successor received a Plugin-built handover assembled from current Project evidence." : "The successor received the handover recovered from this extraction window.",
             `The rotation itself completed autonomously: ${retiredLabel} archived, successor ${ensured.agentId} spawned, held mail drained.`,
           ].join(" "),
         });
@@ -1350,7 +1395,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
           log(`lead-mailbox: handoff timeout fuse of ${slug} failed — the state stands (${messageOf(err)})`);
         }
       });
-    }, handoffTimeoutMs);
+    }, extractionTimeout(slug));
     timer.unref?.();
     handoffTimers.set(slug, timer);
   };
@@ -1388,6 +1433,8 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
         fuseReason,
         ...(requestedAt === undefined ? {} : { handoffRequestedAt: requestedAt }),
       });
+    if (progressOf(slug)?.state === "failed") return;
+    if (progressOf(slug)?.reason !== "context-mark" && progressOf(slug) !== null && elapsed >= extractionTimeout(slug)) { await complete("extraction-timeout"); return; }
     if (lead === undefined || lead.status === "error") {
       log(`lead-mailbox: ${slug} handoff extraction fuse tripped (${lead === undefined ? "no live lead" : "lead in error state"}) — completing the handoff`);
       await complete("extraction-send-failed");
@@ -1396,7 +1443,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     if (isSeatReadyForMail(lead)) {
       // An outstanding send still inside its window is left alone — the Lead
       // may simply not have flipped to `running` on the daemon yet.
-      if (extractionOutstandingBySlug.has(slug) && elapsed < handoffTimeoutMs) return;
+      if (extractionOutstandingBySlug.has(slug) && elapsed < extractionTimeout(slug)) return;
       const snapshot = readExtraction(slug);
       const sends = snapshot?.sends ?? 1; // a pre-v0.2.2 snapshot implies the original send
       if (sends >= HANDOFF_EXTRACTION_MAX_SENDS) {
@@ -1405,7 +1452,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
         return;
       }
       try {
-        await resolveDaemon().agents.ref(lead.id).send(renderHandoffExtractionPrompt(slug));
+        await resolveDaemon().agents.ref(lead.id).send(renderHandoffExtractionPrompt(slug, progressOf(slug)?.reason));
       } catch (err) {
         log(`lead-mailbox: ${slug} handoff extraction re-send failed (${messageOf(err)}) — completing handoff immediately`);
         await complete("extraction-send-failed");
@@ -1419,7 +1466,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       log(`lead-mailbox: ${slug} handoff extraction re-sent to ${lead.id} (send ${sends + 1} of ${HANDOFF_EXTRACTION_MAX_SENDS}) — fuse timer reset`);
       return;
     }
-    if (elapsed >= handoffTimeoutMs) {
+    if (elapsed >= extractionTimeout(slug)) {
       log(`lead-mailbox: ${slug} handoff extraction timed out (${elapsed}ms >= ${handoffTimeoutMs}ms) with the Lead still ${lead.status} — tripping fuse`);
       await complete("extraction-timeout");
     }
@@ -1805,6 +1852,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
   const startupRecovery = (): void => {
     for (const registration of listProjectRegistrations(deps.stateDir)) {
       try {
+        if (registration.rotationState && registration.rotationState !== "normal" && progressOf(registration.slug) === null) updateProgress(registration.slug, { reason: "context-mark", state: registration.rotationState === "rotation_pending" ? "scheduled" : "handing-over" });
         const settled = recoverLeadMailbox(mailboxPath(registration.slug), "daemon-restart");
         for (const event of settled) {
           log(`lead-mailbox: recovered ${event.mailIds.length} item(s) of ${registration.slug} — requeued (daemon-restart)`);
@@ -1935,10 +1983,19 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
           // handover's metadata against (older-than-loss ⇒ the dated staleness
           // line; no metadata ⇒ stale-unknown). No blanket `stale: true`
           // anymore: the file's own written-at decides.
+          const disk = readDiskHandoffFile(registration.slug);
+          const lastTurnAt = lastLeadTurnAt.get(agentId);
+          const fresh = disk?.meta !== undefined && lastTurnAt !== undefined && Date.parse(disk.meta.writtenAt) >= Date.parse(lastTurnAt);
+          if (!fresh) {
+            const events = projectEventsOf(registration.slug, registration.root);
+            const body = buildSubstituteHandover({ digest: renderLedgerDigest(events), notebook: readNotebook(projectNotebookPath(deps.stateDir, registration.slug)), git: readHandoverGit(registration.root), tasks: foldTasks(events).filter(task => !task.accepted).map(task => `${task.task}: ${task.status}; Attempts: ${task.attempts.length}`).join("\n"), timeline: "(outgoing Lead was archived)", maxBytes: LEAD_HANDOFF_MAX_BYTES });
+            mkdirSync(projectStateDir(deps.stateDir, registration.slug), { recursive: true });
+            writeFileSync(join(projectStateDir(deps.stateDir, registration.slug), "lead-handoff.md"), renderHandoffFile(body, { leadId: agentId, writtenAt: new Date().toISOString() }));
+          }
           const priorExtraction = readExtraction(registration.slug);
           atomicJson(extractionPath(registration.slug), {
             ...(priorExtraction ?? {}),
-            leadLostAt: new Date().toISOString(),
+            leadLostAt: lastTurnAt ?? new Date().toISOString(),
           });
           // (3b) v0.6.1 review fix (ADR 0057 §4): the same outside archive
           // settles every released Supervisor waiting on this Lead — the
@@ -1960,6 +2017,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
   };
 
   const resetProjectMailbox = (slug: string): void => {
+    writeHandoffProgress(deps.stateDir, slug, null);
     peerHandoff.reset(slug);
     clearHandoffTimer(slug);
     handingOverBySlug.delete(slug);
@@ -2012,7 +2070,55 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     });
   };
 
+  const handoff = async (input: HandoffRequest): Promise<HandoffReply> => {
+    if ((input.seat ?? "lead") !== "lead") return { ok: false, code: "handoff-seat-unavailable", error: "This seat handoff is not available yet" };
+    if (input.action === "handover") {
+      const current = progressOf(input.slug); const text = readDiskHandoffText(input.slug) ?? "";
+      return { ok: true, progress: current, text, source: current?.handover ?? (text.startsWith("# Plugin-built handover") ? "substitute" : "extracted") };
+    }
+    return projectLane(input.slug, async () => {
+      const reg = readProjectRegistration(deps.stateDir, input.slug);
+      if (!reg) return { ok: false, code: "unknown-project", error: "Project not registered" };
+      const current = progressOf(input.slug);
+      if (input.action === "cancel") {
+        if (readRotationState(input.slug) !== "rotation_pending") return { ok: false, code: "handoff-not-scheduled", error: "Only a scheduled handoff can be canceled" };
+        if (current?.reason === "provider-change") saveLanes(deps.stateDir, { lead: laneValue(current.fromLane) }, input.slug);
+        writeRotationState(input.slug, reg.root, { rotationState: "normal", handoffRequestedAt: null });
+        writeHandoffProgress(deps.stateDir, input.slug, null);
+        await drainLeadMailbox(input.slug);
+        return { ok: true, progress: null };
+      }
+      if (input.action === "retry") {
+        if (current?.state !== "failed") return { ok: false, code: "handoff-not-failed", error: "Only a failed handoff can be retried" };
+        updateProgress(input.slug, { state: "creating-successor", failure: undefined });
+        const ensured = await deps.ensureLead({ projectRoot: reg.root }).catch(error => ({ ok: false as const, code: "successor-create-failed", error: messageOf(error) }));
+        if (!ensured.ok) updateProgress(input.slug, { state: "failed", failure: ensured.error });
+        else {
+          const events = projectEventsOf(input.slug, reg.root);
+          pendingHandoffByAgentId.set(ensured.agentId, readExtraction(input.slug)?.kickoff ?? renderSuccessorKickoff({ slug: input.slug, roster: "(no live roster available)", digest: renderLedgerDigest(events), handoffText: readDiskHandoffText(input.slug) ?? "", stale: false, reason: current.reason }));
+          handingOverBySlug.delete(input.slug); writeRotationState(input.slug, reg.root, { rotationState: "normal", handoffRequestedAt: null });
+          await drainLeadMailbox(input.slug); updateProgress(input.slug, { state: "done" });
+        }
+        return { ok: true, progress: progressOf(input.slug) };
+      }
+      if (input.reason === "provider-change" && current && current.state !== "done") return { ok: false, code: "handoff-in-progress", error: "A handoff is already active; cancel it before choosing a different provider" };
+      if (current && !["done", "scheduled"].includes(current.state) && !(input.action === "replaceNow" && current.state === "handing-over")) return { ok: false, code: "handoff-in-progress", error: "A handoff is already active" };
+      if (!current || current.state === "done") {
+        const loaded = loadLanes(deps.stateDir, input.slug); const lane = loaded.ok ? loaded.lanes.lead : "pi/zcode/glm-5.3";
+        writeHandoffProgress(deps.stateDir, input.slug, null);
+        updateProgress(input.slug, { reason: input.reason ?? "owner", state: "scheduled", fromLane: laneRef(input.fromLane ?? lane), toLane: laneRef(input.toLane ?? lane) });
+      }
+      writeRotationState(input.slug, reg.root, { rotationState: "rotation_pending" });
+      if (input.action === "replaceNow") await completeHandoff(input.slug, reg.root, { agentId: reg.lead ?? "", outcome: { kind: "failed" }, timeline: [], fuseReason: "extraction-send-failed" });
+      else if (input.reason === "provider-change" && await projectPeerInFlight(input.slug)) {
+        const live = await liveAgentsById(); updateProgress(input.slug, { waitingPeers: countWaitingPeers(input.slug, projectStreamOf(input.slug), live) });
+      } else await beginHandoff(input.slug, reg.root);
+      return { ok: true, progress: progressOf(input.slug) };
+    });
+  };
+
   const runtime: LeadMailRuntime = {
+    handoff,
     hasActiveWork,
     hasPendingHandoff: slug => { const id = readProjectRegistration(deps.stateDir, slug)?.lead; return id !== undefined && pendingHandoffByAgentId.has(id); },
     dispatchLead,
@@ -2052,11 +2158,11 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
  * The one bounded Handoff Extraction prompt — fixed sections, fixed ceiling, no
  * new work.
  */
-function renderHandoffExtractionPrompt(slug: string): string {
+function renderHandoffExtractionPrompt(slug: string, reason: HandoffProgress["reason"] = "context-mark"): string {
   return [
     `# Lead handoff extraction — project ${slug}`,
     "",
-    "Your context window has crossed the 128,000-token rotation threshold, so this standing Lead seat is rotating: you are being retired, and a fresh successor Lead continues the project from your handoff.",
+    reason === "context-mark" ? "Your context window has crossed the 128,000-token rotation threshold, so this standing Lead seat is rotating: you are being retired, and a fresh successor Lead continues the project from your handoff." : `This standing Lead seat is handing off (${reason}). A fresh successor Lead continues the project from your handoff.`,
     "",
     "Put the entire Markdown handoff directly in your final assistant message, in one piece, without running shell commands or writing files to disk. The plugin server reads your reply and persists it automatically, capping it at 8 KB. Keep it a lean tactical baton, not an archive: never copy-paste active Contract.description blocks verbatim (they are already recorded in ledger.jsonl), and never write detailed post-mortems or test inventories of already-accepted waves. Use exactly these five sections:",
     "",
@@ -2087,6 +2193,7 @@ function renderSuccessorKickoff(input: {
   handoffText: string | null;
   stale?: boolean;
   staleSource?: "extraction" | "lost-lead" | "dated";
+  reason?: HandoffProgress["reason"];
 }): string {
   return [
     `# Lead handoff — project ${input.slug}`,
@@ -2100,7 +2207,7 @@ function renderSuccessorKickoff(input: {
         ]
       : []),
     "",
-    "You are the fresh successor Lead of this project, spawned at 0% context after the outgoing Lead crossed the 128,000-token rotation threshold. Three layers of continuity follow — the first two are machine-verified, built by the plugin from the live daemon and the ledger, never from prose:",
+    `You are the fresh successor Lead of this project, spawned at 0% context after the outgoing Lead handed off (${input.reason ?? "context-mark"}). Three layers of continuity follow — the first two are machine-verified, built by the plugin from the live daemon and the ledger, never from prose:`,
     "",
     "## Machine-Verified Active Peer Roster",
     "",

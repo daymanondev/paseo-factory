@@ -1,3 +1,4 @@
+import { HandoffProgressSchema } from "./handoff.ts";
 /**
  * The Factory surface's view vocabulary (v0.0.13, ADR 0009 §2) — the one
  * shape the client renders and the server folds. Plain JSON only: `shared/`
@@ -190,6 +191,7 @@ export const AgentViewSchema = z.object({
    * reads as "normal").
    */
   rotationState: z.enum(["normal", "rotation_pending", "handing_over"]).optional(),
+  handoffProgress: HandoffProgressSchema.nullable().optional(),
   /** How many mail items wait queued in the Project's `mailbox.jsonl` fold — Lead-only. */
   queuedMailCount: z.number().optional(),
   requiresAttention: z.boolean().nullable(),

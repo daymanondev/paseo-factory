@@ -1,3 +1,4 @@
+import { HandoffProgressSchema } from "./handoff.ts";
 import { OpenDesignProjectLinkSchema } from "./view.ts";
 /**
  * The Factory surface's RPC contracts (v0.0.13, ADR 0009 §2/§4) — the one
@@ -244,11 +245,14 @@ export const leadEnsure = defineRpc({
   ]),
 });
 
-export const leadRotate = defineRpc({
-  name: "factory.lead.rotate",
-  input: z.object({ projectRoot: z.string() }),
-  output: z.union([z.object({ ok: z.literal(true), agentId: z.string() }), Failure]),
-});
+const HandoffInput = z.object({ projectRoot: z.string(), seat: z.string(), lane: z.string().optional() });
+const HandoffOutput = z.union([z.object({ ok: z.literal(true), progress: HandoffProgressSchema.nullable(), text: z.string().optional(), source: z.enum(["extracted", "substitute"]).optional() }), Failure]);
+export const handoffStart = defineRpc({ name: "factory.handoff.start", input: HandoffInput, output: HandoffOutput });
+// The SDK requires lowercase dotted methods: spec replaceNow is replace.now (lanes.set.batch precedent).
+export const handoffReplaceNow = defineRpc({ name: "factory.handoff.replace.now", input: HandoffInput, output: HandoffOutput });
+export const handoffCancel = defineRpc({ name: "factory.handoff.cancel", input: HandoffInput, output: HandoffOutput });
+export const handoffRetry = defineRpc({ name: "factory.handoff.retry", input: HandoffInput, output: HandoffOutput });
+export const handoffHandover = defineRpc({ name: "factory.handoff.handover", input: HandoffInput, output: HandoffOutput });
 
 export const projectReset = defineRpc({
   name: "factory.project.reset",

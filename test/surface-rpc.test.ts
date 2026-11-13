@@ -707,7 +707,7 @@ test("supervisor.revoke: stops and archives the Project's supervisor; none is a 
   assert.equal(none.code, "no-supervisor");
 });
 
-test("v0.6.1 (ADR 0057 §4): archiving the Supervisor through a cross-provider lane change leaves an unparented Lead live and still bound", async (t) => {
+test("v0.6.1 (ADR 0057 §4): Supervisor cross-family changes are refused until its handoff runtime is available", async (t) => {
   const project = makeProject(t, "lanes-sup-unparented");
   const agents: FakeAgent[] = [
     { id: "agent-sup-x", labels: { seat: "supervisor", project: project.slug }, provider: "pi/zai/glm-5.3" },
@@ -718,13 +718,13 @@ test("v0.6.1 (ADR 0057 §4): archiving the Supervisor through a cross-provider l
 
   const retired = await handlers.lanesSet({ lane: "supervisor", value: "claude/opus-4-8", projectRoot: project.root });
   assert.ok(retired.ok, retired.ok ? "" : retired.error);
-  assert.match(retired.modelSync, /retired — agent agent-su.*rotated onto claude\/opus-4-8's provider family/);
-  assert.deepEqual(stopped, ["agent-sup-x"], "a family change cancels the live Supervisor");
-  assert.deepEqual(fake.archived, ["agent-sup-x"], "then archives it — the Supervisor is replaced");
+  assert.match(retired.modelSync, /refused.*previous lane is restored/);
+  assert.deepEqual(stopped, []);
+  assert.deepEqual(fake.archived, []);
   assert.ok(agents.some((agent) => agent.id === "agent-lead-x"), "the unparented Lead stays live — no cascade can reach it");
   const reg = readProjectRegistration(stateDir, project.slug);
   assert.equal(reg?.lead, "agent-lead-x", "the Lead keeps its binding through the Supervisor swap");
-  assert.equal(reg?.supervisor, undefined, "the Supervisor binding clears for the next start");
+  assert.equal(reg?.supervisor, "agent-sup-x");
 });
 
 test("v0.6.1 (ADR 0057 §4): replacing a Supervisor whose live Lead is parented to it releases it — archived only after that Lead's next handoff, and the record survives a restart", async (t) => {
@@ -899,7 +899,7 @@ test("lead.rotate: cancels + archives the active Lead and clears its registratio
   assert.equal(none.code, "no-lead");
 });
 
-test("lanes.set: a project-scoped seat save follows the Live-Seat Transition Law — same family syncs in place, a family change retires the live Lead (v0.0.38, ADR 0026 §3/§4)", async (t) => {
+test("lanes.set: a project-scoped seat save follows the Live-Seat Transition Law — same family syncs in place, an unwired family-change handoff preserves the live Lead (v0.0.38, ADR 0026 §3/§4)", async (t) => {
   const project = makeProject(t, "lanes-lead");
   const { stateDir, handlers, modelSyncs, thinkingSyncs, stopped, fake, leadRetired } = makeSurface(t, [
     { id: "agent-lead-2", labels: { seat: "lead", project: project.slug }, provider: "pi/zai/glm-5.3" },
@@ -932,12 +932,12 @@ test("lanes.set: a project-scoped seat save follows the Live-Seat Transition Law
   );
   const retired = await handlers.lanesSet({ lane: "lead", value: "claude/opus-4-8", projectRoot: project.root });
   assert.ok(retired.ok, retired.ok ? "" : retired.error);
-  assert.equal(retired.lanes.lead, "claude/opus-4-8");
-  assert.match(retired.modelSync, /retired — agent agent-le.*rotated onto claude\/opus-4-8's provider family/);
-  assert.deepEqual(stopped, ["agent-lead-2"], "a family change cancels the live Lead");
-  assert.deepEqual(fake.archived, ["agent-lead-2"], "then archives it — the next dispatch spawns a fresh Lead");
-  assert.equal(readProjectRegistration(stateDir, project.slug)?.lead, undefined, "the registration forgets the retired Lead");
-  assert.deepEqual(leadRetired, [{ slug: project.slug, agentId: "agent-lead-2" }], "onLeadRetired fires so queued mail requeues for the next Lead");
+  assert.equal(retired.lanes.lead, "pi/zcode/glm-5.3:max", "unavailable handoff restores the previous lane");
+  assert.match(retired.modelSync, /refused.*handoff unavailable/);
+  assert.deepEqual(stopped, []);
+  assert.deepEqual(fake.archived, []);
+  assert.equal(readProjectRegistration(stateDir, project.slug)?.lead, "agent-lead-2");
+  assert.deepEqual(leadRetired, []);
   assert.equal(modelSyncs.length, 1, "no model push ever lands on a session whose adapter family changed");
   assert.ok(existsSync(join(stateDir, "projects", project.slug, "mailbox.jsonl")), "the queued Lead mail file survives the rotation");
 
@@ -5376,26 +5376,20 @@ test("Seam 2: profilesApply and lanesReset follow the Live-Seat Transition Law �
   assert.ok(!fake.archived.includes("a-sup"), "a same-family change never archives the live Supervisor");
   assert.match(applied.modelSync, /applied — agent a-sup.*in place/);
 
-  // Lead: codex → claude — retired through the leadRotate door, mail preserved for the next Lead.
-  assert.deepEqual(stopped, ["a-lead"], "the family change cancels the live Lead");
-  assert.deepEqual(fake.archived, ["a-lead"], "then archives it");
-  assert.equal(readProjectRegistration(stateDir, projectA.slug)?.lead, undefined, "the registration binding clears");
-  assert.deepEqual(leadRetired, [{ slug: projectA.slug, agentId: "a-lead" }], "onLeadRetired fires so queued Lead mail requeues for the next Lead");
-  assert.equal(modelSyncs.length, 1, "no model push ever lands on a session whose adapter family changed");
-  assert.match(applied.modelSync, /retired — agent a-lead rotated onto claude\/claude-sonnet-4-6's provider family/);
-
-  // Reset to the machine default: the (still live, claude-family) Supervisor's
-  // lane falls back to the machine pi lane — a family change, so the seat
-  // rotates for the next turn/dispatch.
+  // Without the handoff runtime a family change refuses and preserves both seats.
+  assert.deepEqual(stopped, []);
+  assert.deepEqual(fake.archived, []);
+  assert.equal(readProjectRegistration(stateDir, projectA.slug)?.lead, "a-lead");
+  assert.deepEqual(leadRetired, []);
+  assert.equal(modelSyncs.length, 1);
+  assert.match(applied.modelSync, /refused.*handoff unavailable/);
   writeLanes(stateDir, { supervisor: "pi/zcode/glm-5.3" });
   const reset = await handlers.lanesReset({ projectRoot: projectA.root });
   assert.ok(reset.ok, reset.ok ? "" : reset.error);
-  assert.equal(reset.removed, true);
-  assert.deepEqual(stopped, ["a-lead", "a-sup"], "the reset retires the live Supervisor whose family changed");
-  assert.deepEqual(fake.archived, ["a-lead", "a-sup"]);
-  assert.equal(readProjectRegistration(stateDir, projectA.slug)?.supervisor, undefined, "the Supervisor binding clears so the next turn spawns fresh");
-  assert.match(reset.modelSync, /retired — agent a-sup rotated onto pi\/zcode\/glm-5\.3's provider family/);
-  assert.match(reset.modelSync, /skipped — no live lead agent for project/, "the already-rotated Lead seat has nothing left to transition");
+  assert.deepEqual(stopped, []);
+  assert.deepEqual(fake.archived, []);
+  assert.equal(readProjectRegistration(stateDir, projectA.slug)?.supervisor, "a-sup");
+  assert.match(reset.modelSync, /refused.*previous lane is restored/);
 });
 
 test("daemon plugin bridge: self-heals a v0.0.40 poisoned factory-supervisor extends ('antigravity') in <home>/config.json before opening the WebSocket so Check Updates and plugin listing never fail with 'daemon socket closed before response'", async (t) => {
