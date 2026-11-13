@@ -113,7 +113,7 @@ test("StudioRelay mounts under a RN-like window and renders the SDK DocumentFram
   assert.doesNotMatch(html, /<iframe|<img/, "no DOM iframe or img element is created");
 });
 
-test("the Project panel mounts under a RN-like window on mobile and renders the no-supervisor item with the adopt button — the one seat write mobile allows (03, ADR 0057 §5/§10)", async () => {
+test("the Project panel mounts under a RN-like window on mobile and renders the no-supervisor item with the adopt button (ADR 0057 §5/§10)", async () => {
   const { ProjectPanel } = await load("plugin/client/factory/project-panel.tsx");
   const { createElement } = await import("react");
   const theme = { colors: { surface0: "#fff", surface1: "#fff", surface2: "#fff", foreground: "#111", foregroundMuted: "#555", accent: "#35a", border: "#ccc", statusSuccess: "#272", statusWarning: "#860", statusDanger: "#a33" } };
@@ -620,4 +620,85 @@ test("W13: the pill bounds quick choices, reports a refused write and never writ
       } finally { await act(() => root.unmount()); }
     });
   } finally { stop(); }
+});
+
+test('W14: iOS and Android expose exactly the Project model, handoff and adoption writes', async () => {
+  const { FactoryShell } = await load('plugin/client/factory/shell.tsx');
+  const { testTheme } = await import('./client-markup.ts');
+  const { createElement } = await import('react');
+  const panel = modelPanelFixture();
+  const progress = { reason: 'owner', fromLane: { provider: 'codex', model: 'old' }, toLane: { provider: 'claude', model: 'new' }, startedAt: '', updatedAt: '' };
+  panel.handoffs = [
+    { ...progress, seat: 'lead', state: 'scheduled', allowedActions: ['cancel', 'hand-off-now'], waitingPeers: 1 },
+    { ...progress, seat: 'peer:gone', state: 'failed', allowedActions: ['retry', 'replace-now', 'view-handover'] },
+  ];
+  panel.seats.supervisorCandidates = [{ agentId: 'candidate', title: 'Owner chat', statusLabel: 'idle', tone: 'normal', model: 'opus' }];
+  panel.needsYou = [
+    { key: 'prerequisites', kind: 'prerequisites', title: 'Missing tools', detail: null, action: { kind: 'install-prerequisites', label: 'Install' } },
+    { key: 'supervisor', kind: 'no-supervisor', title: 'No Supervisor', detail: null, action: { kind: 'start-supervisor', label: 'Start Supervisor' } },
+    { key: 'design', kind: 'open-design-broken', title: 'Broken design', detail: null, action: { kind: 'sync-open-design', label: 'Sync' } },
+    { key: 'retry', kind: 'handoff-failed', title: 'Failed Peer', detail: null, action: { kind: 'retry-handoff', seat: 'peer:gone', label: 'Try again' } },
+  ];
+  panel.openDesign = { state: 'linked', projectName: 'Design', syncedAt: null, detail: null };
+  const view = { ...modelPickerFixture, panel, project: { root: '/project', slug: 'my-app', missingRoot: false }, kpis: { running: 0, needsHuman: 0 }, companionTools: [], corePlugin: {}, vault: {}, skillHub: { projectPacks: [{ id: 'expo', label: 'Expo', enabled: false }] }, daemonError: null };
+  const calls: { method: string; input: any }[] = [];
+  const opened: string[] = [];
+  const g = globalThis as Record<string, any>, prior = g.__factoryClientRpc;
+  g.__factoryClientRpc = async (method: string, input: any) => {
+    calls.push({ method, input });
+    return method === 'factory.snapshot' ? { ok: true, view } : { ok: true, agentId: 'candidate', text: 'Owner goals', source: 'substitute' };
+  };
+  try {
+    await mountUnderNativeWindow(async (createRoot, container, act) => {
+      const root = createRoot(container);
+      try {
+        for (const platform of ['ios', 'android']) {
+          calls.length = 0;
+          await act(() => root.render(createElement(FactoryShell, { key: platform, theme: testTheme, dir: '/project', layout: { compact: true, platform }, navigation: { openAgent: ({ agentId }: any) => opened.push(agentId) } })));
+          const click = async (id: string) => {
+            const button = container.querySelector(`[data-testid="${id}"]`) as HTMLElement;
+            assert.equal(button?.tagName, 'BUTTON', `${platform}: ${id}`);
+            await act(() => button.click());
+          };
+          await click('factory-panel-menu-toggle');
+          assert.match(container.querySelector('[data-testid="factory-panel-menu"]')!.textContent!, /on Paseo Desktop/, 'desktop-only Project actions explain where to continue');
+          for (const id of ['factory-handoff-retry', 'factory-panel-needs-you-action-retry', 'factory-profile-chip-menu', 'factory-skill-pack-expo', 'factory-panel-open-settings', 'factory-panel-menu-reset', 'factory-panel-menu-delete', 'factory-panel-menu-confirm-reset', 'factory-panel-menu-confirm-delete', 'factory-panel-start-supervisor', 'factory-panel-needs-you-action-prerequisites', 'factory-panel-needs-you-action-supervisor', 'factory-panel-needs-you-action-design', 'factory-open-design-sync', 'factory-open-design-studio']) {
+            assert.equal(container.querySelector(`[data-testid="${id}"]`), null, `${platform} hides ${id}`);
+          }
+          assert.equal(container.querySelector('[data-testid="factory-panel-od"] button'), null, 'design Sync and Studio never mount on mobile');
+          assert.equal(container.querySelector('[data-testid="factory-panel-menu"] button'), null, 'the mobile Project menu has no actions');
+          assert.deepEqual([...container.querySelectorAll('button')].map(button => button.getAttribute('data-testid')).sort(), [
+            'factory-panel-menu-toggle', 'factory-handoff-cancel', 'factory-handoff-now', 'factory-handoff-replace-now', 'factory-handoff-view',
+            'factory-seat-chip-supervisor', 'factory-seat-chip-lead', 'factory-seat-chip-peer-task-1', 'factory-seat-chip-worker',
+            'factory-panel-open-lead', 'factory-panel-open-peer-task-1', 'factory-seat-hand-off-now-lead', 'factory-seat-hand-off-now-peer-task-1',
+            'factory-panel-adopt-supervisor',
+          ].sort(), 'every mobile action belongs to the allowed write set or read navigation');
+          assert.notEqual(container.querySelector('[data-testid="factory-profile-chip"]')?.tagName, 'BUTTON');
+          for (const seat of ['supervisor', 'lead', 'peer-task-1', 'worker']) {
+            await click(`factory-seat-chip-${seat}`);
+            assert.equal(container.querySelector('[data-testid="factory-chip-editor-machine-default"]'), null);
+            await click('factory-chip-editor-primary');
+          }
+          await click('factory-handoff-cancel');
+          await click('factory-handoff-now');
+          await click('factory-handoff-replace-now');
+          await click('factory-panel-adopt-supervisor');
+          await click('factory-handoff-view');
+          await click('factory-panel-open-lead');
+          assert.deepEqual(calls.filter(c => c.method !== 'factory.snapshot' && c.method !== 'factory.handoff.handover'), [
+            { method: 'factory.lanes.set', input: { projectRoot: '/project', lane: 'supervisor', value: 'codex/gpt-live:high' } },
+            { method: 'factory.lanes.set', input: { projectRoot: '/project', lane: 'lead', value: 'codex/gpt-live:high' } },
+            { method: 'factory.handoff.start', input: { projectRoot: '/project', seat: 'peer:task-1', lane: 'codex/gpt-live:high' } },
+            { method: 'factory.lanes.set', input: { projectRoot: '/project', lane: 'worker', value: 'codex/gpt-live:high' } },
+            { method: 'factory.handoff.cancel', input: { projectRoot: '/project', seat: 'lead' } },
+            { method: 'factory.handoff.start', input: { projectRoot: '/project', seat: 'lead' } },
+            { method: 'factory.handoff.replace.now', input: { projectRoot: '/project', seat: 'peer:gone' } },
+            { method: 'factory.supervisor.adopt', input: { projectRoot: '/project', agentId: 'candidate' } },
+          ]);
+          assert.deepEqual(opened.slice(-2), ['candidate', 'lead'], 'adoption and read navigation still open chats');
+          assert.ok(calls.some(c => c.method === 'factory.handoff.handover'));
+        }
+      } finally { await act(() => root.unmount()); }
+    });
+  } finally { g.__factoryClientRpc = prior; }
 });

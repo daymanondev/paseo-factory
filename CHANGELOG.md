@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-13
+
+**Seat handoffs and the wide Factory tab** (ADR 0057): completes issues 05–14 after v0.6.1's seat independence and Supervisor binding work.
+
+### Added
+
+- **Every seat replacement carries a handover.** Same-provider Supervisor/Lead model changes switch in place; provider changes and Owner-requested replacements run a Handoff. The progress block names scheduled, handing over, creating successor, done, substitute handover and failed states, with the valid Cancel, Hand off now, Replace now, Try again and View handover actions. Replace now skips extraction and uses a labelled plugin-built Substitute handover.
+- **Supervisor handoff preserves the Owner's conversation.** Goals, decisions and open questions reach the successor together with the live Lead, open Tasks and held reports. The Lead keeps working while its reports wait for the new Supervisor; the Supervisor's context mark only raises a Needs-you suggestion.
+- **Owner-initiated Peer handoff** keeps the worktree, Contract and Attempt count, notifies the Lead, and leaves the automatic once-per-epoch handoff budget intact. All Peer successors follow the current Default worker unless the Owner explicitly chose a model for that Peer.
+- **Model-aware context marks** keep the Lead/Supervisor at the lower of 128k and 65% of the model window (128k when unknown), and the Peer at the lower of 160k and 80% (160k when unknown). Context bars show the actual mark, native-session readings recover under-reported usage, and missing readings say context unknown.
+- **The wide Factory tab** opens from the workspace header's Factory button and Needs-you badge, with two columns at wide widths and one in the narrow explorer. It brings model chips, the active Lane profile and Project skill packs onto the main screen, and pares `⋯` down to Reset, Delete and Open Settings. Role, state and thinking colours always have a text or icon cue.
+- **Seat-chat composer pills** show live status, up to six quick model choices, Other model and Hand off now. Other model opens the Project-root tab at that seat's editor; iOS/Android pills use the same root-scoped navigation instead of a popover, including Peer chats in Task workspaces.
+- **A bounded mobile write set:** Project model chips (including Default worker), Hand off now, Replace now, Cancel and Use this chat as Supervisor. Read navigation and View handover remain available. Retry, machine defaults, profiles, skill-pack changes, onboarding, Settings writes, Reset/Delete and design Sync/Studio stay desktop-only, with a Desktop hint for the Project menu.
+
+### Fixed
+
+- **Failed extraction no longer strands a replacement or reuses stale notes.** Owner/provider handoffs use a roughly 90-second extraction window, and exhausted context-mark extraction falls back to a Substitute handover built from the Ledger, notebook, git state, open Tasks and recent timeline. Lost-Lead recovery uses the same substitute when the saved handover is stale, absent or of unknown freshness.
+- **Scheduled provider changes can be cancelled** with the previous Project lane restored. Hand off now can advance a waiting Lead without stopping its Peers; their reports remain held for the successor.
+- **Legacy `factory lead rotate` help describes the Handoff it now schedules**, rather than promising a destructive cancel/archive.
+- **Domain and surface documentation** now describe the implemented handoff reasons/progress, model-aware marks, mobile permissions and wide tab; ADR 0056/0057 status notes distinguish the implemented change set from publication and live verification.
+
 ## [0.6.1] - 2026-11-12
 
 **Seat-handoff release** (ADR 0057): Decisions 4 and 5 — the Lead unparented from the Supervisor with lost-Lead recovery, and the Supervisor binding with no hidden Supervisor and adoption — plus Decision 11's three hygiene fixes and the §8 read-only spike. Everything else ships in v0.7.0.
