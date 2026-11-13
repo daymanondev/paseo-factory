@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-11-13
+
+**Factory tab polish**: the model picker and handoff failures no longer flood the tab.
+
+### Changed
+
+- **The seat model picker opens in a modal.** Clicking a Supervisor, Lead, Peer or Default worker model chip opens "Change … model" over the tab instead of expanding inside the Seats card, so seat rows keep their height and alignment.
+- **A quieter picker.** Factory's own role providers (`factory-supervisor`, `factory-lead`, `factory-peer`) are no longer offered as lane targets. Model rows drop the repeated `thinking: …` pill — the Thinking row below sets it once — and the custom model ID sits behind "Use a custom model ID…" unless the provider lists no models.
+- **One handoff alert.** A failed handoff shows once, in the Handoff block: one line for reason and lanes (plugin-built handover appended), the error once, and Try again as the primary button on Desktop. The duplicate Needs-you card and the seat row's `Handoff: failed` line are gone; mobile keeps the Desktop retry hint. The block uses a left accent border instead of a full red tint.
+
+### Fixed
+
+- **Providers with no listed models are flagged before a handoff.** The picker marks them with a warning and explains that a handoff onto them can fail (as with an unavailable `antigravity`).
+
 ## [0.7.0] - 2026-11-13
 
 **Seat handoffs and the wide Factory tab** (ADR 0057): completes issues 05–14 after v0.6.1's seat independence and Supervisor binding work.
