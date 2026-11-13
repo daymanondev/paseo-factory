@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.3] - 2026-11-14
+
+**Update the Factory from the Factory tab.**
+
+### Added
+
+- **Check for updates / Update to vX in the Factory tab header.** The header shows the installed version, checks the latest release tag on open (cached 10 min; "Check for updates" forces it), and offers "Update to v<latest>" when one is out. The button only appears when Paseo's own update would install exactly that release's commit — it can never downgrade. On mobile it shows the version and points to Paseo Desktop for the update.
+
+### Fixed
+
+- **"Update" installed an old build.** Paseo's plugin update follows the repo's default branch, which had been left at v0.6.1 while releases moved on. `main` now tracks the latest release tag, so Settings → Plugins → Update and `paseo plugin update` land on the newest version.
+
 ## [0.8.2] - 2026-11-14
 
 **Every provider reachable, a quieter seat pill, and later handoffs.**
