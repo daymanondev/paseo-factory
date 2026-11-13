@@ -768,6 +768,9 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
   const leadTelemetryOf = (
     agent: SurfaceAgentSnapshot,
   ): Pick<AgentView, "contextUsedTokens" | "contextMaxTokens" | "rotationState" | "queuedMailCount" | "handoffProgress"> => {
+    if (agent.labels.seat === "supervisor" && agent.labels.project !== undefined) return {
+      handoffProgress: readHandoffProgress(deps.stateDir, agent.labels.project, "supervisor"),
+    };
     if (agent.labels.seat !== "lead" || agent.labels.project === undefined) return {};
     const reading = readLeadContextTokens(agent, deps.usagePaths);
     const tokens = { contextUsedTokens: reading.usedTokens, contextMaxTokens: reading.maxTokens };
@@ -1163,6 +1166,8 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     if (agentId === "" || cwd === "") return;
     const resolved = resolveProject(cwd);
     if (!resolved.ok) return; // not inside a Project's repository — nothing to bind
+    const handoff = readHandoffProgress(deps.stateDir, resolved.slug, "supervisor");
+    if (handoff && handoff.state !== "done") return;
     const daemon = resolveDaemon(context);
     const agent = await liveAgentById(daemon, agentId);
     if (agent === undefined) return;
@@ -1194,6 +1199,8 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     const project = projectOrRefusal(input.projectRoot);
     if (!project.ok) return project;
     const daemon = resolveDaemon(context);
+    const supervisorProgress = seat === "supervisor" ? readHandoffProgress(deps.stateDir, project.slug, "supervisor") : null;
+    if (supervisorProgress && supervisorProgress.state !== "done") return failure("handoff-in-progress", "The Supervisor is handing off; wait for its successor");
     const lanes = loadLanes(deps.stateDir, project.slug);
     if (!lanes.ok) return failure("lanes-unreadable", lanes.reason);
     let providers: ProviderEntry[] = [];
@@ -1230,11 +1237,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         agent.cwd === "/tmp" ||
         realpathSafe(agent.cwd) === realpathSafe(project.root);
       if (agent.status === "error" || !sameProviderFamily || !sameCwd) {
-        const retired = await retireSeatUnlocked(seat, project.slug, project.root, context);
-        if (!retired.ok) {
-          return retired;
-        }
-        agent = undefined;
+        return failure("handoff-required", `This ${seat === "supervisor" ? "Supervisor" : "Lead"} needs a successor; use factory.handoff.start or Replace now to preserve its history`);
       } else if (parsed !== undefined) {
         const sync = deps.setAgentModel ?? setAgentModelViaCli;
         const syncThinking = deps.setAgentThinking ?? setAgentThinkingViaCli;
@@ -1948,16 +1951,13 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         }
         continue;
       }
-      if (seat === "supervisor") {
-        saveLanes(deps.stateDir, { supervisor: fromLane }, input.projectSlug);
-        parts.push("refused — Supervisor provider handoff is not available yet; the previous lane is restored");
-      } else if (deps.handoff !== undefined) {
+      if (deps.handoff !== undefined) {
         const reply = await deps.handoff({ slug: input.projectSlug, seat, action: "start", reason: "provider-change", fromLane, toLane });
-        if (!reply.ok) saveLanes(deps.stateDir, { lead: fromLane }, input.projectSlug);
+        if (!reply.ok) saveLanes(deps.stateDir, { [seat]: fromLane }, input.projectSlug);
         parts.push(reply.ok ? `handoff scheduled — ${agent.id.slice(0, 8)} to ${toLane}` : `handoff refused — ${reply.error}`);
       } else {
-        saveLanes(deps.stateDir, { lead: fromLane }, input.projectSlug);
-        parts.push("refused — Lead handoff unavailable; the previous lane is restored");
+        saveLanes(deps.stateDir, { [seat]: fromLane }, input.projectSlug);
+        parts.push(`refused — ${seat === "supervisor" ? "Supervisor" : "Lead"} handoff unavailable; the previous lane is restored`);
       }
     }
     if (parts.length === 0) {
@@ -2885,6 +2885,8 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       }
       return serializeSeat(`${project.slug}:supervisor`, async () => {
         const daemon = resolveDaemon(context);
+        const handoff = readHandoffProgress(deps.stateDir, project.slug, "supervisor");
+        if (handoff && handoff.state !== "done") return failure("handoff-in-progress", "The Supervisor is handing off; wait for its successor");
         const registration = readProjectRegistration(deps.stateDir, project.slug);
         const agent = await liveAgentById(daemon, agentId);
         if (agent === undefined) {
@@ -4002,7 +4004,10 @@ export function registerSurfaceRpc(
   server.handle(supervisorEnsure, (input, context) => handlers.supervisorEnsure(input, pass(context)));
   server.handle(supervisorAdopt, (input, context) => handlers.supervisorAdopt(input, pass(context)));
   server.handle(supervisorStart, (input, context) => handlers.supervisorStart(input, pass(context)));
-  server.handle(supervisorRevoke, (input, context) => handlers.supervisorRevoke(input, pass(context)));
+  // Deprecated public alias preserves history through the same Owner handoff door.
+  server.handle(supervisorRevoke, (input, context) => input.projectRoot === undefined
+    ? Promise.resolve({ ok: false as const, code: "project-required", error: "Supervisor handoff requires a Project; pass projectRoot" })
+    : handlers.handoff({ projectRoot: input.projectRoot, seat: "supervisor" }, "start", pass(context)));
   server.handle(leadEnsure, (input, context) => handlers.leadEnsure(input, pass(context)));
   server.handle(handoffStart, (input, context) => handlers.handoff(input, "start", pass(context)));
   server.handle(handoffReplaceNow, (input, context) => handlers.handoff(input, "replaceNow", pass(context)));

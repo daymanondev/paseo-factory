@@ -105,6 +105,8 @@ import type { HandoffFileMetadata } from "./handoff-text.ts";
 import { readHandoffProgress, writeHandoffProgress, laneRef, laneValue } from "./handoff-progress.ts";
 import { buildSubstituteHandover, readNotebook, readHandoverGit } from "./substitute-handover.ts";
 import type { HandoffProgress, HandoffRequest, HandoffReply } from "../shared/handoff.ts";
+import { createSupervisorHandoffRuntime } from "./supervisor-handoff.ts";
+import { stopAgentViaCli } from "./daemon-cli.ts";
 import { createPeerHandoffRuntime } from "./peer-handoff.ts";
 import type { DaemonReply } from "./daemon-cli.ts";
 import type { UsagePaths } from "./core/usage-extractor.ts";
@@ -381,6 +383,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
   };
   const stop = (): void => {
     peerHandoff.stop();
+    supervisorHandoff.stop();
     for (const timer of handoffTimers.values()) clearTimeout(timer);
     handoffTimers.clear();
   };
@@ -474,6 +477,31 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     );
     return job;
   };
+
+  const supervisorHandoff = createSupervisorHandoffRuntime({
+    stateDir: deps.stateDir, daemon: resolveDaemon, timeoutMs: deps.ownerHandoffTimeoutMs ?? 90_000,
+    onLane: projectLane, renderMail: renderSupervisorMailBatch, log,
+    markKickoffSent: id => { kickoffSentAgentIds.add(id); inFlightKickoffAgentIds.add(id); },
+    evidence: slug => {
+      const events = projectStreamOf(slug);
+      return { events, digest: renderLedgerDigest(events), tasks: foldTasks(events).filter(task => !task.accepted).map(task => `${task.task}: ${task.status}; Attempts: ${task.attempts.length}`).join("\n") };
+    },
+    retire: async (slug, agent) => {
+      const reg = readProjectRegistration(deps.stateDir, slug);
+      if (!reg) return;
+      const entries = (await resolveDaemon().agents.list({ filter: { includeArchived: false, includeBackground: true } })).entries;
+      const child = entries.map(e => e.agent).find(a => !a.archivedAt && a.parentAgentId === agent.id && (a.id === reg.lead || (a.labels.seat === "lead" && a.labels.project === slug)));
+      if (child) {
+        writeProjectRegistration(deps.stateDir, slug, { root: reg.root, releasedSupervisors: [...(reg.releasedSupervisors ?? []).filter(r => r.agentId !== agent.id), { agentId: agent.id, waitingOnLead: child.id, releasedAt: new Date().toISOString() }] });
+        return;
+      }
+      if (deps.usage) await deps.usage.flushAgent(agent, { slug });
+      await (deps.stopAgent ?? stopAgentViaCli)(agent.id, deps.home);
+      markPluginArchive(agent.id);
+      try { await resolveDaemon().agents.ref(agent.id).archive(); }
+      catch (error) { clearPluginArchive(agent.id); throw error; }
+    },
+  });
 
   /** `rotationState` as it sits in `project.json` — the typed field, absent folding to "normal". */
   const readRotationState = (slug: string): LeadRotationState => readProjectRegistration(deps.stateDir, slug)?.rotationState ?? "normal";
@@ -713,6 +741,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
    * its Seat kickoff packet.
    */
   const drainSupervisorMailbox = async (slug: string): Promise<void> => {
+    if (supervisorHandoff.active(slug)) return;
     const path = mailboxPath(slug);
     const state = readLeadMailbox(path);
     if (state.supervisorInFlight !== null || state.supervisorQueued.length === 0) return;
@@ -834,6 +863,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
   const pumpProjectSupervisor = async (slug: string): Promise<void> => {
     await projectLane(slug, async () => {
       try {
+        await supervisorHandoff.pump(slug);
         await drainSupervisorMailbox(slug);
       } catch (err) {
         log(`lead-mailbox: supervisor pump of ${slug} failed — the mail stays queued (${messageOf(err)})`);
@@ -932,6 +962,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       const { slug } = ownedSupervisor;
       await projectLane(slug, async () => {
         try {
+          if (await supervisorHandoff.turnEnded(slug, input.agentId, lastAssistantText(input.timeline), input.outcome.kind === "completed")) return;
           const path = mailboxPath(slug);
           const state = readLeadMailbox(path);
           let retryingFailedSupervisorBatch = false;
@@ -1937,6 +1968,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
   };
 
   const resetProjectMailbox = (slug: string): void => {
+    supervisorHandoff.reset(slug);
     writeHandoffProgress(deps.stateDir, slug, null);
     peerHandoff.reset(slug);
     clearHandoffTimer(slug);
@@ -1982,6 +2014,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     }
     if (gates.size > 0 || handingOverBySlug.size > 0) return true;
     const projects = listProjectRegistrations(deps.stateDir);
+    if (projects.some(project => supervisorHandoff.active(project.slug))) return true;
     if (projects.some(project => { const mailbox = readLeadMailbox(mailboxPath(project.slug)); return mailbox.inFlight !== null || mailbox.supervisorInFlight !== null; })) return true;
     const live = [...(await liveAgentsById()).values()];
     return projects.some(project => {
@@ -1991,6 +2024,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
   };
 
   const handoff = async (input: HandoffRequest): Promise<HandoffReply> => {
+    if (input.seat === "supervisor") return projectLane(input.slug, () => supervisorHandoff.request(input));
     if (input.seat?.startsWith("peer:")) return projectLane(input.slug, async () => { const reg = readProjectRegistration(deps.stateDir, input.slug); if (!reg) return { ok: false, code: "unknown-project", error: "Project not registered" }; const reply = await peerHandoff.handoff(input); if (peerBlockersQueued.delete(input.slug)) await drainLeadMailbox(input.slug); return reply; });
     if ((input.seat ?? "lead") !== "lead") return { ok: false, code: "handoff-seat-unavailable", error: "This seat handoff is not available yet" };
     if (input.action === "handover") {

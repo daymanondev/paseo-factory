@@ -3707,7 +3707,7 @@ test("v0.0.24 (ADR 0015 §1): lanesSet sanitizes unsupported :thinking before sa
   assert.equal(await handlers.sanitizeLane("opencode/opencode/nemotron-3-ultra-free:max"), "opencode/opencode/nemotron-3-ultra-free");
 });
 
-test("v0.0.24 (ADR 0015 §1–§2): ensureSeat sanitizes :thinking on create, retires and recreates errored or provider-mismatched seats, and syncs drifted model/thinking in-place", async (t) => {
+test("v0.0.24 (ADR 0015 §1–§2): ensureSeat requires handoff for errored or provider-mismatched seats and syncs healthy model/thinking in-place", async (t) => {
   const project = makeProject(t, "ensure-self-heal");
   const agents: FakeAgent[] = [
     {
@@ -3750,19 +3750,13 @@ test("v0.0.24 (ADR 0015 §1–§2): ensureSeat sanitizes :thinking on create, re
     lead: "opencode/opencode/nemotron-3-ultra-free:max",
   });
 
-  // 1. Lead is in status === "error": ensureSeat retires it (stop + archive) and creates a clean replacement with :max stripped.
+  // Errored seats keep their history until an explicit continuity handoff.
   const leadHeal = await handlers.leadEnsure({ projectRoot: project.root });
-  assert.ok(leadHeal.ok, leadHeal.ok ? "" : leadHeal.error);
-  assert.equal(leadHeal.created, true, "errored Lead seat was retired and recreated");
-  assert.notEqual(leadHeal.agentId, "agent-lead-errored");
-  assert.ok(stopped.includes("agent-lead-errored"), "errored Lead was stopped before archive");
-  assert.ok(fake.archived.includes("agent-lead-errored"), "errored Lead was archived");
-  assert.equal(fake.created.length, 1);
-  assert.deepEqual(
-    fake.created[0]!.config,
-    { provider: "opencode/opencode/nemotron-3-ultra-free" },
-    "replacement Lead seat omitted unsupported :max thinkingOptionId",
-  );
+  assert.equal(leadHeal.ok, false);
+  if (!leadHeal.ok) assert.equal(leadHeal.code, "handoff-required");
+  assert.deepEqual(stopped, []);
+  assert.deepEqual(fake.archived, []);
+  assert.equal(fake.created.length, 0);
 
   // 2. Supervisor is healthy (idle) on same provider ("opencode") but drifted on model & thinkingOptionId: synced in-place!
   const supHeal = await handlers.supervisorEnsure({ projectRoot: project.root });
@@ -3780,17 +3774,13 @@ test("v0.0.24 (ADR 0015 §1–§2): ensureSeat sanitizes :thinking on create, re
     "stale thinkingOptionId ('max') was cleared in-place",
   );
 
-  // 3. Switch supervisor lane to a different provider family (claude/opus-4-8:max): ensureSeat retires opencode seat and creates claude seat.
-  writeLanes(stateDir, {
-    supervisor: "claude/opus-4-8:max",
-    lead: "opencode/opencode/nemotron-3-ultra-free",
-  });
+  // Cross-family replacement requires a handoff, including this compatibility ensure door.
+  writeLanes(stateDir, { supervisor: "claude/opus-4-8:max", lead: "opencode/opencode/nemotron-3-ultra-free" });
   const supSwitch = await handlers.supervisorEnsure({ projectRoot: project.root });
-  assert.ok(supSwitch.ok, supSwitch.ok ? "" : supSwitch.error);
-  assert.equal(supSwitch.created, true, "provider-mismatched Supervisor was retired and recreated on claude");
-  assert.notEqual(supSwitch.agentId, "agent-sup-drifted");
-  assert.ok(fake.archived.includes("agent-sup-drifted"), "old opencode Supervisor was archived");
-  assert.deepEqual(fake.created[1]!.config, { provider: "claude/opus-4-8", thinkingOptionId: "max" });
+  assert.equal(supSwitch.ok, false);
+  if (!supSwitch.ok) assert.equal(supSwitch.code, "handoff-required");
+  assert.equal(fake.archived.length, 0);
+  assert.equal(fake.created.length, 0, "the existing Supervisor keeps its history until handoff");
 });
 
 test("v0.0.24 (ADR 0015 §5): projectReset wipes a project's ledger events, tasks, reports, worktrees, branches, mailbox, bound workers, and seats (unless keepSeats: true) while preserving lanes.json and other projects", async (t) => {
