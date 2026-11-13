@@ -215,7 +215,7 @@ function peerRows(input: PanelInput): PanelPeerRow[] {
   const taskByName = new Map(input.tasks.map((task) => [task.task, task]));
   const rows: PanelPeerRow[] = [];
   for (const agent of input.agents) {
-    if (agent.seat !== null || agent.id === input.supervisor?.id || agent.id === input.lead?.id || agent.task === null) continue;
+    if (agent.seat === "lead" || agent.seat === "supervisor" || agent.id === input.supervisor?.id || agent.id === input.lead?.id || agent.task === null) continue;
     const task = taskByName.get(agent.task);
     if (task !== undefined && (task.status === "accepted" || task.status === "closed")) continue;
     const status = statusOf(agent);

@@ -6630,8 +6630,8 @@ test("panel: live Peers get one row each — `Peer · <Task>`, disposition, stat
   const snap = await handlers.snapshot({ projectRoot: project.root });
   assert.ok(snap.ok, snap.ok ? "" : snap.error);
   assert.deepEqual(snap.view.panel.seats!.peers, [
-    { agentId: "agent-eng", task: "T-ENG", title: "Peer · T-ENG", disposition: "engineer", statusLabel: "working", tone: "normal", model: "glm-5.3" },
-    { agentId: "agent-rev", task: "T-REV", title: "Peer · T-REV", disposition: "reviewer", statusLabel: "idle", tone: "normal", model: "pi/zai/glm-5.3" },
+    { context: { usedTokens: null, markTokens: 160_000, label: "context unknown", fraction: null }, agentId: "agent-eng", task: "T-ENG", title: "Peer · T-ENG", disposition: "engineer", statusLabel: "working", tone: "normal", model: "glm-5.3" },
+    { context: { usedTokens: null, markTokens: 160_000, label: "context unknown", fraction: null }, agentId: "agent-rev", task: "T-REV", title: "Peer · T-REV", disposition: "reviewer", statusLabel: "idle", tone: "normal", model: "pi/zai/glm-5.3" },
   ]);
   assert.equal(snap.view.panel.summary, "Lead idle · 2 Peers · nothing needs you");
 });
@@ -7265,6 +7265,7 @@ test("snapshot and directory recover opencode context after restart from the lat
   mkdirSync(dirname(path), { recursive: true });
   const db = new DatabaseSync(path);
   t.after(() => db.close());
+  db.exec("PRAGMA journal_mode = WAL");
   db.exec("CREATE TABLE session_v2 (id TEXT PRIMARY KEY, tokens_input INTEGER, tokens_output INTEGER, tokens_reasoning INTEGER, tokens_cache_read INTEGER, tokens_cache_write INTEGER, cost REAL, model TEXT)");
   db.exec("CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT, type TEXT, seq INTEGER, time_created INTEGER, data TEXT)");
   db.prepare("INSERT INTO session_v2 VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run("ses-restart", 1_000_000, 200_000, 500_000, 3_000_000, 400_000, 12, "{}");
@@ -7280,6 +7281,10 @@ test("snapshot and directory recover opencode context after restart from the lat
   assert.ok(directory.ok);
   assert.equal(directory.seats[0]!.contextUsedTokens, 86_000);
   assert.equal(directory.seats[0]!.markTokens, 83_200);
+  insert.run("newest-assistant", "ses-restart", "assistant", 5, 50, JSON.stringify({ tokens: { input: 3_000, output: 2_000, cache: { read: 90_000, write: 1_000 } } }));
+  const fresh = await handlers.snapshot({ projectRoot: project.root });
+  assert.ok(fresh.ok);
+  assert.equal(fresh.view.panel.seats!.lead.context!.usedTokens, 96_000, "WAL-only writes advance the native reading");
   const runtime = createLeadMailRuntime({ factory, stateDir, daemon: fake.daemon,
     usagePaths: { userHome: dir, stateDir }, ensureLead: input => handlers.leadEnsure(input), retireLead: input => handlers.leadRotate(input) });
   t.after(() => runtime.stop());
@@ -7287,4 +7292,8 @@ test("snapshot and directory recover opencode context after restart from the lat
   await runtime.onLeadTurnEnded({ agentId: "restart-lead", outcome: { kind: "completed" }, timeline: [] });
   assert.equal(readProjectRegistration(stateDir, project.slug)?.rotationState, "handing_over", "native occupancy triggers the same mark shown by the surface");
   assert.match(fake.sent.at(-1)!.text, /handoff/i);
+  db.exec("DELETE FROM session_message");
+  const missing = await handlers.snapshot({ projectRoot: project.root });
+  assert.ok(missing.ok);
+  assert.equal(missing.view.panel.seats!.lead.context!.label, "context unknown", "cumulative totals never replace a missing per-message reading");
 });

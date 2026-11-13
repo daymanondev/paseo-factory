@@ -137,6 +137,8 @@ export interface UsageExtractorMetrics {
 
 /** One session's read cursor — the stat gate plus the harness's own offset. */
 interface UsageCursor {
+  walMtimeMs?: number;
+  walSize?: number;
   mtimeMs: number;
   size: number;
   byteOffset: number;
@@ -548,7 +550,7 @@ function extractCodex(
 /**
  * The opencode fold: the harness pre-aggregates the whole session into one
  * `session_v2` row, so the read is a primary-key lookup and the cursor is
- * the database file's own `(mtimeMs, size)`.
+ * the database and WAL files' `(mtimeMs, size)`.
  */
 function extractOpencode(
   agent: UsageAgentSource,
@@ -557,9 +559,12 @@ function extractOpencode(
   cursor: UsageCursor | undefined,
   metrics: UsageExtractorMetrics,
 ): UsageCursor | undefined {
-  const gate = statGate(cursor, dbPath);
-  if (gate === undefined) return undefined;
-  if ("hit" in gate) return gate.hit;
+  const stat = statSession(dbPath);
+  if (stat === undefined) return undefined;
+  const wal = statSession(`${dbPath}-wal`);
+  // Native opencode keeps a WAL open: new messages need not touch the main
+  // database until a checkpoint, so both files participate in this cache.
+  if (cursor !== undefined && cursor.mtimeMs === stat.mtimeMs && cursor.size === stat.size && cursor.walMtimeMs === wal?.mtimeMs && cursor.walSize === wal?.size) return cursor;
   const row = querySqlite<Record<string, unknown>>(
     dbPath,
     db => db.prepare("SELECT tokens_input, tokens_output, tokens_reasoning, tokens_cache_read, tokens_cache_write, cost, model FROM session_v2 WHERE id = ?").get(sessionId) as never,
@@ -610,6 +615,7 @@ function extractOpencode(
     { readOnly: true },
   );
   usage.turns = finiteOr(messages?.count, usage.turns);
+  delete usage.latestContextWindowTokens;
   const tokens = messages?.latest?.tokens;
   if (typeof tokens === "object" && tokens !== null) {
     const value = tokens as Record<string, unknown>;
@@ -620,7 +626,7 @@ function extractOpencode(
   // session_v2 is cumulative accounting only; it NEVER supplies occupancy.
   retotal(usage);
   if (usage.turns === 0 && usage.totalTokens === 0 && cursor === undefined) return undefined;
-  return { mtimeMs: gate.stat.mtimeMs, size: gate.stat.size, byteOffset: 0, lastStepIdx: 0, snapshot: usage };
+  return { mtimeMs: stat.mtimeMs, size: stat.size, walMtimeMs: wal?.mtimeMs, walSize: wal?.size, byteOffset: 0, lastStepIdx: 0, snapshot: usage };
 }
 
 // ---- the antigravity reader -----------------------------------------------------------------

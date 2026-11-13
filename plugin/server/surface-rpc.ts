@@ -801,7 +801,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       ...(agent.thinkingOptionId === undefined ? {} : { thinking: agent.thinkingOptionId }),
       // A native-picker seat carries no labels — its recognized seat rides anyway (ADR 0017 §2).
       seat: agent.labels.seat ?? seatOverride ?? null,
-      task,
+      task: task ?? agent.labels.task ?? null,
       ...leadTelemetryOf(agent),
       requiresAttention: agent.requiresAttention,
       attentionReason: agent.attentionReason,
