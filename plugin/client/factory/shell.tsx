@@ -250,6 +250,28 @@ export function FactoryShell({
   // The Project-scoped acts need a resolved Project — the snapshot's own
   // `project` is the truth (a scope that does not resolve leaves them parked).
   const projectRoot = view.project?.root;
+  /** Model chips always save into this Project; a running Peer only changes through handoff. */
+  const saveSeatModel = async (seat: string, value: string): Promise<boolean> => {
+    if (projectRoot === undefined) return false;
+    if (seat.startsWith("peer:")) return act("Hand off Peer", () => handoffStartCall({ projectRoot, seat, lane: value }));
+    if (seat !== "supervisor" && seat !== "lead" && seat !== "worker") return false;
+    return act(seat === "worker" ? "Save Default worker" : "Change model", () => lanesSetCall({ projectRoot, lane: seat, value }));
+  };
+  const setMachineDefault = async (seat: string, value: string): Promise<boolean> => {
+    if (mobile) return false;
+    const lane = seat.startsWith("peer:") ? "worker" : seat;
+    if (lane !== "supervisor" && lane !== "lead" && lane !== "worker") return false;
+    return act("Set as machine default", () => lanesSetCall({ lane, value }));
+  };
+  const applyProjectProfile = (profileId: string): void => {
+    if (projectRoot === undefined || mobile) return;
+    void act("Apply Lane profile", () => profilesApplyCall({ projectRoot, profileId }));
+  };
+  const toggleProjectSkillPack = (pack: string, enabled: boolean): void => {
+    if (projectRoot === undefined || mobile) return;
+    if (pack !== "expo" && pack !== "firebase" && pack !== "zcode-3d" && pack !== "science") return;
+    void act("Project Skill Pack", () => skillsTogglePackCall({ projectRoot, pack, enabled }));
+  };
   /** A Needs-you item's primary action: a bare navigation jump to the agent's conversation. */
   const openAgent = (agentId: string): void => {
     navigation?.openAgent({ agentId, serverId });
@@ -653,12 +675,13 @@ export function FactoryShell({
           <ProjectPanel
             theme={theme}
             panel={view.panel}
+            modelView={view}
             width={containerWidth}
             skillPacks={view.skillHub?.projectPacks ?? []}
             mobile={mobile}
             now={now}
             daemonError={view.daemonError}
-            actions={{ openAgent, installPrerequisites, handoffLead, revokeSupervisor, startSupervisor, syncOpenDesign, adoptSupervisor, busy: busy || activePluginAct !== null }}
+            actions={{ openAgent, installPrerequisites, handoffLead, revokeSupervisor, startSupervisor, syncOpenDesign, adoptSupervisor, saveSeatModel, setMachineDefault, applyProfile: applyProjectProfile, toggleSkillPack: toggleProjectSkillPack, busy: busy || activePluginAct !== null }}
             openDesignActions={
               !mobile && view.project !== null && view.project.missingRoot !== true ? (
                 <>

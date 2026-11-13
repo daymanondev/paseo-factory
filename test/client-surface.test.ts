@@ -758,29 +758,9 @@ test("v0.0.38 Seam 4 (ADR 0026 §5): a multi-lane card saves through exactly ONE
   assert.match(shell, /lanesSetBatchCall\(\{ lanes: update/, "one factory.lanes.setBatch RPC per card save");
 });
 
-test("v0.0.38 Seam 4 (ADR 0026 §3): the Confirm & Apply / Cancel modal appears only when live-seat transitions exist and dispatches the parked RPC on confirm", () => {
+test("v0.7.0: model changes use the labelled inline action without a live-seat confirmation modal", () => {
   const seats = read("plugin/client/factory/seats.tsx");
-  assert.match(seats, /const transitions = planLiveSeatTransitions\(view\.lanes, nextLanes, \{ supervisor: view\.supervisor, lead: view\.lead \}\);/, "the spec's exact planning call (Implementation Decision 4)");
-  assert.match(seats, /if \(view\.project === null\) \{\s*run\(\);\s*return;\s*\}/, "the machine-wide scope never gates — straight through");
-  assert.match(seats, /if \(transitions\.length === 0\) \{\s*run\(\);\s*return;\s*\}/, "zero transitions execute the RPC immediately with no modal (User Story 17)");
-  assert.match(seats, /setPending\(\{ transitions, run \}\)/, "any transition parks the act behind the modal");
-  assert.match(seats, /function LiveSeatConfirmModal\(/, "the modal is its own component");
-  assert.match(seats, /open=\{pending !== null\}/, "the modal opens exactly while an act is parked");
-  assert.match(seats, /label="Confirm & Apply"/, "the spec's verbatim confirm button");
-  assert.match(seats, /Update model in-place \(keeps current session\)/, "the same-family impact copy");
-  assert.match(seats, /Retire\/Rotate live seat \(provider family changed — current session will be archived and recreated on next turn\)/, "the cross-family impact copy");
-  assert.match(seats, /transition\.mode === "in-place"/, "the row's copy follows the transition's mode");
-  assert.match(seats, /onConfirm=\{\(\) => \{\s*const run = pending\?\.run;\s*setPending\(null\);\s*if \(run !== undefined\) run\(\);\s*\}\}/, "Confirm & Apply dispatches the parked RPC");
-  assert.match(seats, /onCancel=\{\(\) => setPending\(null\)\}/, "Cancel drops the parked act");
-  // Reset rides the SAME exact gate (Implementation Decision 4): the machine
-  // table rides the view (`machineLanes`), so the reset plans its live-seat
-  // transitions like every other act — an override that leaves supervisor/lead
-  // untouched runs immediately with no modal (User Story 17).
-  assert.match(
-    seats,
-    /requestLaneChange\(view\.machineLanes, actions\.resetLanes\)/,
-    "reset gates on the exact machine-table transitions, never a conservative any-live-seat guess",
-  );
+  assert.doesNotMatch(seats, /LiveSeatConfirmModal|Confirm & Apply|setPending/, "the old confirmation step is removed from Settings and Project overrides");
 });
 
 test("v0.0.38 Seam 4 (ADR 0026 §2/§5): FactoryShell owns the machine lane/profile RPCs — one useRpc per contract, dispatched through act()", () => {
