@@ -441,8 +441,12 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
   const peerBlockersQueued = new Set<string>();
   const peerHandoff = createPeerHandoffRuntime({
     factory: deps.factory, factoryFor: (slug, task) => taskFactoryOf(slug, task), eventsFor: projectStreamOf, stateDir: deps.stateDir, home: deps.home, stopAgent: deps.stopAgent,
-    daemon: resolveDaemon, timeoutMs: handoffTimeoutMs, readTokens: (agent) => readLeadContextTokens(agent, deps.usagePaths), log,
+    daemon: resolveDaemon, timeoutMs: handoffTimeoutMs, ownerTimeoutMs: deps.ownerHandoffTimeoutMs, readTokens: (agent) => readLeadContextTokens(agent, deps.usagePaths), log,
     ...(deps.usage === undefined ? {} : { recordUsage: async (input: { slug: string; task: string; agent: SurfaceAgentSnapshot }) => { await deps.usage!.meterAgentBoundary({ task: input.task, agent: input.agent, slug: input.slug }); } }),
+    queueNotice: (slug, task, key, text) => {
+      appendMailQueued(mailboxPath(slug), { requestId: `peer-owner-handoff:${task}:${key}:lead`, to: "lead", from: "peer", kind: "report", task, text });
+      peerBlockersQueued.add(slug);
+    },
     queueBlocked: (slug, task, epoch, text) => {
       // ADR 0053 Decision 2 / spec Decision 6: a context-ceiling blocker is a
       // genuine needs-human-grade Peer stall, but it routes exclusively to the
@@ -1987,6 +1991,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
   };
 
   const handoff = async (input: HandoffRequest): Promise<HandoffReply> => {
+    if (input.seat?.startsWith("peer:")) return projectLane(input.slug, async () => { const reg = readProjectRegistration(deps.stateDir, input.slug); if (!reg) return { ok: false, code: "unknown-project", error: "Project not registered" }; const reply = await peerHandoff.handoff(input); if (peerBlockersQueued.delete(input.slug)) await drainLeadMailbox(input.slug); return reply; });
     if ((input.seat ?? "lead") !== "lead") return { ok: false, code: "handoff-seat-unavailable", error: "This seat handoff is not available yet" };
     if (input.action === "handover") {
       const current = progressOf(input.slug); const text = readDiskHandoffText(input.slug) ?? "";
