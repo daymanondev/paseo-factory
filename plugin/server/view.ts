@@ -359,6 +359,8 @@ export interface DaemonAgentsInput {
       defaultThinkingOptionId?: string | null;
     }[] | null;
   }[];
+  /** The first provider listing is still in flight with nothing cached (`providers` is then `[]`, not "none"). */
+  providersLoading?: boolean;
   daemonError: string | null;
 }
 
@@ -560,6 +562,7 @@ export function foldView(input: {
       available: provider.available,
       models: provider.models ?? null,
     })),
+    ...(input.daemon.providersLoading === true ? { providersLoading: true } : {}),
     supervisor: input.daemon.supervisor,
     lead: input.daemon.lead,
     daemonError: input.daemon.daemonError,

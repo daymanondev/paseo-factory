@@ -297,6 +297,27 @@ test("snapshot: versioned view folding ledger + lanes + daemon agents + provider
   assert.equal(view.daemonError, null);
 });
 
+test("snapshot: providersLoading is true while the first provider listing is slow, then the list lands and the flag clears (08)", async (t) => {
+  const { handlers, fake } = makeSurface(t);
+  let release: () => void = () => {};
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  fake.daemon.providers = {
+    listAvailable: async () => { await gate; return { providers: [{ provider: "pi", available: true }] }; },
+    listModels: async () => ({ models: [{ id: "glm-5.3", label: "GLM 5.3" }] }),
+  };
+  // resolveProviders gives the first listing 2s, then answers []: that empty list means "not loaded yet".
+  const slow = await handlers.snapshot({});
+  assert.ok(slow.ok, slow.ok ? "" : slow.error);
+  assert.deepEqual(slow.view.providers, []);
+  assert.equal(slow.view.providersLoading, true, "an empty list with the listing still in flight reports loading");
+  release();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const loaded = await handlers.snapshot({});
+  assert.ok(loaded.ok, loaded.ok ? "" : loaded.error);
+  assert.deepEqual(loaded.view.providers.map((entry) => entry.provider), ["pi"]);
+  assert.equal(loaded.view.providersLoading, undefined, "the flag is omitted once a list is cached");
+});
+
 test("snapshot: the companion catalog rides the view — three cards, not_installed when the daemon lists only paseo-factory", async (t) => {
   const { handlers } = makeSurface(t, [], [{ id: "paseo-factory", path: "/plugins/paseo-factory", enabled: true, status: "running" }]);
   const snap = await handlers.snapshot({});

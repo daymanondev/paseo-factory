@@ -11,6 +11,8 @@ import { createResponseOrder } from "./response-order.ts";
 export const BUSY_MS = 5000;
 export const QUIET_MS = 30000;
 export const GRACE_MS = 3000;
+/** Re-read the snapshot this soon while the provider listing is still loading (the picker shows a loading block until it lands). */
+export const PROVIDERS_LOADING_MS = 1500;
 
 export const pollEvery = (busy: boolean) => (busy ? BUSY_MS : QUIET_MS);
 

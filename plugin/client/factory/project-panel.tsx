@@ -19,7 +19,7 @@ import type { SeatEditorRequest } from "./editor-request.ts";
 import { FactoryTabErrorBoundary } from "./tab-error-boundary.tsx";
 import type { MenuSkillPack } from "./project-menu.tsx";
 import { LANE_CARDS, LaneModalBody, splitLaneParts } from "./lane-editor.tsx";
-import type { LanePickerView } from "./lane-editor.tsx";
+import type { LaneMoreAction, LanePickerView } from "./lane-editor.tsx";
 import type { ScopedLaneRef } from "../../shared/view.ts";
 
 /** The panel's action surface — the Shell owns the RPC and navigation calls. */
@@ -583,20 +583,30 @@ function SeatModelEditor({ theme, lane, target, live, viewHandover, editor }: { 
   const save = (value: string, machine: boolean): void => closeOnSuccess(machine ? editor.actions.setMachineDefault?.(target, value) : editor.actions.saveSeatModel?.(target, value));
   // An unchanged live standing seat has nothing to write: confirming rotates it to a fresh session.
   const confirm = (value: string): void => (standing && value === current ? closeOnSuccess(editor.actions.handoffStart(target)) : save(value, false));
+  /** One sentence on the act, shown in the picker's `⋯` row. */
   const explain = (value: string): string => {
-    if (target === "worker") return "Applies to future Peers in this Project. Running Peers keep their model.";
-    if (!live) return `Sets the ${card.title} model for this Project. The seat starts on this model.`;
-    if (peer) return "The primary action hands this Peer to a successor with the selected model. Keeps its worktree, Contract and Attempts, and leaves the Default worker unchanged.";
-    if (value === current) return `Starts a fresh ${card.title} session on the same model. The current session writes a handover first.`;
-    return splitLaneParts(value).provider === lane.provider ? "Switches this Project's live seat in place and keeps the session." : "Hands this Project's live seat over to a new session with its handover.";
+    const machine = !editor.mobile && editor.actions.setMachineDefault !== undefined ? ` Machine defaults apply to Projects that inherit the ${peer || target === "worker" ? "Default worker" : card.title} model.` : "";
+    if (target === "worker") return `Applies to future Peers in this Project. Running Peers keep their model.${machine}`;
+    if (!live) return `Sets the ${card.title} model for this Project. The seat starts on this model.${machine}`;
+    if (peer) return `The primary action hands this Peer to a successor with the selected model. Keeps its worktree, Contract and Attempts, and leaves the Default worker unchanged.${machine}`;
+    if (value === current) return `Starts a fresh ${card.title} session on the same model. The current session writes a handover first.${machine}`;
+    return `${splitLaneParts(value).provider === lane.provider ? "Switches this Project's live seat in place and keeps the session." : "Hands this Project's live seat over to a new session with its handover."}${machine}`;
   };
-  return <View testID="factory-chip-editor" style={{ alignSelf: "stretch", gap: SPACING[2] }}>
-    <LaneModalBody theme={theme} view={editor.modelView!} card={card} currentValue={current} busy={editor.actions.busy} onSave={confirm} onClose={() => editor.edit(null)} primaryLabel={label} primaryTestID="factory-chip-editor-primary"
-      explanation={explain}
-      {...(viewHandover ? { footerExtra: <Btn theme={theme} variant="ghost" testID="factory-chip-editor-view-handover" label="View last handover" disabled={editor.actions.busy} onPress={() => { editor.edit(null); editor.actions.viewHandover(target); }} /> } : {})}
-      {...(!editor.mobile && editor.actions.setMachineDefault !== undefined ? { secondaryAction: { label: "Set as machine default", testID: "factory-chip-editor-machine-default", onSave: (value: string) => save(value, true) } } : {})}
-    />
-    {!editor.mobile && editor.actions.setMachineDefault !== undefined ? <Text style={text(theme, "meta")}>Machine defaults apply to Projects that inherit the {peer || target === "worker" ? "Default worker" : card.title} model.</Text> : null}
+  /** The footer's one-line summary of the act the primary fires. */
+  const summary = (value: string): string => {
+    if (target === "worker" || !live) return "saves the Project model";
+    if (value === current) return "unchanged · fresh session";
+    const provider = splitLaneParts(value).provider;
+    if (provider === lane.provider) return peer ? "same provider · new session" : "same provider · switch in place";
+    return `${lane.provider} → ${provider} · new session`;
+  };
+  const moreActions: LaneMoreAction[] = [
+    ...(!editor.mobile && editor.actions.setMachineDefault !== undefined ? [{ label: "Set as machine default", testID: "factory-chip-editor-machine-default", onPress: (value: string) => save(value, true) }] : []),
+    ...(viewHandover ? [{ label: "View last handover", testID: "factory-chip-editor-view-handover", onPress: () => { editor.edit(null); editor.actions.viewHandover(target); } }] : []),
+  ];
+  return <View testID="factory-chip-editor" style={{ alignSelf: "stretch", flex: 1, minHeight: 0 }}>
+    <LaneModalBody fill theme={theme} view={editor.modelView!} card={card} currentValue={current} busy={editor.actions.busy} onSave={confirm} onClose={() => editor.edit(null)} primaryLabel={label} primaryTestID="factory-chip-editor-primary"
+      explanation={explain} summary={summary} moreActions={moreActions} />
   </View>;
 }
 

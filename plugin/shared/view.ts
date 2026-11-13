@@ -624,6 +624,8 @@ export const FactoryViewSchema = z.object({
   kpis: KpisSchema,
   agents: z.array(AgentViewSchema),
   providers: z.array(ProviderViewSchema),
+  /** True while the first provider listing is still in flight and no cached list exists — `providers: []` then means "not loaded yet", not "none". Omitted otherwise. */
+  providersLoading: z.boolean().optional(),
   supervisor: AgentViewSchema.nullable(),
   /** The Project's standing Lead agent (v0.0.14, ADR 0010 §2) — null when the seat is vacant. */
   lead: AgentViewSchema.nullable(),

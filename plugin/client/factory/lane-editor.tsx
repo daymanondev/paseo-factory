@@ -14,7 +14,7 @@ import type { FactoryView, LaneName, Lanes, ProviderModelView } from "../../shar
 import { Btn, Chip } from "../kit/pill.tsx";
 import { CONTROL_H, MONO_FONT, RADIUS, SPACING, hoveredOf, text, tint } from "../kit/theme.ts";
 
-export type LanePickerView = Pick<FactoryView, "lanes" | "providers">;
+export type LanePickerView = Pick<FactoryView, "lanes" | "providers" | "providersLoading">;
 
 /** Which lanes a card covers — one value written to every lane the card names. */
 export interface LaneCard {
@@ -69,9 +69,12 @@ export const LANE_CARDS: LaneCard[] = [
 /** Factory's role-routing providers (ADR 0017 §2) — never a lane target of their own. */
 const INTERNAL_PROVIDERS: ReadonlySet<string> = new Set(["factory-supervisor", "factory-lead", "factory-peer", "factory-agent"]);
 
-/** Measured body width from which the picker is two columns (providers left, models right); narrower stacks them. */
-const WIDE_BODY = 560;
-const MODEL_ROW_H = 44;
+const MODEL_ROW_H = 40;
+/** The model list's floor when it flexes (`fill`), and its fixed height when the host scrolls the body. */
+const LIST_MIN_H = 120;
+const LIST_FIXED_H = 280;
+/** Rows rendered at once — `All` can list every provider's models and the ScrollView is not virtualised. */
+const MAX_ROWS = 200;
 
 const FALLBACK_THINKING_OPTIONS: { id: string; label: string }[] = [
   { id: "off", label: "Off" },
@@ -102,13 +105,19 @@ export function findModelMeta(view: FactoryView, provider: string, modelId: stri
   return entry?.models?.find((m) => m.id === modelId);
 }
 
-/** Extracts sub-vendor prefix from a model id like `zai/glm-5.3` -> `zai`. */
-function modelPrefixOf(modelId: string): string | null {
-  const slash = modelId.indexOf("/");
-  return slash === -1 ? null : modelId.slice(0, slash);
+/** An action tucked behind the footer's `⋯` — the seat modal's machine default and last handover. */
+export interface LaneMoreAction {
+  label: string;
+  testID: string;
+  onPress(value: string): void;
 }
 
-/** The live picker: provider list, searchable model list, thinking level row and a footer with the `current → new` summary and the actions. */
+/**
+ * The live picker, one screen: a search across every provider, a one-line provider filter, the model list,
+ * the thinking row and a footer (`summary · ⋯ Cancel primary`) that is always the last thing in the body.
+ * `fill` = a flex column that takes the height of a bounded host (the seat modal's `Modal.Content
+ * scrollable={false}`); otherwise the list gets a fixed height for hosts that scroll the whole body.
+ */
 export function LaneModalBody({
   theme,
   view,
@@ -119,9 +128,10 @@ export function LaneModalBody({
   currentValue,
   primaryLabel = () => "Save lane",
   primaryTestID,
-  secondaryAction,
+  moreActions = [],
   explanation,
-  footerExtra,
+  summary: summaryOf,
+  fill = false,
 }: {
   theme: PluginTheme;
   view: LanePickerView;
@@ -132,10 +142,13 @@ export function LaneModalBody({
   currentValue?: string;
   primaryLabel?: (value: string) => string;
   primaryTestID?: string;
-  secondaryAction?: { label: string; testID: string; onSave(value: string): void };
+  /** Secondary acts, shown in the `⋯` row above the footer. */
+  moreActions?: LaneMoreAction[];
+  /** One sentence on what confirming does; lives in the `⋯` row (above the footer when there is no `⋯`). */
   explanation?: (value: string) => string;
-  /** Extra footer actions, left of Cancel (the seat modal's "View last handover"). */
-  footerExtra?: ReactNode;
+  /** The footer's short summary of the act (`pi → antigravity · new session`); defaults to `current → new`. */
+  summary?: (value: string) => string;
+  fill?: boolean;
 }) {
   const current = currentValue ?? card.value(view.lanes);
   const initial = splitLaneParts(current);
@@ -143,48 +156,38 @@ export function LaneModalBody({
   const [model, setModel] = useState(initial.model);
   const [thinking, setThinking] = useState(initial.thinking);
   const [search, setSearch] = useState("");
-  const [familyFilter, setFamilyFilter] = useState<string>("all");
-  // Unmeasured (0) reads as narrow; the first layout pass settles it.
-  const [width, setWidth] = useState(0);
+  const [customOpen, setCustomOpen] = useState(false);
+  const [moreOpen, setMoreOpen] = useState(false);
 
   // Factory's own role providers (`factory-supervisor` …) only re-route onto a
   // lane's real provider — a lane pointing at one is circular, so the picker
   // hides them unless the current value already names one.
   const available = view.providers.filter((entry) => entry.available && (!INTERNAL_PROVIDERS.has(entry.provider) || entry.provider === initial.provider));
-  const activeModels = available.find((entry) => entry.provider === provider)?.models ?? null;
   const allowEyeJson = card.id === "fresh-eyes";
+  /** The first provider listing is still in flight: `providers` is empty because nothing has loaded, not because there are none. */
+  const loading = view.providersLoading === true && available.length === 0;
+  // The filter starts on the current provider (familiar ground); `all` lists every provider's models.
+  const [filter, setFilter] = useState<string>(() => (available.some((entry) => entry.provider === initial.provider) ? initial.provider : "all"));
+  const activeModels = available.find((entry) => entry.provider === provider)?.models ?? null;
   /** A provider whose model list could not be read is likely unreachable — a handoff onto it tends to fail. */
-  const unverified = provider !== "" && provider !== "eye.json" && available.some((entry) => entry.provider === provider) && (activeModels === null || activeModels.length === 0);
-  const [customOpen, setCustomOpen] = useState(
-    initial.model !== "" && !(view.providers.find((entry) => entry.provider === initial.provider)?.models ?? []).some((m) => m.id === initial.model),
-  );
-  const showCustom = customOpen || activeModels === null || activeModels.length === 0;
-
-  // Extract sub-families (e.g. "zai", "github-copilot", "google-antigravity" for pi)
-  const families: { id: string; count: number }[] = [];
-  if (activeModels !== null) {
-    const counts = new Map<string, number>();
-    for (const m of activeModels) {
-      const prefix = modelPrefixOf(m.id);
-      if (prefix !== null) counts.set(prefix, (counts.get(prefix) ?? 0) + 1);
-    }
-    if (counts.size > 1) {
-      for (const [id, count] of counts) families.push({ id, count });
-      families.sort((a, b) => a.id.localeCompare(b.id));
-    }
-  }
+  const unverified = !loading && provider !== "" && provider !== "eye.json" && available.some((entry) => entry.provider === provider) && (activeModels === null || activeModels.length === 0);
+  const trimmedModel = model.trim();
+  // A model the list does not carry is a custom ID — show the field it lives in. Never because the lists have not loaded yet.
+  const customInUse = !loading && trimmedModel !== "" && activeModels !== null && activeModels.length > 0 && !activeModels.some((m) => m.id === trimmedModel);
+  const listEmpty = !loading && provider !== "eye.json" && (activeModels === null || activeModels.length === 0);
+  const showCustom = provider !== "eye.json" && (customOpen || customInUse || listEmpty);
 
   const q = search.trim().toLowerCase();
-  const filteredModels =
-    activeModels === null
-      ? []
-      : activeModels.filter((m) => {
-          if (familyFilter !== "all" && modelPrefixOf(m.id) !== familyFilter) return false;
-          if (q === "") return true;
-          return m.id.toLowerCase().includes(q) || (m.label !== null && m.label.toLowerCase().includes(q));
-        });
+  const rows: { provider: string; model: ProviderModelView }[] = [];
+  for (const entry of available) {
+    if (filter !== "all" && entry.provider !== filter) continue;
+    for (const m of entry.models ?? []) {
+      if (q === "" || m.id.toLowerCase().includes(q) || (m.label !== null && m.label.toLowerCase().includes(q))) rows.push({ provider: entry.provider, model: m });
+    }
+  }
+  const shownRows = rows.slice(0, MAX_ROWS);
 
-  const selectedModelMeta = activeModels?.find((m) => m.id === model.trim());
+  const selectedModelMeta = activeModels?.find((m) => m.id === trimmedModel);
   const advertisedThinking = selectedModelMeta?.thinkingOptions ?? null;
   const defaultThinking = selectedModelMeta?.defaultThinkingOptionId ?? null;
   const noThinkingSupported = Array.isArray(advertisedThinking) && advertisedThinking.length === 0;
@@ -195,7 +198,6 @@ export function LaneModalBody({
         ? []
         : advertisedThinking.map((o) => ({ id: o.id, label: o.label ?? o.id }));
 
-  const trimmedModel = model.trim();
   const trimmedThinking = noThinkingSupported ? "" : thinking.trim();
   const value =
     provider === "eye.json"
@@ -206,10 +208,10 @@ export function LaneModalBody({
           ? `${provider}/${trimmedModel}`
           : `${provider}/${trimmedModel}:${trimmedThinking}`;
 
+  /** A provider chip filters the list and moves the selection onto that provider (keeping the model when it has one by that id). */
   const switchProvider = (nextProvider: string): void => {
     setProvider(nextProvider);
-    setSearch("");
-    setFamilyFilter("all");
+    setFilter(nextProvider);
     if (nextProvider === "eye.json") {
       setModel("");
       setThinking("");
@@ -233,7 +235,9 @@ export function LaneModalBody({
     }
   };
 
-  const selectModel = (nextModel: ProviderModelView): void => {
+  /** A row sets provider and model together, so picking from `All` switches provider. */
+  const selectModel = (nextProvider: string, nextModel: ProviderModelView): void => {
+    setProvider(nextProvider);
     setModel(nextModel.id);
     // Keep current thinking only if the new model explicitly advertises support for it; otherwise reset to default ("")
     if (!nextModel.thinkingOptions || nextModel.thinkingOptions.length === 0 || !nextModel.thinkingOptions.some((o) => o.id === thinking)) {
@@ -248,219 +252,183 @@ export function LaneModalBody({
   /** `current → new` in model · thinking words; the provider only shows when it changes. */
   const providerChanged = value !== "" && splitLaneParts(current).provider !== provider;
   const display = (raw: string): string => (providerChanged ? `${splitLaneParts(raw).provider}/${laneWords(raw)}` : laneWords(raw));
-  const summary = value === "" ? "Select a provider and model" : value === current ? display(value) : `${current === "" ? "none" : display(current)} → ${display(value)}`;
+  const defaultSummary = value === current ? display(value) : `${current === "" ? "none" : display(current)} → ${display(value)}`;
+  const summary = value === "" ? "Select a provider and model" : summaryOf === undefined ? defaultSummary : summaryOf(value);
+  const now = splitLaneParts(current);
 
-  const wide = width >= WIDE_BODY;
   const providerEntries = available.map((entry) => ({ id: entry.provider, label: entry.provider, count: entry.models?.length ?? 0, warn: entry.models === null || entry.models.length === 0 }));
   if (allowEyeJson) providerEntries.push({ id: "eye.json", label: "eye.json (HTTP)", count: 0, warn: false });
-  const noProviders = available.length === 0 ? <Text style={text(theme, "label", "statusWarning")}>No available providers — daemon unreachable.</Text> : null;
-  const providers = wide ? (
-    <View style={{ width: 180, gap: SPACING[0.5] }}>
-      <Text style={text(theme, "badge")}>PROVIDER</Text>
-      {providerEntries.map((entry) => <ProviderRow key={entry.id} theme={theme} label={entry.label} active={provider === entry.id} count={entry.count} warn={entry.warn} onPress={() => switchProvider(entry.id)} />)}
-      {noProviders}
+  const totalModels = providerEntries.reduce((sum, entry) => sum + entry.count, 0);
+
+  // fill: the list takes whatever height the bounded host leaves; otherwise an explicit height (never only maxHeight — a bare-maxHeight ScrollView can collapse to nothing).
+  const listBox = fill ? { flex: 1, minHeight: LIST_MIN_H } : { height: LIST_FIXED_H };
+  const listBlock = (body: ReactNode) => <View style={{ ...listBox, borderWidth: 1, borderColor: theme.colors.border, borderRadius: RADIUS.lg, backgroundColor: theme.colors.surface1, overflow: "hidden" }}>{body}</View>;
+
+  const filterEntry = available.find((entry) => entry.provider === filter);
+  const emptyFilter = filter !== "all" && filter !== "eye.json" && (filterEntry?.models ?? []).length === 0;
+  const listBody = loading ? (
+    <View testID="lane-picker-loading" style={{ ...listBox, alignItems: "center", justifyContent: "center", gap: SPACING[1], padding: SPACING[3] }}>
+      <Text style={text(theme, "label")}>Loading providers…</Text>
+      <Text style={text(theme, "meta")}>Your current choice stays selected.</Text>
     </View>
-  ) : (
-    <View style={{ gap: SPACING[1.5] }}>
-      <Text style={text(theme, "badge")}>PROVIDER</Text>
-      <View style={{ flexDirection: "row", flexWrap: "wrap", gap: SPACING[1.5] }}>
-        {providerEntries.map((entry) => <Chip key={entry.id} theme={theme} label={entry.label} active={provider === entry.id} count={entry.count} {...(entry.warn ? { icon: "AlertTriangle" } : {})} onPress={() => switchProvider(entry.id)} />)}
-        {noProviders}
-      </View>
-    </View>
+  ) : filter === "eye.json" ? null : listBlock(
+    <ScrollView style={fill ? { flex: 1 } : { height: LIST_FIXED_H }}>
+      {available.length === 0 ? (
+        <View style={{ padding: SPACING[3] }}><Text style={text(theme, "label", "statusWarning")}>No available providers — daemon unreachable.</Text></View>
+      ) : emptyFilter ? (
+        // No list to pick from: say so; the warning and the custom ID field sit right under it.
+        <View style={{ padding: SPACING[3] }}><Text style={text(theme, "meta")}>Paseo returned no models for {filter}.</Text></View>
+      ) : shownRows.length === 0 ? (
+        <View style={{ padding: SPACING[3] }}><Text style={text(theme, "meta")}>No models match "{search}" — type a custom model ID instead.</Text></View>
+      ) : (
+        <>
+          {shownRows.map((row, idx) => {
+            const m = row.model;
+            const isSelected = provider === row.provider && trimmedModel === m.id;
+            return (
+              <Pressable
+                key={`${row.provider}/${m.id}`}
+                accessibilityRole="button"
+                onPress={() => selectModel(row.provider, m)}
+                style={(state) => ({
+                  minHeight: MODEL_ROW_H,
+                  paddingHorizontal: SPACING[3],
+                  paddingVertical: SPACING[1],
+                  borderTopWidth: idx === 0 ? 0 : 1,
+                  borderTopColor: theme.colors.border,
+                  backgroundColor: isSelected ? tint(theme.colors.accent, "1f") : state.pressed || hoveredOf(state) ? theme.colors.surface2 : "transparent",
+                  flexDirection: "row",
+                  alignItems: "center",
+                  gap: SPACING[2],
+                })}
+              >
+                <View style={{ width: 16, height: 16, borderRadius: 99, borderWidth: 1, borderColor: isSelected ? theme.colors.accent : theme.colors.border, backgroundColor: isSelected ? theme.colors.accent : "transparent", alignItems: "center", justifyContent: "center" }}>
+                  {isSelected ? <Icon name="Check" size={10} color={theme.colors.surface0} /> : null}
+                </View>
+                <View style={{ flex: 1, minWidth: 0, gap: 1 }}>
+                  <Text style={{ ...text(theme, "section"), fontWeight: isSelected ? "600" : "500", color: isSelected ? theme.colors.accent : theme.colors.foreground }} numberOfLines={1}>
+                    {m.label ?? m.id}
+                  </Text>
+                  {m.label !== null && m.label !== m.id ? (
+                    <Text style={{ ...text(theme, "code"), fontSize: 11, color: theme.colors.foregroundMuted }} numberOfLines={1}>
+                      {m.id}
+                    </Text>
+                  ) : null}
+                </View>
+                {filter === "all" ? <Text style={text(theme, "meta")} numberOfLines={1}>{row.provider}</Text> : null}
+              </Pressable>
+            );
+          })}
+          {rows.length > shownRows.length ? <View style={{ padding: SPACING[2.5] }}><Text style={text(theme, "meta")}>Showing {shownRows.length} of {rows.length} — type to narrow the list.</Text></View> : null}
+        </>
+      )}
+    </ScrollView>,
   );
 
-  const listHeight = Math.max(132, Math.min(Math.max(filteredModels.length, 1) * MODEL_ROW_H, 320));
-  const models = provider === "eye.json" ? null : (
-    <View style={{ flex: 1, minWidth: 0, gap: SPACING[2] }}>
-      <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: SPACING[1.5] }}>
-        <Text style={text(theme, "badge")}>MODEL {activeModels !== null && activeModels.length > 0 ? `(${filteredModels.length} of ${activeModels.length})` : ""}</Text>
-        {families.length > 0 ? (
-          <View style={{ flexDirection: "row", flexWrap: "wrap", gap: SPACING[1] }}>
-            <Chip theme={theme} label="All" active={familyFilter === "all"} count={activeModels?.length ?? 0} onPress={() => setFamilyFilter("all")} />
-            {families.map((fam) => <Chip key={fam.id} theme={theme} label={fam.id} active={familyFilter === fam.id} count={fam.count} onPress={() => setFamilyFilter(fam.id)} />)}
-          </View>
-        ) : null}
-      </View>
+  const customToggleInMore = fill && !showCustom && provider !== "eye.json" && !loading;
+  const hasMore = moreActions.length > 0 || customToggleInMore;
+  const explanationText = explanation === undefined || value === "" ? null : explanation(value);
+
+  return (
+    <View style={{ alignSelf: "stretch", gap: SPACING[2.5], ...(fill ? { flex: 1, minHeight: 0 } : {}) }}>
+      {current === "" ? null : <Text testID="lane-picker-now" style={text(theme, "meta")} numberOfLines={1}>{`Now: ${[now.provider, now.model, now.thinking === "" ? "" : now.thinking].filter((part) => part !== "").join(" · ")}`}</Text>}
+
+      {loading || filter === "eye.json" ? null : (
+        <View style={{ minHeight: CONTROL_H, flexDirection: "row", alignItems: "center", gap: SPACING[1.5], paddingHorizontal: SPACING[2.5], borderWidth: 1, borderColor: theme.colors.border, borderRadius: RADIUS.md, backgroundColor: theme.colors.surface1 }}>
+          <Icon name="Search" size={13} color={theme.colors.foregroundMuted} />
+          <TextInput
+            value={search}
+            onChangeText={setSearch}
+            placeholder="Search models across all providers…"
+            placeholderTextColor={theme.colors.foregroundMuted}
+            style={{ flex: 1, paddingVertical: 5, color: theme.colors.foreground, fontSize: 12 }}
+          />
+          {search !== "" ? (
+            <Pressable onPress={() => setSearch("")} style={{ padding: 2 }}>
+              <Icon name="X" size={12} color={theme.colors.foregroundMuted} />
+            </Pressable>
+          ) : null}
+        </View>
+      )}
+
+      {/* One line of provider chips that scrolls sideways — never wraps into a second row. */}
+      {loading ? null : (
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ flexGrow: 0 }} contentContainerStyle={{ flexDirection: "row", alignItems: "center", gap: SPACING[1.5], paddingRight: SPACING[2] }}>
+          <Chip theme={theme} label="All" active={filter === "all"} count={totalModels} onPress={() => setFilter("all")} />
+          {providerEntries.map((entry) => <Chip key={entry.id} theme={theme} label={entry.label} active={filter === entry.id} count={entry.count} {...(entry.warn ? { icon: "AlertTriangle" } : {})} onPress={() => switchProvider(entry.id)} />)}
+        </ScrollView>
+      )}
+
+      {listBody}
 
       {unverified ? (
-        // No list to pick from: say so, warn, and put the custom ID field straight under it.
-        <View style={{ gap: SPACING[1] }}>
-          <Text style={text(theme, "meta")}>Paseo returned no models for {provider}.</Text>
-          <Text testID="lane-picker-unverified-provider" style={text(theme, "label", "statusWarning")}>
-            Paseo lists no models for {provider}, so it may not be reachable right now. A handoff onto it can fail — check the provider in Paseo first.
-          </Text>
-        </View>
+        <Text testID="lane-picker-unverified-provider" style={text(theme, "label", "statusWarning")}>
+          Paseo lists no models for {provider}, so it may not be reachable right now. A handoff onto it can fail — check the provider in Paseo first.
+        </Text>
       ) : null}
 
-      {activeModels !== null && activeModels.length > 0 ? (
-        <View style={{ gap: SPACING[1.5] }}>
-          <View style={{ minHeight: CONTROL_H, flexDirection: "row", alignItems: "center", gap: SPACING[1.5], paddingHorizontal: SPACING[2.5], borderWidth: 1, borderColor: theme.colors.border, borderRadius: RADIUS.md, backgroundColor: theme.colors.surface1 }}>
-            <Icon name="Search" size={13} color={theme.colors.foregroundMuted} />
-            <TextInput
-              value={search}
-              onChangeText={setSearch}
-              placeholder={`Search ${activeModels.length} models (e.g. glm-5.3, sonnet, gpt-5.4)…`}
-              placeholderTextColor={theme.colors.foregroundMuted}
-              style={{ flex: 1, paddingVertical: 5, color: theme.colors.foreground, fontSize: 12 }}
-            />
-            {search !== "" ? (
-              <Pressable onPress={() => setSearch("")} style={{ padding: 2 }}>
-                <Icon name="X" size={12} color={theme.colors.foregroundMuted} />
-              </Pressable>
-            ) : null}
-          </View>
-
-          {/* An explicit height, never only maxHeight: a bare-maxHeight ScrollView can collapse to nothing inside a host that does not size it. */}
-          <View style={{ height: listHeight, borderWidth: 1, borderColor: theme.colors.border, borderRadius: RADIUS.lg, backgroundColor: theme.colors.surface1, overflow: "hidden" }}>
-            <ScrollView style={{ height: listHeight }}>
-              {filteredModels.length === 0 ? (
-                <View style={{ padding: SPACING[3] }}>
-                  <Text style={text(theme, "meta")}>No models match "{search}" — type a custom model ID below.</Text>
-                </View>
-              ) : (
-                filteredModels.map((m, idx) => {
-                  const isSelected = trimmedModel === m.id;
-                  return (
-                    <Pressable
-                      key={m.id}
-                      accessibilityRole="button"
-                      onPress={() => selectModel(m)}
-                      style={(state) => ({
-                        minHeight: MODEL_ROW_H,
-                        paddingHorizontal: SPACING[3],
-                        paddingVertical: SPACING[1.5],
-                        borderTopWidth: idx === 0 ? 0 : 1,
-                        borderTopColor: theme.colors.border,
-                        backgroundColor: isSelected ? tint(theme.colors.accent, "1f") : state.pressed || hoveredOf(state) ? theme.colors.surface2 : "transparent",
-                        flexDirection: "row",
-                        alignItems: "center",
-                        gap: SPACING[2],
-                      })}
-                    >
-                      <View style={{ width: 16, height: 16, borderRadius: 99, borderWidth: 1, borderColor: isSelected ? theme.colors.accent : theme.colors.border, backgroundColor: isSelected ? theme.colors.accent : "transparent", alignItems: "center", justifyContent: "center" }}>
-                        {isSelected ? <Icon name="Check" size={10} color={theme.colors.surface0} /> : null}
-                      </View>
-                      <View style={{ flex: 1, minWidth: 0, gap: 1 }}>
-                        <Text style={{ ...text(theme, "section"), fontWeight: isSelected ? "600" : "500", color: isSelected ? theme.colors.accent : theme.colors.foreground }} numberOfLines={1}>
-                          {m.label ?? m.id}
-                        </Text>
-                        {m.label !== null && m.label !== m.id ? (
-                          <Text style={{ ...text(theme, "code"), fontSize: 11, color: theme.colors.foregroundMuted }} numberOfLines={1}>
-                            {m.id}
-                          </Text>
-                        ) : null}
-                      </View>
-                    </Pressable>
-                  );
-                })
-              )}
-            </ScrollView>
-          </View>
-        </View>
-      ) : null}
-
-      {/* Custom model ID — tucked behind a link while a list covers it, shown directly when there is none. */}
-      {!showCustom ? (
-        <Pressable testID="lane-picker-custom-toggle" accessibilityRole="button" onPress={() => setCustomOpen(true)} style={{ alignSelf: "flex-start" }}>
-          <Text style={text(theme, "label", "accent")}>Use a custom model ID…</Text>
-        </Pressable>
-      ) : (
+      {/* Custom model ID: opened from `⋯` (or the inline link where there is no `⋯`), or shown when the selected provider listed nothing. */}
+      {showCustom ? (
         <View style={{ gap: SPACING[1] }}>
           <Text style={text(theme, "label")}>Custom model ID</Text>
           <View style={{ minHeight: CONTROL_H, justifyContent: "center", borderWidth: 1, borderColor: theme.colors.border, borderRadius: RADIUS.md, backgroundColor: theme.colors.surface1 }}>
             <TextInput
               value={model}
-              onChangeText={setModel}
+              onChangeText={(next) => { setCustomOpen(true); setModel(next); }}
               placeholder="e.g. zai/glm-5.3 or claude-sonnet-4-6"
               placeholderTextColor={theme.colors.foregroundMuted}
               style={{ paddingHorizontal: SPACING[2.5], paddingVertical: 5, color: theme.colors.foreground, fontSize: 12, fontFamily: MONO_FONT }}
             />
           </View>
         </View>
-      )}
-    </View>
-  );
+      ) : !fill && provider !== "eye.json" && !loading ? (
+        <Pressable testID="lane-picker-custom-toggle" accessibilityRole="button" onPress={() => setCustomOpen(true)} style={{ alignSelf: "flex-start" }}>
+          <Text style={text(theme, "label", "accent")}>Use a custom model ID…</Text>
+        </Pressable>
+      ) : null}
 
-  return (
-    <View onLayout={(event) => setWidth(event.nativeEvent.layout.width)} style={{ alignSelf: "stretch", gap: SPACING[3] }}>
-      {wide ? (
-        <View style={{ flexDirection: "row", alignItems: "flex-start", gap: SPACING[4] }}>
-          {providers}
-          {models}
-        </View>
-      ) : (
-        <>
-          {providers}
-          {models}
-        </>
-      )}
-
-      {/* Thinking: one compact row of the levels the selected model advertises, plus its default. */}
-      {provider !== "eye.json" ? (
-        <View style={{ gap: SPACING[1.5] }}>
-          <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[1.5] }}>
-            <Text style={text(theme, "badge")}>THINKING</Text>
-            <Text style={text(theme, "label")}>
-              {noThinkingSupported ? "No thinking variants supported by this model" : defaultThinking !== null ? `Model default: ${defaultThinking}` : "Optional — appended as :thinking"}
-            </Text>
-          </View>
-          <View style={{ flexDirection: "row", flexWrap: "wrap", gap: SPACING[1.5] }}>
-            <Chip
-              theme={theme}
-              label={noThinkingSupported ? "Default (none)" : defaultThinking !== null ? `Provider default (${defaultThinking})` : "Provider default"}
-              active={trimmedThinking === ""}
-              count={0}
-              onPress={() => setThinking("")}
-            />
-            {thinkingChoices.map((opt) => <Chip key={opt.id} theme={theme} label={opt.label} active={trimmedThinking === opt.id} count={0} onPress={() => setThinking(opt.id)} />)}
-          </View>
+      {/* Thinking: one compact row of the levels the selected model advertises, plus Default. */}
+      {provider !== "eye.json" && !loading ? (
+        <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[1.5] }}>
+          <Text style={text(theme, "badge")}>THINKING</Text>
+          <Chip
+            theme={theme}
+            label={noThinkingSupported ? "Default (none)" : defaultThinking !== null ? `Default (${defaultThinking})` : "Default"}
+            active={trimmedThinking === ""}
+            count={0}
+            onPress={() => setThinking("")}
+          />
+          {thinkingChoices.map((opt) => <Chip key={opt.id} theme={theme} label={opt.label} active={trimmedThinking === opt.id} count={0} onPress={() => setThinking(opt.id)} />)}
         </View>
       ) : null}
 
-      {explanation === undefined ? null : <Text style={text(theme, "meta")}>{explanation(value)}</Text>}
+      {!hasMore && explanationText !== null ? <Text style={text(theme, "meta")}>{explanationText}</Text> : null}
 
-      {/* Footer: always the last thing in the body. Left the summary; right Cancel, the secondary acts, then the one primary. */}
-      <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: SPACING[2], paddingTop: SPACING[3], borderTopWidth: 1, borderTopColor: theme.colors.border }}>
-        <Text testID="lane-picker-summary" style={{ ...text(theme, "code"), flex: 1, minWidth: 160, color: value === "" ? theme.colors.statusWarning : theme.colors.foregroundMuted }} numberOfLines={2}>
-          {summary}
-        </Text>
-        <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[2] }}>
-          {footerExtra}
-          <Btn theme={theme} variant="ghost" label="Cancel" onPress={onClose} />
-          {secondaryAction === undefined ? null : <Btn theme={theme} variant="secondary" testID={secondaryAction.testID} label={secondaryAction.label} disabled={value === "" || busy} onPress={() => secondaryAction.onSave(value)} />}
-          <Btn theme={theme} variant="primary" icon="Check" label={primaryLabel(value)} {...(primaryTestID === undefined ? {} : { testID: primaryTestID })} disabled={value === "" || busy} onPress={() => onSave(value)} />
+      {/* Footer: always the last thing in the body, one line. Left the summary of the act; right `⋯`, Cancel, then the one primary. */}
+      <View style={{ gap: SPACING[2], paddingTop: SPACING[2.5], borderTopWidth: 1, borderTopColor: theme.colors.border }}>
+        {hasMore && moreOpen ? (
+          <View testID="lane-picker-more" style={{ gap: SPACING[2] }}>
+            {explanationText === null ? null : <Text style={text(theme, "meta")}>{explanationText}</Text>}
+            <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[2] }}>
+              {moreActions.map((action) => <Btn key={action.testID} theme={theme} small variant="secondary" testID={action.testID} label={action.label} disabled={value === "" || busy} onPress={() => action.onPress(value)} />)}
+              {customToggleInMore ? <Btn theme={theme} small variant="secondary" testID="lane-picker-custom-toggle" label="Use a custom model ID…" onPress={() => { setCustomOpen(true); setMoreOpen(false); }} /> : null}
+            </View>
+          </View>
+        ) : null}
+        <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: SPACING[2] }}>
+          <Text testID="lane-picker-summary" style={{ ...text(theme, "code"), flex: 1, minWidth: 0, color: value === "" ? theme.colors.statusWarning : theme.colors.foregroundMuted }} numberOfLines={1}>
+            {summary}
+          </Text>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: SPACING[1.5] }}>
+            {hasMore ? <Btn theme={theme} variant="ghost" testID="lane-picker-more-toggle" label="⋯" onPress={() => setMoreOpen(!moreOpen)} /> : null}
+            <Btn theme={theme} variant="ghost" label="Cancel" onPress={onClose} />
+            <Btn theme={theme} variant="primary" icon="Check" label={primaryLabel(value)} {...(primaryTestID === undefined ? {} : { testID: primaryTestID })} disabled={value === "" || busy} onPress={() => onSave(value)} />
+          </View>
         </View>
       </View>
     </View>
   );
 }
-
-/** One provider in the wide layout's left list: the name first, then a muted model count; the selected row carries the accent tint. */
-function ProviderRow({ theme, label, active, count, warn, onPress }: { theme: PluginTheme; label: string; active: boolean; count: number; warn: boolean; onPress: () => void }) {
-  return (
-    <Pressable
-      accessibilityRole="button"
-      onPress={onPress}
-      style={(state) => ({
-        minHeight: CONTROL_H,
-        paddingHorizontal: SPACING[2.5],
-        borderRadius: RADIUS.md,
-        backgroundColor: active ? tint(theme.colors.accent, "1f") : state.pressed || hoveredOf(state) ? theme.colors.surface2 : "transparent",
-        flexDirection: "row",
-        alignItems: "center",
-        gap: SPACING[1.5],
-      })}
-    >
-      {warn ? <Icon name="AlertTriangle" size={12} color={theme.colors.statusWarning} /> : null}
-      <Text style={{ ...text(theme, "label"), flex: 1, fontWeight: active ? "600" : "500", color: active ? theme.colors.accent : theme.colors.foreground }} numberOfLines={1}>
-        {label}
-      </Text>
-      {count > 0 ? <Text style={{ ...text(theme, "badge"), fontVariant: ["tabular-nums"] }}>{count}</Text> : null}
-    </Pressable>
-  );
-}
-
 
 /** The three lanes a Project may override from its panel's `⋯` menu (v0.6.0 W6, ADR 0056). */
 export const PROJECT_OVERRIDE_CARDS: LaneCard[] = LANE_CARDS.filter((card) => card.id === "supervisor" || card.id === "lead" || card.id === "worker");

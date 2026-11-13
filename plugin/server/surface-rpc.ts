@@ -954,6 +954,9 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     }
   };
 
+  /** True while the first listing is in flight and nothing is cached: an empty `resolveProviders` result then means "not loaded yet". */
+  const providersLoadingNow = (): boolean => inFlightProviders !== null && cachedProviderList === null;
+
   const sanitizeLane = async (laneValue: string, context?: SurfaceCallContext): Promise<string> => {
     const daemon = resolveDaemon(context);
     let providers: ProviderEntry[] = [];
@@ -2309,6 +2312,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
 
       let rawAgents: SurfaceAgentSnapshot[] = [];
       let providers: ProviderEntry[] = [];
+      let providersLoading = false;
       let daemonError: string | null = null;
       let supervisorRaw: SurfaceAgentSnapshot | undefined;
       let leadRaw: SurfaceAgentSnapshot | undefined;
@@ -2321,6 +2325,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         supervisorRaw = seatOfProject("supervisor");
         leadRaw = seatOfProject("lead");
         providers = await resolveProviders(daemon);
+        providersLoading = providers.length === 0 && providersLoadingNow();
       } catch (err) {
         daemonError = `daemon unavailable: ${messageOf(err)}`;
       }
@@ -2468,7 +2473,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         lanes: lanes.lanes,
         events,
         usage: usageFile,
-        daemon: { agents, supervisor, lead, providers, daemonError },
+        daemon: { agents, supervisor, lead, providers, providersLoading, daemonError },
         // v0.0.17 (ADR 0012 §2) & v0.0.25 (ADR 0012 §3–§4): the daemon plugin
         // list joined against Core + companion catalog and cached update check.
         companions: {

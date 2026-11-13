@@ -13,7 +13,7 @@ import { skillsImport, skillsTogglePack, lanesSet, lanesSetBatch, handoffStart, 
 import type { ManageablePluginId } from "../../shared/companions.ts";
 import type { FactoryView, LaneName } from "../../shared/view.ts";
 import { SPACING, text } from "../kit/theme.ts";
-import { useNow, usePoll, pollEvery } from "../kit/poll.ts";
+import { useNow, usePoll, pollEvery, PROVIDERS_LOADING_MS } from "../kit/poll.ts";
 import { OpenDesignControl } from "./open-design.tsx";
 import type { SeatEditorRequest } from "./editor-request.ts";
 import { ProjectPanel } from "./project-panel.tsx";
@@ -134,11 +134,13 @@ export function FactoryShell({
     (view) =>
       activePluginAct?.kind === "restarting-core"
         ? 1000
-        : pollEvery(
-            (view?.kpis.running ?? 0) + (view?.kpis.needsHuman ?? 0) > 0 ||
-              (view?.panel.handoffs ?? []).some(handoff => handoff.state !== "done") ||
-              (view?.vault.historyImports ?? []).some((item) => item.status === "pending" || item.status === "staged"),
-          ),
+        : view?.providersLoading === true
+          ? PROVIDERS_LOADING_MS
+          : pollEvery(
+              (view?.kpis.running ?? 0) + (view?.kpis.needsHuman ?? 0) > 0 ||
+                (view?.panel.handoffs ?? []).some(handoff => handoff.state !== "done") ||
+                (view?.vault.historyImports ?? []).some((item) => item.status === "pending" || item.status === "staged"),
+            ),
   );
   if (poll.value !== null) lastViewRef.current = poll.value;
   const serverView = poll.value ?? lastViewRef.current;

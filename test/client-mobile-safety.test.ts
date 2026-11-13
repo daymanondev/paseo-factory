@@ -36,7 +36,7 @@ async function load(entry: string, platformOs = "ios"): Promise<Exports> {
               const React = require('react');
               // Pressable children may be a render function (Tabs): call it unpressed. Role / label / selected / checked are exposed for tab and switch assertions.
               const tag = (name) => ({ children, onPress, disabled, ...rest }) => React.createElement(name, { disabled, onClick: onPress, 'data-testid': rest.testID, 'data-role': rest.accessibilityRole, 'aria-label': rest.accessibilityLabel, 'data-selected': rest.accessibilityState && rest.accessibilityState.selected !== undefined ? String(rest.accessibilityState.selected) : undefined, 'data-checked': rest.accessibilityState && rest.accessibilityState.checked !== undefined ? String(rest.accessibilityState.checked) : undefined }, typeof children === 'function' ? children({ pressed: false }) : children);
-              exports.View = tag('div'); exports.ScrollView = tag('div'); exports.Text = tag('span'); exports.Pressable = tag('button'); exports.TextInput = tag('input');
+              exports.View = tag('div'); exports.ScrollView = tag('div'); exports.Text = tag('span'); exports.Pressable = tag('button'); exports.TextInput = ({ value, placeholder, onChangeText, ...rest }) => React.createElement('input', { value: value ?? '', placeholder, 'data-testid': rest.testID, onChange: (event) => onChangeText && onChangeText(event.target.value) });
               exports.Icon = () => null;
               exports.useRpc = contract => input => globalThis.__factoryClientRpc(contract.name, input);
               exports.useWorkspace = () => "/project";
@@ -267,6 +267,8 @@ test("W11: one tap on every fresh-tab model chip opens the inline picker, includ
         const editor = container.querySelector('[data-testid="factory-chip-editor"]');
         assert.ok(editor, `${seat} opens inline in one tap`);
         assert.match(editor.textContent!, /gpt-live/, "the picker starts from the displayed seat lane");
+        assert.equal(container.querySelector('[data-testid="factory-chip-editor-machine-default"]'), null, "secondary acts stay behind ⋯ until it is opened");
+        await act(() => (container.querySelector('[data-testid="lane-picker-more-toggle"]') as HTMLElement).click());
         assert.ok(container.querySelector('[data-testid="factory-chip-editor-machine-default"]'));
       }
     }
@@ -295,7 +297,10 @@ test("model picker hides Factory's role providers, warns on a provider whose mod
       const buttons = () => [...editor.querySelectorAll("button")].map((b) => b.textContent ?? "");
       assert.ok(!buttons().some((label) => label.startsWith("factory-supervisor")), "role providers are not lane targets");
       assert.equal(editor.querySelector('[data-testid="lane-picker-unverified-provider"]'), null);
-      assert.ok(editor.querySelector('[data-testid="lane-picker-custom-toggle"]'), "a listed model keeps the custom ID behind a link");
+      assert.equal(editor.querySelector('[data-testid="lane-picker-custom-toggle"]'), null, "a listed model keeps the custom ID behind ⋯");
+      await act(() => (editor.querySelector('[data-testid="lane-picker-more-toggle"]') as HTMLElement).click());
+      assert.ok(editor.querySelector('[data-testid="lane-picker-custom-toggle"]'), "⋯ holds the custom model ID toggle");
+      assert.doesNotMatch(editor.textContent!, /Custom model ID(?!…)/, "the field itself is closed while a list covers it");
       assert.doesNotMatch(editor.textContent!, /thinking: /, "model rows carry no repeated thinking pill");
       const antigravity = [...editor.querySelectorAll("button")].find((b) => b.textContent?.startsWith("antigravity"))!;
       await act(() => antigravity.click());
@@ -373,6 +378,7 @@ test("W11: the tab saves standing models in Project scope, Peer choices through 
       assert.ok(container.querySelector('[data-testid="factory-chip-editor"]'), "a refused save keeps the selection open for retry");
       assert.match(errors.at(-1)!, /Model unavailable/);
       refuse = false;
+      await click("lane-picker-more-toggle");
       await click("factory-chip-editor-machine-default");
       assert.deepEqual(calls.filter(c => c.method !== "factory.snapshot").at(-1), { method: "factory.lanes.set", input: { lane: "lead", value: "claude/opus" } });
       // The header chip no longer opens an inline list: it switches to the Models tab, where each profile has an Apply row.
@@ -831,13 +837,16 @@ test("05: Hand off… and the model chip open the same modal; its title and prim
       assert.equal(title(), "Hand off Lead");
       assert.deepEqual(rotated, [], "opening fires nothing");
       assert.equal(byId("factory-chip-editor-primary")?.textContent, "Hand off to a fresh session");
-      assert.match(byId("factory-chip-editor")!.textContent!, /Starts a fresh Lead session on the same model\. The current session writes a handover first\./);
-      assert.match(byId("lane-picker-summary")!.textContent!, /^gpt-live · high$/, "unchanged: just the value");
+      assert.equal(byId("factory-chip-editor")!.textContent!.includes("Starts a fresh Lead session"), false, "the explanation lives behind ⋯, not in the footer");
+      await click("lane-picker-more-toggle");
+      assert.match(byId("lane-picker-more")!.textContent!, /Starts a fresh Lead session on the same model\. The current session writes a handover first\./);
+      assert.match(byId("lane-picker-now")!.textContent!, /^Now: codex · gpt-live · high$/);
+      assert.equal(byId("lane-picker-summary")!.textContent, "unchanged · fresh session");
       assert.equal(byId("factory-chip-editor")!.textContent!.includes("EFFECTIVE LANE VALUE"), false);
-      // Another model on the same provider switches in place; the footer shows current → new.
+      // Another model on the same provider switches in place; the footer summary says so.
       await act(() => buttons("GPT next").click());
       assert.equal(byId("factory-chip-editor-primary")?.textContent, "Switch model");
-      assert.match(byId("lane-picker-summary")!.textContent!, /^gpt-live · high → gpt-next$/);
+      assert.equal(byId("lane-picker-summary")!.textContent, "same provider · switch in place");
       // View last handover closes the modal and asks for the handover.
       await click("factory-chip-editor-view-handover");
       assert.deepEqual(viewed, ["lead"]);
@@ -849,6 +858,7 @@ test("05: Hand off… and the model chip open the same modal; its title and prim
       await click("factory-seat-hand-off-now-peer-task-1");
       assert.equal(title(), "Hand off Peer · task-1");
       assert.equal(byId("factory-chip-editor-primary")?.textContent, "Hand off Peer");
+      await click("lane-picker-more-toggle");
       await click("factory-chip-editor-view-handover");
       assert.deepEqual(viewed, ["lead", "peer:task-1"]);
       // A vacant standing seat only sets its model; so does the Default worker.
@@ -887,6 +897,77 @@ test("05: a provider whose model list is empty shows the empty state, the warnin
       }
       await act(() => ([...editor.querySelectorAll("button")].find((b) => b.textContent?.startsWith("codex")) as HTMLElement).click());
       assert.equal(editor.textContent!.includes("Paseo returned no models"), false, "a provider with models has no empty state");
+    } finally { await act(() => root.unmount()); }
+  });
+});
+
+test("08: All searches every provider; picking a row from another provider switches provider and the primary label", async () => {
+  const { ProjectPanel } = await load("plugin/client/factory/project-panel.tsx");
+  const { testTheme } = await import("./client-markup.ts");
+  const { createElement } = await import("react");
+  const rotated: string[] = [];
+  const saved: unknown[] = [];
+  const actions = { ...modelPanelActions, handoffStart: (seat: string) => { rotated.push(seat); }, saveSeatModel: (seat: string, value: string) => { saved.push({ seat, value }); } };
+  await mountUnderNativeWindow(async (createRoot, container, act) => {
+    const root = createRoot(container);
+    try {
+      await act(() => root.render(createElement(ProjectPanel, { theme: testTheme, panel: modelPanelFixture(), modelView: modelPickerFixture, mobile: false, now: Date.now(), daemonError: null, actions })));
+      await act(() => (container.querySelector('[data-testid="factory-seat-chip-lead"]') as HTMLElement).click());
+      const editor = container.querySelector('[data-testid="factory-chip-editor"]')!;
+      const byId = (id: string) => container.querySelector(`[data-testid="${id}"]`) as HTMLElement | null;
+      const button = (label: string) => [...editor.querySelectorAll("button")].find((b) => b.textContent?.startsWith(label)) as HTMLElement | undefined;
+      const search = editor.querySelector("input") as HTMLInputElement;
+      assert.equal(search.placeholder, "Search models across all providers…");
+      const type = async (text: string) => {
+        const setter = Object.getOwnPropertyDescriptor(search.ownerDocument.defaultView!.HTMLInputElement.prototype, "value")!.set!;
+        await act(() => { setter.call(search, text); search.dispatchEvent(new search.ownerDocument.defaultView!.Event("input", { bubbles: true })); });
+      };
+      // Opens filtered to the current provider: the other provider's model is not listed yet, and typing stays inside it.
+      assert.equal(button("Opus"), undefined, "the list starts on the current provider");
+      await type("opus");
+      assert.equal(button("Opus"), undefined, "a search inside one provider filters inside it");
+      assert.match(editor.textContent!, /No models match "opus"/);
+      await act(() => button("All")!.click());
+      assert.ok(button("Opus"), "searching under All finds a model from another provider");
+      assert.equal(button("GPT live"), undefined, "the search still filters the rest out");
+      await type("");
+      assert.ok(button("GPT live") && button("Opus"), "clearing the search lists every provider's models under All");
+      assert.match(button("Opus")!.textContent!, /claude$/, "All shows the provider name on the right of each row");
+      await act(() => button("Opus")!.click());
+      assert.equal(byId("factory-chip-editor-primary")?.textContent, "Hand off to claude", "a row from another provider switches the provider too");
+      assert.equal(byId("lane-picker-summary")!.textContent, "codex → claude · new session");
+      await act(() => byId("factory-chip-editor-primary")!.click());
+      assert.deepEqual(saved, [{ seat: "lead", value: "claude/opus" }]);
+      assert.deepEqual(rotated, []);
+    } finally { await act(() => root.unmount()); }
+  });
+});
+
+test("08: while providers load the picker shows a loading block, keeps the current value and never opens the custom field", async () => {
+  const { ProjectPanel } = await load("plugin/client/factory/project-panel.tsx");
+  const { testTheme } = await import("./client-markup.ts");
+  const { createElement } = await import("react");
+  const rotated: string[] = [];
+  const modelView = { ...modelPickerFixture, providers: [], providersLoading: true };
+  await mountUnderNativeWindow(async (createRoot, container, act) => {
+    const root = createRoot(container);
+    try {
+      await act(() => root.render(createElement(ProjectPanel, { theme: testTheme, panel: modelPanelFixture(), modelView, mobile: false, now: Date.now(), daemonError: null, actions: { ...modelPanelActions, handoffStart: (seat: string) => { rotated.push(seat); }, saveSeatModel() {} } })));
+      await act(() => (container.querySelector('[data-testid="factory-seat-chip-lead"]') as HTMLElement).click());
+      const editor = container.querySelector('[data-testid="factory-chip-editor"]')!;
+      assert.match(editor.querySelector('[data-testid="lane-picker-loading"]')!.textContent!, /Loading providers…/);
+      assert.equal(editor.textContent!.includes("Custom model ID"), false, "no custom field while the lists have not loaded");
+      assert.equal(editor.querySelector('[data-testid="lane-picker-unverified-provider"]'), null);
+      assert.equal(editor.textContent!.includes("Paseo returned no models"), false);
+      assert.equal(editor.querySelector('[data-testid="lane-picker-custom-toggle"]'), null);
+      // The current value stays selected: confirming still rotates the live Lead.
+      assert.equal((container.querySelector('[data-testid="factory-chip-editor-primary"]') as HTMLElement).textContent, "Hand off to a fresh session");
+      await act(() => (container.querySelector('[data-testid="factory-chip-editor-primary"]') as HTMLElement).click());
+      assert.deepEqual(rotated, ["lead"]);
+      // Loaded lists replace the block.
+      await act(() => root.render(createElement(ProjectPanel, { theme: testTheme, panel: modelPanelFixture(), modelView: modelPickerFixture, mobile: false, now: Date.now(), daemonError: null, actions: { ...modelPanelActions, saveSeatModel() {} } })));
+      await act(() => (container.querySelector('[data-testid="factory-seat-chip-lead"]') as HTMLElement).click());
+      assert.equal(container.querySelector('[data-testid="lane-picker-loading"]'), null);
     } finally { await act(() => root.unmount()); }
   });
 });
