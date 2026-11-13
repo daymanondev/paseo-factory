@@ -107,12 +107,13 @@ import { buildSubstituteHandover, readNotebook, readHandoverGit } from "./substi
 import type { HandoffProgress, HandoffRequest, HandoffReply } from "../shared/handoff.ts";
 import { createPeerHandoffRuntime } from "./peer-handoff.ts";
 import type { DaemonReply } from "./daemon-cli.ts";
-import { readNativeContextWindowTokens, type UsagePaths } from "./core/usage-extractor.ts";
+import type { UsagePaths } from "./core/usage-extractor.ts";
+import { readLeadContextTokens } from "./context-tokens.ts";
 import type { UsageRuntime } from "./usage-rollup.ts";
 import { factoryRegistryFor } from "./projects.ts";
 import type { FactoryRegistry } from "./projects.ts";
 export { PEER_HANDOFF_TOKENS } from "./peer-handoff.ts";
-import { HANDOFF_EXTRACTION_MAX_SENDS, HANDOFF_EXTRACTION_TIMEOUT_MS, LEAD_ROTATE_TOKENS } from "./handoff-limits.ts";
+import { HANDOFF_EXTRACTION_MAX_SENDS, HANDOFF_EXTRACTION_TIMEOUT_MS, LEAD_ROTATE_TOKENS, handoffMarkTokens } from "./handoff-limits.ts";
 export { HANDOFF_EXTRACTION_MAX_SENDS, HANDOFF_EXTRACTION_TIMEOUT_MS, LEAD_ROTATE_TOKENS };
 /**
  * The `lead-handoff.md` byte ceiling (v0.0.97, ADR 0047 §3.3, amending ADR 0044):
@@ -159,99 +160,8 @@ export function isSeatReadyForMail(agent: SurfaceAgentSnapshot): boolean {
   return (agent.status === "idle" || agent.status === "closed") && !isBlockedByAttention(agent);
 }
 
-// ---- the deterministic context sensor (ADR 0013 §5, "Reading Lead Context Tokens") ----------
-
-/** What the sensor read, and where it read it from — nulls mean "unknown", never a guess. */
-export interface LeadContextTokens {
-  usedTokens: number | null;
-  maxTokens: number | null;
-  source: "daemon" | "session-file" | "native-store";
-}
-
-/**
- * Reads one Lead's context-window usage deterministically — 0 LLM tokens, no
- * 4th agent role. Primary: the live daemon snapshot's `lastUsage`
- * (`contextWindowUsedTokens` / `contextWindowMaxTokens`, the SDK's
- * `AgentUsage` fields). Fallback (after a daemon restart, when `lastUsage` is
- * gone): the Pi session `.jsonl` at `persistence.nativeHandle` — the LAST
- * assistant message carrying `usage` answers, computed as
- * `totalTokens || (input + output + cacheRead + cacheWrite)`.
- */
-export function readLeadContextTokens(lead: SurfaceAgentSnapshot, usagePaths?: UsagePaths): LeadContextTokens {
-  const used = finiteNumber(lead.lastUsage?.contextWindowUsedTokens);
-  if (used !== null && used > 0) {
-    return { usedTokens: used, maxTokens: finiteNumber(lead.lastUsage?.contextWindowMaxTokens), source: "daemon" };
-  }
-  const native = lead.persistence?.nativeHandle;
-  if (typeof native === "string" && native !== "") {
-    const fromFile = readLastAssistantUsageTokens(native);
-    if (fromFile !== null) return { usedTokens: fromFile, maxTokens: null, source: "session-file" };
-  }
-  // The multi-provider fallback (v0.0.87, ADR 0043 §3): every harness's own
-  // native store answers when the daemon gauge is gone — codex's rollout
-  // tail, antigravity's steps table, and so on, not just Pi's `.jsonl`.
-  const fromStore = readNativeContextWindowTokens(lead, usagePaths);
-  if (fromStore !== null) return { usedTokens: fromStore, maxTokens: null, source: "native-store" };
-  return { usedTokens: null, maxTokens: null, source: "daemon" };
-}
-
-/**
- * The `.jsonl` fallback's one read: walk the session file's lines backwards,
- * find the last assistant message carrying a `usage` record (skipping later
- * lines without one), and fold it — `totalTokens` wins when present, else the
- * component sum. Tolerant of the wrapper shapes Pi writes (`message` nested
- * or flat) and of camelCase / snake_case usage keys; anything unreadable is
- * a null, never a guess.
- */
-function readLastAssistantUsageTokens(sessionPath: string): number | null {
-  let raw: string;
-  try {
-    raw = readFileSync(sessionPath, "utf8");
-  } catch {
-    return null;
-  }
-  const lines = raw.split("\n");
-  for (let i = lines.length - 1; i >= 0; i -= 1) {
-    const line = lines[i]!.trim();
-    if (line === "") continue;
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(line);
-    } catch {
-      continue; // a damaged line is skipped, never trusted
-    }
-    if (typeof parsed !== "object" || parsed === null) continue;
-    const record = parsed as { message?: { role?: unknown; usage?: unknown }; role?: unknown; usage?: unknown };
-    const message = record.message !== undefined && typeof record.message === "object" ? record.message : record;
-    if ((message as { role?: unknown }).role !== "assistant") continue;
-    const usage = (message as { usage?: unknown }).usage;
-    if (typeof usage !== "object" || usage === null) continue;
-    const total = finiteNumber(numberAt(usage, ["totalTokens", "total_tokens"]));
-    if (total !== null) return total;
-    const components = [
-      numberAt(usage, ["input", "inputTokens", "input_tokens"]),
-      numberAt(usage, ["output", "outputTokens", "output_tokens"]),
-      numberAt(usage, ["cacheRead", "cacheReadTokens", "cache_read_input_tokens"]),
-      numberAt(usage, ["cacheWrite", "cacheWriteTokens", "cache_creation_input_tokens"]),
-    ];
-    if (components.every((value) => value === null)) continue;
-    return components.reduce<number>((sum, value) => sum + (value ?? 0), 0);
-  }
-  return null;
-}
-
-/** The first numeric value among the record's named keys — null when none is a finite number. */
-function numberAt(record: object, keys: readonly string[]): number | null {
-  for (const key of keys) {
-    const value = finiteNumber((record as Record<string, unknown>)[key]);
-    if (value !== null) return value;
-  }
-  return null;
-}
-
-function finiteNumber(value: unknown): number | null {
-  return typeof value === "number" && Number.isFinite(value) ? value : null;
-}
+export { readLeadContextTokens } from "./context-tokens.ts";
+export type { LeadContextTokens } from "./context-tokens.ts";
 
 /** The ensure result the surface handlers' `leadEnsure` / `supervisorEnsure` answers — the runtime's seat door. */
 export type EnsureLeadResult =
@@ -851,10 +761,11 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     const lead = await liveLeadAgent(daemon, slug);
     if (lead === undefined || lead.status !== "running") return;
     const tokens = readLeadContextTokens(lead, deps.usagePaths);
-    if (tokens.usedTokens === null || tokens.usedTokens < LEAD_ROTATE_TOKENS) return;
+    const mark = handoffMarkTokens("lead", tokens.maxTokens);
+    if (tokens.usedTokens === null || tokens.usedTokens < mark) return;
     writeRotationState(slug, registration.root, { rotationState: "rotation_pending" });
     updateProgress(slug, { state: "scheduled" });
-    log(`lead-mailbox: ${slug}'s lead crossed ${LEAD_ROTATE_TOKENS} tokens (${tokens.usedTokens}, ${tokens.source}) — rotation pending, the turn runs on`);
+    log(`lead-mailbox: ${slug}'s lead crossed ${mark} tokens (${tokens.usedTokens}, ${tokens.source}) — rotation pending, the turn runs on`);
   };
 
   /**
@@ -1143,13 +1054,18 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     }
     // The boundary sensor reading — best effort; the pending state alone also arms.
     let usedTokens: number | null = null;
+    let mark = handoffMarkTokens("lead");
     try {
       const lead = await liveLeadAgent(resolveDaemon(), slug);
-      if (lead !== undefined) usedTokens = readLeadContextTokens(lead, deps.usagePaths).usedTokens;
+      if (lead !== undefined) {
+        const reading = readLeadContextTokens(lead, deps.usagePaths);
+        usedTokens = reading.usedTokens;
+        mark = handoffMarkTokens("lead", reading.maxTokens);
+      }
     } catch {
       // a sensor miss never blocks the machine
     }
-    if ((usedTokens ?? 0) >= LEAD_ROTATE_TOKENS || rotation === "rotation_pending") {
+    if ((usedTokens !== null && usedTokens >= mark) || rotation === "rotation_pending") {
       // (3) Over threshold at the boundary (v0.0.93, ADR 0031 Quiet-Point
       // Succession): durably mark `rotation_pending` first, then begin the
       // handoff only at a quiet point. While any unaccepted Task's Peer is

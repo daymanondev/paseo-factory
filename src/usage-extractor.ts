@@ -137,6 +137,8 @@ export interface UsageExtractorMetrics {
 
 /** One session's read cursor — the stat gate plus the harness's own offset. */
 interface UsageCursor {
+  walMtimeMs?: number;
+  walSize?: number;
   mtimeMs: number;
   size: number;
   byteOffset: number;
@@ -548,7 +550,7 @@ function extractCodex(
 /**
  * The opencode fold: the harness pre-aggregates the whole session into one
  * `session_v2` row, so the read is a primary-key lookup and the cursor is
- * the database file's own `(mtimeMs, size)`.
+ * the database and WAL files' `(mtimeMs, size)`.
  */
 function extractOpencode(
   agent: UsageAgentSource,
@@ -557,13 +559,17 @@ function extractOpencode(
   cursor: UsageCursor | undefined,
   metrics: UsageExtractorMetrics,
 ): UsageCursor | undefined {
-  const gate = statGate(cursor, dbPath);
-  if (gate === undefined) return undefined;
-  if ("hit" in gate) return gate.hit;
+  const stat = statSession(dbPath);
+  if (stat === undefined) return undefined;
+  const wal = statSession(`${dbPath}-wal`);
+  // Native opencode keeps a WAL open: new messages need not touch the main
+  // database until a checkpoint, so both files participate in this cache.
+  if (cursor !== undefined && cursor.mtimeMs === stat.mtimeMs && cursor.size === stat.size && cursor.walMtimeMs === wal?.mtimeMs && cursor.walSize === wal?.size) return cursor;
   const row = querySqlite<Record<string, unknown>>(
     dbPath,
     db => db.prepare("SELECT tokens_input, tokens_output, tokens_reasoning, tokens_cache_read, tokens_cache_write, cost, model FROM session_v2 WHERE id = ?").get(sessionId) as never,
     metrics,
+    { readOnly: true },
   );
   if (row === undefined) return undefined;
   const usage = continued(cursor, agent, "opencode");
@@ -588,19 +594,39 @@ function extractOpencode(
   usage.cacheWriteTokens = finiteOr(row.tokens_cache_write, 0);
   const cost = finite(row.cost);
   if (cost !== null) usage.totalCostUsd = cost;
-  const messages = querySqlite<{ count?: unknown }>(
+  const messages = querySqlite<{ count: unknown; latest?: Record<string, unknown> }>(
     dbPath,
-    db => db.prepare("SELECT COUNT(*) AS count FROM session_message WHERE session_id = ? AND json_extract(data, '$.role') = 'assistant'").get(sessionId) as never,
+    db => {
+      // New opencode stores the role in `type` and its stable order in `seq`.
+      // Older stores encode the role in JSON and only have message ids.
+      const columns = new Set((db.prepare("PRAGMA table_info(session_message)").all() as { name: string }[]).map(column => column.name));
+      const assistant = columns.has("type") ? "type = 'assistant'" : "json_extract(data, '$.role') = 'assistant'";
+      const order = columns.has("seq") ? "seq DESC, id DESC" : columns.has("time_created") ? "time_created DESC, id DESC" : "id DESC";
+      const count = (db.prepare(`SELECT COUNT(*) AS count FROM session_message WHERE session_id = ? AND json_valid(data) AND ${assistant}`).get(sessionId) as { count: unknown }).count;
+      // The last assistant that actually reports tokens is occupancy. A later
+      // user message or incomplete assistant without usage does not erase it.
+      const tokenPaths = ["$.tokens.input", "$.tokens.output", "$.tokens.cache.read", "$.tokens.cache.write"];
+      const hasTokens = tokenPaths.map(path => `json_type(data, '${path}') IN ('integer', 'real')`).join(" OR ");
+      const row = db.prepare(`SELECT data FROM session_message WHERE session_id = ? AND json_valid(data) AND ${assistant} AND (${hasTokens}) ORDER BY ${order} LIMIT 1`).get(sessionId) as { data?: unknown } | undefined;
+      const latest = typeof row?.data === "string" ? JSON.parse(row.data) as Record<string, unknown> : undefined;
+      return { count, latest };
+    },
     metrics,
+    { readOnly: true },
   );
   usage.turns = finiteOr(messages?.count, usage.turns);
-  // The context occupancy stays ABSENT for opencode: `session_v2` carries
-  // session-cumulative totals only, and a cumulative sum is not a context
-  // window — feeding it to the 128k/160k rotation would rotate long before
-  // the window fills. Nulls mean unknown, never a guess (the sensor's law).
+  delete usage.latestContextWindowTokens;
+  const tokens = messages?.latest?.tokens;
+  if (typeof tokens === "object" && tokens !== null) {
+    const value = tokens as Record<string, unknown>;
+    const cache = typeof value.cache === "object" && value.cache !== null ? value.cache as Record<string, unknown> : {};
+    // Reasoning is a breakdown of output, so it must not be added again.
+    usage.latestContextWindowTokens = finiteOr(value.input, 0) + finiteOr(value.output, 0) + finiteOr(cache.read, 0) + finiteOr(cache.write, 0);
+  }
+  // session_v2 is cumulative accounting only; it NEVER supplies occupancy.
   retotal(usage);
   if (usage.turns === 0 && usage.totalTokens === 0 && cursor === undefined) return undefined;
-  return { mtimeMs: gate.stat.mtimeMs, size: gate.stat.size, byteOffset: 0, lastStepIdx: 0, snapshot: usage };
+  return { mtimeMs: stat.mtimeMs, size: stat.size, walMtimeMs: wal?.mtimeMs, walSize: wal?.size, byteOffset: 0, lastStepIdx: 0, snapshot: usage };
 }
 
 // ---- the antigravity reader -----------------------------------------------------------------

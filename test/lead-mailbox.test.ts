@@ -3266,3 +3266,25 @@ test("A second provider change cannot overwrite the lane of a scheduled handoff"
   assert.ok(second.ok); assert.match(second.modelSync, /handoff refused/);
   assert.equal(second.lanes.lead, "claude/claude-sonnet-4-6");
 });
+
+test("Lead handoff crosses the smaller model mark while running and at a turn boundary", async (t) => {
+  for (const status of ["running", "idle"]) {
+    const lead: FakeAgent = { id: `small-lead-${status}`, status, lastUsage: { contextWindowUsedTokens: 83_199, contextWindowMaxTokens: 128_000 } };
+    const { leadMail, surface, slug, projectRoot, fake, stateDir } = makeSpooledRuntime(t, [lead]);
+    lead.labels = { seat: "lead", project: slug };
+    lead.cwd = projectRoot;
+    assert.ok((await surface.leadEnsure({ projectRoot })).ok);
+    if (status === "running") await leadMail.pumpProjectLead(slug);
+    else await leadMail.onLeadTurnEnded({ agentId: lead.id, outcome: { kind: "completed" }, timeline: [] });
+    assert.equal(readProjectRegistration(stateDir, slug)?.rotationState ?? "normal", "normal");
+    lead.lastUsage!.contextWindowUsedTokens = 83_200;
+    if (status === "running") {
+      await leadMail.pumpProjectLead(slug);
+      assert.equal(readProjectRegistration(stateDir, slug)?.rotationState, "rotation_pending");
+    } else {
+      await leadMail.onLeadTurnEnded({ agentId: lead.id, outcome: { kind: "completed" }, timeline: [] });
+      assert.equal(readProjectRegistration(stateDir, slug)?.rotationState, "handing_over");
+      assert.match(fake.sent.at(-1)!.text, /handoff/i);
+    }
+  }
+});

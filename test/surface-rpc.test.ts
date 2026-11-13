@@ -16,6 +16,7 @@ import { resolveProject } from "../plugin/server/core/project.ts";
 import { createSurfaceHandlers, sanitizeLaneWithProviders } from "../plugin/server/surface-rpc.ts";
 import type { ProviderEntry, SurfaceDaemonApi, SurfaceDeps } from "../plugin/server/surface-rpc.ts";
 import { handleSpoolRequest } from "../plugin/server/spool.ts";
+import { createLeadMailRuntime } from "../plugin/server/lead-mailbox.ts";
 import {
   BRIDGE_TIMEOUT_MS,
   checkDaemonPluginUpdates,
@@ -74,6 +75,7 @@ interface FakeAgent {
   /** The Paseo Workspace the agent's session lives in (v0.0.31, ADR 0017 §5). */
   workspaceId?: string | null;
   updatedAt?: string;
+  persistence?: { nativeHandle?: string; sessionId?: string };
 }
 
 function fakeDaemon(agents: FakeAgent[]) {
@@ -112,6 +114,7 @@ function fakeDaemon(agents: FakeAgent[]) {
               ...(agent.parentAgentId === undefined ? {} : { parentAgentId: agent.parentAgentId }),
               ...(agent.workspaceId === undefined ? {} : { workspaceId: agent.workspaceId }),
               ...(agent.lastUsage === undefined ? {} : { lastUsage: agent.lastUsage }),
+              ...(agent.persistence === undefined ? {} : { persistence: agent.persistence }),
             },
           })),
           pageInfo: {},
@@ -188,6 +191,7 @@ function makeSurface(t: TestContext, agents: FakeAgent[] = [], plugins: DaemonPl
     stateDir,
     home,
     daemon: fake.daemon,
+    usagePaths: { userHome: dir, stateDir },
     setAgentModel: async (agentId, model) => {
       modelSyncs.push({ agentId, model });
       return { ok: true };
@@ -999,7 +1003,7 @@ test("snapshot: a projectRoot scopes lanes, seats, and the task counts to the Pr
 
 // ---- the Lead telemetry join (v0.0.20, ADR 0013 §6, ticket 08) ------------------------------
 
-test("snapshot: the Lead view carries the 128k telemetry — lastUsage tokens, project.json rotationState, and the mailbox fold's queued count; other seats leave all four unset", async (t) => {
+test("snapshot: the Lead view carries the 128k telemetry — lastUsage tokens, project.json rotationState, and the mailbox fold's queued count; other seats carry context but leave Lead state unset", async (t) => {
   const project = makeProject(t, "lead-telemetry");
   const { stateDir, handlers } = makeSurface(t, [
     { id: "agent-sup-t", labels: { seat: "supervisor", project: project.slug }, cwd: project.root },
@@ -1028,17 +1032,17 @@ test("snapshot: the Lead view carries the 128k telemetry — lastUsage tokens, p
   assert.equal(lead.rotationState, "rotation_pending", "project.json's rotationState rides the Lead view");
   assert.equal(lead.queuedMailCount, 2, "the mailbox fold's queued count rides the Lead view — a delivered item no longer counts");
 
-  // Non-Lead agents leave all four unset — the telemetry is the Lead's alone.
+  // Context is visible on every seat; rotation and queued Lead mail stay Lead-only.
   assert.ok(snap.view.supervisor !== null && snap.view.supervisor.id === "agent-sup-t");
   const supervisor = snap.view.supervisor!;
-  assert.equal(supervisor.contextUsedTokens, undefined, "a non-Lead seat leaves the token pair unset");
-  assert.equal(supervisor.contextMaxTokens, undefined);
+  assert.equal(supervisor.contextUsedTokens, null, "a seat without a reading remains unknown");
+  assert.equal(supervisor.contextMaxTokens, null);
   assert.equal(supervisor.rotationState, undefined);
   assert.equal(supervisor.queuedMailCount, undefined);
   for (const agent of snap.view.agents) {
     if (agent.id === "agent-lead-t") continue;
-    assert.equal(agent.contextUsedTokens, undefined, `agent ${agent.id} carries no Lead telemetry`);
-    assert.equal(agent.contextMaxTokens, undefined);
+    assert.equal(agent.contextUsedTokens, null, `agent ${agent.id} has unknown context`);
+    assert.equal(agent.contextMaxTokens, null);
     assert.equal(agent.rotationState, undefined);
     assert.equal(agent.queuedMailCount, undefined);
   }
@@ -6536,7 +6540,7 @@ test("panel: seat rows carry plain-language status and model, draw no colour for
     { vacant: seats.lead.vacant, agentId: seats.lead.agentId, statusLabel: seats.lead.statusLabel, tone: seats.lead.tone, model: seats.lead.model },
     { vacant: false, agentId: "agent-lead", statusLabel: "working", tone: "normal", model: "glm-5.3 · high" },
   );
-  assert.equal(seats.supervisor.context, null, "only the Lead carries a context bar");
+  assert.equal(seats.supervisor.context!.label, "context unknown", "the Supervisor carries its own context bar");
   assert.equal(seats.supervisor.handoff, null, "only the Lead carries a handoff state");
 });
 
@@ -6598,7 +6602,7 @@ test("panel: the Lead context bar is honest without a reading and never exceeds 
   const { handlers, project } = makePanelSurface(t, (p) => [{ id: "agent-lead", labels: seatLabels(p, "lead"), cwd: p.root }]);
   const none = await handlers.snapshot({ projectRoot: project.root });
   assert.ok(none.ok, none.ok ? "" : none.error);
-  assert.deepEqual(none.view.panel.seats!.lead.context, { usedTokens: null, markTokens: 128_000, label: "— / 128k", fraction: null });
+  assert.deepEqual(none.view.panel.seats!.lead.context, { usedTokens: null, markTokens: 128_000, label: "context unknown", fraction: null });
 
   const over = makePanelSurface(t, (p) => [{ id: "agent-lead", labels: seatLabels(p, "lead"), cwd: p.root, lastUsage: { contextWindowUsedTokens: 150_000, contextWindowMaxTokens: 200_000 } }], "over");
   const snap = await over.handlers.snapshot({ projectRoot: over.project.root });
@@ -6626,8 +6630,8 @@ test("panel: live Peers get one row each — `Peer · <Task>`, disposition, stat
   const snap = await handlers.snapshot({ projectRoot: project.root });
   assert.ok(snap.ok, snap.ok ? "" : snap.error);
   assert.deepEqual(snap.view.panel.seats!.peers, [
-    { agentId: "agent-eng", task: "T-ENG", title: "Peer · T-ENG", disposition: "engineer", statusLabel: "working", tone: "normal", model: "glm-5.3" },
-    { agentId: "agent-rev", task: "T-REV", title: "Peer · T-REV", disposition: "reviewer", statusLabel: "idle", tone: "normal", model: "pi/zai/glm-5.3" },
+    { context: { usedTokens: null, markTokens: 160_000, label: "context unknown", fraction: null }, agentId: "agent-eng", task: "T-ENG", title: "Peer · T-ENG", disposition: "engineer", statusLabel: "working", tone: "normal", model: "glm-5.3" },
+    { context: { usedTokens: null, markTokens: 160_000, label: "context unknown", fraction: null }, agentId: "agent-rev", task: "T-REV", title: "Peer · T-REV", disposition: "reviewer", statusLabel: "idle", tone: "normal", model: "pi/zai/glm-5.3" },
   ]);
   assert.equal(snap.view.panel.summary, "Lead idle · 2 Peers · nothing needs you");
 });
@@ -7217,4 +7221,79 @@ test("seat directory: a daemon that cannot answer degrades to an empty seat list
   // The projects half still answers — the Project, its workspace and a Needs-you count need no daemon.
   assert.equal(reply.projects.length, 1);
   assert.equal(reply.projects[0]!.workspaceId, "ws-degraded");
+});
+
+test("snapshot: the Lead context mark follows its model window and keeps unknown usage honest", async (t) => {
+  for (const [window, mark] of [[1_000_000, 128_000], [128_000, 83_200], [undefined, 128_000], [0, 128_000], [-1, 128_000], [Number.NaN, 128_000]] as const) {
+    const { handlers, project } = makePanelSurface(t, (p) => [{ id: "window-lead", labels: seatLabels(p, "lead"), cwd: p.root, lastUsage: { contextWindowMaxTokens: window } }], `window-${window}`);
+    const snap = await handlers.snapshot({ projectRoot: project.root });
+    assert.ok(snap.ok, snap.ok ? "" : snap.error);
+    assert.equal(snap.view.panel.seats!.lead.context!.markTokens, mark);
+    assert.equal(snap.view.panel.seats!.lead.context!.usedTokens, null);
+    assert.equal(snap.view.panel.seats!.lead.context!.label, "context unknown");
+  }
+});
+
+test("snapshot and seat directory expose each role's model mark and context reading", async (t) => {
+  const { handlers, factory, project } = makePanelSurface(t, (p) => [
+    { id: "small-sup", labels: seatLabels(p, "supervisor"), cwd: p.root, lastUsage: { contextWindowUsedTokens: 60_000, contextWindowMaxTokens: 128_000 } },
+    { id: "small-lead", labels: seatLabels(p, "lead"), cwd: p.root, lastUsage: { contextWindowUsedTokens: 0, contextWindowMaxTokens: 128_000 } },
+    { id: "small-peer", cwd: join(p.root, "wt"), lastUsage: { contextWindowUsedTokens: 100_000, contextWindowMaxTokens: 128_000 } },
+  ]);
+  factory.ledger.append({ event: "contract_set", task: "T-WINDOW", workspace: join(project.root, "wt"), gate: "true", artifact: "a" });
+  factory.ledger.append({ event: "claim_reported", task: "T-WINDOW", attempt: 1, sha: "s", agent: "small-peer" });
+  const snap = await handlers.snapshot({ projectRoot: project.root });
+  assert.ok(snap.ok, snap.ok ? "" : snap.error);
+  assert.equal(snap.view.panel.seats!.supervisor.context!.markTokens, 83_200);
+  assert.equal(snap.view.panel.seats!.supervisor.context!.usedTokens, 60_000);
+  assert.equal(snap.view.panel.seats!.lead.context!.usedTokens, 0, "a reported empty context is known");
+  assert.equal(snap.view.panel.seats!.peers[0]!.context!.markTokens, 102_400);
+  assert.equal(snap.view.panel.seats!.peers[0]!.context!.usedTokens, 100_000);
+  const directory = await handlers.seatsDirectory({});
+  assert.ok(directory.ok);
+  assert.deepEqual(directory.seats.map(row => [row.agentId, row.contextUsedTokens, row.markTokens]).sort(), [
+    ["small-lead", 0, 83_200], ["small-peer", 100_000, 102_400], ["small-sup", 60_000, 83_200],
+  ]);
+});
+
+test("snapshot and directory recover opencode context after restart from the latest assistant, preserving its window", async (t) => {
+  const { handlers, project, dir, stateDir, factory, fake } = makePanelSurface(t, (p) => [{
+    id: "restart-lead", labels: seatLabels(p, "lead"), cwd: p.root, provider: "opencode/moonshot/kimi-k3",
+    persistence: { nativeHandle: "ses-restart" }, lastUsage: { contextWindowMaxTokens: 128_000 },
+  }]);
+  const path = join(dir, ".local", "share", "opencode", "opencode.db");
+  mkdirSync(dirname(path), { recursive: true });
+  const db = new DatabaseSync(path);
+  t.after(() => db.close());
+  db.exec("PRAGMA journal_mode = WAL");
+  db.exec("CREATE TABLE session_v2 (id TEXT PRIMARY KEY, tokens_input INTEGER, tokens_output INTEGER, tokens_reasoning INTEGER, tokens_cache_read INTEGER, tokens_cache_write INTEGER, cost REAL, model TEXT)");
+  db.exec("CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT, type TEXT, seq INTEGER, time_created INTEGER, data TEXT)");
+  db.prepare("INSERT INTO session_v2 VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run("ses-restart", 1_000_000, 200_000, 500_000, 3_000_000, 400_000, 12, "{}");
+  const insert = db.prepare("INSERT INTO session_message VALUES (?, ?, ?, ?, ?, ?)");
+  insert.run("z-old", "ses-restart", "assistant", 1, 10, JSON.stringify({ tokens: { input: 9_000, output: 1_000, cache: { read: 150_000, write: 5_000 } } }));
+  insert.run("a-new", "ses-restart", "assistant", 2, 20, JSON.stringify({ tokens: { input: 3_000, output: 2_000, reasoning: 800, cache: { read: 80_000, write: 1_000 } } }));
+  insert.run("later-user", "ses-restart", "user", 3, 30, JSON.stringify({ tokens: { input: 999_999 } }));
+  insert.run("later-no-usage", "ses-restart", "assistant", 4, 40, "{}");
+  const snap = await handlers.snapshot({ projectRoot: project.root });
+  assert.ok(snap.ok, snap.ok ? "" : snap.error);
+  assert.deepEqual(snap.view.panel.seats!.lead.context, { usedTokens: 86_000, markTokens: 83_200, label: "86k / 83k", fraction: 1 });
+  const directory = await handlers.seatsDirectory({});
+  assert.ok(directory.ok);
+  assert.equal(directory.seats[0]!.contextUsedTokens, 86_000);
+  assert.equal(directory.seats[0]!.markTokens, 83_200);
+  insert.run("newest-assistant", "ses-restart", "assistant", 5, 50, JSON.stringify({ tokens: { input: 3_000, output: 2_000, cache: { read: 90_000, write: 1_000 } } }));
+  const fresh = await handlers.snapshot({ projectRoot: project.root });
+  assert.ok(fresh.ok);
+  assert.equal(fresh.view.panel.seats!.lead.context!.usedTokens, 96_000, "WAL-only writes advance the native reading");
+  const runtime = createLeadMailRuntime({ factory, stateDir, daemon: fake.daemon,
+    usagePaths: { userHome: dir, stateDir }, ensureLead: input => handlers.leadEnsure(input), retireLead: input => handlers.leadRotate(input) });
+  t.after(() => runtime.stop());
+  writeProjectRegistration(stateDir, project.slug, { root: project.root, lead: "restart-lead" });
+  await runtime.onLeadTurnEnded({ agentId: "restart-lead", outcome: { kind: "completed" }, timeline: [] });
+  assert.equal(readProjectRegistration(stateDir, project.slug)?.rotationState, "handing_over", "native occupancy triggers the same mark shown by the surface");
+  assert.match(fake.sent.at(-1)!.text, /handoff/i);
+  db.exec("DELETE FROM session_message");
+  const missing = await handlers.snapshot({ projectRoot: project.root });
+  assert.ok(missing.ok);
+  assert.equal(missing.view.panel.seats!.lead.context!.label, "context unknown", "cumulative totals never replace a missing per-message reading");
 });

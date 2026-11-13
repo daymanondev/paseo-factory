@@ -598,3 +598,18 @@ test("Owner Peer handoff refuses protected or missing Tasks before interrupting 
   assert.equal(f.sent.length, 0);
   assert.equal(f.stopped.length, 0);
 });
+
+test("a smaller Peer window clips the handoff mark to eighty percent", async t => {
+  const f = fixture(t);
+  f.peer.lastUsage = { contextWindowUsedTokens: 102_399, contextWindowMaxTokens: 128_000 };
+  await f.runtime.onLeadTurnEnded(ended(f.peer.id));
+  assert.equal(f.sent.length, 0, "below the clipped mark the Peer continues");
+  f.peer.lastUsage.contextWindowUsedTokens = 102_400;
+  await f.runtime.onLeadTurnEnded(ended(f.peer.id));
+  assert.equal(f.sent.length, 1, "the clipped mark starts extraction before 160k");
+  assert.match(f.sent[0]!.text, /102,400/);
+  const snap = await f.surface.snapshot({ projectRoot: f.root });
+  assert.ok(snap.ok);
+  assert.equal(snap.view.panel.seats!.peers[0]!.context!.markTokens, 102_400);
+  assert.equal(f.created.length, 0, "extraction preserves the existing Peer until its reply");
+});

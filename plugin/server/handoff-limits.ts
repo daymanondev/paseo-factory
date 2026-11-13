@@ -1,18 +1,21 @@
 /**
- * The Lead handoff's fixed limits, in a leaf module (v0.6.0 W5, ADR 0056):
+ * The seat handoff's limits, in a leaf module (v0.6.0 W5, ADR 0056):
  * `lead-mailbox.ts` owns the rotation runtime and re-exports these names,
  * while `panel.ts` (reached from `view.ts`, which the mailbox itself imports)
  * reads them here so the Project panel never imports the runtime — that
  * import would close a cycle.
  */
 
-/**
- * The fixed `Lead handoff` threshold (ADR 0013 §5): 128,000 tokens, a
- * constant — never a per-model percentage formula (spec §Out of Scope). The
- * successor rotates before context degradation sets in across any
- * `200k`–`1M` model lane.
- */
+/** The unknown-window caps (ADR 0057 §7). */
 export const LEAD_ROTATE_TOKENS = 128_000;
+export const PEER_CONTEXT_MARK_TOKENS = 160_000;
+
+/** One mark for both the runtime trigger and the Owner's context bar. */
+export function handoffMarkTokens(role: "supervisor" | "lead" | "peer", maxTokens?: number | null): number {
+  const cap = role === "peer" ? PEER_CONTEXT_MARK_TOKENS : LEAD_ROTATE_TOKENS;
+  if (typeof maxTokens !== "number" || !Number.isFinite(maxTokens) || maxTokens <= 0) return cap;
+  return Math.min(cap, Math.floor(maxTokens * (role === "peer" ? 0.8 : 0.65)));
+}
 
 /**
  * The Dual-Fuse `Lead handoff` extraction window (v0.0.28, ADR 0018 §3;
