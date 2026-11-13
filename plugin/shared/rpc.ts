@@ -224,15 +224,6 @@ export const supervisorStart = defineRpc({
   ]),
 });
 
-export const supervisorRevoke = defineRpc({
-  name: "factory.supervisor.revoke",
-  input: z.object({
-    /** The Project scope; omitted revokes the first live supervisor (the legacy global act). */
-    projectRoot: z.string().optional(),
-  }),
-  output: z.union([z.object({ ok: z.literal(true), agentId: z.string() }), Failure]),
-});
-
 // The Lead seat's lifecycle (v0.0.14, ADR 0010 §2): ensure finds-or-creates
 // the standing seat=lead agent at <project-root>; rotate cancels + archives
 // it so the next dispatch starts a fresh Lead grounded in the Ledger.
@@ -247,6 +238,8 @@ export const leadEnsure = defineRpc({
 
 const HandoffInput = z.object({ projectRoot: z.string(), seat: z.string(), lane: z.string().optional() });
 const HandoffOutput = z.union([z.object({ ok: z.literal(true), progress: HandoffProgressSchema.nullable(), text: z.string().optional(), source: z.enum(["extracted", "substitute"]).optional() }), Failure]);
+/** Deprecated compatibility alias: starts a Supervisor handoff; never plain retirement. */
+export const supervisorRevoke = defineRpc({ name: "factory.supervisor.revoke", input: z.object({ projectRoot: z.string().optional() }), output: HandoffOutput });
 export const handoffStart = defineRpc({ name: "factory.handoff.start", input: HandoffInput, output: HandoffOutput });
 // The SDK requires lowercase dotted methods: spec replaceNow is replace.now (lanes.set.batch precedent).
 export const handoffReplaceNow = defineRpc({ name: "factory.handoff.replace.now", input: HandoffInput, output: HandoffOutput });

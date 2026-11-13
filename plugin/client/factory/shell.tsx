@@ -22,7 +22,7 @@ import { useRpc } from "@getpaseo/plugin/client";
 import { ScrollView, useToast } from "@getpaseo/plugin/client/ui";
 import { useEffect, useRef, useState } from "react";
 import { Text, View } from "react-native";
-import { skillsImport, skillsTogglePack, lanesReset, lanesSet, lanesSetBatch, handoffStart, onboardingCommit, onboardingInspect, openDesignCatalog, openDesignSync, helperMcpsSyncAndProbe, helperMcpsSetEnabled, pluginsInstall, pluginsManage, pluginsCheckUpdates, profilesApply, profilesDelete, profilesSave, projectDelete, projectReset, snapshot, supervisorAdopt, supervisorRevoke, supervisorStart, vaultConfigure, vaultHydrate, vaultImport, vaultSync } from "../../shared/rpc.ts";
+import { skillsImport, skillsTogglePack, lanesReset, lanesSet, lanesSetBatch, handoffStart, onboardingCommit, onboardingInspect, openDesignCatalog, openDesignSync, helperMcpsSyncAndProbe, helperMcpsSetEnabled, pluginsInstall, pluginsManage, pluginsCheckUpdates, profilesApply, profilesDelete, profilesSave, projectDelete, projectReset, snapshot, supervisorAdopt, supervisorStart, vaultConfigure, vaultHydrate, vaultImport, vaultSync } from "../../shared/rpc.ts";
 import type { ManageablePluginId } from "../../shared/companions.ts";
 import type { FactoryView, LaneName } from "../../shared/view.ts";
 import { SPACING, text } from "../kit/theme.ts";
@@ -73,7 +73,6 @@ export function FactoryShell({
   // Start Supervisor (the ADR 0017 amendment — the only seat the plugin may
   // create), Reset and Delete. There is no Lead start and no accept RPC here.
   const handoffStartCall = useRpc(handoffStart);
-  const supervisorRevokeCall = useRpc(supervisorRevoke);
   const supervisorStartCall = useRpc(supervisorStart);
   const supervisorAdoptCall = useRpc(supervisorAdopt);
   // The onboarding wizard's doors (v0.6.0 W7): a read-only folder inspection, the Start commit, and the Open Design catalog.
@@ -273,7 +272,7 @@ export function FactoryShell({
   };
   const revokeSupervisor = (): void => {
     if (projectRoot === undefined) return;
-    void act("Revoke Supervisor", () => supervisorRevokeCall({ projectRoot }));
+    void act("Hand off Supervisor", () => handoffStartCall({ projectRoot, seat: "supervisor" }));
   };
   /**
    * "Use this chat as Supervisor" (v0.6.1, ADR 0057 §5): adopt a live candidate

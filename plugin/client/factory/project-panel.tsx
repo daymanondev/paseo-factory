@@ -74,6 +74,7 @@ const NEEDS_YOU_TONE: Record<PanelNeedsYouItem["kind"], Colour> = {
   "attempt-ceiling": "statusDanger",
   "seat-stuck": "statusDanger",
   "no-supervisor": "statusDanger",
+  "supervisor-near-mark": "statusWarning",
   "handoff-stuck": "statusDanger",
   prerequisites: "statusWarning",
   "open-design-broken": "statusDanger",
@@ -135,6 +136,8 @@ function NeedsYouRow({ theme, item, mobile, actions }: { theme: PluginTheme; ite
       {item.detail !== null ? <Text style={text(theme, "meta")}>{item.detail}</Text> : null}
       {action.kind === "open-agent" ? (
         <Btn theme={theme} small testID={buttonId} label={action.label} onPress={() => actions.openAgent(action.agentId)} />
+      ) : action.kind === "handoff-supervisor" ? (
+        <Btn theme={theme} small testID={buttonId} label={action.label} disabled={actions.busy} onPress={actions.revokeSupervisor} />
       ) : mobile ? (
         <Text testID={`factory-panel-needs-you-hint-${item.key}`} style={text(theme, "meta")}>{DESKTOP_ONLY_HINT[action.kind]}</Text>
       ) : action.kind === "install-prerequisites" ? (
@@ -221,8 +224,8 @@ function SeatRow({
             theme={theme}
             small
             testID="factory-panel-revoke-supervisor"
-            label="Revoke Supervisor"
-            tone="statusDanger"
+            label="Hand off now"
+            tone="statusWarning"
             disabled={actions.busy}
             onPress={() => {
               setMenuOpen(false);

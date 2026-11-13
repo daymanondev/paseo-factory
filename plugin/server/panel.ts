@@ -286,6 +286,12 @@ function needsYou(input: PanelInput): PanelNeedsYouItem[] {
       action: deciderAction,
     });
   }
+  const supervisor = input.supervisor;
+  const window = supervisor?.contextMaxTokens;
+  const mark = typeof window === "number" && Number.isFinite(window) && window > 0 ? Math.min(128_000, Math.floor(window * 0.65)) : 128_000;
+  if (supervisor && supervisor.contextUsedTokens != null && supervisor.contextUsedTokens >= mark && (!supervisor.handoffProgress || supervisor.handoffProgress.state === "done")) {
+    items.push({ key: "supervisor-near-mark", kind: "supervisor-near-mark", title: "Supervisor is near its handoff mark", detail: "Hand off when you are ready to continue in a fresh chat.", action: { kind: "handoff-supervisor", label: "Hand off now" } });
+  }
   items.push(...seatStuckItems("supervisor", input.supervisor), ...seatStuckItems("lead", input.lead));
   // v0.6.1 (ADR 0057 §5): Supervisor-addressed mail holds when no live
   // Supervisor exists — the plugin never creates one — so the Owner sees the

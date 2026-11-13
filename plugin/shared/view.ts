@@ -426,6 +426,7 @@ export type SkillHubView = z.infer<typeof SkillHubViewSchema>;
  * on the client; mobile renders a hint to use Paseo Desktop in their place.
  */
 export const PanelNeedsYouActionSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("handoff-supervisor"), label: z.string() }),
   z.object({ kind: z.literal("open-agent"), agentId: z.string(), label: z.string() }),
   z.object({ kind: z.literal("install-prerequisites"), label: z.string() }),
   /** No Supervisor or Lead lives to decide — the way forward is to start the Supervisor. */
@@ -436,7 +437,7 @@ export const PanelNeedsYouActionSchema = z.discriminatedUnion("kind", [
 export type PanelNeedsYouAction = z.infer<typeof PanelNeedsYouActionSchema>;
 
 /** The Owner-actionable item kinds, in the order the list shows them. */
-export const PANEL_NEEDS_YOU_KINDS = ["needs-human", "attempt-ceiling", "seat-stuck", "no-supervisor", "handoff-stuck", "prerequisites", "open-design-broken"] as const;
+export const PANEL_NEEDS_YOU_KINDS = ["needs-human", "attempt-ceiling", "seat-stuck", "no-supervisor", "supervisor-near-mark", "handoff-stuck", "prerequisites", "open-design-broken"] as const;
 
 export const PanelNeedsYouItemSchema = z.object({
   key: z.string(),

@@ -282,7 +282,7 @@ test("Revoke Supervisor lives behind the Supervisor row's ⋯ — closed by defa
     assert.equal(hasHook(closed, "factory-panel-revoke-supervisor"), false, "Revoke is not prominent");
     const open = await render(makePanel(), { mobile, initialUi: { supervisorMenuOpen: true } });
     assert.ok(hasHook(open, "factory-panel-revoke-supervisor"), `Revoke Supervisor once the ⋯ opens (mobile=${mobile})`);
-    assert.match(open, /Revoke Supervisor/);
+    assert.match(open, /Hand off now/);
     const leadRow = open.slice(open.indexOf("factory-panel-seat-lead"));
     assert.doesNotMatch(leadRow, /Revoke/);
   }
@@ -471,7 +471,7 @@ test("the shell reads mobile from the host layout platform, mounts the panel on 
 
 test("W6 shell wiring: every action rides its RPC — Rotate, Revoke, Start Supervisor (then opens the new seat), Reset, Delete — and no Lead start or accept RPC is bound", () => {
   const shell = read("plugin/client/factory/shell.tsx");
-  for (const rpc of ["handoffStart", "supervisorRevoke", "supervisorStart", "projectReset", "projectDelete"]) {
+  for (const rpc of ["handoffStart", "supervisorStart", "projectReset", "projectDelete"]) {
     assert.match(shell, new RegExp(`useRpc\\(${rpc}\\)`), `${rpc} is bound`);
   }
   assert.doesNotMatch(shell, /useRpc\((leadEnsure|supervisorEnsure|leadDispatch)\)/, "the only seat creation is Start Supervisor");
