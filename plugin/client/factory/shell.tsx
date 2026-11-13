@@ -9,7 +9,7 @@ import { useRpc } from "@getpaseo/plugin/client";
 import { Modal, ScrollView, useToast } from "@getpaseo/plugin/client/ui";
 import { useEffect, useRef, useState } from "react";
 import { Text, View } from "react-native";
-import { skillsImport, skillsTogglePack, lanesSet, lanesSetBatch, handoffStart, handoffReplaceNow, handoffCancel, handoffRetry, handoffHandover, onboardingCommit, onboardingInspect, openDesignCatalog, openDesignSync, helperMcpsSyncAndProbe, helperMcpsSetEnabled, pluginsInstall, pluginsManage, pluginsCheckUpdates, profilesApply, profilesDelete, profilesSave, projectDelete, projectReset, snapshot, supervisorAdopt, supervisorStart, vaultConfigure, vaultHydrate, vaultImport, vaultSync } from "../../shared/rpc.ts";
+import { skillsImport, skillsTogglePack, lanesSet, lanesSetBatch, handoffStart, handoffReplaceNow, handoffCancel, handoffRetry, handoffHandover, onboardingCommit, onboardingInspect, openDesignCatalog, openDesignSync, helperMcpsSyncAndProbe, helperMcpsSetEnabled, pluginsInstall, pluginsManage, pluginsCheckUpdates, selfUpdateApply, selfUpdateStatus, profilesApply, profilesDelete, profilesSave, projectDelete, projectReset, snapshot, supervisorAdopt, supervisorStart, vaultConfigure, vaultHydrate, vaultImport, vaultSync } from "../../shared/rpc.ts";
 import type { ManageablePluginId } from "../../shared/companions.ts";
 import type { FactoryView, LaneName } from "../../shared/view.ts";
 import { SPACING, text } from "../kit/theme.ts";
@@ -17,6 +17,7 @@ import { useNow, usePoll, pollEvery, PROVIDERS_LOADING_MS } from "../kit/poll.ts
 import { OpenDesignControl } from "./open-design.tsx";
 import type { SeatEditorRequest } from "./editor-request.ts";
 import { ProjectPanel } from "./project-panel.tsx";
+import { useSelfUpdate } from "./self-update.tsx";
 import { ProjectMenu } from "./project-menu.tsx";
 import { OnboardingWizard } from "./onboarding-wizard.tsx";
 import type { CommitInput } from "./onboarding-state.ts";
@@ -93,6 +94,10 @@ export function FactoryShell({
   const skillsTogglePackCall = useRpc(skillsTogglePack);
   const pluginsManageCall = useRpc(pluginsManage);
   const pluginsCheckUpdatesCall = useRpc(pluginsCheckUpdates);
+  // The header's version + self-update (ticket 11): one status on mount, Check forces it, Update applies (the plugin reloads under us).
+  const selfUpdateStatusCall = useRpc(selfUpdateStatus);
+  const selfUpdateApplyCall = useRpc(selfUpdateApply);
+  const selfUpdate = useSelfUpdate({ status: selfUpdateStatusCall, apply: selfUpdateApplyCall, enabled: surface === "panel" });
   // The Private vault RPCs (v0.0.21–v0.0.22, ADR 0014 §4): one useRpc per
   // contract, every act through act() — the plugins pair's law.
   const vaultConfigureCall = useRpc(vaultConfigure);
@@ -702,6 +707,7 @@ export function FactoryShell({
             {...(editorRequest === undefined ? {} : { editorRequest })}
             {...(onEditorRequestHandled === undefined ? {} : { onEditorRequestHandled })}
             width={containerWidth}
+            selfUpdate={selfUpdate}
             skillPacks={view.skillHub?.projectPacks ?? []}
             mobile={mobile}
             now={now}

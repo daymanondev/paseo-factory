@@ -751,6 +751,7 @@ test('W14: iOS and Android expose exactly the Project model, handoff and adoptio
   const g = globalThis as Record<string, any>, prior = g.__factoryClientRpc;
   g.__factoryClientRpc = async (method: string, input: any) => {
     calls.push({ method, input });
+    if (method === 'factory.self.update.status') return { ok: true, current: '0.8.2', latest: '0.9.0', updateAvailable: true, checkedAt: '' };
     return method === 'factory.snapshot' ? { ok: true, view } : { ok: true, agentId: 'candidate', text: 'Owner goals', source: 'substitute' };
   };
   try {
@@ -782,6 +783,10 @@ test('W14: iOS and Android expose exactly the Project model, handoff and adoptio
             'factory-panel-open-lead', 'factory-panel-open-peer-task-1', 'factory-seat-hand-off-now-lead', 'factory-seat-hand-off-now-peer-task-1',
             'factory-panel-adopt-supervisor',
           ].sort(), 'every mobile action belongs to the allowed write set or read navigation');
+          // Ticket 11: the version is shown, the update is announced for Desktop, and no Update button mounts (the status read is the only self-update call).
+          assert.match(container.querySelector('[data-testid="factory-version"]')?.textContent ?? '', /v0\.8\.2/, `${platform} shows the version`);
+          assert.match(container.querySelector('[data-testid="factory-update-desktop-hint"]')?.textContent ?? '', /Update from Paseo Desktop/, `${platform} points at Desktop`);
+          assert.equal(container.querySelector('[data-testid="factory-update-apply"]'), null, `${platform} hides Update`);
           assert.notEqual(container.querySelector('[data-testid="factory-profile-chip"]')?.tagName, 'BUTTON');
           for (const seat of ['supervisor', 'lead', 'peer-task-1', 'worker']) {
             await click(`factory-tab-${seat === 'worker' ? 'models' : 'team'}`);
@@ -796,7 +801,9 @@ test('W14: iOS and Android expose exactly the Project model, handoff and adoptio
           await click('factory-panel-adopt-supervisor');
           await click('factory-handoff-view');
           await click('factory-panel-open-lead');
-          assert.deepEqual(calls.filter(c => c.method !== 'factory.snapshot' && c.method !== 'factory.handoff.handover'), [
+          assert.ok(calls.some(c => c.method === 'factory.self.update.status'), `${platform} checks the version on mount`);
+          assert.equal(calls.some(c => c.method === 'factory.self.update.apply'), false, `${platform} never applies an update`);
+          assert.deepEqual(calls.filter(c => c.method !== 'factory.snapshot' && c.method !== 'factory.handoff.handover' && c.method !== 'factory.self.update.status'), [
             { method: 'factory.lanes.set', input: { projectRoot: '/project', lane: 'supervisor', value: 'codex/gpt-live:high' } },
             { method: 'factory.handoff.start', input: { projectRoot: '/project', seat: 'lead' } },
             { method: 'factory.handoff.start', input: { projectRoot: '/project', seat: 'peer:task-1', lane: 'codex/gpt-live:high' } },

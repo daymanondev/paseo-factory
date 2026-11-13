@@ -16,6 +16,8 @@ import { Tabs } from "../kit/tabs.tsx";
 import { CONTROL_H, RADIUS, SPACING, factoryPalette, hoveredOf, text, thinkingColour, tint } from "../kit/theme.ts";
 import type { Colour } from "../kit/theme.ts";
 import type { SeatEditorRequest } from "./editor-request.ts";
+import { SelfUpdateControls, SelfUpdateNote } from "./self-update.tsx";
+import type { SelfUpdateView } from "./self-update.tsx";
 import { FactoryTabErrorBoundary } from "./tab-error-boundary.tsx";
 import type { MenuSkillPack } from "./project-menu.tsx";
 import { LANE_CARDS, LaneModalBody, splitLaneParts } from "./lane-editor.tsx";
@@ -747,7 +749,10 @@ export function ProjectPanel({
   width = 0,
   skillPacks = [],
   modelView,
+  selfUpdate,
 }: {
+  /** The header's version + update control (ticket 11), mounted by the Shell; omitted, no control. */
+  selfUpdate?: SelfUpdateView;
   modelView?: LanePickerView;
   editorRequest?: SeatEditorRequest;
   onEditorRequestHandled?: () => void;
@@ -802,9 +807,13 @@ export function ProjectPanel({
           <Text style={text(theme, "meta")}>{panel.summary}</Text>
           {daemonError !== null ? <Text style={text(theme, "label", "statusWarning")}>{daemonError}</Text> : null}
         </View>
-        <View style={{ flexDirection: "row", alignItems: "center", gap: SPACING[1.5] }}>
-          {panel.isProject ? (!mobile && actions.applyProfile !== undefined ? <Btn theme={theme} small variant="secondary" testID="factory-profile-chip" label={`${profileLabel} ▾`} onPress={() => setTab("models")} /> : <View testID="factory-profile-chip"><Text style={text(theme, "label")}>{profileLabel}</Text></View>) : null}
-          {hasMenu ? <Btn theme={theme} small variant="ghost" testID="factory-panel-menu-toggle" label="⋯" onPress={() => setMenuOpen(!menuOpen)} /> : null}
+        <View style={{ flexShrink: 1, alignItems: "flex-end", gap: SPACING[1] }}>
+          <View style={{ flexDirection: "row", flexWrap: "wrap", justifyContent: "flex-end", alignItems: "center", gap: SPACING[1.5] }}>
+            {selfUpdate === undefined ? null : <SelfUpdateControls theme={theme} view={selfUpdate} mobile={mobile} />}
+            {panel.isProject ? (!mobile && actions.applyProfile !== undefined ? <Btn theme={theme} small variant="secondary" testID="factory-profile-chip" label={`${profileLabel} ▾`} onPress={() => setTab("models")} /> : <View testID="factory-profile-chip"><Text style={text(theme, "label")}>{profileLabel}</Text></View>) : null}
+            {hasMenu ? <Btn theme={theme} small variant="ghost" testID="factory-panel-menu-toggle" label="⋯" onPress={() => setMenuOpen(!menuOpen)} /> : null}
+          </View>
+          {selfUpdate === undefined ? null : <SelfUpdateNote theme={theme} view={selfUpdate} />}
         </View>
       </View>
       {hasMenu && menuOpen ? <Block theme={theme} testID="factory-panel-menu">{menu}</Block> : null}

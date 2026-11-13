@@ -71,6 +71,7 @@ import type { UsagePaths } from "./core/usage-extractor.ts";
 import type { ProjectEventStream } from "./view.ts";
 import type { LedgerEvent } from "./core/events.ts";
 import { setAgentModelViaCli, setAgentThinkingViaCli, stopAgentViaCli } from "./daemon-cli.ts";
+import { createSelfUpdate, type RemoteTagsReply } from "./self-update.ts";
 import { checkDaemonPluginUpdates, cleanupDaemonWorkspacesAndProjectsViaWs, getCachedPluginUpdateStatus, installDaemonPlugin, isPaseoWorkspaceArchivedOnDisk, listDaemonPlugins, manageDaemonPlugin, prunePaseoProjectRegistry, reloadDaemonConfigViaWs, restoreDaemonWorkspaceViaWs } from "./daemon-cli.ts";
 import type { DaemonPluginAction, DaemonPluginItem, DaemonPluginSourceStatus, DaemonPluginUpdateRow, DaemonReply } from "./daemon-cli.ts";
 import { effectiveLanesForReconcile, reconcilePaseoRoleProviders } from "./core/role-providers.ts";
@@ -96,6 +97,8 @@ import {
   skillsImport, skillsTogglePack,
   pluginsInstall,
   pluginsManage,
+  selfUpdateApply,
+  selfUpdateStatus,
   profilesApply,
   profilesDelete,
   profilesSave,
@@ -342,6 +345,8 @@ export interface SurfaceDeps {
   installPlugin?: typeof installDaemonPlugin;
   managePlugin?: typeof manageDaemonPlugin;
   checkPluginUpdates?: typeof checkDaemonPluginUpdates;
+  /** The self-update door's `git ls-remote --tags` override (tests) — the real git by default. */
+  listRemoteTags?: (remote: string) => Promise<RemoteTagsReply>;
   /** Optional host home override and runner override for companion tools (`factory-skills-pack`; ADR 0040). */
   userHome?: string;
   companionToolRunner?: CompanionToolRunner;
@@ -2132,6 +2137,17 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     return installOrUpdateExpoSkillPack({ userHome, action: 'update', runner: deps.companionToolRunner });
   };
 
+  /** The Factory tab's self-update door — Settings' own Core update path (Expo skill pack first), guarded against downgrades. */
+  const selfUpdate = createSelfUpdate({
+    home: deps.home,
+    ...(deps.pluginDir === undefined ? {} : { pluginDir: deps.pluginDir }),
+    ...(deps.listPlugins === undefined ? {} : { listPlugins: deps.listPlugins }),
+    ...(deps.checkPluginUpdates === undefined ? {} : { checkPluginUpdates: deps.checkPluginUpdates }),
+    ...(deps.managePlugin === undefined ? {} : { managePlugin: deps.managePlugin }),
+    ...(deps.listRemoteTags === undefined ? {} : { listRemoteTags: deps.listRemoteTags }),
+    beforeUpdate: () => updateInstalledExpo(),
+  });
+
   /**
    * Registers the Project a folder names (the onboarding commit's first write):
    * `resolveOrBootstrapProject` initialises Git when the folder is not a
@@ -3787,6 +3803,15 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       return { ok: true as const, pluginId: input.pluginId, action: input.action, summary };
     },
 
+    async selfUpdateStatus(input: { force?: boolean }, _context?: SurfaceCallContext) {
+      return selfUpdate.status(input);
+    },
+
+    async selfUpdateApply(_input: Record<string, never>, _context?: SurfaceCallContext) {
+      localUpdateSnapshot = null;
+      return selfUpdate.apply();
+    },
+
     async helperMcpsSyncAndProbe(_input: Record<string, never>) {
       return serializeSeat("helper-mcps", async () => {
         try {
@@ -4001,7 +4026,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       }
     },
   };
-  const reads = new Set(["cachedProviders", "sanitizeLane", "snapshot", "seatsDirectory", "pluginsCheckUpdates", "historyImport", "historyImports", "historyUpgrade", "vaultHydrate", "vaultPull", "vaultPush", "vaultSync", "vaultImport"]);
+  const reads = new Set(["cachedProviders", "sanitizeLane", "snapshot", "seatsDirectory", "pluginsCheckUpdates", "selfUpdateStatus", "selfUpdateApply", "historyImport", "historyImports", "historyUpgrade", "vaultHydrate", "vaultPull", "vaultPush", "vaultSync", "vaultImport"]);
   const wrappers = new Map<PropertyKey, unknown>();
   return new Proxy(handlers, {
     get(target, key, receiver) {
@@ -4084,6 +4109,8 @@ export function registerSurfaceRpc(
   server.handle(helperMcpsSyncAndProbe, (input, context) => { pass(context); return handlers.helperMcpsSyncAndProbe(input); });
   server.handle(helperMcpsSetEnabled, (input, context) => { pass(context); return handlers.helperMcpsSetEnabled(input); });
   server.handle(pluginsCheckUpdates, (input, context) => handlers.pluginsCheckUpdates(input, pass(context)));
+  server.handle(selfUpdateStatus, (input, context) => handlers.selfUpdateStatus(input, pass(context)));
+  server.handle(selfUpdateApply, (input, context) => handlers.selfUpdateApply(input, pass(context)));
   server.handle(vaultConfigure, (input, context) => handlers.vaultConfigure(input, pass(context)));
   server.handle(vaultHydrate, (input, context) => handlers.vaultHydrate(input, pass(context)));
   server.handle(historyImport, (input) => handlers.historyImport(input));

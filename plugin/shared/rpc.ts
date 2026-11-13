@@ -441,6 +441,33 @@ export const pluginsCheckUpdates = defineRpc({
   ]),
 });
 
+// The Factory tab's self-update (ticket 11): `status` compares the installed
+// version with the highest release tag and only reports `updateAvailable` when
+// Paseo's own update target is that tag's commit (never a downgrade); `apply`
+// re-runs the status and then asks the daemon to update this very plugin — the
+// reply may never arrive, because applying reloads the plugin that answers.
+export const selfUpdateStatus = defineRpc({
+  name: "factory.self.update.status",
+  input: z.object({ force: z.boolean().optional() }),
+  output: z.union([
+    z.object({
+      ok: z.literal(true),
+      current: z.string(),
+      latest: z.string().nullable(),
+      updateAvailable: z.boolean(),
+      checkedAt: z.string(),
+      note: z.string().optional(),
+    }),
+    Failure,
+  ]),
+});
+
+export const selfUpdateApply = defineRpc({
+  name: "factory.self.update.apply",
+  input: z.object({}),
+  output: z.union([z.object({ ok: z.literal(true), from: z.string(), to: z.string() }), Failure]),
+});
+
 // The Private vault surface (v0.0.21, ADR 0014 §4; v0.0.22 unified sync &
 // 1-click key import): configure persists the Owner's repo/branch/passphrase
 // to the `0o600` `<stateDir>/vault-config.json` and returns the refreshed

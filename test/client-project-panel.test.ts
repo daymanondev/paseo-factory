@@ -99,7 +99,7 @@ const noopActions = () => ({
   openAgent() {}, installPrerequisites() {}, handoffStart() {}, handoffReplaceNow() {}, handoffCancel() {}, handoffRetry() {}, viewHandover() {}, startSupervisor() {}, syncOpenDesign() {}, adoptSupervisor() {}, busy: false,
 });
 
-async function render(panel: PanelView, props: { mobile?: boolean; openDesignActions?: unknown; menu?: unknown; initialUi?: Record<string, unknown>; actions?: Record<string, unknown>; width?: number; skillPacks?: unknown[] } = {}): Promise<string> {
+async function render(panel: PanelView, props: { mobile?: boolean; openDesignActions?: unknown; menu?: unknown; initialUi?: Record<string, unknown>; actions?: Record<string, unknown>; width?: number; skillPacks?: unknown[]; selfUpdate?: unknown } = {}): Promise<string> {
   const { ProjectPanel } = await loadPanel();
   const { createElement } = await import("react");
   const { renderToStaticMarkup } = await import("react-dom/server");
@@ -111,6 +111,7 @@ async function render(panel: PanelView, props: { mobile?: boolean; openDesignAct
       ...(props.openDesignActions === undefined ? {} : { openDesignActions: props.openDesignActions }),
       ...(props.menu === undefined ? {} : { menu: props.menu }),
       ...(props.initialUi === undefined ? {} : { initialUi: props.initialUi }),
+      ...(props.selfUpdate === undefined ? {} : { selfUpdate: props.selfUpdate }),
     }),
   );
 }
@@ -806,4 +807,82 @@ test("04: the model chip is a quiet pill — no border, surface fill, code-style
   assert.equal(chip.includes("borderWidth"), false);
   assert.match(chip, /&quot;borderRadius&quot;:4,&quot;paddingHorizontal&quot;:8,&quot;paddingVertical&quot;:3,&quot;backgroundColor&quot;:&quot;#f5f5f5&quot;/);
   assert.match(chip, /&quot;fontFamily&quot;:&quot;Menlo&quot;/, "the model name is in code type");
+});
+
+// ---- ticket 11: the header's version + self-update control ---------------------------------------
+
+/** The `<span>` / `<button>` carrying a test hook, through its closing tag (`elementOf` walks divs only). */
+function leafOf(html: string, id: string): string {
+  const match = new RegExp(`<(span|button)\\b[^>]*data-testid="${id}"[^>]*>.*?</\\1>`).exec(html);
+  if (match === null) throw new Error(`no ${id} in the markup`);
+  return match[0];
+}
+
+const selfUpdateView = (state: Record<string, unknown> = {}) => ({
+  state: { phase: "idle", current: "0.8.2", latest: "0.8.2", updateAvailable: false, upToDate: false, note: null, error: null, ...state },
+  actions: { check() {}, apply() {} },
+});
+
+test("11: the header shows the muted version and a ghost Check for updates when up to date", async () => {
+  const html = await render(makePanel(), { selfUpdate: selfUpdateView() });
+  assert.match(leafOf(html, "factory-version"), /v0\.8\.2/);
+  assert.match(leafOf(html, "factory-update-check"), /Check for updates/);
+  assert.equal(hasHook(html, "factory-update-apply"), false);
+  assert.equal(hasHook(html, "factory-update-note"), false);
+  const upToDate = await render(makePanel(), { selfUpdate: selfUpdateView({ upToDate: true }) });
+  assert.match(leafOf(upToDate, "factory-update-uptodate"), /Up to date/);
+});
+
+test("11: while the first status is in flight the header says Checking… and offers no button", async () => {
+  const html = await render(makePanel(), { selfUpdate: selfUpdateView({ phase: "checking", current: null, latest: null }) });
+  assert.match(leafOf(html, "factory-update-checking"), /Checking…/);
+  assert.equal(hasHook(html, "factory-version"), false);
+  assert.equal(hasHook(html, "factory-update-check"), false);
+  assert.equal(hasHook(html, "factory-update-apply"), false);
+});
+
+test("11: an available update shows the primary Update to vX button; pressing state disables it and says Updating", async () => {
+  const ready = await render(makePanel(), { selfUpdate: selfUpdateView({ latest: "0.9.0", updateAvailable: true }) });
+  assert.match(leafOf(ready, "factory-update-apply"), /Update to v0\.9\.0/);
+  assert.equal(leafOf(ready, "factory-update-apply").startsWith("<button disabled"), false);
+  assert.equal(hasHook(ready, "factory-update-check"), false, "the Update button replaces Check");
+  const updating = await render(makePanel(), { selfUpdate: selfUpdateView({ phase: "updating", latest: "0.9.0", updateAvailable: true }) });
+  assert.match(leafOf(updating, "factory-update-apply"), /Updating to v0\.9\.0…/);
+  assert.match(leafOf(updating, "factory-update-apply"), /^<button disabled/);
+});
+
+test("11: a reload after pressing Update is a calm notice, a real failure is a warning-coloured error that re-enables, a note is muted", async () => {
+  const reloading = await render(makePanel(), { selfUpdate: selfUpdateView({ phase: "reloading", latest: "0.9.0", updateAvailable: true }) });
+  assert.match(leafOf(reloading, "factory-update-note"), /Paseo is reloading the Factory plugin…/);
+  assert.equal(hasHook(reloading, "factory-update-error"), false);
+  const failed = await render(makePanel(), { selfUpdate: selfUpdateView({ latest: "0.9.0", updateAvailable: true, error: "daemon refused" }) });
+  assert.match(leafOf(failed, "factory-update-error"), /daemon refused/);
+  assert.ok(leafOf(failed, "factory-update-error").includes(WARNING), "an update failure is warning-coloured");
+  assert.equal(leafOf(failed, "factory-update-apply").startsWith("<button disabled"), false, "the button is enabled again");
+  const noted = await render(makePanel(), { selfUpdate: selfUpdateView({ latest: "0.9.0", note: "Paseo's update source is not on v0.9.0 yet" }) });
+  assert.match(leafOf(noted, "factory-update-note"), /not on v0\.9\.0 yet/);
+  assert.equal(leafOf(noted, "factory-update-note").includes(WARNING), false, "a server note is muted");
+});
+
+test("11: mobile keeps the version and Check but never mounts Update — it points at Paseo Desktop", async () => {
+  const html = await render(makePanel(), { mobile: true, selfUpdate: selfUpdateView({ latest: "0.9.0", updateAvailable: true }) });
+  assert.match(leafOf(html, "factory-version"), /v0\.8\.2/);
+  assert.equal(hasHook(html, "factory-update-apply"), false);
+  assert.match(leafOf(html, "factory-update-desktop-hint"), /Update from Paseo Desktop/);
+  const idle = await render(makePanel(), { mobile: true, selfUpdate: selfUpdateView() });
+  assert.ok(hasHook(idle, "factory-update-check"), "mobile can still check");
+});
+
+test("11: the header renders without a self-update control when the host supplies none", async () => {
+  const html = await render(makePanel());
+  assert.equal(hasHook(html, "factory-version"), false);
+  assert.equal(hasHook(html, "factory-update-check"), false);
+});
+
+test("11: the Shell mounts the self-update hook for the panel and hands it to the Project panel", () => {
+  const shell = readFileSync(join(repoRoot, "plugin/client/factory/shell.tsx"), "utf8");
+  assert.match(shell, /useRpc\(selfUpdateStatus\)/);
+  assert.match(shell, /useRpc\(selfUpdateApply\)/);
+  assert.match(shell, /useSelfUpdate\(\{[^}]*enabled: surface === "panel"/);
+  assert.match(shell, /selfUpdate=\{selfUpdate\}/);
 });
