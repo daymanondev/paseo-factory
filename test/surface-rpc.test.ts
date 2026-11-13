@@ -266,7 +266,7 @@ test("snapshot: versioned view folding ledger + lanes + daemon agents + provider
   const snap = await handlers.snapshot({});
   assert.ok(snap.ok, snap.ok ? "" : snap.error);
   const view = snap.view;
-  assert.equal(view.version, 4);
+  assert.equal(view.version, 5);
   assert.equal(view.lanes.worker, "pi/zcode/glm-5.3", "the lanes table rides the snapshot");
   assert.equal(view.kpis.readyToAccept, 1, "one green unaccepted task");
   assert.equal(view.kpis.accepted, 0);
@@ -971,7 +971,7 @@ test("snapshot: a projectRoot scopes lanes, seats, and the task counts to the Pr
   const snap = await handlers.snapshot({ projectRoot: project.root });
   assert.ok(snap.ok, snap.ok ? "" : snap.error);
   const view = snap.view;
-  assert.equal(view.version, 4);
+  assert.equal(view.version, 5);
   assert.deepEqual(view.project, {
     slug: project.slug,
     name: basename(project.root),
@@ -6479,6 +6479,7 @@ test("panel: with a live Supervisor the seats view names every Supervisor candid
     "only the Project-workspace candidate chat is a candidate row — the bound seats, task Peers, and strangers never are",
   );
   assert.equal(candidates[0]?.title, "Chat about release");
+  assert.deepEqual(candidates[0]?.allowedActions, ["adopt"]);
 
   // Without a live Supervisor the auto-bind door owns recovery — no candidate rows.
   const bare = makePanelSurface(t, (p) => [
@@ -6562,7 +6563,7 @@ test("panel: a vacant Supervisor says so (Start Supervisor is the W6 action); a 
   assert.equal(snap.view.panel.summary, "No Supervisor · No Lead · nothing needs you");
 });
 
-test("panel: the Lead row shows context against the 128k mark and the handoff state in words with the queued mail count", async (t) => {
+test("panel: the Lead row shows context and maps legacy rotation state to context-mark progress", async (t) => {
   const { handlers, stateDir, project } = makePanelSurface(t, (p) => [
     { id: "agent-lead", labels: seatLabels(p, "lead"), cwd: p.root, lastUsage: { contextWindowUsedTokens: 94_400, contextWindowMaxTokens: 200_000 } },
   ]);
@@ -6573,26 +6574,30 @@ test("panel: the Lead row shows context against the 128k mark and the handoff st
   };
 
   const normal = await read();
-  assert.deepEqual(normal.context, { usedTokens: 94_400, markTokens: 128_000, label: "94k / 128k", fraction: 94_400 / 128_000 });
-  assert.deepEqual(normal.handoff, { state: "normal", label: "normal", queuedMailCount: 0 });
+  assert.deepEqual(normal.context, { state: "used", usedTokens: 94_400, markTokens: 128_000, label: "94k / 128k", fraction: 94_400 / 128_000 });
+  assert.equal(normal.handoff, null);
 
   const mailbox = join(stateDir, "projects", project.slug, "mailbox.jsonl");
   enqueueLeadMail(mailbox, { from: "supervisor", kind: "directive", text: "One." });
   enqueueLeadMail(mailbox, { from: "owner", kind: "directive", text: "Two." });
   writeProjectRegistration(stateDir, project.slug, { root: project.root, lead: "agent-lead", rotationState: "rotation_pending" });
   const pending = await read();
-  assert.deepEqual(pending.handoff, { state: "rotation_pending", label: "will hand off at the next quiet point · 2 queued mail", queuedMailCount: 2 });
+  assert.equal(pending.handoff!.state, "scheduled");
+  assert.equal(pending.handoff!.reason, "context-mark");
+  assert.equal(pending.handoff!.waitingPeers, 0);
+  assert.equal(pending.pendingLane, null);
 
   writeProjectRegistration(stateDir, project.slug, { root: project.root, rotationState: "handing_over", handoffRequestedAt: new Date().toISOString() });
   const handing = await read();
-  assert.deepEqual(handing.handoff, { state: "handing_over", label: "handing over to a new Lead · 2 queued mail", queuedMailCount: 2 });
+  assert.equal(handing.handoff!.state, "handing-over");
+  assert.equal(handing.handoff!.reason, "context-mark");
 });
 
 test("panel: the Lead context bar is honest without a reading and never exceeds full", async (t) => {
   const { handlers, project } = makePanelSurface(t, (p) => [{ id: "agent-lead", labels: seatLabels(p, "lead"), cwd: p.root }]);
   const none = await handlers.snapshot({ projectRoot: project.root });
   assert.ok(none.ok, none.ok ? "" : none.error);
-  assert.deepEqual(none.view.panel.seats!.lead.context, { usedTokens: null, markTokens: 128_000, label: "context unknown", fraction: null });
+  assert.deepEqual(none.view.panel.seats!.lead.context, { state: "unknown", usedTokens: null, markTokens: 128_000, label: "context unknown", fraction: null });
 
   const over = makePanelSurface(t, (p) => [{ id: "agent-lead", labels: seatLabels(p, "lead"), cwd: p.root, lastUsage: { contextWindowUsedTokens: 150_000, contextWindowMaxTokens: 200_000 } }], "over");
   const snap = await over.handlers.snapshot({ projectRoot: over.project.root });
@@ -6620,8 +6625,8 @@ test("panel: live Peers get one row each — `Peer · <Task>`, disposition, stat
   const snap = await handlers.snapshot({ projectRoot: project.root });
   assert.ok(snap.ok, snap.ok ? "" : snap.error);
   assert.deepEqual(snap.view.panel.seats!.peers, [
-    { context: { usedTokens: null, markTokens: 160_000, label: "context unknown", fraction: null }, agentId: "agent-eng", task: "T-ENG", title: "Peer · T-ENG", disposition: "engineer", statusLabel: "working", tone: "normal", model: "glm-5.3" },
-    { context: { usedTokens: null, markTokens: 160_000, label: "context unknown", fraction: null }, agentId: "agent-rev", task: "T-REV", title: "Peer · T-REV", disposition: "reviewer", statusLabel: "idle", tone: "normal", model: "pi/zai/glm-5.3" },
+    { role: "peer", lane: { provider: "pi", model: "zai/glm-5.3", scope: "machine" }, pendingLane: null, markTokens: 160000, handoff: null, allowedActions: ["switch-model", "hand-off-now"], context: { state: "unknown", usedTokens: null, markTokens: 160_000, label: "context unknown", fraction: null }, agentId: "agent-eng", task: "T-ENG", title: "Peer · T-ENG", disposition: "engineer", statusLabel: "working", tone: "normal", model: "glm-5.3" },
+    { role: "peer", lane: { provider: "pi", model: "zai/glm-5.3", scope: "machine" }, pendingLane: null, markTokens: 160000, handoff: null, allowedActions: ["switch-model", "hand-off-now"], context: { state: "unknown", usedTokens: null, markTokens: 160_000, label: "context unknown", fraction: null }, agentId: "agent-rev", task: "T-REV", title: "Peer · T-REV", disposition: "reviewer", statusLabel: "idle", tone: "normal", model: "pi/zai/glm-5.3" },
   ]);
   assert.equal(snap.view.panel.summary, "Lead idle · 2 Peers · nothing needs you");
 });
@@ -7086,7 +7091,7 @@ function makeSeatedTwinSurface(
   return { home, stateDir, rootA: projectA!.root, rootB: projectB!.root, slugA: projectA!.slug, slugB: projectB!.slug, registry, handlers, fake };
 }
 
-test("seat directory: every live seat across two Projects — slug, workspace, role, lane, context against the 128k mark, and the null handoff placeholder (W4, ADR 0057 §8)", async (t) => {
+test("seat directory: every live seat across two Projects carries its identity, context mark and unrecorded handoff state", async (t) => {
   const { rootB, slugA, slugB, registry, handlers } = makeSeatedTwinSurface(t, (p, which) => {
     if (which === "a") {
       return [
@@ -7124,8 +7129,8 @@ test("seat directory: every live seat across two Projects — slug, workspace, r
   assert.equal(supA.model, "glm-5.3");
   assert.equal(supA.thinking, "high");
   assert.equal(supA.contextUsedTokens, 40_000, "the live usage reading rides the seat");
-  assert.equal(supA.markTokens, 128_000, "the v0.6.1 handoff mark is the flat 128k (W9 makes it follow the window)");
-  assert.equal(supA.handoffState, null, "the handoff state is a null placeholder until W9");
+  assert.equal(supA.markTokens, 128_000, "the 200k window is clipped at the 128k Supervisor cap");
+  assert.equal(supA.handoffState, null, "no recorded handoff is null");
 
   const leadA = byAgent.get("agent-lead-a");
   assert.ok(leadA !== undefined, "project-a's Lead rides the directory");
@@ -7150,7 +7155,7 @@ test("seat directory: every live seat across two Projects — slug, workspace, r
     assert.equal(seat.slug, slugB);
   }
   assert.equal(byAgent.has("agent-stranger"), false, "a stranger chat is never a seat");
-  for (const seat of reply.seats) assert.equal(seat.handoffState, null, "every seat carries the null handoff placeholder");
+  for (const seat of reply.seats) assert.equal(seat.handoffState, null, "no handoff is invented for idle seats");
 
   // The projects half — the header-button rows: root workspace and Needs-you count.
   assert.equal(reply.projects.length, 2, "one row per registered Project");
@@ -7286,4 +7291,155 @@ test("snapshot and directory recover opencode context after restart from the lat
   const missing = await handlers.snapshot({ projectRoot: project.root });
   assert.ok(missing.ok);
   assert.equal(missing.view.panel.seats!.lead.context!.label, "context unknown", "cumulative totals never replace a missing per-message reading");
+});
+
+test("panel handoff actions follow progress and retain View handover after done expires", async (t) => {
+  const { handlers, stateDir, project } = makePanelSurface(t, (p) => [
+    { id: "agent-sup", labels: seatLabels(p, "supervisor"), cwd: p.root },
+    { id: "agent-lead", labels: seatLabels(p, "lead"), cwd: p.root },
+  ]);
+  const dir = join(stateDir, "projects", project.slug);
+  const base = { seat: "lead", reason: "provider-change", fromLane: { provider: "pi", model: "old" }, toLane: { provider: "codex", model: "new" }, startedAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+  for (const [state, expected] of [
+    [null, ["switch-model", "hand-off-now"]],
+    ["scheduled", ["switch-model", "hand-off-now", "cancel"]],
+    ["handing-over", ["switch-model", "hand-off-now", "replace-now"]],
+    ["substitute", ["switch-model", "hand-off-now", "replace-now"]],
+    ["creating-successor", ["switch-model", "hand-off-now", "replace-now"]],
+    ["failed", ["switch-model", "hand-off-now", "replace-now", "retry"]],
+    ["done", ["switch-model", "hand-off-now", "view-handover"]],
+  ] as const) {
+    if (state) writeFileSync(join(dir, "handoff-lead.json"), JSON.stringify({ ...base, state }));
+    const snapshot = await handlers.snapshot({ projectRoot: project.root });
+    assert.ok(snapshot.ok);
+    assert.deepEqual(snapshot.view.panel.seats!.lead.allowedActions, expected, String(state));
+    const directory = await handlers.seatsDirectory({});
+    assert.deepEqual(directory.seats.find(s => s.agentId === "agent-lead")?.allowedActions, expected, `directory ${state}`);
+  }
+  writeFileSync(join(dir, "lead-handoff.md"), "The successor received these continuity notes.");
+  writeFileSync(join(dir, "handoff-lead.json"), JSON.stringify({ ...base, state: "done", updatedAt: "2000-01-01T00:00:00.000Z" }));
+  const snapshot = await handlers.snapshot({ projectRoot: project.root });
+  assert.ok(snapshot.ok);
+  assert.equal(snapshot.view.panel.seats!.lead.handoff, null);
+  assert.ok(snapshot.view.panel.seats!.lead.allowedActions.includes("view-handover"));
+});
+
+test("panel Default worker inherits the individual role scope and header profiles match the applied preset", async (t) => {
+  const { handlers, stateDir, project } = makePanelSurface(t);
+  const initial = await handlers.snapshot({ projectRoot: project.root });
+  assert.ok(initial.ok);
+  assert.equal(initial.view.version, 5);
+  assert.equal(initial.view.panel.defaultWorker!.lane.scope, "machine");
+  assert.equal(initial.view.panel.profile.active, null);
+  assert.ok(saveLanes(stateDir, { lead: "codex/other" }, project.slug).ok);
+  const leadOnly = await handlers.snapshot({ projectRoot: project.root });
+  assert.ok(leadOnly.ok);
+  assert.equal(leadOnly.view.panel.defaultWorker!.lane.scope, "machine", "a Lead override does not make Worker Project-scoped");
+  assert.equal(leadOnly.view.panel.seats!.lead.lane.scope, "project");
+  assert.ok(saveLanes(stateDir, { worker: "codex/worker:high" }, project.slug).ok);
+  const changed = await handlers.snapshot({ projectRoot: project.root });
+  assert.ok(changed.ok);
+  assert.deepEqual(changed.view.panel.defaultWorker!.lane, { provider: "codex", model: "worker", thinking: "high", scope: "project" });
+  const saved = await handlers.profilesSave({ name: "Owner preset", projectRoot: project.root });
+  assert.ok(saved.ok);
+  const applied = await handlers.profilesApply({ profileId: saved.profile.id, projectRoot: project.root });
+  assert.ok(applied.ok);
+  const preset = await handlers.snapshot({ projectRoot: project.root });
+  assert.ok(preset.ok);
+  assert.equal(preset.view.panel.profile.active!.id, saved.profile.id);
+  assert.equal(preset.view.panel.profile.list[0]!.name, "Owner preset");
+  assert.equal(preset.view.panel.profile.modified, false);
+});
+
+test("panel retains a failed standing handoff when the outgoing seat is absent", async (t) => {
+  const { handlers, stateDir, project } = makePanelSurface(t);
+  const dir = join(stateDir, "projects", project.slug);
+  writeFileSync(join(dir, "handoff-supervisor.json"), JSON.stringify({ seat: "supervisor", reason: "owner", state: "failed", fromLane: { provider: "pi", model: "old" }, toLane: { provider: "codex", model: "new" }, failure: "provider unavailable", startedAt: new Date().toISOString(), updatedAt: new Date().toISOString() }));
+  const snapshot = await handlers.snapshot({ projectRoot: project.root });
+  assert.ok(snapshot.ok);
+  assert.equal(snapshot.view.panel.seats!.supervisor.handoff?.state, "failed");
+  assert.deepEqual(snapshot.view.panel.seats!.supervisor.allowedActions, ["replace-now", "retry"]);
+  assert.equal(snapshot.view.panel.needsYou.find(i => i.kind === "handoff-failed")?.detail, "provider unavailable");
+  const directory = await handlers.seatsDirectory({});
+  assert.equal(directory.projects[0]!.needsYouCount, snapshot.view.panel.needsYou.length);
+});
+
+test("seat directory quick switches prefer active profile models, then real role history, deduplicate and survive restart", async (t) => {
+  const f = makeSeatedTwinSurface(t, (p, which) => [
+    { id: `lead-${which}`, labels: seatLabels(p, "lead"), provider: "codex", model: which === "a" ? "current" : "other-project", cwd: p.root, updatedAt: "2026-11-01T00:00:00Z" },
+    { id: `supervisor-${which}`, labels: seatLabels(p, "supervisor"), provider: "pi", model: "supervisor-only", cwd: p.root, updatedAt: "2026-11-01T00:00:00Z" },
+  ]);
+  const list = f.fake.daemon.agents.list;
+  let observed = "current";
+  let day = 2;
+  f.fake.daemon.agents.list = async options => {
+    const result = await list(options);
+    for (const { agent } of result.entries) if (agent.id === "lead-a") { agent.model = observed; agent.updatedAt = `2026-11-${String(day).padStart(2, "0")}T00:00:00Z`; }
+    return result;
+  };
+  for (const model of ["used-one", "used-two", "used-three", "used-four", "used-five", "used-six", "used-seven"]) {
+    observed = model; day++;
+    await f.handlers.seatsDirectory({});
+  }
+  const saved = await f.handlers.profilesSave({ name: "Quick choices", lanes: { supervisor: "pi/preset", lead: "codex/preset-lead", worker: "pi/preset", watch: "pi/preset-watch", freshEyes: "eye.json" } });
+  assert.ok(saved.ok);
+  // Copy-on-Apply metadata is fixture state, preserving actual live seats for the read.
+  const { applyLaneProfile } = await import("../src/lanes.ts");
+  applyLaneProfile(f.stateDir, saved.profile.id, f.slugA);
+  const directory = await f.handlers.seatsDirectory({});
+  const quick = directory.seats.find(s => s.agentId === "lead-a")!.quickSwitchModels;
+  assert.deepEqual(quick.map(l => `${l.provider}/${l.model}`), ["pi/preset", "codex/preset-lead", "pi/preset-watch", "codex/used-seven", "codex/used-six", "codex/used-five"]);
+  const b = directory.seats.find(s => s.agentId === "lead-b")!;
+  assert.equal(b.quickSwitchModels[0]!.model, "used-seven", "the other Project has no applied profile and starts with role history");
+  assert.ok(b.quickSwitchModels.every(l => l.model !== "supervisor-only" && !l.model.startsWith("preset")), "other roles and inactive presets are not fabricated role history");
+  const fresh = createSurfaceHandlers({ factory: f.registry.root, registry: f.registry, stateDir: f.stateDir, home: f.home, daemon: f.fake.daemon });
+  const restarted = await fresh.seatsDirectory({});
+  assert.deepEqual(restarted.seats.find(s => s.agentId === "lead-a")!.quickSwitchModels, quick);
+});
+
+test("panel handoff list retains failed Peers without live agents and drops closed Task progress", async t => {
+  const { handlers, factory, stateDir, project } = makePanelSurface(t);
+  factory.setContract({ task: "T-recover", workspace: project.root, gate: "true" });
+  const dir = join(stateDir, "projects", project.slug);
+  const progress = { seat: "peer:T-recover", reason: "owner", state: "failed", fromLane: { provider: "pi", model: "old" }, toLane: { provider: "codex", model: "new" }, failure: "successor unavailable", startedAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+  writeFileSync(join(dir, "handoff-peer-T-recover.json"), JSON.stringify(progress));
+  const snapshot = await handlers.snapshot({ projectRoot: project.root });
+  assert.ok(snapshot.ok);
+  assert.deepEqual(snapshot.view.panel.handoffs, [progress]);
+  assert.deepEqual(snapshot.view.panel.seats!.peers, []);
+  assert.equal(snapshot.view.panel.needsYou.filter(i => i.kind === "handoff-failed").length, 1);
+  factory.ledger.append({ event: "task_closed", task: "T-recover", reason: "superseded", by: "lead" });
+  const closed = await handlers.snapshot({ projectRoot: project.root });
+  assert.ok(closed.ok);
+  assert.deepEqual(closed.view.panel.handoffs, []);
+  assert.equal(closed.view.panel.needsYou.some(i => i.kind === "handoff-failed"), false);
+});
+
+test("snapshot and global directory expose the same per-role lane, pending lane, mark, context and real handoff", async t => {
+  const f = makeSeatedTwinSurface(t, (p, which) => which === "a" ? [
+    { id: "sup-consistent", labels: seatLabels(p, "supervisor"), provider: "pi/old", model: "old", cwd: p.root, lastUsage: { contextWindowUsedTokens: 84000, contextWindowMaxTokens: 128000 } },
+    { id: "lead-consistent", labels: seatLabels(p, "lead"), provider: "pi/old", model: "old", cwd: p.root },
+    { id: "peer-consistent", labels: { seat: "agent", project: p.slug, task: "T-shared" }, provider: "pi/old", model: "old", cwd: p.root, lastUsage: { contextWindowUsedTokens: 50000, contextWindowMaxTokens: 128000 } },
+  ] : []);
+  const factory = f.registry.factoryForProject(f.slugA);
+  factory.setContract({ task: "T-shared", workspace: f.rootA, gate: "true" });
+  saveLanes(f.stateDir, { supervisor: "codex/new", worker: "codex/worker" }, f.slugA);
+  const at = new Date().toISOString();
+  const progress = { seat: "supervisor", reason: "provider-change", state: "handing-over", fromLane: { provider: "pi", model: "old" }, toLane: { provider: "codex", model: "new" }, startedAt: at, updatedAt: at };
+  writeFileSync(join(f.stateDir, "projects", f.slugA, "handoff-supervisor.json"), JSON.stringify(progress));
+  writeFileSync(join(f.stateDir, "projects", f.slugA, "handoff-peer-T-shared.json"), JSON.stringify({ ...progress, seat: "peer:T-shared", reason: "owner" }));
+  const snapshot = await f.handlers.snapshot({ projectRoot: f.rootA }); assert.ok(snapshot.ok);
+  const directory = await f.handlers.seatsDirectory({});
+  const rows = snapshot.view.panel.seats!;
+  for (const row of [rows.supervisor, rows.lead, ...rows.peers]) {
+    const seat = directory.seats.find(s => s.agentId === row.agentId)!;
+    for (const key of ["lane", "pendingLane", "markTokens", "context", "handoff", "allowedActions"] as const) assert.deepEqual(seat[key], row[key], `${row.role} ${key}`);
+  }
+  assert.deepEqual(rows.supervisor.lane, { provider: "pi", model: "old", scope: "project" });
+  assert.deepEqual(rows.supervisor.pendingLane, { provider: "codex", model: "new", scope: "project" });
+  assert.equal(rows.supervisor.markTokens, 83200);
+  assert.equal(rows.peers[0]!.markTokens, 102400);
+  assert.equal(rows.peers[0]!.lane.scope, "project");
+  assert.equal(snapshot.view.panel.needsYou.some(i => i.kind === "supervisor-near-mark"), false, "an active handoff supersedes the near-mark suggestion");
+  assert.equal(directory.projects.find(p => p.slug === f.slugA)!.needsYouCount, snapshot.view.panel.needsYou.length);
 });

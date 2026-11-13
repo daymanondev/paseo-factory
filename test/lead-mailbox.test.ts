@@ -3291,3 +3291,21 @@ test("Lead handoff crosses the smaller model mark while running and at a turn bo
     }
   }
 });
+
+test("View handover remains readable through the surface after done progress expires", async t => {
+  const f = makeSpooledRuntime(t);
+  f.fake.agents.push({ id: "lead-handover-read", labels: { seat: "lead", project: f.slug }, cwd: f.projectRoot });
+  writeProjectRegistration(f.stateDir, f.slug, { root: f.projectRoot, lead: "lead-handover-read" });
+  const replaced = await f.surface.handoff({ projectRoot: f.projectRoot, seat: "lead" }, "replaceNow");
+  assert.ok(replaced.ok); assert.equal(replaced.progress?.state, "done");
+  const path = join(projectStateDir(f.stateDir, f.slug), "handoff-lead.json");
+  const completed = JSON.parse(readFileSync(path, "utf8"));
+  writeFileSync(path, JSON.stringify({ ...completed, updatedAt: "2000-01-01T00:00:00.000Z" }));
+  const snapshot = await f.surface.snapshot({ projectRoot: f.projectRoot });
+  assert.ok(snapshot.ok);
+  assert.equal(snapshot.view.panel.seats!.lead.handoff, null);
+  assert.ok(snapshot.view.panel.seats!.lead.allowedActions.includes("view-handover"));
+  const handover = await f.surface.handoff({ projectRoot: f.projectRoot, seat: "lead" }, "handover");
+  assert.ok(handover.ok); assert.equal(handover.progress, null); assert.equal(handover.source, "substitute");
+  assert.match(handover.text!, /Plugin-built handover/);
+});

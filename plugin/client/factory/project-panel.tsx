@@ -6,12 +6,12 @@
  * server-projected `PanelView` (plugin/server/panel.ts): it derives no state,
  * calls no RPC, and draws colour only for exceptions — red for errors and
  * stuck items, amber for waiting states and items that need the Owner.
- * Actions (W6): every live seat row has Open; the Lead row has Rotate; the
+ * Actions (W6): every live seat row has Open; the Lead row has Hand off now; the
  * Supervisor row's `⋯` holds Revoke; a vacant Supervisor row offers Start
  * Supervisor with a directive box (desktop only — it creates the seat through
  * the ADR 0017 amendment path); the header `⋯` toggles the Project menu the
  * shell supplies (project-menu.tsx). There is NO Accept and NO Lead start —
- * a vacant Lead only says to ask the Supervisor. Mobile keeps Open, Rotate and
+ * a vacant Lead only says to ask the Supervisor. Mobile keeps Open, Hand off now and
  * Revoke; Start Supervisor, Sync/Studio and the menu's writes are desktop only.
  * A workspace that is not yet a Project shows the onboarding wizard the Shell
  * supplies (W7, onboarding-wizard.tsx) on desktop, and only "set this Project
@@ -42,8 +42,8 @@ export interface ProjectPanelActions {
   openAgent(agentId: string): void;
   /** Install the missing required skills & tools (desktop only — a settings write). */
   installPrerequisites(): void;
-  /** Retire the live Lead so the next dispatch starts a fresh one (also on mobile). */
-  rotateLead(): void;
+  /** Request a continuity handoff for the live Lead (also on mobile). */
+  handoffLead(): void;
   /** Retire the live Supervisor — the seat row's `⋯` act (also on mobile). */
   revokeSupervisor(): void;
   /** Start the Supervisor on a vacant seat with the Owner's optional first directive (desktop only). */
@@ -75,6 +75,7 @@ const NEEDS_YOU_TONE: Record<PanelNeedsYouItem["kind"], Colour> = {
   "seat-stuck": "statusDanger",
   "no-supervisor": "statusDanger",
   "supervisor-near-mark": "statusWarning",
+  "handoff-failed": "statusDanger",
   "handoff-stuck": "statusDanger",
   prerequisites: "statusWarning",
   "open-design-broken": "statusDanger",
@@ -138,7 +139,7 @@ function NeedsYouRow({ theme, item, mobile, actions }: { theme: PluginTheme; ite
         <Btn theme={theme} small testID={buttonId} label={action.label} onPress={() => actions.openAgent(action.agentId)} />
       ) : action.kind === "handoff-supervisor" ? (
         <Btn theme={theme} small testID={buttonId} label={action.label} disabled={actions.busy} onPress={actions.revokeSupervisor} />
-      ) : mobile ? (
+      ) : action.kind === "retry-handoff" ? null : mobile ? (
         <Text testID={`factory-panel-needs-you-hint-${item.key}`} style={text(theme, "meta")}>{DESKTOP_ONLY_HINT[action.kind]}</Text>
       ) : action.kind === "install-prerequisites" ? (
         <Btn theme={theme} small testID={buttonId} label={action.label} disabled={actions.busy} onPress={actions.installPrerequisites} />
@@ -191,7 +192,7 @@ function SeatRow({
   initialUi?: ProjectPanelInitialUi;
 }) {
   const colour = toneColour(row.tone);
-  const handoffWaiting = row.handoff !== null && row.handoff.state !== "normal";
+  const handoffWaiting = row.handoff !== null && row.handoff.state !== "done";
   const [menuOpen, setMenuOpen] = useState(initialUi?.supervisorMenuOpen === true);
   const [directive, setDirective] = useState(initialUi?.directive ?? "");
   const isSupervisor = row.role === "supervisor";
@@ -206,12 +207,12 @@ function SeatRow({
       </View>
       {row.hint !== null ? <Text style={text(theme, "meta", colour)}>{row.hint}</Text> : null}
       {row.context !== null ? <ContextBar theme={theme} context={row.context} /> : null}
-      {row.handoff !== null ? <Text style={text(theme, "meta", handoffWaiting ? "statusWarning" : undefined)}>Handoff: {row.handoff.label}</Text> : null}
+      {row.handoff !== null ? <Text style={text(theme, "meta", handoffWaiting ? "statusWarning" : undefined)}>Handoff: {row.handoff.state === "scheduled" ? `Scheduled · waiting for ${row.handoff.waitingPeers ?? 0} Peers` : row.handoff.state}</Text> : null}
       {live && agentId !== null ? (
         <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[1.5] }}>
           <Btn theme={theme} small testID={`factory-panel-open-${row.role}`} label="Open" onPress={() => actions.openAgent(agentId)} />
           {row.role === "lead" ? (
-            <Btn theme={theme} small testID="factory-panel-handoff-lead" label="Hand off now" tone="foregroundMuted" disabled={actions.busy} onPress={actions.rotateLead} />
+            <Btn theme={theme} small testID="factory-panel-handoff-lead" label="Hand off now" tone="foregroundMuted" disabled={actions.busy} onPress={actions.handoffLead} />
           ) : null}
           {isSupervisor ? (
             <Btn theme={theme} small testID="factory-panel-supervisor-menu" label="⋯" tone="foregroundMuted" onPress={() => setMenuOpen(!menuOpen)} />

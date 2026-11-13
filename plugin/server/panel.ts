@@ -1,3 +1,4 @@
+import type { HandoffProgress } from "../shared/handoff.ts";
 /**
  * The Project panel's server-side view-model (v0.6.0, ADR 0056 §5): the one
  * projection the workspace panel renders — a summary line, the ordered
@@ -10,7 +11,7 @@
  */
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import type { AgentView, PanelNeedsYouItem, PanelOpenDesign, PanelPeerRow, PanelSeatRow, PanelSupervisorCandidateRow, PanelTone, PanelView, ProjectView, TaskView } from "../shared/view.ts";
+import type { AgentView, PanelNeedsYouItem, PanelOpenDesign, PanelPeerRow, PanelSeatRow, PanelSupervisorCandidateRow, PanelTone, PanelView, PanelProfile, ScopedLaneRef, SeatAllowedAction, ProjectView, TaskView } from "../shared/view.ts";
 import { MAX_ATTEMPTS } from "./core/events.ts";
 import { openDesignBundleReady, readOpenDesignLink } from "./core/open-design/open-design-link-state.ts";
 import { readProjectSettings } from "./core/project-settings.ts";
@@ -73,6 +74,10 @@ export interface PanelInput {
    * door owns recovery and the fold renders none.
    */
   supervisorCandidates: readonly AgentView[];
+  handoffs?: Record<string, HandoffProgress>;
+  handovers?: readonly string[];
+  seatLanes?: Record<"supervisor" | "lead" | "worker", ScopedLaneRef>;
+  profile?: PanelProfile;
   now: number;
 }
 
@@ -130,13 +135,6 @@ function modelOf(agent: AgentView): string | null {
   return agent.thinking !== undefined && agent.thinking !== null && agent.thinking !== "" ? `${base} · ${agent.thinking}` : base;
 }
 
-function handoffLabel(state: RotationState, queued: number): string {
-  const mail = queued > 0 ? ` · ${queued} queued mail` : "";
-  if (state === "rotation_pending") return `will hand off at the next quiet point${mail}`;
-  if (state === "handing_over") return `handing over to a new Lead${mail}`;
-  return "normal";
-}
-
 const seatName = (role: SeatRole): string => (role === "supervisor" ? "Supervisor" : "Lead");
 
 /** The one "Open <seat>" action every Needs-you item that points at a live seat carries. */
@@ -147,46 +145,29 @@ function openSeatAction(role: SeatRole, agent: AgentView): PanelAction {
 /** With neither seat live there is no conversation to open — the only way forward is to start the Supervisor. */
 const START_SUPERVISOR_ACTION: PanelAction = { kind: "start-supervisor", label: "Start Supervisor" };
 
-function seatRow(role: SeatRole, agent: AgentView | null): PanelSeatRow {
-  if (agent === null) {
-    return {
-      role,
-      vacant: true,
-      agentId: null,
-      statusLabel: "vacant",
-      tone: "normal",
-      model: null,
-      hint: role === "supervisor" ? "No Supervisor is running." : "No Lead is running — ask your Supervisor.",
-      context: null,
-      handoff: null,
-    };
-  }
-  const status = statusOf(agent);
-  const row: PanelSeatRow = {
-    role,
-    vacant: false,
-    agentId: agent.id,
-    statusLabel: status.label,
-    tone: status.tone,
-    model: modelOf(agent),
-    hint: status.tone === "error" ? (agent.lastError ?? null) : null,
-    context: null,
-    handoff: null,
-  };
+function contextOf(role: "supervisor" | "lead" | "peer", agent: AgentView) {
   const used = agent.contextUsedTokens ?? null;
-  const mark = handoffMarkTokens(role, agent.contextMaxTokens);
-  const state = agent.rotationState ?? "normal";
-  const queued = agent.queuedMailCount ?? 0;
-  return {
-    ...row,
-    context: {
-      usedTokens: used,
-      markTokens: mark,
-      label: used === null ? "context unknown" : `${Math.round(used / 1000)}k / ${Math.round(mark / 1000)}k`,
-      fraction: used === null ? null : Math.min(1, used / mark),
-    },
-    handoff: role === "lead" ? { state, label: handoffLabel(state, queued), queuedMailCount: queued } : null,
-  };
+  const mark = agent.markTokens ?? handoffMarkTokens(role, agent.contextMaxTokens);
+  return { state: used === null ? "unknown" as const : "used" as const, usedTokens: used, markTokens: mark, label: used === null ? "context unknown" : `${Math.round(used / 1000)}k / ${Math.round(mark / 1000)}k`, fraction: used === null ? null : Math.min(1, used / mark) };
+}
+
+function seatFields(agent: AgentView | null, lane: ScopedLaneRef, progress?: HandoffProgress, handoverAvailable = false) {
+  const handoff = progress ?? agent?.handoffProgress ?? null;
+  const allowedActions: SeatAllowedAction[] = agent ? ["switch-model", "hand-off-now"] : [];
+  if (handoff?.state === "scheduled") allowedActions.push("cancel");
+  if (handoff && ["handing-over", "substitute", "creating-successor", "failed"].includes(handoff.state)) allowedActions.push("replace-now");
+  if (handoff?.state === "failed") allowedActions.push("retry");
+  if (handoverAvailable || agent?.handoverAvailable || handoff?.state === "done") allowedActions.push("view-handover");
+  const active = handoff && handoff.state !== "done";
+  return { lane: active ? { ...handoff.fromLane, scope: lane.scope } : agent?.lane ?? lane, pendingLane: active && handoff.reason === "provider-change" ? { ...handoff.toLane, scope: lane.scope } : agent?.pendingLane ?? null, markTokens: agent?.markTokens ?? handoffMarkTokens("lead", null), handoff, allowedActions };
+}
+
+const fallbackLane: ScopedLaneRef = { provider: "", model: "", scope: "machine" };
+function seatRow(role: SeatRole, agent: AgentView | null, input: PanelInput): PanelSeatRow {
+  const fields = seatFields(agent, input.seatLanes?.[role] ?? fallbackLane, input.handoffs?.[role], input.handovers?.includes(role));
+  if (agent === null) return { ...fields, role, vacant: true, agentId: null, statusLabel: "vacant", tone: "normal", model: null, hint: role === "supervisor" ? "No Supervisor is running." : "No Lead is running — ask your Supervisor.", context: null };
+  const status = statusOf(agent);
+  return { ...fields, role, vacant: false, agentId: agent.id, statusLabel: status.label, tone: status.tone, model: modelOf(agent), hint: status.tone === "error" ? (agent.lastError ?? null) : null, context: contextOf(role, agent) };
 }
 
 /**
@@ -201,6 +182,7 @@ function supervisorCandidateRows(input: PanelInput): PanelSupervisorCandidateRow
   return input.supervisorCandidates.map((agent) => {
     const status = statusOf(agent);
     return {
+      allowedActions: ["adopt"],
       agentId: agent.id,
       title: agent.title,
       statusLabel: status.label,
@@ -219,10 +201,11 @@ function peerRows(input: PanelInput): PanelPeerRow[] {
     const task = taskByName.get(agent.task);
     if (task !== undefined && (task.status === "accepted" || task.status === "closed")) continue;
     const status = statusOf(agent);
-    const used = agent.contextUsedTokens ?? null;
-    const mark = handoffMarkTokens("peer", agent.contextMaxTokens);
+
     rows.push({
-      context: { usedTokens: used, markTokens: mark, label: used === null ? "context unknown" : `${Math.round(used / 1000)}k / ${Math.round(mark / 1000)}k`, fraction: used === null ? null : Math.min(1, used / mark) },
+      ...seatFields(agent, input.seatLanes?.worker ?? fallbackLane, input.handoffs?.[`peer:${agent.task}`], input.handovers?.includes(`peer:${agent.task}`)),
+      role: "peer",
+      context: contextOf("peer", agent),
       agentId: agent.id,
       task: agent.task,
       title: `Peer · ${agent.task}`,
@@ -294,6 +277,11 @@ function needsYou(input: PanelInput): PanelNeedsYouItem[] {
   if (supervisor && supervisor.contextUsedTokens != null && supervisor.contextUsedTokens >= mark && (!supervisor.handoffProgress || supervisor.handoffProgress.state === "done")) {
     items.push({ key: "supervisor-near-mark", kind: "supervisor-near-mark", title: "Supervisor is near its handoff mark", detail: "Hand off when you are ready to continue in a fresh chat.", action: { kind: "handoff-supervisor", label: "Hand off now" } });
   }
+  for (const handoff of handoffsOf(input)) {
+    if (handoff?.state !== "failed") continue;
+    const label = handoff.seat.startsWith("peer:") ? `Peer · ${handoff.seat.slice(5)}` : handoff.seat === "lead" ? "Lead" : "Supervisor";
+    items.push({ key: `handoff-failed:${handoff.seat}`, kind: "handoff-failed", title: `${label} handoff failed`, detail: handoff.failure ?? null, action: { kind: "retry-handoff", seat: handoff.seat, label: "Try again" } });
+  }
   items.push(...seatStuckItems("supervisor", input.supervisor), ...seatStuckItems("lead", input.lead));
   // v0.6.1 (ADR 0057 §5): Supervisor-addressed mail holds when no live
   // Supervisor exists — the plugin never creates one — so the Owner sees the
@@ -309,7 +297,7 @@ function needsYou(input: PanelInput): PanelNeedsYouItem[] {
       action: START_SUPERVISOR_ACTION,
     });
   }
-  if ((input.rotationState ?? input.lead?.rotationState) === "handing_over") {
+  if ((input.rotationState ?? input.lead?.rotationState) === "handing_over" && input.handoffs?.lead?.state !== "failed") {
     const since = input.handoffRequestedAt === null ? Number.NaN : Date.parse(input.handoffRequestedAt);
     const lost = input.lead === null || input.lead.status === "error";
     if (lost || (Number.isFinite(since) && input.now - since > HANDOFF_STUCK_AFTER_MS)) {
@@ -362,10 +350,20 @@ function summaryOf(input: PanelInput, attention: number, peers: number): string 
   return parts.join(" · ");
 }
 
+function handoffsOf(input: PanelInput): HandoffProgress[] {
+  const closed = new Set(input.tasks.filter(task => task.status === "accepted" || task.status === "closed").map(task => `peer:${task.task}`));
+  const handoffs = new Map(input.agents.flatMap(agent => agent.handoffProgress ? [[agent.handoffProgress.seat, agent.handoffProgress] as const] : []));
+  for (const [seat, progress] of Object.entries(input.handoffs ?? {})) handoffs.set(seat, progress);
+  return [...handoffs.values()].filter(progress => !closed.has(progress.seat)).sort((a, b) => a.seat.localeCompare(b.seat));
+}
+
 /** Projects the whole panel — pure over `input`. */
 export function foldPanel(input: PanelInput): PanelView {
   if (input.project === null || !input.registered) {
     return {
+      profile: input.profile ?? { active: null, list: [], modified: false },
+      defaultWorker: null,
+      handoffs: [],
       isProject: false,
       name: null,
       summary: "Not a Factory Project yet",
@@ -378,13 +376,16 @@ export function foldPanel(input: PanelInput): PanelView {
   const peers = peerRows(input);
   const items = needsYou(input);
   return {
+    profile: input.profile ?? { active: null, list: [], modified: false },
+    defaultWorker: { role: "worker", title: "Default worker", lane: input.seatLanes?.worker ?? fallbackLane },
+    handoffs: handoffsOf(input),
     isProject: true,
     name: input.project.name ?? input.project.slug,
     summary: summaryOf(input, items.length, peers.length),
     needsYou: items,
     seats: {
-      supervisor: seatRow("supervisor", input.supervisor),
-      lead: seatRow("lead", input.lead),
+      supervisor: seatRow("supervisor", input.supervisor, input),
+      lead: seatRow("lead", input.lead, input),
       peers,
       supervisorCandidates: supervisorCandidateRows(input),
     },

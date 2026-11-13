@@ -1,5 +1,9 @@
-import { readHandoffProgress } from "./handoff-progress.ts";
-import type { HandoffAction, HandoffRequest, HandoffReply } from "../shared/handoff.ts";
+import { recentSeatModels } from "./seat-model-history.ts";
+import { readPeerHandover } from "./peer-handoff.ts";
+import { parseHandoffFile } from "./handoff-text.ts";
+import { readHandoffProgress, laneRef } from "./handoff-progress.ts";
+import type { PanelView, ScopedLaneRef, TaskView } from "../shared/view.ts";
+import type { HandoffProgress, HandoffAction, HandoffRequest, HandoffReply } from "../shared/handoff.ts";
 import { readProjectSettings, setProjectSkillPacks } from "./core/project-settings.ts";
 import { linkedPreviewBundle } from "./core/open-design/preview-bundle.ts";
 import { serveLinkedPreview } from "./core/open-design/preview-server.ts";
@@ -755,33 +759,40 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     return false;
   };
 
-  /**
-   * The Lead telemetry join (v0.0.20, ADR 0013 §6): the Lead's own labels
-   * name its Project, so its card's facts fold in here — the live
-   * context-window pair from the daemon's `lastUsage` (null when it reports
-   * none), the durable `rotationState` from `project.json` (unset when
-   * unrecorded — absent reads as "normal"), and the queued count from the
-   * Project's `mailbox.jsonl` fold (0 when no mailbox exists yet; a damaged
-   * one renders no count, never a failed snapshot). Non-Lead agents — and a
-   * Lead the daemon lists without its project label — leave all four unset.
-   */
-  const leadTelemetryOf = (
-    agent: SurfaceAgentSnapshot,
-  ): Pick<AgentView, "contextUsedTokens" | "contextMaxTokens" | "rotationState" | "queuedMailCount" | "handoffProgress"> => {
-    if (agent.labels.seat === "supervisor" && agent.labels.project !== undefined) return {
-      handoffProgress: readHandoffProgress(deps.stateDir, agent.labels.project, "supervisor"),
-    };
-    if (agent.labels.seat !== "lead" || agent.labels.project === undefined) return {};
-    const reading = readLeadContextTokens(agent, deps.usagePaths);
-    const tokens = { contextUsedTokens: reading.usedTokens, contextMaxTokens: reading.maxTokens };
-    let queued: number;
-    try {
-      queued = readLeadMailbox(join(projectStateDir(deps.stateDir, agent.labels.project), "mailbox.jsonl")).queued.length;
-    } catch {
-      return tokens; // an unreadable mailbox is not a snapshot failure — the count stays unset
+  /** Scope is resolved for each role, so a Lead override never labels Worker as Project-owned. */
+  const laneScope = (slug: string | undefined, role: "supervisor" | "lead" | "worker"): "project" | "machine" => {
+    if (slug) try {
+      const overrides = JSON.parse(readFileSync(projectLanesPath(deps.stateDir, slug), "utf8"));
+      if (typeof overrides?.[role] === "string") return "project";
+    } catch { /* Absent Project override inherits the machine. */ }
+    return "machine";
+  };
+  const seatLanesOf = (slug: string | undefined, lanes: Lanes): Record<"supervisor" | "lead" | "worker", ScopedLaneRef> => ({
+    supervisor: { ...laneRef(lanes.supervisor), scope: laneScope(slug, "supervisor") },
+    lead: { ...laneRef(lanes.lead), scope: laneScope(slug, "lead") },
+    worker: { ...laneRef(lanes.worker), scope: laneScope(slug, "worker") },
+  });
+
+  const handoffPanelFacts = (slug: string | undefined, tasks: readonly TaskView[], lanes: Lanes) => {
+    const handoffs: Record<string, HandoffProgress> = {};
+    const handovers: string[] = [];
+    if (!slug) return { handoffs, handovers };
+    const seats = ["supervisor", "lead", ...tasks.filter(t => !["accepted", "closed"].includes(t.status)).map(t => `peer:${t.task}`)];
+    for (const seat of seats) {
+      const progress = readHandoffProgress(deps.stateDir, slug, seat);
+      if (progress) handoffs[seat] = progress;
+      if (seat.startsWith("peer:")) {
+        if (readPeerHandover(deps.stateDir, slug, seat.slice(5)).text) handovers.push(seat);
+      } else try {
+        if (parseHandoffFile(readFileSync(join(projectStateDir(deps.stateDir, slug), `${seat}-handoff.md`), "utf8")).body.trim()) handovers.push(seat);
+      } catch { /* No handover yet. */ }
     }
-    const rotationState = readProjectRegistration(deps.stateDir, agent.labels.project)?.rotationState;
-    return { ...tokens, handoffProgress: readHandoffProgress(deps.stateDir, agent.labels.project, "lead"), queuedMailCount: queued, ...(rotationState === undefined ? {} : { rotationState }) };
+    const reg = readProjectRegistration(deps.stateDir, slug);
+    if (!handoffs.lead && reg?.rotationState && reg.rotationState !== "normal") {
+      const at = reg.handoffRequestedAt ?? new Date().toISOString();
+      handoffs.lead = { seat: "lead", reason: "context-mark", state: reg.rotationState === "rotation_pending" ? "scheduled" : "handing-over", fromLane: laneRef(lanes.lead), toLane: laneRef(lanes.lead), startedAt: at, updatedAt: at, ...(reg.rotationState === "rotation_pending" ? { waitingPeers: tasks.filter(t => t.status === "running").length } : {}) };
+    }
+    return { handoffs, handovers };
   };
 
   /** One agent → AgentView. */
@@ -789,10 +800,40 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     agent: SurfaceAgentSnapshot,
     task: string | null,
     seatOverride?: "supervisor" | "lead",
+    projectSlug = agent.labels.project,
   ): AgentView => {
     const reading = readLeadContextTokens(agent, deps.usagePaths);
     const role = (agent.labels.seat ?? seatOverride) === "supervisor" ? "supervisor" : (agent.labels.seat ?? seatOverride) === "lead" ? "lead" : "peer";
+    const taskId = task ?? agent.labels.task ?? null;
+    const seat = role === "peer" ? taskId === null ? null : `peer:${taskId}` : role;
+    const configured = projectSlug ? loadLanes(deps.stateDir, projectSlug) : loadLanes(deps.stateDir);
+    const laneName = role === "peer" ? "worker" : role;
+    const configuredLane = configured.ok ? laneRef(configured.lanes[laneName]) : { provider: "", model: "" };
+    let value = agent.provider;
+    if ((Object.values(FACTORY_SEAT_PROVIDER_IDS) as string[]).includes(value)) value = `${configuredLane.provider}/${configuredLane.model}`;
+    else if (!value.includes("/") && agent.model) value = `${value}/${agent.model}`;
+    else if (agent.model) {
+      const parsed = parseLane(value);
+      if (parsed) value = `${parsed.provider}/${agent.model.includes("/") ? agent.model : parsed.model.slice(0, parsed.model.lastIndexOf("/") + 1) + agent.model}`;
+    }
+    const liveLane = { ...laneRef(value), ...(agent.thinkingOptionId ? { thinking: agent.thinkingOptionId } : {}) };
+    const lane = { ...liveLane, scope: laneScope(projectSlug, laneName) };
+    const handoffProgress = projectSlug && seat ? readHandoffProgress(deps.stateDir, projectSlug, seat) : null;
+    let handoverAvailable = false;
+    if (projectSlug && seat) {
+      if (role === "peer") handoverAvailable = !!readPeerHandover(deps.stateDir, projectSlug, taskId!).text;
+      else try { handoverAvailable = !!parseHandoffFile(readFileSync(join(projectStateDir(deps.stateDir, projectSlug), `${role}-handoff.md`), "utf8")).body.trim(); } catch { /* No handover yet. */ }
+      if (!(Object.values(FACTORY_SEAT_PROVIDER_IDS) as string[]).includes(agent.provider)) recentSeatModels(deps.stateDir, role, { lane: liveLane, usedAt: agent.updatedAt });
+    }
+    const registration = projectSlug ? readProjectRegistration(deps.stateDir, projectSlug) : undefined;
+    let queuedMailCount = 0;
+    if (projectSlug && role === "lead") try { queuedMailCount = readLeadMailbox(join(projectStateDir(deps.stateDir, projectSlug), "mailbox.jsonl")).queued.length; } catch { /* Unknown mailbox count. */ }
     return {
+      lane,
+      pendingLane: handoffProgress?.reason === "provider-change" && handoffProgress.state === "scheduled" ? { ...handoffProgress.toLane, scope: lane.scope } : null,
+      handoffProgress,
+      handoverAvailable,
+      ...(role === "lead" ? { rotationState: registration?.rotationState, queuedMailCount } : {}),
       contextUsedTokens: reading.usedTokens,
       contextMaxTokens: reading.maxTokens,
       markTokens: handoffMarkTokens(role, reading.maxTokens),
@@ -805,7 +846,6 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       // A native-picker seat carries no labels — its recognized seat rides anyway (ADR 0017 §2).
       seat: agent.labels.seat ?? seatOverride ?? null,
       task: task ?? agent.labels.task ?? null,
-      ...leadTelemetryOf(agent),
       requiresAttention: agent.requiresAttention,
       attentionReason: agent.attentionReason,
       ...(agent.lastError === undefined ? {} : { lastError: agent.lastError }),
@@ -813,30 +853,30 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     };
   };
 
-  /**
-   * One daemon agent → its seat-directory row (v0.6.1 W4 spike, ADR 0057
-   * §8/§11): the workspace falls back to the Project registration's when the
-   * daemon reports none, the mark follows its model window, and the handoff state is
-   * the null placeholder W9 fills.
-   */
+  /** Directory pills carry the same projected facts/actions as panel rows. */
   const directorySeatOf = (
     registration: { slug: string; workspaceId?: string },
     agent: SurfaceAgentSnapshot,
-    role: "supervisor" | "lead" | "peer",
+    row: NonNullable<PanelView["seats"]>["lead"] | NonNullable<PanelView["seats"]>["peers"][number],
+    profiles: ReturnType<typeof laneProfilesGather>,
   ): SeatDirectoryEntry => {
-    const reading = readLeadContextTokens(agent, deps.usagePaths);
-    return ({
-    slug: registration.slug,
-    workspaceId: agent.workspaceId ?? registration.workspaceId ?? null,
-    agentId: agent.id,
-    role,
-    provider: agent.provider,
-    model: agent.model ?? null,
-    thinking: agent.thinkingOptionId ?? null,
-    contextUsedTokens: reading.usedTokens,
-    markTokens: handoffMarkTokens(role, reading.maxTokens),
-    handoffState: null,
-  });
+    const role = row.role;
+    const profile = profiles.profiles.find(p => p.id === profiles.activeProfileId);
+    const candidates = [...(profile ? Object.values(profile.lanes).map(laneRef) : []), ...recentSeatModels(deps.stateDir, role)];
+    const seen = new Set<string>();
+    const quickSwitchModels = candidates.filter(lane => {
+      const key = `${lane.provider}/${lane.model}`;
+      if (!lane.model || seen.has(key)) return false;
+      seen.add(key); return true;
+    }).slice(0, 6);
+    return {
+      slug: registration.slug, workspaceId: agent.workspaceId ?? registration.workspaceId ?? null,
+      agentId: agent.id, role, task: "task" in row ? row.task : null,
+      provider: agent.provider, model: agent.model ?? null, thinking: agent.thinkingOptionId ?? null,
+      lane: row.lane, pendingLane: row.pendingLane, context: row.context!, contextUsedTokens: row.context!.usedTokens,
+      markTokens: row.markTokens, handoff: row.handoff, handoffState: row.handoff?.state ?? null,
+      allowedActions: row.allowedActions, quickSwitchModels,
+    };
   };
 
   const PROVIDERS_TTL_MS = 5 * 60_000;
@@ -2324,7 +2364,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       const agents: AgentView[] = [];
       for (const agent of relevant) {
         const seatOverride = agent.id === supervisorRaw?.id ? ("supervisor" as const) : agent.id === leadRaw?.id ? ("lead" as const) : undefined;
-        agents.push(agentViewOf(agent, bound.get(agent.id) ?? null, seatOverride));
+        agents.push(agentViewOf(agent, bound.get(agent.id) ?? null, seatOverride, project?.slug));
       }
       const supervisor = supervisorRaw === undefined ? null : (agents.find((agent) => agent.id === supervisorRaw!.id) ?? null);
       const lead = leadRaw === undefined ? null : (agents.find((agent) => agent.id === leadRaw!.id) ?? null);
@@ -2343,7 +2383,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           if (agent.id === supervisorRaw.id || agent.id === leadRaw?.id) continue;
           if (!agentInProjectWorkspace(agent, project)) continue;
           if (!isSupervisorCandidate(agent, { stateDir: deps.stateDir, slug: project.slug })) continue;
-          supervisorCandidates.push(agentViewOf(agent, null, undefined));
+          supervisorCandidates.push(agentViewOf(agent, null, undefined, project?.slug));
         }
       }
 
@@ -2421,6 +2461,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       const panelMissingPrerequisites = buildCompanionToolsView()
         .filter((tool) => tool.status !== "running" || tool.error !== null)
         .map((tool) => tool.title);
+      const profileInfo = laneProfilesGather(enrichedProject?.slug, lanes.lanes);
       const view = foldView({
         stateDir: deps.stateDir,
         generatedAt: new Date().toISOString(),
@@ -2441,6 +2482,9 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         vault: await vaultStatusOf(),
         project: enrichedProject,
         panel: {
+          ...handoffPanelFacts(enrichedProject?.slug, foldTasks(events), lanes.lanes),
+          seatLanes: seatLanesOf(enrichedProject?.slug, lanes.lanes),
+          profile: { active: profileInfo.profiles.find(p => p.id === profileInfo.activeProfileId) ?? null, list: profileInfo.profiles, modified: profileInfo.activeProfileModified },
           project: enrichedProject,
           registered: panelRegistration !== undefined,
           folder: panelFolder,
@@ -2469,7 +2513,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           skillHub: inspectSkillHub({ slpLanes: lanes.lanes, userHome: resolveSurfaceUserHome(), projectRoot: enrichedProject?.root, configuredPacks }),
           companionTools: buildCompanionToolsView(),
           helperMcps: helperMcpRoster(discoverHelperMcps({ stateDir: deps.stateDir, userHome: resolveSurfaceUserHome() }).servers),
-          ...laneProfilesGather(enrichedProject?.slug, view.lanes),
+          ...profileInfo,
         },
       };
     },
@@ -2498,7 +2542,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       const missingPrerequisites = buildCompanionToolsView()
         .filter((tool) => tool.status !== "running" || tool.error !== null)
         .map((tool) => tool.title);
-      const seats: SeatDirectoryEntry[] = [];
+      const directoryRows: Parameters<typeof directorySeatOf>[] = [];
       const projects: ProjectDirectoryEntry[] = [];
       for (const registration of listProjectRegistrations(deps.stateDir)) {
         const supervisorRaw = seatCandidates(rawAgents, deps.stateDir, "supervisor", registration.slug)[0];
@@ -2529,12 +2573,12 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         }
         // The Needs-you count: the same panel projection the workspace panel
         // renders for this Project (the snapshot's own gather, reused).
-        const supervisor = supervisorRaw === undefined ? null : agentViewOf(supervisorRaw, null, "supervisor");
-        const lead = leadRaw === undefined ? null : agentViewOf(leadRaw, null, "lead");
+        const supervisor = supervisorRaw === undefined ? null : agentViewOf(supervisorRaw, null, "supervisor", registration.slug);
+        const lead = leadRaw === undefined ? null : agentViewOf(leadRaw, null, "lead", registration.slug);
         const agents = [
           ...(supervisor === null ? [] : [supervisor]),
           ...(lead === null ? [] : [lead]),
-          ...peers.map((agent) => agentViewOf(agent, bound.get(agent.id) ?? null, undefined)),
+          ...peers.map((agent) => agentViewOf(agent, bound.get(agent.id) ?? agent.labels.task ?? null, undefined, registration.slug)),
         ];
         let heldSupervisorMailCount = 0;
         try {
@@ -2542,7 +2586,12 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         } catch {
           heldSupervisorMailCount = 0; // an unreadable mailbox is not a failed directory read
         }
+        const effective = loadLanes(deps.stateDir, registration.slug);
+        const profiles = effective.ok ? laneProfilesGather(registration.slug, effective.lanes) : { profiles: [], activeProfileId: null, activeProfileModified: false, hasProjectLaneOverride: false };
         const panel = foldPanel({
+          ...(effective.ok ? handoffPanelFacts(registration.slug, tasks, effective.lanes) : {}),
+          ...(effective.ok ? { seatLanes: seatLanesOf(registration.slug, effective.lanes) } : {}),
+          profile: { active: profiles.profiles.find(p => p.id === profiles.activeProfileId) ?? null, list: profiles.profiles, modified: profiles.activeProfileModified },
           project: { slug: registration.slug, root: registration.root, ...(registration.name !== undefined ? { name: registration.name } : {}) },
           registered: true,
           folder: null,
@@ -2561,11 +2610,11 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         });
         const workspaceId = registration.workspaceId ?? supervisorRaw?.workspaceId ?? leadRaw?.workspaceId ?? null;
         projects.push({ slug: registration.slug, workspaceId, needsYouCount: panel.needsYou.length });
-        if (supervisorRaw !== undefined) seats.push(directorySeatOf(registration, supervisorRaw, "supervisor"));
-        if (leadRaw !== undefined) seats.push(directorySeatOf(registration, leadRaw, "lead"));
-        for (const peer of peers) seats.push(directorySeatOf(registration, peer, "peer"));
+        if (supervisorRaw !== undefined) directoryRows.push([registration, supervisorRaw, panel.seats!.supervisor, profiles]);
+        if (leadRaw !== undefined) directoryRows.push([registration, leadRaw, panel.seats!.lead, profiles]);
+        for (const row of panel.seats!.peers) { const peer = peers.find(p => p.id === row.agentId); if (peer) directoryRows.push([registration, peer, row, profiles]); }
       }
-      return { ok: true as const, seats, projects, daemonError };
+      return { ok: true as const, seats: directoryRows.map(args => directorySeatOf(...args)), projects, daemonError };
     },
 
     async lanesSet(input: { lane: LaneName; value: string; projectRoot?: string }, context?: SurfaceCallContext) {
