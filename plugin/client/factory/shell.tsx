@@ -15,6 +15,7 @@ import type { FactoryView, LaneName } from "../../shared/view.ts";
 import { SPACING, text } from "../kit/theme.ts";
 import { useNow, usePoll, pollEvery } from "../kit/poll.ts";
 import { OpenDesignControl } from "./open-design.tsx";
+import type { SeatEditorRequest } from "./editor-request.ts";
 import { ProjectPanel } from "./project-panel.tsx";
 import { ProjectMenu } from "./project-menu.tsx";
 import { OnboardingWizard } from "./onboarding-wizard.tsx";
@@ -44,6 +45,8 @@ export function FactoryShell({
   serverId,
   surface = "panel",
   openSettings,
+  editorRequest,
+  onEditorRequestHandled,
 }: {
   theme: PluginTheme;
   layout?: { compact: boolean; platform?: "ios" | "android" | "web" };
@@ -54,6 +57,8 @@ export function FactoryShell({
   /** Which entry hosts the shell: the workspace panel (the Project panel) or the settings screen. */
   surface?: "panel" | "settings";
   openSettings?: () => void;
+  editorRequest?: SeatEditorRequest;
+  onEditorRequestHandled?: () => void;
 }) {
   const toast = useToast();
   const snapshotCall = useRpc(snapshot);
@@ -691,6 +696,8 @@ export function FactoryShell({
             theme={theme}
             panel={view.panel}
             modelView={view}
+            {...(editorRequest === undefined ? {} : { editorRequest })}
+            {...(onEditorRequestHandled === undefined ? {} : { onEditorRequestHandled })}
             width={containerWidth}
             skillPacks={view.skillHub?.projectPacks ?? []}
             mobile={mobile}

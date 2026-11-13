@@ -958,9 +958,9 @@ test("v0.0.87 (ADR 0043 §4): SeatsPane renders the Project Token & Model Usage 
 
 test("kit/directory: headerPlans yields one factory-header-<workspaceId> button per Project root workspace, labelled Factory plus the Needs-you count only when it is non-zero (W4)", () => {
   const plans = headerPlans([
-    { slug: "goal-partner", workspaceId: "ws-1", needsYouCount: 0 },
-    { slug: "paseo-factory", workspaceId: "ws-2", needsYouCount: 3 },
-    { slug: "no-workspace", workspaceId: null, needsYouCount: 2 },
+    { slug: "goal-partner", root: "/project", workspaceId: "ws-1", needsYouCount: 0 },
+    { slug: "paseo-factory", root: "/project", workspaceId: "ws-2", needsYouCount: 3 },
+    { slug: "no-workspace", root: "/project", workspaceId: null, needsYouCount: 2 },
   ]);
   assert.deepEqual(plans, [
     { id: "factory-header-ws-1", workspaceId: "ws-1", label: "Factory", fingerprint: "Factory" },
@@ -1042,7 +1042,7 @@ test("kit/directory: reconcileDirectory registers what appeared, updates on chan
 
 test("W4: the client starts the seat directory starter in contribute() and its cleanup rides the disposer", () => {
   const index = read("plugin/index.client.tsx");
-  assert.match(index, /startSeatDirectory\(client\)/, "contribute() starts the 20-second directory poll");
+  assert.match(index, /startSeatDirectory\(client, editorRequests\)/, "contribute() starts the 20-second directory poll");
   assert.match(index, /import \{ startSeatDirectory \} from "\.\/client\/factory\/directory\.tsx";/);
 });
 
@@ -1071,18 +1071,19 @@ test("W4: the starter polls factory.seats.directory every 20 seconds, keeps the 
   assert.match(directory, /warn\("directory poll",/, "failed polls warn and keep registrations; mounted recovery test covers retention");
 });
 
-test("W4: the composer pill popover is read-only — role, model, thinking, context and Project on the factory-pill-popover test id, and no RPC or write action inside", () => {
+test("W13: the composer pill exposes status and named quick actions through starter-owned RPC callbacks", () => {
   const directory = read("plugin/client/factory/directory.tsx");
   assert.match(directory, /testID="factory-pill-popover"/, "the spike's named E2E hook");
   for (const word of ["Role", "Model", "Thinking", "Context", "Project"]) {
     assert.ok(new RegExp(`\\b${word}\\b`).test(directory), `the popover renders ${word}`);
   }
-  assert.ok(!directory.includes("useRpc"), "the popover is a pure render — the panes' law");
-  assert.ok(!/onPress=\{[^}]*Call/.test(directory), "no action dispatches an RPC from the pill");
+  assert.match(directory, /factory-pill-other-model/);
+  assert.match(directory, /factory-pill-hand-off-now/);
+  assert.ok(!directory.includes("useRpc"), "the starter owns RPC dispatch");
 });
 
 test("W10: every planned contribution id obeys Paseo's renderer contract", () => {
-  const headers = headerPlans([{ slug: "factory", workspaceId: "wks_2438d240dc71fd76", needsYouCount: 1 }, { slug: "other", workspaceId: "WKS_Mixed.Space/Root", needsYouCount: 0 }]);
+  const headers = headerPlans([{ slug: "factory", root: "/project", workspaceId: "wks_2438d240dc71fd76", needsYouCount: 1 }, { slug: "other", root: "/project", workspaceId: "WKS_Mixed.Space/Root", needsYouCount: 0 }]);
   const pills = pillPlans([{ workspaceId: "wks_root", agentId: "AE879777-27D9-4355-B2C3-A8F99AC7F902" } as SeatDirectoryEntry]);
   assert.equal(headers[0]!.id, "factory-header-wks-2438d240dc71fd76");
   for (const plan of [...headers, ...pills]) assert.match(plan.id, /^[a-z][a-z0-9-]*$/);
@@ -1107,4 +1108,10 @@ test("W10: failed contribution updates and removals retry on the next successful
   reconcile([]);
   assert.equal(removed, true, "a failed remove retained the handle for retry");
   assert.equal(current.size, 0);
+});
+
+test("W13: pill labels track every active handoff phase, including substitute handover, then return to role", () => {
+  const states = ["scheduled", "handing-over", "substitute", "creating-successor", "done", "failed", null];
+  const plans = pillPlans(states.map((state, i) => ({ role: "lead", workspaceId: "root", agentId: `agent-${i}`, handoffState: state } as SeatDirectoryEntry)));
+  assert.deepEqual(plans.map(plan => plan.label), ["lead · handing off", "lead · handing off", "lead · handing off", "lead · handing off", "lead", "lead", "lead"]);
 });

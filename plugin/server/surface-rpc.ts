@@ -2609,7 +2609,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           now: Date.now(),
         });
         const workspaceId = registration.workspaceId ?? supervisorRaw?.workspaceId ?? leadRaw?.workspaceId ?? null;
-        projects.push({ slug: registration.slug, workspaceId, needsYouCount: panel.needsYou.length });
+        projects.push({ slug: registration.slug, root: registration.root, workspaceId, needsYouCount: panel.needsYou.length });
         if (supervisorRaw !== undefined) directoryRows.push([registration, supervisorRaw, panel.seats!.supervisor, profiles]);
         if (leadRaw !== undefined) directoryRows.push([registration, leadRaw, panel.seats!.lead, profiles]);
         for (const row of panel.seats!.peers) { const peer = peers.find(p => p.id === row.agentId); if (peer) directoryRows.push([registration, peer, row, profiles]); }
