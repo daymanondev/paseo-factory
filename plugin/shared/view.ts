@@ -1,4 +1,4 @@
-import { HandoffProgressSchema } from "./handoff.ts";
+import { HandoffProgressSchema, LaneRefSchema } from "./handoff.ts";
 /**
  * The Factory surface's view vocabulary (v0.0.13, ADR 0009 §2) — the one
  * shape the client renders and the server folds. Plain JSON only: `shared/`
@@ -11,7 +11,7 @@ import { HandoffProgressSchema } from "./handoff.ts";
 import { z } from "zod";
 
 /** Bump when the shape changes in a way an older client cannot render. */
-export const FACTORY_VIEW_VERSION = 4 as const;
+export const FACTORY_VIEW_VERSION = 5 as const;
 
 /** The five model-bearing roles — mirrors src/lanes.ts (kept by test/lanes.test.ts). */
 export const LaneNameSchema = z.enum(["supervisor", "lead", "worker", "watch", "freshEyes"]);
@@ -163,6 +163,22 @@ export const TaskViewSchema = z.object({
 });
 export type TaskView = z.infer<typeof TaskViewSchema>;
 
+/** The model chip's resolved lane and the role-specific layer it inherits. */
+export const ScopedLaneRefSchema = LaneRefSchema.extend({ scope: z.enum(["project", "machine"]) });
+export type ScopedLaneRef = z.infer<typeof ScopedLaneRefSchema>;
+export const SeatAllowedActionSchema = z.enum(["switch-model", "hand-off-now", "replace-now", "cancel", "retry", "view-handover", "adopt"]);
+export type SeatAllowedAction = z.infer<typeof SeatAllowedActionSchema>;
+export const SeatContextSchema = z.object({ state: z.enum(["used", "unknown"]), usedTokens: z.number().nullable(), markTokens: z.number(), label: z.string(), fraction: z.number().nullable() });
+const SeatFields = {
+  lane: ScopedLaneRefSchema,
+  pendingLane: ScopedLaneRefSchema.nullable(),
+  markTokens: z.number(),
+  handoff: HandoffProgressSchema.nullable(),
+  allowedActions: z.array(SeatAllowedActionSchema),
+};
+export const PanelProfileSchema = z.object({ active: LaneProfileViewSchema.nullable(), list: z.array(LaneProfileViewSchema), modified: z.boolean() });
+export type PanelProfile = z.infer<typeof PanelProfileSchema>;
+
 /** One live daemon agent, as the Seat Graph renders it. */
 export const AgentViewSchema = z.object({
   id: z.string(),
@@ -186,6 +202,9 @@ export const AgentViewSchema = z.object({
    */
   rotationState: z.enum(["normal", "rotation_pending", "handing_over"]).optional(),
   handoffProgress: HandoffProgressSchema.nullable().optional(),
+  lane: ScopedLaneRefSchema.optional(),
+  pendingLane: ScopedLaneRefSchema.nullable().optional(),
+  handoverAvailable: z.boolean().optional(),
   /** How many mail items wait queued in the Project's `mailbox.jsonl` fold — Lead-only. */
   queuedMailCount: z.number().optional(),
   requiresAttention: z.boolean().nullable(),
@@ -421,6 +440,7 @@ export type SkillHubView = z.infer<typeof SkillHubViewSchema>;
  */
 export const PanelNeedsYouActionSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("handoff-supervisor"), label: z.string() }),
+  z.object({ kind: z.literal("retry-handoff"), seat: z.string(), label: z.string() }),
   z.object({ kind: z.literal("open-agent"), agentId: z.string(), label: z.string() }),
   z.object({ kind: z.literal("install-prerequisites"), label: z.string() }),
   /** No Supervisor or Lead lives to decide — the way forward is to start the Supervisor. */
@@ -431,7 +451,7 @@ export const PanelNeedsYouActionSchema = z.discriminatedUnion("kind", [
 export type PanelNeedsYouAction = z.infer<typeof PanelNeedsYouActionSchema>;
 
 /** The Owner-actionable item kinds, in the order the list shows them. */
-export const PANEL_NEEDS_YOU_KINDS = ["needs-human", "attempt-ceiling", "seat-stuck", "no-supervisor", "supervisor-near-mark", "handoff-stuck", "prerequisites", "open-design-broken"] as const;
+export const PANEL_NEEDS_YOU_KINDS = ["needs-human", "attempt-ceiling", "seat-stuck", "no-supervisor", "supervisor-near-mark", "handoff-failed", "handoff-stuck", "prerequisites", "open-design-broken"] as const;
 
 export const PanelNeedsYouItemSchema = z.object({
   key: z.string(),
@@ -449,6 +469,7 @@ export const PanelToneSchema = z.enum(["normal", "waiting", "error"]);
 export type PanelTone = z.infer<typeof PanelToneSchema>;
 
 export const PanelSeatRowSchema = z.object({
+  ...SeatFields,
   role: z.enum(["supervisor", "lead"]),
   vacant: z.boolean(),
   agentId: z.string().nullable(),
@@ -459,9 +480,7 @@ export const PanelSeatRowSchema = z.object({
   /** The vacancy sentence (or a daemon error line for a live seat); null otherwise. */
   hint: z.string().nullable(),
   /** The seat context-window reading against its model-dependent handoff mark. */
-  context: z.object({ usedTokens: z.number().nullable(), markTokens: z.number(), label: z.string(), fraction: z.number().nullable() }).nullable(),
-  /** The Lead handoff state in words, with the queued mail count — Lead only. */
-  handoff: z.object({ state: z.enum(["normal", "rotation_pending", "handing_over"]), label: z.string(), queuedMailCount: z.number().int() }).nullable(),
+  context: SeatContextSchema.nullable(),
 });
 export type PanelSeatRow = z.infer<typeof PanelSeatRowSchema>;
 
@@ -473,6 +492,7 @@ export type PanelSeatRow = z.infer<typeof PanelSeatRowSchema>;
  * itself through the auto-bind door.
  */
 export const PanelSupervisorCandidateRowSchema = z.object({
+  allowedActions: z.array(SeatAllowedActionSchema),
   agentId: z.string(),
   title: z.string().nullable(),
   statusLabel: z.string(),
@@ -482,7 +502,9 @@ export const PanelSupervisorCandidateRowSchema = z.object({
 export type PanelSupervisorCandidateRow = z.infer<typeof PanelSupervisorCandidateRowSchema>;
 
 export const PanelPeerRowSchema = z.object({
-  context: PanelSeatRowSchema.shape.context.optional(),
+  ...SeatFields,
+  role: z.literal("peer"),
+  context: SeatContextSchema,
   agentId: z.string(),
   task: z.string(),
   /** `Peer · T-08` — the name the Owner reads. */
@@ -514,6 +536,10 @@ export type PanelOnboarding = z.infer<typeof PanelOnboardingSchema>;
 
 /** The workspace panel's whole world: header, Needs you, Seats, Open Design — or the not-a-Project readiness. */
 export const PanelViewSchema = z.object({
+  /** Includes failures whose outgoing agent is gone; seat is the stable recovery key. */
+  handoffs: z.array(HandoffProgressSchema),
+  profile: PanelProfileSchema,
+  defaultWorker: z.object({ role: z.literal("worker"), title: z.literal("Default worker"), lane: ScopedLaneRefSchema }).nullable(),
   isProject: z.boolean(),
   name: z.string().nullable(),
   summary: z.string(),
@@ -536,10 +562,13 @@ export type PanelView = z.infer<typeof PanelViewSchema>;
  * One live seat in the all-Projects directory (`factory.seats.directory`) —
  * the read-only composer pill's whole world: which Project, which Paseo
  * workspace, which agent, which role, on which lane, how close to the
- * handoff mark. The handoff state is a `null` placeholder in v0.6.1; W9 fills
- * it with the real per-seat progress.
+ * handoff mark, real progress, permitted actions and bounded quick-switch choices.
  */
 export const SeatDirectoryEntrySchema = z.object({
+  ...SeatFields,
+  context: SeatContextSchema,
+  task: z.string().nullable(),
+  quickSwitchModels: z.array(LaneRefSchema).max(6),
   /** The owning Project's canonical slug. */
   slug: z.string(),
   /** The Paseo workspace the seat's session lives in — null when the daemon reports none (no pill anchors). */
@@ -551,9 +580,9 @@ export const SeatDirectoryEntrySchema = z.object({
   thinking: z.string().nullable(),
   /** The daemon's live context-window reading — null when it reports none, never a fabricated zero. */
   contextUsedTokens: z.number().nullable(),
-  /** The v0.6.1 handoff mark — the flat 128k (W9 makes it follow the model's window). */
+  /** The role cap clipped to the model context window. */
   markTokens: z.number().int(),
-  /** The handoff-state placeholder — `null` until W9. */
+  /** Compatibility status summary of handoff.state, or null. */
   handoffState: z.string().nullable(),
 });
 export type SeatDirectoryEntry = z.infer<typeof SeatDirectoryEntrySchema>;

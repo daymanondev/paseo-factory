@@ -66,19 +66,23 @@ const theme = {
 const WARNING = "#aa8800";
 const DANGER = "#cc0000";
 
+const seatDefaults = { lane: { provider: "pi", model: "glm-5.3", scope: "machine" as const }, pendingLane: null, markTokens: 128_000, allowedActions: ["switch-model", "hand-off-now"] as ("switch-model" | "hand-off-now")[] };
+const handoffFixture = { seat: "lead", reason: "context-mark" as const, fromLane: { provider: "pi", model: "glm-5.3" }, toLane: { provider: "pi", model: "glm-5.3" }, startedAt: "2026-11-13T00:00:00Z", updatedAt: "2026-11-13T00:00:00Z" };
 const healthySeats: NonNullable<PanelView["seats"]> = {
-  supervisor: { role: "supervisor", vacant: false, agentId: "agent-sup", statusLabel: "idle", tone: "normal", model: "opus-4-8", hint: null, context: null, handoff: null },
+  supervisor: { ...seatDefaults, role: "supervisor", vacant: false, agentId: "agent-sup", statusLabel: "idle", tone: "normal", model: "opus-4-8", hint: null, context: null, handoff: null },
   lead: {
-    role: "lead", vacant: false, agentId: "agent-lead", statusLabel: "working", tone: "normal", model: "glm-5.3", hint: null,
-    context: { usedTokens: 94_400, markTokens: 128_000, label: "94k / 128k", fraction: 0.7375 },
-    handoff: { state: "normal", label: "normal", queuedMailCount: 0 },
+    ...seatDefaults, role: "lead", vacant: false, agentId: "agent-lead", statusLabel: "working", tone: "normal", model: "glm-5.3", hint: null,
+    context: { state: "used", usedTokens: 94_400, markTokens: 128_000, label: "94k / 128k", fraction: 0.7375 },
+    handoff: null,
   },
-  peers: [{ agentId: "agent-peer", task: "T-08", title: "Peer · T-08", disposition: "reviewer", statusLabel: "working", tone: "normal", model: "glm-5.3" }],
+  peers: [{ ...seatDefaults, role: "peer", context: { state: "unknown", usedTokens: null, markTokens: 160000, label: "context unknown", fraction: null }, handoff: null, agentId: "agent-peer", task: "T-08", title: "Peer · T-08", disposition: "reviewer", statusLabel: "working", tone: "normal", model: "glm-5.3" }],
   supervisorCandidates: [],
 };
 
 function makePanel(overrides: Partial<PanelView> = {}): PanelView {
   return {
+    handoffs: [], profile: { active: null, list: [], modified: false },
+    defaultWorker: null,
     isProject: true,
     name: "my-app",
     summary: "Lead working · 1 Peer · nothing needs you",
@@ -91,7 +95,7 @@ function makePanel(overrides: Partial<PanelView> = {}): PanelView {
 }
 
 const noopActions = () => ({
-  openAgent() {}, installPrerequisites() {}, rotateLead() {}, revokeSupervisor() {}, startSupervisor() {}, syncOpenDesign() {}, adoptSupervisor() {}, busy: false,
+  openAgent() {}, installPrerequisites() {}, handoffLead() {}, revokeSupervisor() {}, startSupervisor() {}, syncOpenDesign() {}, adoptSupervisor() {}, busy: false,
 });
 
 async function render(panel: PanelView, props: { mobile?: boolean; openDesignActions?: unknown; menu?: unknown; initialUi?: Record<string, unknown>; actions?: Record<string, unknown> } = {}): Promise<string> {
@@ -122,7 +126,7 @@ test("panel renders the header, summary, seats and Open Design card with the nam
   assert.match(html, /Peer · T-08/);
   assert.match(html, /reviewer/);
   assert.match(html, /94k \/ 128k/, "the Lead row reads Nk / 128k");
-  assert.match(html, /Handoff: normal/);
+  assert.doesNotMatch(html, /Handoff:/);
   assert.match(html, /Mobile Redesign/);
   assert.match(html, /Synced 5m ago/);
 });
@@ -166,16 +170,16 @@ test("colour is only for exceptions — healthy seats draw none, an errored seat
 
 test("a handoff that is waiting is amber words on the Lead row; a vacant Lead only says to ask the Supervisor — no start button", async () => {
   const pending = await render(
-    makePanel({ seats: { ...healthySeats, lead: { ...healthySeats.lead, handoff: { state: "rotation_pending", label: "will hand off at the next quiet point · 2 queued mail", queuedMailCount: 2 } } } }),
+    makePanel({ seats: { ...healthySeats, lead: { ...healthySeats.lead, handoff: { ...handoffFixture, state: "scheduled", waitingPeers: 2 } } } }),
   );
-  assert.match(pending, /will hand off at the next quiet point · 2 queued mail/);
+  assert.match(pending, /Scheduled · waiting for 2 Peers/);
 
   const vacant = await render(
     makePanel({
       seats: {
         ...healthySeats,
         peers: [],
-        lead: { role: "lead", vacant: true, agentId: null, statusLabel: "vacant", tone: "normal", model: null, hint: "No Lead is running — ask your Supervisor.", context: null, handoff: null },
+        lead: { ...seatDefaults, role: "lead", vacant: true, agentId: null, statusLabel: "vacant", tone: "normal", model: null, hint: "No Lead is running — ask your Supervisor.", context: null, handoff: null },
       },
     }),
   );
@@ -250,7 +254,7 @@ test("a workspace that is not a Project says to set it up on Desktop on mobile, 
 
 const vacantSupervisorSeats: NonNullable<PanelView["seats"]> = {
   ...healthySeats,
-  supervisor: { role: "supervisor", vacant: true, agentId: null, statusLabel: "vacant", tone: "normal", model: null, hint: "No Supervisor is running.", context: null, handoff: null },
+  supervisor: { ...seatDefaults, role: "supervisor", vacant: true, agentId: null, statusLabel: "vacant", tone: "normal", model: null, hint: "No Supervisor is running.", context: null, handoff: null },
 };
 
 test("every live seat row has an Open action — Supervisor, Lead and each Peer — on desktop and on mobile", async () => {
@@ -409,7 +413,7 @@ test("a live Supervisor with a candidate chat renders the candidate row with 'Us
   const panel = makePanel({
     seats: {
       ...healthySeats,
-      supervisorCandidates: [{ agentId: "agent-candidate", title: "Chat about release", statusLabel: "idle", tone: "normal", model: "glm-5.3" }],
+      supervisorCandidates: [{ allowedActions: ["adopt"], agentId: "agent-candidate", title: "Chat about release", statusLabel: "idle", tone: "normal", model: "glm-5.3" }],
     },
   });
   for (const mobile of [false, true]) {

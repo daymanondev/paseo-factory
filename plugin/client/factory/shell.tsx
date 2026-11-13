@@ -5,7 +5,7 @@
  * Project panel (project-panel.tsx — a pure render of `view.panel`); the
  * panel carries no machine-wide pane: the Settings screen (settings.tsx, v0.6.0
  * W8) hosts models, skills & tools, plugins, Vault and diagnostics. The
- * panel's actions (v0.6.0 W6): Rotate Lead, Revoke Supervisor, Start Supervisor (opens the seat it
+ * panel's actions (v0.6.0 W6): Hand off Lead, Revoke Supervisor, Start Supervisor (opens the seat it
  * creates) and the header `⋯` Project menu (per-Project models, skill packs,
  * Open Design link, two-step Reset / Delete) — all RPC wiring lives here; on
  * mobile the menu is view-only and Start / Sync / Studio never mount. The shell owns the snapshot poll and every RPC action (lanes.set,
@@ -69,7 +69,7 @@ export function FactoryShell({
   const toast = useToast();
   const snapshotCall = useRpc(snapshot);
   const lanesSetCall = useRpc(lanesSet);
-  // The panel's seat and Project acts (v0.6.0 W6, ADR 0056): Rotate, Revoke,
+  // The panel's seat and Project acts (v0.6.0 W6, ADR 0056): Handoff, Revoke,
   // Start Supervisor (the ADR 0017 amendment — the only seat the plugin may
   // create), Reset and Delete. There is no Lead start and no accept RPC here.
   const handoffStartCall = useRpc(handoffStart);
@@ -266,7 +266,7 @@ export function FactoryShell({
   const openAgent = (agentId: string): void => {
     navigation?.openAgent({ agentId, serverId });
   };
-  const rotateLead = (): void => {
+  const handoffLead = (): void => {
     if (projectRoot === undefined) return;
     void act("Hand off Lead", () => handoffStartCall({ projectRoot, seat: "lead" }));
   };
@@ -668,7 +668,7 @@ export function FactoryShell({
             mobile={mobile}
             now={now}
             daemonError={view.daemonError}
-            actions={{ openAgent, installPrerequisites, rotateLead, revokeSupervisor, startSupervisor, syncOpenDesign, adoptSupervisor, busy: busy || activePluginAct !== null }}
+            actions={{ openAgent, installPrerequisites, handoffLead, revokeSupervisor, startSupervisor, syncOpenDesign, adoptSupervisor, busy: busy || activePluginAct !== null }}
             openDesignActions={
               !mobile && view.project !== null && view.project.missingRoot !== true ? (
                 <OpenDesignControl key={view.project.root} part="card" theme={theme} root={view.project.root} sourceKey={`${serverId ?? "local"}:${view.project.root}`} onChanged={refresh} />

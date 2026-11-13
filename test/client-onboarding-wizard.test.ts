@@ -228,6 +228,7 @@ test("a failed Start says what went wrong and how to fix it, and Start stays ava
 // ---- panel integration + structural pins -----------------------------------------------------
 
 const notAProject: PanelView = {
+  handoffs: [], profile: { active: null, list: [], modified: false }, defaultWorker: null,
   isProject: false, name: null, summary: "Not a Factory Project yet", needsYou: [], seats: null, openDesign: null,
   onboarding: { folder: "/work/my-app", gitRepo: true, hasCommits: true, existingLead: false },
 };
@@ -239,7 +240,7 @@ async function renderPanel(mobile: boolean): Promise<string> {
   const wizard = createElement("div", { "data-testid": "wizard-slot" }, "wizard");
   return renderToStaticMarkup(createElement(ProjectPanel, {
     theme, panel: notAProject, mobile, now: Date.now(), daemonError: null,
-    actions: { openAgent() {}, installPrerequisites() {}, rotateLead() {}, revokeSupervisor() {}, startSupervisor() {}, busy: false },
+    actions: { openAgent() {}, installPrerequisites() {}, handoffLead() {}, revokeSupervisor() {}, startSupervisor() {}, busy: false },
     onboarding: wizard,
   }));
 }

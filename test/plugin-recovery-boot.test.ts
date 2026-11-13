@@ -57,3 +57,11 @@ test("actual plugin boot registers through legacy server.on/server.before when t
   assert.match(output, /RECOVERY_OK/);
   assertSweepHistoryGate(output);
 });
+
+test("actual plugin boot maps legacy rotation_pending to a scheduled context-mark handoff", { timeout: 15_000 }, t => {
+  const dir = makeTempDir(); disposeDir(t, dir);
+  const output = execFileSync(process.execPath, [fileURLToPath(new URL("./fixtures/plugin-handoff-boot.ts", import.meta.url))], {
+    env: { ...process.env, HOME: dir, PASEO_HOME: join(dir, "fake-paseo") }, encoding: "utf8", timeout: 12_000,
+  });
+  assert.match(output, /LEGACY_HANDOFF_BOOT_OK/);
+});

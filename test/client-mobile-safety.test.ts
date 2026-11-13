@@ -133,7 +133,7 @@ test("the Project panel mounts under a RN-like window on mobile and renders the 
     goNative();
     await act(() => root.render(createElement(ProjectPanel, {
       theme, panel, mobile: true, now: Date.now(), daemonError: null,
-      actions: { openAgent() {}, installPrerequisites() {}, rotateLead() {}, revokeSupervisor() {}, startSupervisor() {}, syncOpenDesign() {}, adoptSupervisor() {}, busy: false },
+      actions: { openAgent() {}, installPrerequisites() {}, handoffLead() {}, revokeSupervisor() {}, startSupervisor() {}, syncOpenDesign() {}, adoptSupervisor() {}, busy: false },
     })));
     const markup = container.innerHTML;
     await act(() => root.unmount());

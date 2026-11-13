@@ -992,6 +992,8 @@ test("kit/directory: headerPlans yields one factory-header-<workspaceId> button 
 
 test("kit/directory: pillPlans yields one factory-pill-<agentId> per live seat agent with a workspace, labelled by role (W4)", () => {
   const seat = (over: Partial<SeatDirectoryEntry>): SeatDirectoryEntry => ({
+    lane: { provider: "pi", model: "zai/glm-5.3", scope: "machine" }, pendingLane: null, handoff: null, allowedActions: ["switch-model", "hand-off-now"],
+    context: { state: "used", usedTokens: 40000, markTokens: 128000, label: "40k / 128k", fraction: 0.3125 }, task: null, quickSwitchModels: [],
     slug: "goal-partner",
     workspaceId: "ws-1",
     agentId: "agent-1",
