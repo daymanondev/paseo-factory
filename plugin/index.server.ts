@@ -41,7 +41,7 @@ import { migrateLegacyExecutionState } from "./server/core/project-settings.ts";
 // migrateLegacyRootState(stateDir, { projects: Array<{ slug, gitRoot? }> }).
 import { migrateLegacyRootState } from "./server/core/ledger-migration.ts";
 
-const SHELL_VERSION = "0.8.1";
+const SHELL_VERSION = "0.8.2";
 
 const log = (message: string) => console.log(`[${PLUGIN_ID}] ${message}`);
 
@@ -411,7 +411,7 @@ export default function contribute(server: PluginServerContext) {
   // `agent.turn_ended` hands the Lead-mailbox runtime the event — it settles
   // the in-flight batch (`mail_acked` on completed, `mail_requeued` otherwise)
   // for both registered Lead and registered Supervisor seats and drives the
-  // 128k rotation state machine for the Project whose registered Lead ended
+  // Lead-mark (160k) rotation state machine for the Project whose registered Lead ended
   // the turn.
   const offTurnEnded = registerLifecycleHook<PluginHookEvents["agent.turn.after"], void>(
     (handler) => server.addHook("agent.turn.after", handler),

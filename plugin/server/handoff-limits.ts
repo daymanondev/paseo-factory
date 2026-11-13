@@ -6,9 +6,14 @@
  * import would close a cycle.
  */
 
-/** The unknown-window caps (ADR 0057 §7). */
-export const LEAD_ROTATE_TOKENS = 128_000;
-export const PEER_CONTEXT_MARK_TOKENS = 160_000;
+/**
+ * The unknown-window caps (ADR 0057 §7). Raised in v0.8.2 at the Owner's
+ * request: Supervisor and Lead 128k → 160k, Peer 160k → 200k. A model whose
+ * window is known still hands off at 65% (Supervisor/Lead) / 80% (Peer) of it
+ * when that is lower, so the extraction turn always has room.
+ */
+export const LEAD_ROTATE_TOKENS = 160_000;
+export const PEER_CONTEXT_MARK_TOKENS = 200_000;
 
 /** One mark for both the runtime trigger and the Owner's context bar. */
 export function handoffMarkTokens(role: "supervisor" | "lead" | "peer", maxTokens?: number | null): number {

@@ -17,6 +17,7 @@ import { createSurfaceHandlers, sanitizeLaneWithProviders } from "../plugin/serv
 import type { ProviderEntry, SurfaceDaemonApi, SurfaceDeps } from "../plugin/server/surface-rpc.ts";
 import { handleSpoolRequest } from "../plugin/server/spool.ts";
 import { createLeadMailRuntime } from "../plugin/server/lead-mailbox.ts";
+import { LEAD_ROTATE_TOKENS, PEER_CONTEXT_MARK_TOKENS } from "../plugin/server/handoff-limits.ts";
 import {
   BRIDGE_TIMEOUT_MS,
   checkDaemonPluginUpdates,
@@ -1024,7 +1025,7 @@ test("snapshot: a projectRoot scopes lanes, seats, and the task counts to the Pr
 
 // ---- the Lead telemetry join (v0.0.20, ADR 0013 §6, ticket 08) ------------------------------
 
-test("snapshot: the Lead view carries the 128k telemetry — lastUsage tokens, project.json rotationState, and the mailbox fold's queued count; other seats carry context but leave Lead state unset", async (t) => {
+test("snapshot: the Lead view carries the Lead-mark telemetry — lastUsage tokens, project.json rotationState, and the mailbox fold's queued count; other seats carry context but leave Lead state unset", async (t) => {
   const project = makeProject(t, "lead-telemetry");
   const { stateDir, handlers } = makeSurface(t, [
     { id: "agent-sup-t", labels: { seat: "supervisor", project: project.slug }, cwd: project.root },
@@ -6595,7 +6596,7 @@ test("panel: the Lead row shows context and maps legacy rotation state to contex
   };
 
   const normal = await read();
-  assert.deepEqual(normal.context, { state: "used", usedTokens: 94_400, markTokens: 128_000, label: "94k / 128k", fraction: 94_400 / 128_000 });
+  assert.deepEqual(normal.context, { state: "used", usedTokens: 94_400, markTokens: 130_000, label: "94k / 130k", fraction: 94_400 / 130_000 });
   assert.equal(normal.handoff, null);
 
   const mailbox = join(stateDir, "projects", project.slug, "mailbox.jsonl");
@@ -6618,7 +6619,7 @@ test("panel: the Lead context bar is honest without a reading and never exceeds 
   const { handlers, project } = makePanelSurface(t, (p) => [{ id: "agent-lead", labels: seatLabels(p, "lead"), cwd: p.root }]);
   const none = await handlers.snapshot({ projectRoot: project.root });
   assert.ok(none.ok, none.ok ? "" : none.error);
-  assert.deepEqual(none.view.panel.seats!.lead.context, { state: "unknown", usedTokens: null, markTokens: 128_000, label: "context unknown", fraction: null });
+  assert.deepEqual(none.view.panel.seats!.lead.context, { state: "unknown", usedTokens: null, markTokens: LEAD_ROTATE_TOKENS, label: "context unknown", fraction: null });
 
   const over = makePanelSurface(t, (p) => [{ id: "agent-lead", labels: seatLabels(p, "lead"), cwd: p.root, lastUsage: { contextWindowUsedTokens: 150_000, contextWindowMaxTokens: 200_000 } }], "over");
   const snap = await over.handlers.snapshot({ projectRoot: over.project.root });
@@ -6646,8 +6647,8 @@ test("panel: live Peers get one row each — `Peer · <Task>`, disposition, stat
   const snap = await handlers.snapshot({ projectRoot: project.root });
   assert.ok(snap.ok, snap.ok ? "" : snap.error);
   assert.deepEqual(snap.view.panel.seats!.peers, [
-    { role: "peer", lane: { provider: "pi", model: "zai/glm-5.3", scope: "machine" }, pendingLane: null, markTokens: 160000, handoff: null, allowedActions: ["switch-model", "hand-off-now"], context: { state: "unknown", usedTokens: null, markTokens: 160_000, label: "context unknown", fraction: null }, agentId: "agent-eng", task: "T-ENG", title: "Peer · T-ENG", disposition: "engineer", statusLabel: "working", tone: "normal", model: "glm-5.3" },
-    { role: "peer", lane: { provider: "pi", model: "zai/glm-5.3", scope: "machine" }, pendingLane: null, markTokens: 160000, handoff: null, allowedActions: ["switch-model", "hand-off-now"], context: { state: "unknown", usedTokens: null, markTokens: 160_000, label: "context unknown", fraction: null }, agentId: "agent-rev", task: "T-REV", title: "Peer · T-REV", disposition: "reviewer", statusLabel: "idle", tone: "normal", model: "pi/zai/glm-5.3" },
+    { role: "peer", lane: { provider: "pi", model: "zai/glm-5.3", scope: "machine" }, pendingLane: null, markTokens: PEER_CONTEXT_MARK_TOKENS, handoff: null, allowedActions: ["switch-model", "hand-off-now"], context: { state: "unknown", usedTokens: null, markTokens: PEER_CONTEXT_MARK_TOKENS, label: "context unknown", fraction: null }, agentId: "agent-eng", task: "T-ENG", title: "Peer · T-ENG", disposition: "engineer", statusLabel: "working", tone: "normal", model: "glm-5.3" },
+    { role: "peer", lane: { provider: "pi", model: "zai/glm-5.3", scope: "machine" }, pendingLane: null, markTokens: PEER_CONTEXT_MARK_TOKENS, handoff: null, allowedActions: ["switch-model", "hand-off-now"], context: { state: "unknown", usedTokens: null, markTokens: PEER_CONTEXT_MARK_TOKENS, label: "context unknown", fraction: null }, agentId: "agent-rev", task: "T-REV", title: "Peer · T-REV", disposition: "reviewer", statusLabel: "idle", tone: "normal", model: "pi/zai/glm-5.3" },
   ]);
   assert.equal(snap.view.panel.summary, "Lead idle · 2 Peers · nothing needs you");
 });
@@ -7150,7 +7151,7 @@ test("seat directory: every live seat across two Projects carries its identity, 
   assert.equal(supA.model, "glm-5.3");
   assert.equal(supA.thinking, "high");
   assert.equal(supA.contextUsedTokens, 40_000, "the live usage reading rides the seat");
-  assert.equal(supA.markTokens, 128_000, "the 200k window is clipped at the 128k Supervisor cap");
+  assert.equal(supA.markTokens, 130_000, "the 200k window is clipped at 65% (130k), below the 160k Supervisor cap");
   assert.equal(supA.handoffState, null, "no recorded handoff is null");
 
   const leadA = byAgent.get("agent-lead-a");
@@ -7242,7 +7243,7 @@ test("seat directory: a daemon that cannot answer degrades to an empty seat list
 });
 
 test("snapshot: the Lead context mark follows its model window and keeps unknown usage honest", async (t) => {
-  for (const [window, mark] of [[1_000_000, 128_000], [128_000, 83_200], [undefined, 128_000], [0, 128_000], [-1, 128_000], [Number.NaN, 128_000]] as const) {
+  for (const [window, mark] of [[1_000_000, LEAD_ROTATE_TOKENS], [128_000, 83_200], [undefined, LEAD_ROTATE_TOKENS], [0, LEAD_ROTATE_TOKENS], [-1, LEAD_ROTATE_TOKENS], [Number.NaN, LEAD_ROTATE_TOKENS]] as const) {
     const { handlers, project } = makePanelSurface(t, (p) => [{ id: "window-lead", labels: seatLabels(p, "lead"), cwd: p.root, lastUsage: { contextWindowMaxTokens: window } }], `window-${window}`);
     const snap = await handlers.snapshot({ projectRoot: project.root });
     assert.ok(snap.ok, snap.ok ? "" : snap.error);
@@ -7422,7 +7423,8 @@ test("seat directory quick switches prefer active profile models, then real role
   applyLaneProfile(f.stateDir, saved.profile.id, f.slugA);
   const directory = await f.handlers.seatsDirectory({});
   const quick = directory.seats.find(s => s.agentId === "lead-a")!.quickSwitchModels;
-  assert.deepEqual(quick.map(l => `${l.provider}/${l.model}`), ["pi/preset", "codex/preset-lead", "pi/preset-watch", "codex/used-seven", "codex/used-six", "codex/used-five"]);
+  // lead-a now runs codex/used-seven, so its own model is not offered back as a no-op switch (v0.8.2).
+  assert.deepEqual(quick.map(l => `${l.provider}/${l.model}`), ["pi/preset", "codex/preset-lead", "pi/preset-watch", "codex/used-six", "codex/used-five", "codex/used-four"]);
   const b = directory.seats.find(s => s.agentId === "lead-b")!;
   assert.equal(b.quickSwitchModels[0]!.model, "used-seven", "the other Project has no applied profile and starts with role history");
   assert.ok(b.quickSwitchModels.every(l => l.model !== "supervisor-only" && !l.model.startsWith("preset")), "other roles and inactive presets are not fabricated role history");

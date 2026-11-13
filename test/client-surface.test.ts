@@ -1074,8 +1074,11 @@ test("W4: the starter polls factory.seats.directory every 20 seconds, keeps the 
 test("W13: the composer pill exposes status and named quick actions through starter-owned RPC callbacks", () => {
   const directory = read("plugin/client/factory/directory.tsx");
   assert.match(directory, /testID="factory-pill-popover"/, "the spike's named E2E hook");
-  for (const word of ["Role", "Model", "Thinking", "Context", "Project"]) {
-    assert.ok(new RegExp(`\\b${word}\\b`).test(directory), `the popover renders ${word}`);
+  for (const hook of ["factory-pill-close", "factory-pill-model-", "RECENT MODELS"]) {
+    assert.ok(directory.includes(hook), `the popover renders ${hook}`);
+  }
+  for (const word of ["Role", "Context", "Project", "Close"]) {
+    assert.ok(!new RegExp(`label="${word}"|\\["${word}",`).test(directory), `the popover no longer renders a ${word} row or button`);
   }
   assert.match(directory, /factory-pill-other-model/);
   assert.match(directory, /factory-pill-hand-off-now/);

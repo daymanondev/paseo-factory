@@ -158,6 +158,8 @@ export function LaneModalBody({
   const [search, setSearch] = useState("");
   const [customOpen, setCustomOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
+  /** The provider dropdown: while open, its list replaces the model list (no floating overlay — plugin hosts clip those). */
+  const [providerOpen, setProviderOpen] = useState(false);
 
   // Factory's own role providers (`factory-supervisor` …) only re-route onto a
   // lane's real provider — a lane pointing at one is circular, so the picker
@@ -235,6 +237,13 @@ export function LaneModalBody({
     }
   };
 
+  /** A dropdown row picks exactly what a provider chip did (`All` only widens the filter), then closes the dropdown. */
+  const pickProvider = (id: string): void => {
+    if (id === "all") setFilter("all");
+    else switchProvider(id);
+    setProviderOpen(false);
+  };
+
   /** A row sets provider and model together, so picking from `All` switches provider. */
   const selectModel = (nextProvider: string, nextModel: ProviderModelView): void => {
     setProvider(nextProvider);
@@ -259,6 +268,10 @@ export function LaneModalBody({
   const providerEntries = available.map((entry) => ({ id: entry.provider, label: entry.provider, count: entry.models?.length ?? 0, warn: entry.models === null || entry.models.length === 0 }));
   if (allowEyeJson) providerEntries.push({ id: "eye.json", label: "eye.json (HTTP)", count: 0, warn: false });
   const totalModels = providerEntries.reduce((sum, entry) => sum + entry.count, 0);
+  const modelsWord = (count: number): string => `${count} ${count === 1 ? "model" : "models"}`;
+  const filterProviderEntry = providerEntries.find((entry) => entry.id === filter);
+  const triggerLabel = filter === "all" || filterProviderEntry === undefined ? `All providers · ${totalModels}` : `${filterProviderEntry.label} · ${filterProviderEntry.count}`;
+  const triggerWarn = filter !== "all" && filterProviderEntry !== undefined && filterProviderEntry.warn;
 
   // fill: the list takes whatever height the bounded host leaves; otherwise an explicit height (never only maxHeight — a bare-maxHeight ScrollView can collapse to nothing).
   const listBox = fill ? { flex: 1, minHeight: LIST_MIN_H } : { height: LIST_FIXED_H };
@@ -271,6 +284,41 @@ export function LaneModalBody({
       <Text style={text(theme, "label")}>Loading providers…</Text>
       <Text style={text(theme, "meta")}>Your current choice stays selected.</Text>
     </View>
+  ) : providerOpen ? listBlock(
+    <ScrollView testID="lane-picker-provider-list" style={fill ? { flex: 1 } : { height: LIST_FIXED_H }}>
+      {[{ id: "all", label: "All providers", count: totalModels, warn: false }, ...providerEntries].map((entry, idx) => {
+        const isSelected = entry.id === filter;
+        return (
+          <Pressable
+            key={entry.id}
+            testID={`lane-picker-provider-${entry.id}`}
+            accessibilityRole="button"
+            onPress={() => pickProvider(entry.id)}
+            style={(state) => ({
+              minHeight: MODEL_ROW_H,
+              paddingHorizontal: SPACING[3],
+              paddingVertical: SPACING[1],
+              borderTopWidth: idx === 0 ? 0 : 1,
+              borderTopColor: theme.colors.border,
+              backgroundColor: isSelected ? tint(theme.colors.accent, "1f") : state.pressed || hoveredOf(state) ? theme.colors.surface2 : "transparent",
+              flexDirection: "row",
+              alignItems: "center",
+              gap: SPACING[2],
+            })}
+          >
+            <Text style={{ ...text(theme, "section"), flexShrink: 1, fontWeight: isSelected ? "600" : "500", color: isSelected ? theme.colors.accent : theme.colors.foreground }} numberOfLines={1}>
+              {entry.label}
+            </Text>
+            {entry.warn ? <Icon name="AlertTriangle" size={12} color={theme.colors.statusWarning} /> : null}
+            <View style={{ flex: 1 }} />
+            <Text style={text(theme, "meta")} numberOfLines={1}>{modelsWord(entry.count)}</Text>
+            <View style={{ width: 14, alignItems: "center" }}>
+              {isSelected ? <Icon name="Check" size={12} color={theme.colors.accent} /> : null}
+            </View>
+          </Pressable>
+        );
+      })}
+    </ScrollView>,
   ) : filter === "eye.json" ? null : listBlock(
     <ScrollView style={fill ? { flex: 1 } : { height: LIST_FIXED_H }}>
       {available.length === 0 ? (
@@ -333,30 +381,50 @@ export function LaneModalBody({
     <View style={{ alignSelf: "stretch", gap: SPACING[2.5], ...(fill ? { flex: 1, minHeight: 0 } : {}) }}>
       {current === "" ? null : <Text testID="lane-picker-now" style={text(theme, "meta")} numberOfLines={1}>{`Now: ${[now.provider, now.model, now.thinking === "" ? "" : now.thinking].filter((part) => part !== "").join(" · ")}`}</Text>}
 
-      {loading || filter === "eye.json" ? null : (
-        <View style={{ minHeight: CONTROL_H, flexDirection: "row", alignItems: "center", gap: SPACING[1.5], paddingHorizontal: SPACING[2.5], borderWidth: 1, borderColor: theme.colors.border, borderRadius: RADIUS.md, backgroundColor: theme.colors.surface1 }}>
-          <Icon name="Search" size={13} color={theme.colors.foregroundMuted} />
-          <TextInput
-            value={search}
-            onChangeText={setSearch}
-            placeholder="Search models across all providers…"
-            placeholderTextColor={theme.colors.foregroundMuted}
-            style={{ flex: 1, paddingVertical: 5, color: theme.colors.foreground, fontSize: 12 }}
-          />
-          {search !== "" ? (
-            <Pressable onPress={() => setSearch("")} style={{ padding: 2 }}>
-              <Icon name="X" size={12} color={theme.colors.foregroundMuted} />
-            </Pressable>
-          ) : null}
-        </View>
-      )}
-
-      {/* One line of provider chips that scrolls sideways — never wraps into a second row. */}
+      {/* One row: the search across every provider (flex 1) and the provider dropdown trigger; wraps under the search only when the width is really too small. */}
       {loading ? null : (
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ flexGrow: 0 }} contentContainerStyle={{ flexDirection: "row", alignItems: "center", gap: SPACING[1.5], paddingRight: SPACING[2] }}>
-          <Chip theme={theme} label="All" active={filter === "all"} count={totalModels} onPress={() => setFilter("all")} />
-          {providerEntries.map((entry) => <Chip key={entry.id} theme={theme} label={entry.label} active={filter === entry.id} count={entry.count} {...(entry.warn ? { icon: "AlertTriangle" } : {})} onPress={() => switchProvider(entry.id)} />)}
-        </ScrollView>
+        <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: SPACING[1.5] }}>
+          {filter === "eye.json" ? null : (
+            <View style={{ flex: 1, minWidth: 160, minHeight: CONTROL_H, flexDirection: "row", alignItems: "center", gap: SPACING[1.5], paddingHorizontal: SPACING[2.5], borderWidth: 1, borderColor: theme.colors.border, borderRadius: RADIUS.md, backgroundColor: theme.colors.surface1 }}>
+              <Icon name="Search" size={13} color={theme.colors.foregroundMuted} />
+              <TextInput
+                value={search}
+                onChangeText={(next) => { setSearch(next); setProviderOpen(false); }}
+                placeholder="Search models across all providers…"
+                placeholderTextColor={theme.colors.foregroundMuted}
+                style={{ flex: 1, paddingVertical: 5, color: theme.colors.foreground, fontSize: 12 }}
+              />
+              {search !== "" ? (
+                <Pressable onPress={() => setSearch("")} style={{ padding: 2 }}>
+                  <Icon name="X" size={12} color={theme.colors.foregroundMuted} />
+                </Pressable>
+              ) : null}
+            </View>
+          )}
+          <Pressable
+            testID="lane-picker-provider-select"
+            accessibilityRole="button"
+            accessibilityState={{ expanded: providerOpen }}
+            onPress={() => setProviderOpen(!providerOpen)}
+            style={(state) => ({
+              minHeight: CONTROL_H,
+              flexShrink: 0,
+              paddingHorizontal: SPACING[3],
+              paddingVertical: 5,
+              borderRadius: RADIUS.md,
+              borderWidth: 1,
+              borderColor: providerOpen ? tint(theme.colors.accent, "99") : hoveredOf(state) ? theme.colors.foregroundMuted : theme.colors.border,
+              backgroundColor: state.pressed || hoveredOf(state) ? theme.colors.surface2 : theme.colors.surface1,
+              flexDirection: "row",
+              alignItems: "center",
+              gap: SPACING[1.5],
+            })}
+          >
+            {triggerWarn ? <Icon name="AlertTriangle" size={12} color={theme.colors.statusWarning} /> : null}
+            <Text style={{ ...text(theme, "section"), fontSize: 13, fontWeight: "600", color: theme.colors.foreground }} numberOfLines={1}>{triggerLabel}</Text>
+            <Icon name="ChevronDown" size={13} color={theme.colors.foregroundMuted} />
+          </Pressable>
+        </View>
       )}
 
       {listBody}

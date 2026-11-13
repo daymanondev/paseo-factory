@@ -45,7 +45,7 @@ interface FakeAgent {
   labels?: Record<string, string>;
   requiresAttention?: boolean;
   cwd?: string;
-  /** The live usage slice the 128k sensor reads (ticket 07) — absent on agents the daemon reports no usage for. */
+  /** The live usage slice the Lead context sensor reads (ticket 07) — absent on agents the daemon reports no usage for. */
   lastUsage?: { contextWindowUsedTokens?: number; contextWindowMaxTokens?: number } | null;
   /** The persistence slice naming the Pi session `.jsonl` (ticket 07's fallback sensor). */
   persistence?: { nativeHandle?: string } | null;
@@ -142,7 +142,7 @@ function makeSpooledSurface(t: TestContext, agents: FakeAgent[] = []) {
   writeProjectRegistration(stateDir, resolved.slug, { root: projectRoot });
   const fake = fakeDaemon(agents);
   // The retire path's cancel half rides the CLI in production — recorded and
-  // ok here, so the 128k handoff tests never spawn a real paseo process.
+  // ok here, so the Lead handoff tests never spawn a real paseo process.
   const stopped: string[] = [];
   // The two Lead-mailbox doors the surface defers to (index.server.ts's
   // mutual late binding, mirrored): the rotation settle fires on every Lead
@@ -716,7 +716,7 @@ test("a queued peer_challenge settles its Task for the rotation quiet-point — 
   peer.labels = { seat: "agent", project: slug, task: "T5" };
   peer.cwd = taskWorktreePath(stateDir, slug, "T5");
 
-  // The Lead crossed 128k and its turn ended while the Peer is still inside its
+  // The Lead crossed the 160k mark and its turn ended while the Peer is still inside its
   // active turn: rotation_pending holds (v0.2.2, ADR 0050 §1's durable arm).
   await leadMail.onLeadTurnEnded({ agentId: "agent-lead-1", outcome: { kind: "completed" }, timeline: [] });
   assert.equal(readProjectRegistration(stateDir, slug)?.rotationState, "rotation_pending", "a running bound Peer holds the rotation");
@@ -829,15 +829,15 @@ test("startup recovery requeues an un-acked delivery for every registered Projec
   assert.deepEqual(events[2]?.mailIds, [queued.mailId]);
 });
 
-// ---- the 128k rotation state machine (v0.0.20, ADR 0013 §5 — ticket 07) --------------------
+// ---- the 160k rotation state machine (v0.0.20, ADR 0013 §5 — ticket 07) --------------------
 
-test("LEAD_ROTATE_TOKENS is the fixed 128,000 and the rotation fields ride the registry's merge-by-field law", (t) => {
+test("LEAD_ROTATE_TOKENS is the fixed 160,000 and the rotation fields ride the registry's merge-by-field law", (t) => {
   const dir = makeTempDir();
   disposeDir(t, dir);
   const stateDir = join(dir, "state");
 
   // The threshold is a constant, never a per-model formula (spec §Out of Scope).
-  assert.equal(LEAD_ROTATE_TOKENS, 128_000);
+  assert.equal(LEAD_ROTATE_TOKENS, 160_000);
 
   // A bare registration carries no rotation state — absent reads as "normal".
   writeProjectRegistration(stateDir, "demo-a1b2c3", { root: "/w/demo" });
@@ -919,7 +919,7 @@ test("readLeadContextTokens prefers the daemon's lastUsage and falls back to the
   assert.deepEqual(readLeadContextTokens(snapshotOf({})), { usedTokens: null, maxTokens: null, source: "daemon" });
 });
 
-test("crossing 128k mid-turn marks rotation_pending without interrupting the running Lead", async (t) => {
+test("crossing the 160k Lead mark mid-turn marks rotation_pending without interrupting the running Lead", async (t) => {
   const lead: FakeAgent = {
     id: "agent-lead-1",
     title: "Lead (paseo-factory)",
@@ -945,7 +945,7 @@ test("crossing 128k mid-turn marks rotation_pending without interrupting the run
   assert.deepEqual(readMailbox(stateDir, slug).map((evt) => evt.type), ["mail_queued"], "the mail stays queued");
 });
 
-test("a turn ending at >= 128k acks its batch, locks handing_over, holds arriving mail, and steers the extraction prompt — then handoff completion rotates the Lead end to end", async (t) => {
+test("a turn ending at >= 160k acks its batch, locks handing_over, holds arriving mail, and steers the extraction prompt — then handoff completion rotates the Lead end to end", async (t) => {
   const lead: FakeAgent = {
     id: "agent-lead-1",
     title: "Lead (paseo-factory)",
@@ -988,7 +988,7 @@ test("a turn ending at >= 128k acks its batch, locks handing_over, holds arrivin
     );
   });
 
-  // (1)+(3): the work turn ends — the Lead crossed 128k during it (the
+  // (1)+(3): the work turn ends — the Lead crossed the 160k mark during it (the
   // snapshot now reads 135k). The batch acks, the mailbox locks handing_over,
   // and the one bounded extraction prompt goes out.
   lead.lastUsage = { contextWindowUsedTokens: 135_000, contextWindowMaxTokens: 200_000 };

@@ -140,7 +140,7 @@ export interface SurfaceAgentSnapshot {
   updatedAt: string;
   cwd: string;
   /**
-   * The live usage slice the 128k Lead sensor reads (v0.0.20, ADR 0013 §5) —
+   * The live usage slice the Lead-mark (160k) sensor reads (v0.0.20, ADR 0013 §5) —
    * the SDK's `AgentUsage` subset, present when the daemon reports usage.
    * The token/cost fields are the usage extractor's last-resort fallback
    * (v0.0.87, ADR 0043 §2) when no native session store exists on disk yet.
@@ -863,10 +863,14 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     const role = row.role;
     const profile = profiles.profiles.find(p => p.id === profiles.activeProfileId);
     const candidates = [...(profile ? Object.values(profile.lanes).map(laneRef) : []), ...recentSeatModels(deps.stateDir, role)];
+    // The seat's exact current model+thinking is never a switch target (v0.8.2: the pill offered a no-op
+    // "Switch · <current>"); another thinking level of the same model still is.
+    const isCurrent = (lane: { provider: string; model: string; thinking?: string }) =>
+      lane.provider === agent.provider && lane.model === agent.model && (lane.thinking ?? "") === (agent.thinkingOptionId ?? "");
     const seen = new Set<string>();
     const quickSwitchModels = candidates.filter(lane => {
       const key = `${lane.provider}/${lane.model}`;
-      if (!lane.model || seen.has(key)) return false;
+      if (!lane.model || isCurrent(lane) || seen.has(key)) return false;
       seen.add(key); return true;
     }).slice(0, 6);
     return {

@@ -20,7 +20,7 @@ import { commitSeatMemoryOnRoot } from "./core/workspace.ts";
  *     permissions), `rotationState === "normal"`, nothing is in flight, and mail
  *     is queued: batch ALL queued items into one formatted prompt,
  *     `agents.ref(leadAgentId).send(...)`, then append `mail_delivered`;
- *   - `readLeadContextTokens` — the deterministic 128k context sensor (0 LLM
+ *   - `readLeadContextTokens` — the deterministic Lead-mark (160k) context sensor (0 LLM
  *     tokens, no 4th agent role): the live snapshot's `lastUsage` first, the
  *     Pi session `.jsonl` at `persistence.nativeHandle` as the fallback across
  *     daemon restarts;
@@ -204,7 +204,7 @@ export interface LeadMailRuntimeDeps {
   /**
    * The per-Project usage rollup runtime (v0.0.87, ADR 0043 §3): the outgoing
    * Lead's final session usage is flushed into `<projectStateDir>/usage.json`
-   * the moment the 128k handoff archives it — rotated sessions are never
+   * the moment the Lead-mark (160k) handoff archives it — rotated sessions are never
    * lost from the Project's totals.
    */
   usage?: UsageRuntime;
@@ -2134,7 +2134,7 @@ function renderHandoffExtractionPrompt(slug: string, reason: HandoffProgress["re
   return [
     `# Lead handoff extraction — project ${slug}`,
     "",
-    reason === "context-mark" ? "Your context window has crossed the 128,000-token rotation threshold, so this standing Lead seat is rotating: you are being retired, and a fresh successor Lead continues the project from your handoff." : `This standing Lead seat is handing off (${reason}). A fresh successor Lead continues the project from your handoff.`,
+    reason === "context-mark" ? `Your context window has crossed the ${LEAD_ROTATE_TOKENS.toLocaleString("en-US")}-token rotation threshold, so this standing Lead seat is rotating: you are being retired, and a fresh successor Lead continues the project from your handoff.` : `This standing Lead seat is handing off (${reason}). A fresh successor Lead continues the project from your handoff.`,
     "",
     "Put the entire Markdown handoff directly in your final assistant message, in one piece, without running shell commands or writing files to disk. The plugin server reads your reply and persists it automatically, capping it at 8 KB. Keep it a lean tactical baton, not an archive: never copy-paste active Contract.description blocks verbatim (they are already recorded in ledger.jsonl), and never write detailed post-mortems or test inventories of already-accepted waves. Use exactly these five sections:",
     "",

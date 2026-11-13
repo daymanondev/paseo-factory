@@ -8,7 +8,7 @@ import { CorrelationRegistry } from "../src/correlations.ts";
 import { createFactory } from "../plugin/server/core/factory.ts";
 import { ensureProjectRegistered, readProjectRegistration, writeProjectRegistration } from "../src/project.ts";
 import { readLeadMailbox } from "../src/mailbox.ts";
-import { createLeadMailRuntime } from "../plugin/server/lead-mailbox.ts";
+import { createLeadMailRuntime, LEAD_ROTATE_TOKENS } from "../plugin/server/lead-mailbox.ts";
 import { startSpool } from "../plugin/server/spool.ts";
 import { createFactoryRegistry } from "../plugin/server/projects.ts";
 
@@ -2063,7 +2063,7 @@ test("the MCP catalog is SLP-only: a stale `--mode scrum` argument still serves 
   } finally { rmSync(state, { recursive: true, force: true }); }
 });
 
-test("v0.0.93 quiet-point regression: Lead dispatches a Peer then crosses 128k â€” the rotation holds in rotation_pending (outgoing Lead live, Peer untouched, no successor) until the Peer's verdict pump begins the handoff and the Successor Lead receives Turn 1 immediately", async () => {
+test("v0.0.93 quiet-point regression: Lead dispatches a Peer then crosses 160k â€” the rotation holds in rotation_pending (outgoing Lead live, Peer untouched, no successor) until the Peer's verdict pump begins the handoff and the Successor Lead receives Turn 1 immediately", async () => {
   const homeDir = mkdtempSync(join(tmpdir(), "factory-bridge-handoff-"));
   const stateDir = join(homeDir, "plugin-state", "paseo-factory");
   const repoDir = makeGitRepo();
@@ -2093,7 +2093,7 @@ test("v0.0.93 quiet-point regression: Lead dispatches a Peer then crosses 128k â
     archivedAt: null,
     cwd: repoDir,
     labels: { seat: "lead", project: reg.slug },
-    lastUsage: { contextWindowUsedTokens: 128_500 },
+    lastUsage: { contextWindowUsedTokens: LEAD_ROTATE_TOKENS + 500 },
   };
   registerAgent(lead);
   const supervisor: FakeAgentShape = { id: "sup-kick-1", status: "idle", archivedAt: null, cwd: repoDir, labels: { seat: "supervisor", project: reg.slug } };
@@ -2294,7 +2294,7 @@ test("v0.0.93 quiet-point regression: Lead dispatches a Peer then crosses 128k â
     //    `interruptedPeerIds` wake is an accelerator only). The hold releases
     //    through the Task's own outcome, queued `from: "peer"` mail, or the
     //    Peer's death â€” so `rotation_pending` still never deadlocks.
-    successor.lastUsage = { contextWindowUsedTokens: 130_000 };
+    successor.lastUsage = { contextWindowUsedTokens: LEAD_ROTATE_TOKENS + 2_000 };
     const sucessorCorr = correlations.issue({ role: "lead", projectSlug: reg.slug, projectRoot: canonicalRoot, agentId: successor.id });
     const wave2Call = await runMcpSession({
       args: ["--correlation", sucessorCorr.correlationId, "--state-dir", stateDir, "--home", homeDir],

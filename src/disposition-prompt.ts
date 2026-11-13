@@ -1,7 +1,7 @@
 /**
  * Disposition-aware Peer prompt synthesis (v0.5.0 ticket 03, ADR 0054 §3):
  * the shared vocabulary the plugin-server prompt builders (the Spool re-poke
- * continuation and the 160k Peer handoff successor prompt) branch on. The
+ * continuation and the Peer-mark (200k) handoff successor prompt) branch on. The
  * plain-JS CLIs (`plugin/bin/driver.mjs`, `plugin/bin/bridge.mjs`) carry their
  * own mirrors — they cannot import this module (ADR 0004).
  *

@@ -1,12 +1,13 @@
 /** Project directory contributions: one header per root workspace and one actionable pill per live seat. */
 import type { PluginButton, PluginButtonContentProps, PluginClientContext } from "@getpaseo/plugin/client";
 import { useState } from "react";
-import { Platform, Text, View } from "react-native";
+import { Icon } from "@getpaseo/plugin/client/ui";
+import { Platform, Pressable, Text, View } from "react-native";
 import { handoffStart, lanesSet, seatsDirectory } from "../../shared/rpc.ts";
 import type { ProjectDirectoryEntry, SeatDirectoryEntry } from "../../shared/view.ts";
 import { headerPlans, pillPlans, reconcileDirectory } from "../kit/directory.ts";
 import type { RegistrationLike } from "../kit/directory.ts";
-import { SPACING, text } from "../kit/theme.ts";
+import { CONTROL_SM, RADIUS, SPACING, hoveredOf, text } from "../kit/theme.ts";
 import { Btn } from "../kit/pill.tsx";
 import type { SeatEditorRequests } from "./editor-request.ts";
 import { PANEL_ID } from "./entries.tsx";
@@ -29,18 +30,19 @@ function SeatDirectoryPopover({ theme, seat, close, otherModel, switchModel, han
     catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
     finally { setBusy(false); }
   };
-  const context =
-    seat.contextUsedTokens === null
-      ? "Context unknown"
-      : `${Math.round(seat.contextUsedTokens / 1000)}k / ${Math.round(seat.markTokens / 1000)}k`;
-  const rows: readonly [label: string, value: string][] = [
-    ["Role", seat.role],
-    ["Model", seat.model ?? seat.provider],
-    ["Thinking", seat.thinking ?? "—"],
-    ["Context", context],
-    ["Project", seat.slug],
-    ["Handoff", seat.handoffState ?? "None"],
-  ];
+  const title = seat.role === "peer" ? (seat.task ? `Peer · ${seat.task}` : "Peer") : seat.role === "lead" ? "Lead" : "Supervisor";
+  const meta = [seat.model ?? seat.lane.model, seat.thinking ?? seat.lane.thinking ?? null, seat.provider].filter((part): part is string => typeof part === "string" && part !== "").join(" · ");
+  const handoffFailed = seat.handoffState === "failed";
+  // "done" is a finished handoff — nothing to say; every other state is in flight.
+  const handoffLine = seat.handoffState === null || seat.handoffState === "done" ? null : handoffFailed ? "Handoff failed" : "Handing over…";
+  // The seat's own model is never an alternative; the original index stays the testID and the write's argument.
+  const isCurrent = (lane: { provider: string; model: string; thinking?: string | undefined }): boolean => {
+    const thinking = lane.thinking ?? "";
+    const live = lane.provider === seat.provider && lane.model === seat.model && thinking === (seat.thinking ?? "");
+    const configured = lane.provider === seat.lane.provider && lane.model === seat.lane.model && thinking === (seat.lane.thinking ?? "");
+    return live || configured;
+  };
+  const recent = switchModel ? seat.quickSwitchModels.slice(0, 6).map((lane, index) => ({ lane, index })).filter(({ lane }) => !isCurrent(lane)) : [];
   return (
     <View
       testID="factory-pill-popover"
@@ -51,22 +53,59 @@ function SeatDirectoryPopover({ theme, seat, close, otherModel, switchModel, han
         borderRadius: 8,
         padding: SPACING[3],
         gap: SPACING[2],
-        minWidth: 220,
+        minWidth: 260,
+        maxWidth: 340,
       }}
     >
-      {rows.map(([label, value]) => (
-        <View key={label} style={{ flexDirection: "row", justifyContent: "space-between", gap: SPACING[3] }}>
-          <Text style={{ ...text(theme, "label"), color: theme.colors.foregroundMuted }}>{label}</Text>
-          <Text style={{ ...text(theme, "label"), color: theme.colors.foreground, fontWeight: "600" }} numberOfLines={1}>
-            {value}
-          </Text>
+      <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: SPACING[2] }}>
+        <Text style={{ ...text(theme, "section"), flex: 1, minWidth: 0, fontWeight: "600" }} numberOfLines={1}>{title}</Text>
+        <Pressable
+          testID="factory-pill-close"
+          accessibilityRole="button"
+          accessibilityLabel="Close"
+          onPress={close}
+          style={(state) => ({ padding: SPACING[1], borderRadius: RADIUS.md, backgroundColor: state.pressed || hoveredOf(state) ? theme.colors.surface2 : "transparent" })}
+        >
+          <Icon name="X" size={14} color={theme.colors.foregroundMuted} />
+        </Pressable>
+      </View>
+      {meta !== "" ? <Text style={text(theme, "meta")} numberOfLines={1}>{meta}</Text> : null}
+      {handoffLine !== null ? <Text style={text(theme, "label", handoffFailed ? "statusWarning" : "foregroundMuted")}>{handoffLine}</Text> : null}
+      {recent.length > 0 ? (
+        <View style={{ gap: SPACING[1] }}>
+          <Text style={text(theme, "badge")}>RECENT MODELS</Text>
+          {recent.map(({ lane, index }) => {
+            const verb = seat.role === "peer" || lane.provider !== seat.lane.provider ? "Hand off" : "Switch";
+            return (
+              <Pressable
+                key={`${lane.provider}/${lane.model}/${lane.thinking ?? ""}`}
+                testID={`factory-pill-model-${index}`}
+                accessibilityRole="button"
+                disabled={busy}
+                onPress={() => { if (switchModel) void act(() => switchModel(index)); }}
+                style={(state) => ({
+                  minHeight: CONTROL_SM,
+                  paddingHorizontal: SPACING[2],
+                  paddingVertical: SPACING[1],
+                  borderRadius: RADIUS.md,
+                  backgroundColor: state.pressed || hoveredOf(state) ? theme.colors.surface2 : "transparent",
+                  flexDirection: "row",
+                  alignItems: "center",
+                  gap: SPACING[2],
+                  opacity: busy ? 0.45 : 1,
+                })}
+              >
+                <Text style={{ ...text(theme, "label"), flex: 1, minWidth: 0, color: theme.colors.foreground }} numberOfLines={1}>{lane.thinking ? `${lane.model} · ${lane.thinking}` : lane.model}</Text>
+                <Text style={text(theme, "meta")} numberOfLines={1}>{lane.provider}</Text>
+                <Text style={{ ...text(theme, "label"), fontWeight: "600", color: theme.colors.accent }}>{verb}</Text>
+              </Pressable>
+            );
+          })}
         </View>
-      ))}
-      {switchModel ? seat.quickSwitchModels.slice(0, 6).map((lane, index) => <Btn key={`${lane.provider}/${lane.model}`} theme={theme} small testID={`factory-pill-model-${index}`} label={`${seat.role === "peer" || lane.provider !== seat.lane.provider ? "Hand off" : "Switch"} · ${lane.model}${lane.thinking ? ` · ${lane.thinking}` : ""}`} disabled={busy} onPress={() => { void act(() => switchModel(index)); }} />) : null}
-      {otherModel ? <Btn theme={theme} small testID="factory-pill-other-model" label="Other model…" disabled={busy} onPress={() => { otherModel(); close(); }} /> : null}
-      {handOffNow ? <Btn theme={theme} small testID="factory-pill-hand-off-now" label="Hand off now" disabled={busy} onPress={() => { void act(handOffNow); }} /> : null}
+      ) : null}
+      {handOffNow ? <Btn theme={theme} small variant="secondary" testID="factory-pill-hand-off-now" label="Hand off to a fresh session" disabled={busy} onPress={() => { void act(handOffNow); }} /> : null}
+      {otherModel ? <Btn theme={theme} small variant="ghost" testID="factory-pill-other-model" label="Other model…" disabled={busy} onPress={() => { otherModel(); close(); }} /> : null}
       {error !== null ? <Text style={text(theme, "label", "statusDanger")}>{error}</Text> : null}
-      <Btn theme={theme} label="Close" onPress={close} small tone="foregroundMuted" />
     </View>
   );
 }

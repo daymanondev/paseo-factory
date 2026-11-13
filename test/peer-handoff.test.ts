@@ -8,6 +8,7 @@ import { CorrelationRegistry } from "../plugin/server/core/correlations.ts";
 import { projectStateDir, resolveProject, writeProjectRegistration } from "../plugin/server/core/project.ts";
 import { prepareTaskWorktree } from "../plugin/server/core/workspace.ts";
 import { createLeadMailRuntime } from "../plugin/server/lead-mailbox.ts";
+import { PEER_HANDOFF_TOKENS } from "../plugin/server/peer-handoff.ts";
 import { createSurfaceHandlers, type SurfaceAgentSnapshot, type SurfaceDaemonApi } from "../plugin/server/surface-rpc.ts";
 import { handleSpoolRequest, startSpool } from "../plugin/server/spool.ts";
 import { readLeadMailbox } from "../plugin/server/core/mailbox.ts";
@@ -34,7 +35,7 @@ function fixture(t: TestContext, handoffTimeoutMs?: number) {
   writeFileSync(join(cwd, "README.md"), "verified progress\n");
   const sha = gitCommitChanges(cwd, "completed slice");
   writeFileSync(join(cwd, "pending.txt"), "unfinished work\n");
-  const peer: SurfaceAgentSnapshot = { id: "initial-peer", provider: "pi/model", title: "Peer", status: "idle", model: null, labels: { seat: "agent", project: slug, task: "T-04" }, archivedAt: null, requiresAttention: false, attentionReason: null, updatedAt: "", cwd, lastUsage: { contextWindowUsedTokens: 165_000 } };
+  const peer: SurfaceAgentSnapshot = { id: "initial-peer", provider: "pi/model", title: "Peer", status: "idle", model: null, labels: { seat: "agent", project: slug, task: "T-04" }, archivedAt: null, requiresAttention: false, attentionReason: null, updatedAt: "", cwd, lastUsage: { contextWindowUsedTokens: PEER_HANDOFF_TOKENS + 5_000 } };
   const agents = [peer, ...["lead", "supervisor"].map(seat => ({ ...peer, id: seat, cwd: root, labels: { seat, project: slug }, lastUsage: null }))];
   writeProjectRegistration(stateDir, slug, { root, lead: "lead", supervisor: "supervisor" });
   const sent: { id: string; text: string }[] = [];
@@ -74,11 +75,11 @@ function fixture(t: TestContext, handoffTimeoutMs?: number) {
 
 const ended = (agentId: string, text = "") => ({ agentId, outcome: { kind: "completed" as const }, timeline: text ? [{ type: "assistant_message", text }] : [] });
 
-test("160k Peer turn completion hands existing committed and uncommitted work to one fresh Peer", async t => {
+test("200k Peer turn completion hands existing committed and uncommitted work to one fresh Peer", async t => {
   const f = fixture(t);
   await f.runtime.onLeadTurnEnded(ended(f.peer.id));
   assert.equal(f.sent.length, 1);
-  assert.match(f.sent[0]!.text, /160,000/);
+  assert.match(f.sent[0]!.text, /200,000/);
   assert.match(f.sent[0]!.text, /Completed & Verified Slice/);
   assert.equal(f.created.length, 0);
   writeFileSync(f.handoff, "# Completed & Verified Slice\nThe slice is implemented; fix the targeted check.");
@@ -107,7 +108,7 @@ test("the successor's second crossing survives restart and escalates to the Lead
   t.after(() => restarted.stop());
   const successor = f.agents.find(agent => agent.id === "successor-1")!;
   successor.status = "idle";
-  successor.lastUsage = { contextWindowUsedTokens: 160_000 };
+  successor.lastUsage = { contextWindowUsedTokens: PEER_HANDOFF_TOKENS };
   await restarted.onLeadTurnEnded(ended(successor.id));
   await restarted.onLeadTurnEnded(ended(successor.id, "Final partial work preserved."));
   assert.equal(f.created.length, 1, "only one automatic successor is allowed");
@@ -135,7 +136,7 @@ test("the successor's second crossing survives restart and escalates to the Lead
   assert.equal(f.created.length, 2, f.logs.join("\n"));
 });
 
-test("a read-only Contract's 160k successor is fenced: the worktree stays clean at HEAD, no commit, claim without --sha with the disposition's evidence (ticket 03, ADR 0054 §3)", async t => {
+test("a read-only Contract's 200k successor is fenced: the worktree stays clean at HEAD, no commit, claim without --sha with the disposition's evidence (ticket 03, ADR 0054 §3)", async t => {
   const f = fixture(t);
   // The epoch moves onto a read-only disposition before the crossing — the
   // successor continues the same Task under the reviewer's fence.
@@ -155,12 +156,12 @@ test("a read-only Contract's 160k successor is fenced: the worktree stays clean 
 });
 
 for (const sensor of ["live", "native transcript"] as const) {
-  test(`the periodic runtime sweep interrupts a single running turn at 160k using ${sensor}`, async t => {
+  test(`the periodic runtime sweep interrupts a single running turn at the 200k mark using ${sensor}`, async t => {
     const f = fixture(t);
     f.peer.status = "running";
     if (sensor === "native transcript") {
       const nativeHandle = join(f.dir, "session.jsonl");
-      writeFileSync(nativeHandle, JSON.stringify({ message: { role: "assistant", usage: { input: 20_000, output: 5_000, cacheRead: 140_000 } } }) + "\n");
+      writeFileSync(nativeHandle, JSON.stringify({ message: { role: "assistant", usage: { input: 20_000, output: 5_000, cacheRead: 180_000 } } }) + "\n");
       f.peer.persistence = { nativeHandle };
       f.peer.lastUsage = { contextWindowUsedTokens: 0 };
     }
@@ -225,7 +226,7 @@ test("a completed Gate and an in-flight Gate both protect the Peer from rotation
 test("native transcript usage also triggers handoff on turn completion, with bounded assistant-text fallback", async t => {
   const f = fixture(t);
   const nativeHandle = join(f.dir, "session.jsonl");
-  writeFileSync(nativeHandle, JSON.stringify({ message: { role: "assistant", usage: { totalTokens: 160_000 } } }));
+  writeFileSync(nativeHandle, JSON.stringify({ message: { role: "assistant", usage: { totalTokens: PEER_HANDOFF_TOKENS } } }));
   f.peer.lastUsage = null;
   f.peer.persistence = { nativeHandle };
   await f.runtime.onLeadTurnEnded(ended(f.peer.id));
@@ -503,7 +504,7 @@ test("Owner Peer handoff uses its chosen lane, preserves Task continuity, and le
   assert.equal(readFileSync(join(f.cwd, "pending.txt"), "utf8"), "unfinished work\n");
   assert.ok(f.sent.some(message => message.id === "lead" && /T-04/.test(message.text) && /pi\/model/.test(message.text) && /codex\/chosen/.test(message.text) && /extracted/.test(message.text)), "Lead receives the Owner replacement notice");
   const successor = f.agents.find(agent => agent.id === "successor-1")!;
-  successor.lastUsage = { contextWindowUsedTokens: 165_000 };
+  successor.lastUsage = { contextWindowUsedTokens: PEER_HANDOFF_TOKENS + 5_000 };
   await f.runtime.onLeadTurnEnded(ended(successor.id));
   await f.runtime.onLeadTurnEnded(ended(successor.id, "Automatic continuation."));
   assert.equal(f.created.length, 2, "Owner replacement did not consume automatic budget");
@@ -658,7 +659,7 @@ test("a smaller Peer window clips the handoff mark to eighty percent", async t =
   assert.equal(f.sent.length, 0, "below the clipped mark the Peer continues");
   f.peer.lastUsage.contextWindowUsedTokens = 102_400;
   await f.runtime.onLeadTurnEnded(ended(f.peer.id));
-  assert.equal(f.sent.length, 1, "the clipped mark starts extraction before 160k");
+  assert.equal(f.sent.length, 1, "the clipped mark starts extraction before the 200k mark");
   assert.match(f.sent[0]!.text, /102,400/);
   const snap = await f.surface.snapshot({ projectRoot: f.root });
   assert.ok(snap.ok);

@@ -295,15 +295,18 @@ test("model picker hides Factory's role providers, warns on a provider whose mod
       await act(() => (container.querySelector('[data-testid="factory-seat-chip-lead"]') as HTMLElement).click());
       const editor = container.querySelector('[data-testid="factory-chip-editor"]')!;
       const buttons = () => [...editor.querySelectorAll("button")].map((b) => b.textContent ?? "");
+      await act(() => (editor.querySelector('[data-testid="lane-picker-provider-select"]') as HTMLElement).click());
       assert.ok(!buttons().some((label) => label.startsWith("factory-supervisor")), "role providers are not lane targets");
+      assert.equal(editor.querySelector('[data-testid="lane-picker-provider-factory-supervisor"]'), null);
+      await act(() => (editor.querySelector('[data-testid="lane-picker-provider-select"]') as HTMLElement).click());
       assert.equal(editor.querySelector('[data-testid="lane-picker-unverified-provider"]'), null);
       assert.equal(editor.querySelector('[data-testid="lane-picker-custom-toggle"]'), null, "a listed model keeps the custom ID behind ⋯");
       await act(() => (editor.querySelector('[data-testid="lane-picker-more-toggle"]') as HTMLElement).click());
       assert.ok(editor.querySelector('[data-testid="lane-picker-custom-toggle"]'), "⋯ holds the custom model ID toggle");
       assert.doesNotMatch(editor.textContent!, /Custom model ID(?!…)/, "the field itself is closed while a list covers it");
       assert.doesNotMatch(editor.textContent!, /thinking: /, "model rows carry no repeated thinking pill");
-      const antigravity = [...editor.querySelectorAll("button")].find((b) => b.textContent?.startsWith("antigravity"))!;
-      await act(() => antigravity.click());
+      await act(() => (editor.querySelector('[data-testid="lane-picker-provider-select"]') as HTMLElement).click());
+      await act(() => (editor.querySelector('[data-testid="lane-picker-provider-antigravity"]') as HTMLElement).click());
       assert.ok(editor.querySelector('[data-testid="lane-picker-unverified-provider"]'), "an unlisted provider is flagged before the handoff");
       assert.equal(editor.querySelector('[data-testid="lane-picker-custom-toggle"]'), null, "no list means the custom ID field shows directly");
     } finally { await act(() => root.unmount()); }
@@ -352,8 +355,8 @@ test("W11: the tab saves standing models in Project scope, Peer choices through 
         await click(`factory-seat-chip-${sample.seat}`);
         const editor = container.querySelector('[data-testid="factory-chip-editor"]')!;
         if (sample.provider === "claude") {
-          const provider = [...editor.querySelectorAll("button")].find(b => b.textContent?.startsWith("claude"))!;
-          await act(() => provider.click());
+          await act(() => (editor.querySelector('[data-testid="lane-picker-provider-select"]') as HTMLElement).click());
+          await act(() => (editor.querySelector('[data-testid="lane-picker-provider-claude"]') as HTMLElement).click());
         }
         if (sample.modelLabel) {
           const model = [...editor.querySelectorAll("button")].find(b => b.textContent?.startsWith(sample.modelLabel!))!;
@@ -372,8 +375,8 @@ test("W11: the tab saves standing models in Project scope, Peer choices through 
       await click("factory-chip-editor-primary");
       assert.ok(container.querySelector('[data-testid="factory-chip-editor"]'), "a refused rotate keeps the modal open for retry");
       // A refused write (a model change) stays open too.
-      const claude = [...container.querySelectorAll('[data-testid="factory-chip-editor"] button')].find(b => b.textContent?.startsWith("claude"))!;
-      await act(() => (claude as HTMLElement).click());
+      await click("lane-picker-provider-select");
+      await click("lane-picker-provider-claude");
       await click("factory-chip-editor-primary");
       assert.ok(container.querySelector('[data-testid="factory-chip-editor"]'), "a refused save keeps the selection open for retry");
       assert.match(errors.at(-1)!, /Model unavailable/);
@@ -710,8 +713,8 @@ test("W13: the pill bounds quick choices, reports a refused write and never writ
       try {
         await act(() => root.render(createElement(buttons.get("lead").behavior.Content, { theme: testTheme, layout: { platform: "web" }, close() { assert.fail("a refused write stays open"); } })));
         assert.equal(container.querySelectorAll('[data-testid^="factory-pill-model-"]').length, 6);
-        assert.match(container.textContent!, /Context unknown/);
-        assert.match(container.textContent!, /scheduled/);
+        assert.doesNotMatch(container.textContent!, /Context|Project|Role|Thinking/, "the popover carries no status table");
+        assert.match(container.textContent!, /Handing over…/, "an in-flight handoff gets one line");
         await act(() => (container.querySelector('[data-testid="factory-pill-model-0"]') as HTMLElement).click());
         assert.match(container.textContent!, /Provider unavailable/);
         assert.equal((container.querySelector('[data-testid="factory-pill-model-0"]') as HTMLButtonElement).disabled, false, "a refused write can be retried");
@@ -889,13 +892,15 @@ test("05: a provider whose model list is empty shows the empty state, the warnin
       await act(() => (container.querySelector('[data-testid="factory-seat-chip-lead"]') as HTMLElement).click());
       const editor = container.querySelector('[data-testid="factory-chip-editor"]')!;
       for (const provider of ["antigravity", "gemini"]) {
-        await act(() => ([...editor.querySelectorAll("button")].find((b) => b.textContent?.startsWith(provider)) as HTMLElement).click());
+        await act(() => (editor.querySelector('[data-testid="lane-picker-provider-select"]') as HTMLElement).click());
+        await act(() => (editor.querySelector(`[data-testid="lane-picker-provider-${provider}"]`) as HTMLElement).click());
         assert.match(editor.textContent!, new RegExp(`Paseo returned no models for ${provider}\\.`));
         assert.ok(editor.querySelector('[data-testid="lane-picker-unverified-provider"]'), "the unreachable-provider warning shows");
         assert.equal(editor.querySelector('[data-testid="lane-picker-custom-toggle"]'), null);
         assert.match(editor.textContent!, /Custom model ID/, "the custom field is shown directly");
       }
-      await act(() => ([...editor.querySelectorAll("button")].find((b) => b.textContent?.startsWith("codex")) as HTMLElement).click());
+      await act(() => (editor.querySelector('[data-testid="lane-picker-provider-select"]') as HTMLElement).click());
+      await act(() => (editor.querySelector('[data-testid="lane-picker-provider-codex"]') as HTMLElement).click());
       assert.equal(editor.textContent!.includes("Paseo returned no models"), false, "a provider with models has no empty state");
     } finally { await act(() => root.unmount()); }
   });
@@ -927,7 +932,8 @@ test("08: All searches every provider; picking a row from another provider switc
       await type("opus");
       assert.equal(button("Opus"), undefined, "a search inside one provider filters inside it");
       assert.match(editor.textContent!, /No models match "opus"/);
-      await act(() => button("All")!.click());
+      await act(() => byId("lane-picker-provider-select")!.click());
+      await act(() => byId("lane-picker-provider-all")!.click());
       assert.ok(button("Opus"), "searching under All finds a model from another provider");
       assert.equal(button("GPT live"), undefined, "the search still filters the rest out");
       await type("");
@@ -970,4 +976,114 @@ test("08: while providers load the picker shows a loading block, keeps the curre
       assert.equal(container.querySelector('[data-testid="lane-picker-loading"]'), null);
     } finally { await act(() => root.unmount()); }
   });
+});
+
+test("09: the provider dropdown lists every provider with its count (8 of them), picking one filters and closes, All shows the total", async () => {
+  const { ProjectPanel } = await load("plugin/client/factory/project-panel.tsx");
+  const { testTheme } = await import("./client-markup.ts");
+  const { createElement } = await import("react");
+  const extra = ["gemini", "pi", "antigravity", "copilot", "opencode", "amp"].map((provider, i) => ({ provider, available: true, models: Array.from({ length: i }, (_, n) => ({ id: `${provider}-m${n}`, label: `${provider} model ${n}`, thinkingOptions: [] })) }));
+  const modelView = { ...modelPickerFixture, providers: [...modelPickerFixture.providers, ...extra] };
+  await mountUnderNativeWindow(async (createRoot, container, act) => {
+    const root = createRoot(container);
+    try {
+      await act(() => root.render(createElement(ProjectPanel, { theme: testTheme, panel: modelPanelFixture(), modelView, mobile: false, now: Date.now(), daemonError: null, actions: { ...modelPanelActions, saveSeatModel() {} } })));
+      await act(() => (container.querySelector('[data-testid="factory-seat-chip-lead"]') as HTMLElement).click());
+      const editor = container.querySelector('[data-testid="factory-chip-editor"]')!;
+      const byId = (id: string) => editor.querySelector(`[data-testid="${id}"]`) as HTMLElement | null;
+      const click = async (id: string) => { const el = byId(id); assert.ok(el, id); await act(() => el!.click()); };
+      assert.equal(editor.querySelector('[data-testid="lane-picker-provider-list"]'), null, "closed by default");
+      assert.match(byId("lane-picker-provider-select")!.textContent!, /^codex · 2/, "the trigger names the current provider and its count");
+      await click("lane-picker-provider-select");
+      assert.ok(byId("lane-picker-provider-list"), "the list opens in place");
+      const total = modelView.providers.reduce((sum, p) => sum + (p.models?.length ?? 0), 0);
+      assert.equal(total, 2 + 1 + 0 + 1 + 2 + 3 + 4 + 5);
+      assert.match(byId("lane-picker-provider-all")!.textContent!, new RegExp(`^All providers${total} models$`));
+      for (const entry of modelView.providers) {
+        const row = byId(`lane-picker-provider-${entry.provider}`);
+        assert.ok(row, `${entry.provider} is listed`);
+        assert.ok(row!.textContent!.startsWith(entry.provider), "row text starts with the provider name");
+        const n = entry.models!.length;
+        assert.ok(row!.textContent!.includes(`${n} ${n === 1 ? "model" : "models"}`), `${entry.provider} shows ${n}`);
+      }
+      assert.match(byId("lane-picker-provider-pi")!.textContent!, /1 model$/, "a single model reads singular");
+      assert.match(byId("lane-picker-provider-gemini")!.textContent!, /0 models$/);
+      assert.equal(editor.textContent!.includes("GPT live"), false, "the model list is replaced while the dropdown is open");
+      await click("lane-picker-provider-claude");
+      assert.equal(byId("lane-picker-provider-list"), null, "picking a provider closes the dropdown");
+      assert.match(byId("lane-picker-provider-select")!.textContent!, /^claude · 1/);
+      assert.ok([...editor.querySelectorAll("button")].some((b) => b.textContent?.startsWith("Opus")), "the list is filtered to the provider");
+      assert.equal([...editor.querySelectorAll("button")].some((b) => b.textContent?.startsWith("GPT live")), false);
+      assert.equal(byId("factory-chip-editor-primary")?.textContent, "Hand off to claude", "picking a provider moves the selection onto it");
+      await click("lane-picker-provider-select");
+      await click("lane-picker-provider-select");
+      assert.equal(byId("lane-picker-provider-list"), null, "tapping the trigger again closes it");
+      await click("lane-picker-provider-select");
+      await click("lane-picker-provider-all");
+      assert.equal(byId("lane-picker-provider-list"), null);
+      assert.match(byId("lane-picker-provider-select")!.textContent!, new RegExp(`^All providers · ${total}`));
+      assert.ok([...editor.querySelectorAll("button")].some((b) => b.textContent?.startsWith("GPT live")), "All lists every provider's models");
+      // Typing in search closes an open dropdown.
+      await click("lane-picker-provider-select");
+      const search = editor.querySelector("input") as HTMLInputElement;
+      const setter = Object.getOwnPropertyDescriptor(search.ownerDocument.defaultView!.HTMLInputElement.prototype, "value")!.set!;
+      await act(() => { setter.call(search, "gpt"); search.dispatchEvent(new search.ownerDocument.defaultView!.Event("input", { bubbles: true })); });
+      assert.equal(byId("lane-picker-provider-list"), null, "typing closes the dropdown");
+    } finally { await act(() => root.unmount()); }
+  });
+});
+
+test("10: the pill popover drops the status table, hides the current model, labels provider and verb, and closes from the X", async () => {
+  const { startSeatDirectory } = await load("plugin/client/factory/directory.tsx", "web");
+  const { testTheme } = await import("./client-markup.ts");
+  const { createElement } = await import("react");
+  const buttons = new Map<string, any>();
+  const calls: any[] = [];
+  const base = { slug: "app", workspaceId: "root", provider: "github-copilot", model: "gpt-6.1-sol", thinking: "high", lane: { provider: "github-copilot", model: "gpt-6.1-sol", thinking: "high", scope: "project" }, allowedActions: ["switch-model", "hand-off-now"], contextUsedTokens: 121000, markTokens: 128000, handoffState: null, task: null,
+    quickSwitchModels: [{ provider: "github-copilot", model: "gpt-6.1-sol", thinking: "high" }, { provider: "antigravity", model: "gemini-4-argon-high", thinking: "high" }, { provider: "github-copilot", model: "gpt-6.1-sol", thinking: "medium" }] };
+  const seats = [{ ...base, role: "supervisor", agentId: "sup" }, { ...base, role: "peer", task: "task-9", agentId: "peer", workspaceId: "wt" }, { ...base, role: "lead", agentId: "lead", handoffState: "failed", allowedActions: [], quickSwitchModels: [] }];
+  const stop = startSeatDirectory({ rpc: async (contract: any, input: any) => { if (contract.name === "factory.seats.directory") return { ok: true, daemonError: null, projects: [{ slug: "app", root: "/project", workspaceId: "root", needsYouCount: 0 }], seats }; calls.push({ method: contract.name, input }); return { ok: true }; }, addHeaderButton: () => ({ update() {}, remove() {} }), addComposerPill: ({ agentId, button }: any) => { buttons.set(agentId, button); return { update() {}, remove() {} }; } });
+  try {
+    await new Promise<void>(resolve => setImmediate(resolve));
+    await mountUnderNativeWindow(async (createRoot, container, act) => {
+      const root = createRoot(container);
+      let closed = 0;
+      const byId = (id: string) => container.querySelector(`[data-testid="${id}"]`) as HTMLElement | null;
+      const render = (agent: string) => act(() => root.render(createElement(buttons.get(agent).behavior.Content, { theme: testTheme, layout: { platform: "web" }, close() { closed++; } })));
+      try {
+        await render("sup");
+        const popover = byId("factory-pill-popover")!;
+        assert.match(popover.textContent!, /^Supervisor/, "the title is the capitalised role");
+        assert.ok(popover.textContent!.includes("gpt-6.1-sol · high · github-copilot"), "one muted meta line: model · thinking · provider");
+        assert.doesNotMatch(popover.textContent!, /Context|121k|Project|app\b|Handoff|Role|Close/, "no Role/Model/Thinking/Context/Project/Handoff rows and no Close button");
+        assert.ok(popover.textContent!.includes("RECENT MODELS"));
+        // The current model (index 0) is never offered; the original indexes survive for the rest.
+        assert.equal(byId("factory-pill-model-0"), null, "the current model is not offered");
+        const cross = byId("factory-pill-model-1")!;
+        assert.match(cross.textContent!, /gemini-4-argon-high · high/);
+        assert.match(cross.textContent!, /antigravity/, "the provider of a quick-switch model is visible");
+        assert.match(cross.textContent!, /Hand off$/, "a cross-provider row says Hand off");
+        const same = byId("factory-pill-model-2")!;
+        assert.match(same.textContent!, /gpt-6\.1-sol · medium/);
+        assert.match(same.textContent!, /github-copilot/);
+        assert.match(same.textContent!, /Switch$/, "the same provider switches in place");
+        assert.equal(byId("factory-pill-hand-off-now")!.textContent, "Hand off to a fresh session");
+        assert.equal(byId("factory-pill-other-model")!.textContent, "Other model…");
+        await act(() => same.click());
+        assert.deepEqual(calls.at(-1), { method: "factory.lanes.set", input: { projectRoot: "/project", lane: "supervisor", value: "github-copilot/gpt-6.1-sol:medium" } });
+        assert.equal(closed, 1, "close on success");
+        await act(() => byId("factory-pill-close")!.click());
+        assert.equal(closed, 2, "the X calls close");
+
+        await render("peer");
+        assert.match(byId("factory-pill-popover")!.textContent!, /^Peer · task-9/);
+        assert.match(byId("factory-pill-model-2")!.textContent!, /Hand off$/, "a Peer always hands off");
+
+        await render("lead");
+        assert.match(byId("factory-pill-popover")!.textContent!, /Handoff failed/);
+        assert.equal(container.querySelector('[data-testid^="factory-pill-model-"]'), null);
+        assert.doesNotMatch(byId("factory-pill-popover")!.textContent!, /RECENT MODELS/, "no section label without rows");
+      } finally { await act(() => root.unmount()); }
+    });
+  } finally { stop(); }
 });

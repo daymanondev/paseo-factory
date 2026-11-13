@@ -53,7 +53,7 @@
  * `node:sqlite` loaded through a synchronous builtin `require` — a runtime
  * without it (an Electron build predating it) degrades to the fallback,
  * never crashes the plugin. Every reader is synchronous on purpose: the
- * 128k/160k context sensors are sync contracts.
+ * Lead (160k) and Peer (200k) context sensors are sync contracts.
  */
 import { closeSync, existsSync, openSync, readdirSync, readSync, statSync } from "node:fs";
 import type { Dirent } from "node:fs";
@@ -415,7 +415,7 @@ let sqliteDatabaseSync: (new (path: string, options?: { readOnly?: boolean }) =>
 
 /**
  * Resolves `node:sqlite`'s `DatabaseSync` once, synchronously (a builtin
- * `require` — the 128k/160k sensors are sync contracts) — `null` when this
+ * `require` — the Lead (160k) and Peer (200k) sensors are sync contracts) — `null` when this
  * runtime lacks it (degrade, never crash).
  *
  * Uses a synthetic CJS path (`join(process.cwd(), "factory-sqlite.cjs")`)
@@ -1064,7 +1064,7 @@ const sharedExtractors = new Map<string, UsageExtractor>();
 
 /**
  * The process-wide extractor for one `(userHome, stateDir)` pair — the
- * sensor callers (the 128k/160k context rotation) need the SAME cursor map
+ * sensor callers (the Lead 160k / Peer 200k context rotation) need the SAME cursor map
  * across sweeps or every read would pay the cold-start cost again.
  */
 export function sharedUsageExtractor(paths?: UsagePaths): UsageExtractor {
@@ -1080,7 +1080,7 @@ export function sharedUsageExtractor(paths?: UsagePaths): UsageExtractor {
 /**
  * The multi-provider context-window sensor (ADR 0043 §3): the agent's
  * normalized `latestContextWindowTokens`, or null when no store answered —
- * the value both the `128,000` Lead handoff and the `160,000` Peer handoff
+ * the value both the `160,000` Lead handoff and the `200,000` Peer handoff
  * fall back to whenever the daemon's volatile `lastUsage` is absent.
  */
 export function readNativeContextWindowTokens(agent: UsageAgentSource, paths?: UsagePaths): number | null {

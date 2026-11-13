@@ -13,7 +13,7 @@ import type { FactoryRegistry } from "../plugin/server/projects.ts";
 import { createSurfaceHandlers } from "../plugin/server/surface-rpc.ts";
 import type { SurfaceDaemonApi } from "../plugin/server/surface-rpc.ts";
 import { handleSpoolRequest, parseSpoolRequest, spoolRootFor, startSpool } from "../plugin/server/spool.ts";
-import { createLeadMailRuntime, HANDOFF_EXTRACTION_MAX_SENDS, HANDOFF_EXTRACTION_TIMEOUT_MS, isBlockedByAttention, LEAD_HANDOFF_MAX_BYTES } from "../plugin/server/lead-mailbox.ts";
+import { createLeadMailRuntime, HANDOFF_EXTRACTION_MAX_SENDS, HANDOFF_EXTRACTION_TIMEOUT_MS, isBlockedByAttention, LEAD_HANDOFF_MAX_BYTES, LEAD_ROTATE_TOKENS } from "../plugin/server/lead-mailbox.ts";
 import { loadLanes, saveLanes } from "../plugin/server/core/lanes.ts";
 import { readHandoffProgress } from "../plugin/server/handoff-progress.ts";
 import { parseHandoffFile } from "../plugin/server/handoff-text.ts";
@@ -1044,7 +1044,7 @@ test("completeHandoff delivers a unified single-turn kickoff (Seat kickoff packe
   const seated = await surface.leadEnsure({ projectRoot });
   assert.ok(seated.ok && seated.agentId === "agent-lead-1");
 
-  // Begin handoff on turn end at >= 128k
+  // Begin handoff on turn end at >= the Lead mark (LEAD_ROTATE_TOKENS)
   await leadMail.onLeadTurnEnded({ agentId: "agent-lead-1", outcome: { kind: "completed" }, timeline: [] });
   assert.equal(readProjectRegistration(stateDir, slug)?.rotationState, "handing_over");
 
@@ -1233,7 +1233,7 @@ test("Fuse 1: beginHandoff immediately completes handoff when extraction prompt 
     assert.match(supSends[0]!.text, /extraction-send-failed/);
   }
 
-  // Case B: outgoing Lead is in status === "error" at >= 128k turn end
+  // Case B: outgoing Lead is in status === "error" at >= the Lead mark (LEAD_ROTATE_TOKENS) turn end
   {
     const lead: FakeAgent = {
       id: "agent-lead-err",
@@ -1891,7 +1891,7 @@ test("pause-aware fuse (pump path): an absent or error Lead trips immediately ev
 });
 
 test("boot after a restart re-sends the extraction to the alive Lead instead of completing from a stale prior (v0.2.2, ADR 0050 Decision 3)", async (t) => {
-  const lead: FakeAgent = { id: "agent-lead-boot-alive", status: "idle", lastUsage: { contextWindowUsedTokens: 128_000 } };
+  const lead: FakeAgent = { id: "agent-lead-boot-alive", status: "idle", lastUsage: { contextWindowUsedTokens: LEAD_ROTATE_TOKENS } };
   const f = makeSpooledRuntime(t, [lead]);
   lead.labels = { seat: "lead", project: f.slug };
   lead.cwd = f.projectRoot;
@@ -1995,7 +1995,7 @@ test("Paseo 0.13.0 compatibility: completeHandoff refetches tail timeline via da
 
 
 test("quiet-point handoff binds the roster to the current Peer and combines its verdict with the successor kickoff (v0.0.93)", async (t) => {
-  const lead: FakeAgent = { id: "agent-lead-1", status: "idle", lastUsage: { contextWindowUsedTokens: 135_000 } };
+  const lead: FakeAgent = { id: "agent-lead-1", status: "idle", lastUsage: { contextWindowUsedTokens: LEAD_ROTATE_TOKENS + 5_000 } };
   const { stateDir, slug, projectRoot, factory, surface, leadMail, fake } = makeSpooledRuntime(t, [lead]);
   lead.labels = { seat: "lead", project: slug };
   lead.cwd = projectRoot;
@@ -2026,7 +2026,7 @@ test("quiet-point handoff binds the roster to the current Peer and combines its 
 });
 
 test("a pending rotation pumps into a handoff after its Peer stops even without verdict mail, and never double-delivers the kickoff", async (t) => {
-  const lead: FakeAgent = { id: "lead", status: "idle", lastUsage: { contextWindowUsedTokens: 135_000 } };
+  const lead: FakeAgent = { id: "lead", status: "idle", lastUsage: { contextWindowUsedTokens: LEAD_ROTATE_TOKENS + 5_000 } };
   const { stateDir, slug, projectRoot, factory, surface, leadMail, fake } = makeSpooledRuntime(t, [lead]);
   lead.labels = { seat: "lead", project: slug };
   lead.cwd = projectRoot;
@@ -2049,7 +2049,7 @@ test("a pending rotation pumps into a handoff after its Peer stops even without 
 });
 
 test("a paused-then-idle Peer on an open spawn round holds rotation_pending across a bare pump — a live-not-error Peer is not a quiet point (v0.2.2, ADR 0050 §1)", async (t) => {
-  const lead: FakeAgent = { id: "lead-paused-peer", status: "idle", lastUsage: { contextWindowUsedTokens: 132_000 } };
+  const lead: FakeAgent = { id: "lead-paused-peer", status: "idle", lastUsage: { contextWindowUsedTokens: LEAD_ROTATE_TOKENS + 5_000 } };
   const { stateDir, slug, projectRoot, factory, surface, leadMail, fake } = makeSpooledRuntime(t, [lead]);
   lead.labels = { seat: "lead", project: slug };
   lead.cwd = projectRoot;
@@ -2081,7 +2081,7 @@ test("a paused-then-idle Peer on an open spawn round holds rotation_pending acro
 });
 
 test("the paused-Peer hold survives a runtime restart — a fresh runtime over the same stateDir with empty in-process markers still holds (v0.2.2, ADR 0050 §1)", async (t) => {
-  const lead: FakeAgent = { id: "lead-paused-restart", status: "idle", lastUsage: { contextWindowUsedTokens: 132_000 } };
+  const lead: FakeAgent = { id: "lead-paused-restart", status: "idle", lastUsage: { contextWindowUsedTokens: LEAD_ROTATE_TOKENS + 5_000 } };
   const { stateDir, slug, projectRoot, factory, surface, leadMail, fake } = makeSpooledRuntime(t, [lead]);
   lead.labels = { seat: "lead", project: slug };
   lead.cwd = projectRoot;
@@ -2119,7 +2119,7 @@ test("the paused-Peer hold survives a runtime restart — a fresh runtime over t
 });
 
 test("a queued from-peer verdict mail releases the paused-Peer hold — the wave is back in the Lead's court (v0.2.2, ADR 0050 §1)", async (t) => {
-  const lead: FakeAgent = { id: "lead-verdict-release", status: "idle", lastUsage: { contextWindowUsedTokens: 132_000 } };
+  const lead: FakeAgent = { id: "lead-verdict-release", status: "idle", lastUsage: { contextWindowUsedTokens: LEAD_ROTATE_TOKENS + 5_000 } };
   const { stateDir, slug, projectRoot, factory, surface, leadMail, fake } = makeSpooledRuntime(t, [lead]);
   lead.labels = { seat: "lead", project: slug };
   lead.cwd = projectRoot;
@@ -2147,7 +2147,7 @@ test("a queued from-peer verdict mail releases the paused-Peer hold — the wave
 
 for (const death of ["error", "absent", "archived"] as const) {
   test(`an ${death} Peer on an open round never holds rotation_pending — the anti-deadlock law stands (v0.2.2, ADR 0050 §1)`, async (t) => {
-    const lead: FakeAgent = { id: `lead-dead-${death}`, status: "idle", lastUsage: { contextWindowUsedTokens: 132_000 } };
+    const lead: FakeAgent = { id: `lead-dead-${death}`, status: "idle", lastUsage: { contextWindowUsedTokens: LEAD_ROTATE_TOKENS + 5_000 } };
     const { stateDir, slug, projectRoot, factory, surface, leadMail, fake } = makeSpooledRuntime(t, [lead]);
     lead.labels = { seat: "lead", project: slug };
     lead.cwd = projectRoot;
@@ -2194,7 +2194,7 @@ test("pumping an empty project without a held handoff does not create a Lead", a
 });
 
 test("quiet-point Lead rotation (ADR 0031, v0.0.93): rotation_pending holds the outgoing Lead live while a Peer runs, notifyPeer's pump begins the handoff once the wave settles, a closed Supervisor wakes on report, and pendingHandoff recovers durably from lead-handoff.md across restarts", async (t) => {
-  const lead: FakeAgent = { id: "agent-lead-1", status: "idle", lastUsage: { contextWindowUsedTokens: 135_000 } };
+  const lead: FakeAgent = { id: "agent-lead-1", status: "idle", lastUsage: { contextWindowUsedTokens: LEAD_ROTATE_TOKENS + 5_000 } };
   const supervisor: FakeAgent = { id: "agent-sup-1", status: "idle" };
   const { stateDir, slug, projectRoot, factory, surface, leadMail, fake } = makeSpooledRuntime(t, [lead, supervisor]);
   lead.labels = { seat: "lead", project: slug };
@@ -2563,7 +2563,7 @@ test("v0.6.1 (ADR 0057 §4): a Project reset's and delete's own archives never t
 
 test("v0.6.1 (ADR 0057 §4): the released Supervisor archives when the Lead handoff retires the parented Lead — end to end through the rotation machine", async (t) => {
   const supervisor: FakeAgent = { id: "agent-sup-rel", status: "idle" };
-  const lead: FakeAgent = { id: "agent-lead-rel", status: "idle", lastUsage: { contextWindowUsedTokens: 135_000 }, parentAgentId: "agent-sup-rel" };
+  const lead: FakeAgent = { id: "agent-lead-rel", status: "idle", lastUsage: { contextWindowUsedTokens: LEAD_ROTATE_TOKENS + 5_000 }, parentAgentId: "agent-sup-rel" };
   const { stateDir, slug, projectRoot, surface, leadMail, fake } = makeSpooledRuntime(t, [supervisor, lead]);
   supervisor.labels = { seat: "supervisor", project: slug };
   supervisor.cwd = projectRoot;
@@ -2704,7 +2704,7 @@ test("v0.6.1 review fix: a failed plugin archive clears its marker — a later g
 });
 
 test("settleTurnAndRotate begins the handoff immediately at the turn boundary when no Peer is running (v0.0.93, ADR 0031)", async (t) => {
-  const lead: FakeAgent = { id: "agent-lead-quiet", status: "idle", lastUsage: { contextWindowUsedTokens: 128_001 } };
+  const lead: FakeAgent = { id: "agent-lead-quiet", status: "idle", lastUsage: { contextWindowUsedTokens: LEAD_ROTATE_TOKENS + 1 } };
   const { stateDir, slug, projectRoot, surface, leadMail, fake } = makeSpooledRuntime(t, [lead]);
   lead.labels = { seat: "lead", project: slug };
   lead.cwd = projectRoot;
@@ -2719,7 +2719,7 @@ test("settleTurnAndRotate begins the handoff immediately at the turn boundary wh
 });
 
 test("pumpProjectLead recovers a rotation_pending Project once its Peer stops — even a dead (error) Peer — completing the rotation cleanly (v0.0.93, ADR 0031)", async (t) => {
-  const lead: FakeAgent = { id: "agent-lead-pump-rec", status: "idle", lastUsage: { contextWindowUsedTokens: 130_000 } };
+  const lead: FakeAgent = { id: "agent-lead-pump-rec", status: "idle", lastUsage: { contextWindowUsedTokens: LEAD_ROTATE_TOKENS + 5_000 } };
   const { stateDir, slug, projectRoot, factory, surface, leadMail, fake } = makeSpooledRuntime(t, [lead]);
   lead.labels = { seat: "lead", project: slug };
   lead.cwd = projectRoot;
@@ -2832,7 +2832,7 @@ test('a stopped worktree Peer no longer holds the active-work sleep assertion', 
 
 test("Lead handoff persists the final Markdown reply, caps UTF-8 at 8 KB (LEAD_HANDOFF_MAX_BYTES), and prefers it over a disk fallback", async t => {
   assert.equal(LEAD_HANDOFF_MAX_BYTES, 8 * 1024, "v0.0.97 (ADR 0047 §3.3) lowers the lead-handoff.md cap from 24 KB to 8 KB");
-  const lead: FakeAgent = { id: "reply-lead", status: "idle", lastUsage: { contextWindowUsedTokens: 128_000 } };
+  const lead: FakeAgent = { id: "reply-lead", status: "idle", lastUsage: { contextWindowUsedTokens: LEAD_ROTATE_TOKENS } };
   const f = makeSpooledRuntime(t, [lead]);
   lead.labels = { seat: "lead", project: f.slug };
   lead.cwd = f.projectRoot;
@@ -2862,7 +2862,7 @@ test("Lead handoff persists the final Markdown reply, caps UTF-8 at 8 KB (LEAD_H
 });
 
 test("Machine-Verified Active Peer Roster summarizes accepted Tasks into one count line and renders full rows strictly for unaccepted Tasks, each active row carrying the epoch disposition (v0.0.97, ADR 0047 §1.3; ADR 0053 §3)", async t => {
-  const lead: FakeAgent = { id: "agent-lead-1", status: "idle", lastUsage: { contextWindowUsedTokens: 135_000 } };
+  const lead: FakeAgent = { id: "agent-lead-1", status: "idle", lastUsage: { contextWindowUsedTokens: LEAD_ROTATE_TOKENS + 5_000 } };
   const { stateDir, slug, projectRoot, factory, surface, leadMail, fake } = makeSpooledRuntime(t, [lead]);
   lead.labels = { seat: "lead", project: slug };
   lead.cwd = projectRoot;
@@ -2903,7 +2903,7 @@ test("Machine-Verified Active Peer Roster summarizes accepted Tasks into one cou
 });
 
 test("Machine-Verified Active Peer Roster reports '- active unaccepted tasks: none' once every Task is accepted (v0.0.97, ADR 0047 §1.3)", async t => {
-  const lead: FakeAgent = { id: "agent-lead-1", status: "idle", lastUsage: { contextWindowUsedTokens: 135_000 } };
+  const lead: FakeAgent = { id: "agent-lead-1", status: "idle", lastUsage: { contextWindowUsedTokens: LEAD_ROTATE_TOKENS + 5_000 } };
   const { stateDir, slug, projectRoot, factory, surface, leadMail, fake } = makeSpooledRuntime(t, [lead]);
   lead.labels = { seat: "lead", project: slug };
   lead.cwd = projectRoot;
@@ -2964,7 +2964,7 @@ test("Turn-1 kickoff delivery deduplicates the packet against config.systemPromp
 // shape left this family; `refusal` keeps the completed-but-invalid-text arm.
 for (const failure of ["refusal", "send", "timeout"] as const) {
   test(`Lead builds a substitute handover after ${failure}`, async t => {
-    const lead: FakeAgent = { id: "prior-lead", status: "idle", lastUsage: { contextWindowUsedTokens: 128_000 } };
+    const lead: FakeAgent = { id: "prior-lead", status: "idle", lastUsage: { contextWindowUsedTokens: LEAD_ROTATE_TOKENS } };
     const f = makeSpooledRuntime(t, [lead], { handoffTimeoutMs: failure === "timeout" ? 40 : 180_000 });
     lead.labels = { seat: "lead", project: f.slug };
     lead.cwd = f.projectRoot;
@@ -3003,7 +3003,7 @@ for (const failure of ["refusal", "send", "timeout"] as const) {
 
 test("Lead extraction waits the full 180-second fuse before retiring a stuck seat", async t => {
   t.mock.timers.enable({ apis: ["Date", "setTimeout"] });
-  const lead: FakeAgent = { id: "slow-lead", status: "idle", lastUsage: { contextWindowUsedTokens: 128_000 } };
+  const lead: FakeAgent = { id: "slow-lead", status: "idle", lastUsage: { contextWindowUsedTokens: LEAD_ROTATE_TOKENS } };
   const f = makeSpooledRuntime(t, [lead]);
   lead.labels = { seat: "lead", project: f.slug };
   lead.cwd = f.projectRoot;
@@ -3031,7 +3031,7 @@ test("Lead extraction waits the full 180-second fuse before retiring a stuck sea
 
 
 test("Lead builds a substitute after a plugin restart during failed extraction", async t => {
-  const lead: FakeAgent = { id: "restarting-lead", status: "idle", lastUsage: { contextWindowUsedTokens: 128_000 } };
+  const lead: FakeAgent = { id: "restarting-lead", status: "idle", lastUsage: { contextWindowUsedTokens: LEAD_ROTATE_TOKENS } };
   const f = makeSpooledRuntime(t, [lead]);
   lead.labels = { seat: "lead", project: f.slug };
   lead.cwd = f.projectRoot;
@@ -3053,7 +3053,7 @@ test("Lead builds a substitute after a plugin restart during failed extraction",
 });
 
 test("rotation_pending holds on an unsettled Task and an errored successor retains held mail until an Owner handoff", async (t) => {
-  const lead: FakeAgent = { id: "lead-outage", status: "idle", lastUsage: { contextWindowUsedTokens: 132_000 } };
+  const lead: FakeAgent = { id: "lead-outage", status: "idle", lastUsage: { contextWindowUsedTokens: LEAD_ROTATE_TOKENS + 5_000 } };
   const { stateDir, slug, projectRoot, factory, surface, leadMail, fake } = makeSpooledRuntime(t, [lead]);
   lead.labels = { seat: "lead", project: slug };
   lead.cwd = projectRoot;
@@ -3262,7 +3262,7 @@ test("Replace now interrupts an active extraction and keeps its reason while pro
 for (const reason of ["context-mark", "provider-change", "owner"] as const) {
   test(`${reason} exposes creating-successor, failed and done while retry preserves extracted continuity`, async t => {
     const f = makeSpooledRuntime(t);
-    f.fake.agents.push({ id: `lead-${reason}`, labels: { seat: "lead", project: f.slug }, cwd: f.projectRoot, lastUsage: { contextWindowUsedTokens: reason === "context-mark" ? 135_000 : 1000 } });
+    f.fake.agents.push({ id: `lead-${reason}`, labels: { seat: "lead", project: f.slug }, cwd: f.projectRoot, lastUsage: { contextWindowUsedTokens: reason === "context-mark" ? LEAD_ROTATE_TOKENS + 5_000 : 1000 } });
     writeProjectRegistration(f.stateDir, f.slug, { root: f.projectRoot, lead: `lead-${reason}` });
     if (reason === "context-mark") await f.leadMail.onLeadTurnEnded({ agentId: `lead-${reason}`, outcome: { kind: "completed" }, timeline: [] });
     else if (reason === "provider-change") await f.surface.lanesSet({ lane: "lead", value: "claude/claude-sonnet-4-6", projectRoot: f.projectRoot });

@@ -170,7 +170,7 @@ export function createPeerHandoffRuntime(deps: PeerHandoffDeps) {
     }
     const digest = worktreeDigest(state.worktree!, contract);
     if (state.phase === "blocked") {
-      deps.queueBlocked(slug, task, contract.seq, `BLOCKED (context-ceiling): Task ${task} exhausted both its initial Peer and 1 automatic Peer handoff (2 x 160,000 tokens) in the current Contract epoch without reaching a green Claim.\n\n${digest}\n\nHandoff: ${path}\nInspect the partial Task worktree progress, land or preserve verified work, and re-contract / split the remaining scope into a narrower follow-up wave.`);
+      deps.queueBlocked(slug, task, contract.seq, `BLOCKED (context-ceiling): Task ${task} exhausted both its initial Peer and 1 automatic Peer handoff (2 x ${PEER_HANDOFF_TOKENS.toLocaleString("en-US")} tokens) in the current Contract epoch without reaching a green Claim.\n\n${digest}\n\nHandoff: ${path}\nInspect the partial Task worktree progress, land or preserve verified work, and re-contract / split the remaining scope into a narrower follow-up wave.`);
       // Idle with the spent budget avoids duplicate escalation on every sweep.
       state.phase = "idle";
       writeHandoffProgress(deps.stateDir, slug, null, `peer:${task}`);

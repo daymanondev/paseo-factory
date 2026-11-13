@@ -20,7 +20,7 @@ import { disposeDir, gitCommitAll, gitCommitChanges, makeTempDir } from "./helpe
  * daemon is a fake, no LLM call anywhere. These tests pin the plugin-owned
  * Tier-1 meter at Claim/Gate boundaries (the `driver.mjs` bypass closed),
  * the flush-before-archive law at every seat rotation, the multi-provider
- * 128k/160k sensor fallback, the reset/delete hygiene, the one-time lazy
+ * 160k/200k mark sensor fallback, the reset/delete hygiene, the one-time lazy
  * backfill, and the snapshot's `projectUsage` gather.
  */
 
@@ -203,9 +203,9 @@ test("a Claim through the Spool lands ONE meter_written line and the usage.json 
   assert.equal(closing.usage.inputTokens, 1_900 + 5_000 + 2_000, "cumulative uncached input across every boundary");
 });
 
-// ---- Seam 2: the multi-provider 128k/160k sensor + flush-before-archive ------------------------
+// ---- Seam 2: the multi-provider Lead/Peer context sensor + flush-before-archive ------------------------
 
-test("the 128k Lead sensor falls back to the codex native store when lastUsage is absent", async t => {
+test("the Lead (160k mark) sensor falls back to the codex native store when lastUsage is absent", async t => {
   const dir = makeTempDir();
   disposeDir(t, dir);
   const userHome = join(dir, "user-home");
@@ -215,7 +215,7 @@ test("the 128k Lead sensor falls back to the codex native store when lastUsage i
     { type: "turn_context", payload: { model: "gpt-6.1-sol" } },
     { type: "event_msg", payload: { type: "token_count", info: {
       total_token_usage: { input_tokens: 400_000, cached_input_tokens: 370_000, cache_write_input_tokens: 0, output_tokens: 9_000, reasoning_output_tokens: 2_100 },
-      last_token_usage: { input_tokens: 130_500, output_tokens: 9_000 },
+      last_token_usage: { input_tokens: 156_000, output_tokens: 9_000 },
     } } },
   ]);
   const { DatabaseSync } = await import("node:sqlite");
@@ -231,11 +231,11 @@ test("the 128k Lead sensor falls back to the codex native store when lastUsage i
     persistence: { nativeHandle: "thread-lead" }, lastUsage: null,
   };
   const reading = readLeadContextTokens(lead, paths);
-  assert.deepEqual(reading, { usedTokens: 139_500, maxTokens: null, source: "native-store" }, "last_token_usage input + output crosses 128k from the rollout tail");
+  assert.deepEqual(reading, { usedTokens: 165_000, maxTokens: null, source: "native-store" }, "last_token_usage input + output crosses the 160k Lead mark from the rollout tail");
   assert.ok(reading.usedTokens! >= LEAD_ROTATE_TOKENS);
 });
 
-test("the 160k Peer sensor falls back to the antigravity steps store when lastUsage is absent", async t => {
+test("the Peer (200k mark) sensor falls back to the antigravity steps store when lastUsage is absent", async t => {
   const dir = makeTempDir();
   disposeDir(t, dir);
   const userHome = join(dir, "user-home");
@@ -266,17 +266,17 @@ test("the 160k Peer sensor falls back to the antigravity steps store when lastUs
   };
   const reading = readLeadContextTokens(peer, { userHome, stateDir });
   assert.deepEqual(reading, { usedTokens: 110_000, maxTokens: null, source: "native-store" }, "the last planner response's input + cacheRead + output answers");
-  assert.ok(reading.usedTokens! < PEER_HANDOFF_TOKENS, "sanity: this fixture sits under 160k");
-  // A third planner response pushes the latest context window over 160k —
+  assert.ok(reading.usedTokens! < PEER_HANDOFF_TOKENS, "sanity: this fixture sits under the Peer mark");
+  // A third planner response pushes the latest context window over the Peer mark —
   // the same store, read again through the SAME shared cursor map.
   const grow = new DatabaseSync(dbPath);
-  grow.prepare("INSERT INTO steps VALUES (?, 15, ?)").run(3, step(30_000, 5_000, 140_000));
+  grow.prepare("INSERT INTO steps VALUES (?, 15, ?)").run(3, step(30_000, 5_000, 170_000));
   grow.close();
   const grown = readLeadContextTokens({ ...peer, id: "peer-agy-2", persistence: { sessionId: "conv-p" } }, { userHome, stateDir });
-  assert.ok(grown.usedTokens! >= 160_000, `a grown store crosses 160k (${grown.usedTokens})`);
+  assert.ok(grown.usedTokens! >= PEER_HANDOFF_TOKENS, `a grown store crosses the 200k Peer mark (${grown.usedTokens})`);
 });
 
-test("Peer handoff at 160k from the antigravity store flushes the outgoing session into usage.json BEFORE archival", async t => {
+test("Peer handoff at the 200k mark from the antigravity store flushes the outgoing session into usage.json BEFORE archival", async t => {
   const dir = makeTempDir();
   disposeDir(t, dir);
   const userHome = join(dir, "user-home");
@@ -314,7 +314,7 @@ test("Peer handoff at 160k from the antigravity store flushes the outgoing sessi
     const fields = [0x08, ...varint(1417), 0x10, ...varint(input), 0x18, ...varint(output), 0x28, ...varint(cacheRead), 0x48, ...varint(0), 0x50, ...varint(0)];
     return new Uint8Array([0x4a, ...varint(fields.length), ...fields]);
   };
-  db.prepare("INSERT INTO steps VALUES (?, 15, ?)").run(1, step(100_000, 20_000, 45_000));
+  db.prepare("INSERT INTO steps VALUES (?, 15, ?)").run(1, step(130_000, 25_000, 60_000));
   db.close();
 
   const peer: SurfaceAgentSnapshot = {
@@ -336,7 +336,7 @@ test("Peer handoff at 160k from the antigravity store flushes the outgoing sessi
 
   const ended = (agentId: string, text = "") => ({ agentId, outcome: { kind: "completed" as const }, timeline: text ? [{ type: "assistant_message", text }] : [] });
   await peerHandoff.observeProject(slug, root, ended(peer.id));
-  assert.equal(fake.sent.filter(m => m.id === peer.id).length, 1, "the 165k store reading triggered extraction");
+  assert.equal(fake.sent.filter(m => m.id === peer.id).length, 1, "the 215k store reading triggered extraction");
   writeFileSync(join(projectStateDirOf(stateDir, slug), "peer-handoff-H1.md"), "# Completed & Verified Slice\nDone.");
   await peerHandoff.observeProject(slug, root, ended(peer.id, "slice done"));
 
@@ -347,19 +347,19 @@ test("Peer handoff at 160k from the antigravity store flushes the outgoing sessi
   assert.ok(record, "the outgoing Peer's session landed in usage.json");
   assert.equal(record.harness, "antigravity");
   assert.equal(record.model, "gemini-4-argon-high");
-  assert.equal(record.totalTokens, 165_000);
+  assert.equal(record.totalTokens, 215_000);
   assert.equal(record.task, "H1");
   const handoffMeters = meterLines(factory, "H1");
   assert.equal(handoffMeters.length, 1, "the retirement boundary also lands its Tier-1 meter line");
   assert.equal(handoffMeters[0]!.provider, "antigravity/gemini-4-argon-high");
-  assert.deepEqual(handoffMeters[0]!.usage, { inputTokens: 100_000, cachedInputTokens: 45_000, outputTokens: 20_000 }, "no totalCostUsd key — the antigravity store meters tokens only");
+  assert.deepEqual(handoffMeters[0]!.usage, { inputTokens: 130_000, cachedInputTokens: 60_000, outputTokens: 25_000 }, "no totalCostUsd key — the antigravity store meters tokens only");
 });
 
 function projectStateDirOf(stateDir: string, slug: string): string {
   return join(stateDir, "projects", slug);
 }
 
-test("the 128k Lead handoff flushes the outgoing Lead's codex session into usage.json before archival", async t => {
+test("the Lead (160k mark) handoff flushes the outgoing Lead's codex session into usage.json before archival", async t => {
   const dir = makeTempDir();
   disposeDir(t, dir);
   const userHome = join(dir, "user-home");
@@ -379,7 +379,7 @@ test("the 128k Lead handoff flushes the outgoing Lead's codex session into usage
     { type: "turn_context", payload: { model: "gpt-6.1-sol" } },
     { type: "event_msg", payload: { type: "token_count", info: {
       total_token_usage: { input_tokens: 500_000, cached_input_tokens: 460_000, cache_write_input_tokens: 0, output_tokens: 12_000, reasoning_output_tokens: 3_000 },
-      last_token_usage: { input_tokens: 130_500, output_tokens: 9_000 },
+      last_token_usage: { input_tokens: 156_000, output_tokens: 9_000 },
     } } },
   ]);
   const { DatabaseSync } = await import("node:sqlite");
@@ -416,7 +416,7 @@ test("the 128k Lead handoff flushes the outgoing Lead's codex session into usage
   t.after(() => runtime.stop());
 
   const ended = { agentId: "lead-cx", outcome: { kind: "completed" as const }, timeline: [] };
-  // Boundary 1: the 139.5k native-store reading locks `handing_over` and steers extraction.
+  // Boundary 1: the 165k native-store reading locks `handing_over` and steers extraction.
   await runtime.onLeadTurnEnded(ended);
   assert.equal(fake.sent.filter(m => m.id === "lead-cx").length, 1, "the extraction prompt went to the outgoing Lead");
   // Boundary 2: the extraction turn completes the handoff — flush, archive, successor.
