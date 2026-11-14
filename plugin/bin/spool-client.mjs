@@ -19,9 +19,17 @@ export function stateDirFor(paseoHome) {
   return join(paseoHome, "plugin-state", "paseo-factory");
 }
 
-/** `--home` flag > `PASEO_HOME` > `~/.paseo`, with `~` expansion. */
+/** Which rung of the home precedence won: `--home` > `$PASEO_HOME` (non-blank) > `~/.paseo`. */
+export function resolveHomeSource(flag, env = process.env) {
+  if (flag !== undefined) return "--home";
+  if (typeof env.PASEO_HOME === "string" && env.PASEO_HOME.trim() !== "") return "PASEO_HOME";
+  return "default";
+}
+
+/** `--home` flag > `PASEO_HOME` > `~/.paseo`, with `~` expansion — the winning rung is `resolveHomeSource`. */
 export function resolveHome(flag) {
-  const raw = flag ?? (process.env.PASEO_HOME && process.env.PASEO_HOME.trim() !== "" ? process.env.PASEO_HOME : join(homedir(), ".paseo"));
+  const source = resolveHomeSource(flag);
+  const raw = source === "--home" ? flag : source === "PASEO_HOME" ? process.env.PASEO_HOME : join(homedir(), ".paseo");
   if (raw === "~") return homedir();
   if (raw.startsWith("~/")) return join(homedir(), raw.slice(2));
   return raw;

@@ -40,7 +40,7 @@ import { existsSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from
 import { join, resolve as resolvePath } from "node:path";
 import { readLedgerEvents } from "./ledger-read.mjs";
 import { taskStatusLines } from "./task-status.mjs";
-import { awaitReply, randomId, resolveHome, spoolRootFor, stateDirFor, submit } from "./spool-client.mjs";
+import { awaitReply, randomId, resolveHome, resolveHomeSource, spoolRootFor, stateDirFor, submit } from "./spool-client.mjs";
 import {
   LANE_NAMES,
   applyLaneProfile,
@@ -55,7 +55,7 @@ import {
   saveLanes,
 } from "./lanes-config.mjs";
 import { resolveProject } from "./project.mjs";
-import { diagnose, formatDiagnosis, readProjectRegistrations, resolveHomeSource, workspaceRegistrationState } from "./project-read.mjs";
+import { diagnose, formatDiagnosis, readProjectRegistrations, workspaceRegistrationState } from "./project-read.mjs";
 
 // The contract stanza's authoring-law block mirrors docs/runbooks/live-run.md
 // step 3 (the ratified R2–R6 batch, ticket 02 / v0.0.8) — help text and
@@ -923,28 +923,12 @@ function resolveProjectSlug(commandName, projectDir) {
 
 /**
  * Every registered Project's slug (v0.0.89, ADR 0045 §1) — the durable
- * `<stateDir>/projects/<slug>/project.json` registry, read locally the way
- * the core's listProjectRegistrations reads it (the CLIs import no src/
- * code, ADR 0004). Slug order; an unreadable entry names no Project.
+ * `<stateDir>/projects/<slug>/project.json` registry, read locally through
+ * project-read.mjs (the CLIs import no src/ code, ADR 0004). Slug order; an
+ * unreadable entry names no Project.
  */
 function registeredProjectSlugs(stateDir) {
-  const projectsDir = join(stateDir, "projects");
-  let entries;
-  try {
-    entries = readdirSync(projectsDir);
-  } catch {
-    return [];
-  }
-  const slugs = [];
-  for (const entry of entries.sort()) {
-    try {
-      const registration = JSON.parse(readFileSync(join(projectsDir, entry, "project.json"), "utf8"));
-      if (registration && typeof registration.root === "string" && registration.root !== "") slugs.push(entry);
-    } catch {
-      // not a registration — never a guess
-    }
-  }
-  return slugs;
+  return readProjectRegistrations(stateDir).map((registration) => registration.slug);
 }
 
 if (command === "profile") {

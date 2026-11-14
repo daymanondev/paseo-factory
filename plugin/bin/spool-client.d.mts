@@ -7,6 +7,8 @@
 
 export declare function stateDirFor(paseoHome: string): string;
 /** `--home` flag > `PASEO_HOME` > `~/.paseo`, with `~` expansion. */
+/** Which rung of the home precedence won: `--home`, `PASEO_HOME` or the `~/.paseo` default. */
+export declare function resolveHomeSource(flag: string | undefined, env?: Record<string, string | undefined>): "--home" | "PASEO_HOME" | "default";
 export declare function resolveHome(flag: string | undefined): string;
 export declare function spoolRootFor(stateDir: string): string;
 /** Drops a request file (write-then-rename) and returns its path; the id travels in the filename and the body. */
