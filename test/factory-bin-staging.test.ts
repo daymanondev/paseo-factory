@@ -20,19 +20,16 @@ test("factoryBinImportClosure follows static, side-effect and dynamic ./*.mjs im
   assert.deepEqual(factoryBinImportClosure(dir, ["entry.mjs"]).sort(), ["a.mjs", "b.mjs", "entry.mjs", "lazy.mjs", "side.mjs"]);
 });
 
-test("every relative import of the staged bridge and hook is staged beside them (the v0.6.1 project.mjs regression)", (t) => {
+test("staged bridge and hook are zero-relative-import self-contained ESM scripts in <stateDir>/bin (immune to sibling .mjs drift)", (t) => {
   const stateDir = makeTempDir("bin-staging-");
   disposeDir(t, stateDir);
   ensureFactoryBinScripts(stateDir, join(repoRoot, "plugin"));
   const binDir = join(stateDir, "bin");
   const staged = readdirSync(binDir).filter((name) => name.endsWith(".mjs"));
-  for (const name of ["bridge.mjs", "agy-pre-tool-hook.mjs", "ledger-project.mjs", "project.mjs", "worktree-policy.mjs"]) {
+  for (const name of ["bridge.mjs", "agy-pre-tool-hook.mjs"]) {
     assert.ok(staged.includes(name), `${name} is staged into <stateDir>/bin`);
-  }
-  for (const name of staged) {
-    for (const match of readFileSync(join(binDir, name), "utf8").matchAll(/(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s+)["']\.\/([\w.-]+\.mjs)["']/g)) {
-      assert.ok(existsSync(join(binDir, match[1]!)), `${name} imports ./${match[1]} which must be staged too`);
-    }
+    const relativeImports = [...readFileSync(join(binDir, name), "utf8").matchAll(/(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s+)["']\.\/([\w.-]+\.mjs)["']/g)];
+    assert.deepEqual(relativeImports.map((m) => m[1]), [], `${name} must have zero relative ./*.mjs imports`);
   }
 });
 

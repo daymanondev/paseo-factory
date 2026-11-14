@@ -2017,3 +2017,31 @@ test("isSupervisorCandidate recognises the three candidate arms — the factory-
   assert.equal(isSupervisorCandidate({ provider: "claude/opus-4-8", labels: { seat: "lead" } }, { stateDir, slug }), false);
   assert.equal(isSupervisorCandidate({ provider: "claude/opus-4-8", labels: { task: "T-01" } }, { stateDir, slug }), false);
 });
+
+test("Lead contracts enforce Scout-First Context Discipline (<= 3 targeted boundary reads), Missing-Capability Fail-Fast Guard, and keep both MCP + CLI fallback", () => {
+  const project = { root: "/workspace/repo", slug: "repo" };
+  const input = {
+    seat: "lead" as const,
+    home: "/trial",
+    stateDir: "/trial/state",
+    nodePath: process.execPath,
+    path: "/usr/bin",
+    lane: "pi/zcode/glm-5.3",
+    project,
+  };
+  const contract = renderRoleContract("lead", { project });
+  assert.doesNotMatch(contract, /read and inspect the repository, decompose/, "Lead is no longer told to read the whole repository into its own context");
+  assert.match(contract, /Missing-Capability Fail-Fast Guard:/);
+  assert.match(contract, /NEVER inspect, search, or read.*~\/\.paseo\/plugins\/\*\*/);
+  assert.match(contract, /paseo-factory_lead_read_ledger/);
+  assert.match(contract, /factory contract/);
+  assert.match(contract, /factory run/);
+
+  for (const surface of [contract, renderSeatContract("lead", project), ROLE_PROMPTS.lead, renderSeatBootstrapPrompt(input), renderSeatBootstrap(input)]) {
+    assert.match(surface, /Scout-First Context Discipline & Assignment Vocabulary:/);
+    assert.match(surface, /<= 3 targeted boundary/);
+    assert.match(surface, /disposition: "scout"/);
+    assert.match(surface, /disposition: "architect"/);
+    assert.match(surface, /lead_read_ledger/);
+  }
+});

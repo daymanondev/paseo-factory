@@ -3,7 +3,7 @@
 // src/ledger-project.ts
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, readdirSync, readFileSync as readFileSync3, realpathSync } from "node:fs";
+import { existsSync, mkdirSync as mkdirSync2, readdirSync, readFileSync as readFileSync3, realpathSync, renameSync, writeFileSync as writeFileSync2 } from "node:fs";
 import { basename, isAbsolute, join as join2, resolve as resolve2 } from "node:path";
 
 // src/ledger-read.ts
@@ -314,6 +314,27 @@ var GIT_TIMEOUT_MS = 1e4;
 function projectLedgerPath(stateDir, slug) {
   return join2(stateDir, "projects", slug, "ledger.jsonl");
 }
+function writeSupervisorBinding(stateDir, projectSlug, agentId) {
+  const projectDir = join2(stateDir, "projects", projectSlug);
+  const path = join2(projectDir, "project.json");
+  if (!existsSync(path)) return false;
+  let registration;
+  try {
+    const parsed = JSON.parse(readFileSync3(path, "utf8"));
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return false;
+    registration = parsed;
+  } catch {
+    return false;
+  }
+  if (registration.supervisor === agentId) return false;
+  registration.supervisor = agentId;
+  mkdirSync2(projectDir, { recursive: true });
+  const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
+  writeFileSync2(tmp, `${JSON.stringify(registration, null, 2)}
+`);
+  renameSync(tmp, path);
+  return true;
+}
 function registeredProjectSlugs(stateDir) {
   const projectsDir = join2(stateDir, "projects");
   let entries;
@@ -421,5 +442,6 @@ export {
   readLedgerEventsList,
   readProjectLedgerEvents,
   registeredProjectSlugs,
-  resolveProjectLedger
+  resolveProjectLedger,
+  writeSupervisorBinding
 };

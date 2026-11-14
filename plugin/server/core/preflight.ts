@@ -207,12 +207,12 @@ export function buildSeatKickoffPacket(input: SeatKickoffPacketInput): string {
   const roleTools =
     input.role === "supervisor"
       ? "`supervisor_dispatch_lead`, `supervisor_read_ledger`, `supervisor_end_cycle`"
-      : "`lead_set_contract`, `lead_dispatch_agent`, `lead_verify`, `lead_merge`, `lead_report_to_supervisor`";
+      : "`lead_set_contract`, `lead_dispatch_agent`, `lead_read_ledger`, `lead_verify`, `lead_merge`, `lead_report_to_supervisor`";
 
   const fireAndEndTurn =
     input.role === "supervisor"
       ? "Fire-and-End-Turn: call `supervisor_dispatch_lead` (or run `factory lead dispatch`) and IMMEDIATELY end your turn — never poll, never sleep, and never edit product source code."
-      : "Fire-and-End-Turn: outline the serial-wave roadmap, call `lead_set_contract` then `lead_dispatch_agent` (or `factory contract` + `factory run`) for the current wave only, and IMMEDIATELY end your turn — never poll, never sleep, and never edit product source code on `<project-root>`.";
+      : "Fire-and-End-Turn: orient within <= 3 small boundary reads (dispatch a read-only `scout` or `architect` Peer first whenever deeper repo/design discovery is needed), outline the serial-wave roadmap, call `lead_set_contract` then `lead_dispatch_agent` (or `factory contract` + `factory run`) for the current wave only, and IMMEDIATELY end your turn — never poll, never sleep, never grep raw `ledger.jsonl` or `~/.paseo/plugins/**`, and never edit product source code on `<project-root>`.";
 
   // v0.1.0 (ADR 0048 §3): the Project notebook rides the packet as dynamic
   // state — its slug-dependent path plus the bounded content (or the clean

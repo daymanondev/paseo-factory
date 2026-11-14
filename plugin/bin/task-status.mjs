@@ -36,18 +36,59 @@ function projectTask(events, task) {
 }
 
 // src/task-status.ts
-function taskStatusLines(events, workspaceFilter) {
+var LEAN_SETTLED_TAIL = 5;
+function classifySettled(state) {
+  if (state.closed !== void 0) return "closed";
+  if (state.acceptance !== void 0 && !state.pendingLanding) return "accepted";
+  return null;
+}
+function formatReviewSummary(state) {
+  const current = state.currentAttempt;
+  return {
+    sha: current?.gate?.sha?.slice(0, 7) ?? "-",
+    eye: current?.review?.outcome ?? "-",
+    review: current?.reviewState ?? (state.contract?.freshEyes === true ? "pending" : "off")
+  };
+}
+function renderTaskStatusLine(events, task, workspaceFilter) {
+  const state = projectTask(events, task);
+  if (workspaceFilter && state.contract?.workspace && state.contract.workspace !== workspaceFilter) return null;
+  const { sha, eye, review } = formatReviewSummary(state);
+  const count = (kind) => state.epoch.filter((event) => event.event === kind).length;
+  const eligible = (role) => state.attempts.filter((attempt) => attempt[role]).map((attempt) => attempt.attempt).join(",") || "-";
+  const closedPart = state.closed === void 0 ? "" : ` closed=yes reason="${state.closed.reason}"`;
+  const needsPart = state.needs === void 0 ? "" : ` needs-human=${state.needs.reason}`;
+  const acceptedFlag = state.acceptance === void 0 ? "no" : "yes";
+  const line = `${task} attempts=${state.maxAttempt} verdict=${state.verdict ?? "-"} sha=${sha} accepted=${acceptedFlag}${closedPart} eye=${eye} choke=${count("permit_allowed")}/${count("permit_denied")}/${count("git_blocked")}${needsPart} review=${review} owner-eligible=${eligible("ownerEligible")} lead-eligible=${eligible("leadEligible")}`;
+  return { line, settled: classifySettled(state) };
+}
+function taskStatusLines(events, workspaceFilter, options) {
   const tasks = [...new Set(events.flatMap((event) => event.event === "contract_set" ? [event.task] : []))];
-  const lines = [];
+  const rendered = [];
   for (const task of tasks) {
-    const state = projectTask(events, task);
-    if (workspaceFilter && state.contract?.workspace && state.contract.workspace !== workspaceFilter) continue;
-    const gate = state.currentAttempt?.gate;
-    const current = state.currentAttempt;
-    const review = current?.review;
-    const count = (kind) => state.epoch.filter((event) => event.event === kind).length;
-    const eligible = (role) => state.attempts.filter((attempt) => attempt[role]).map((attempt) => attempt.attempt).join(",") || "-";
-    lines.push(`${task} attempts=${state.maxAttempt} verdict=${state.verdict ?? "-"} sha=${gate?.sha?.slice(0, 7) ?? "-"} accepted=${state.acceptance === void 0 ? "no" : "yes"}` + (state.closed === void 0 ? "" : ` closed=yes reason="${state.closed.reason}"`) + ` eye=${review?.outcome ?? "-"} choke=${count("permit_allowed")}/${count("permit_denied")}/${count("git_blocked")}` + (state.needs === void 0 ? "" : ` needs-human=${state.needs.reason}`) + ` review=${current?.reviewState ?? (state.contract?.freshEyes === true ? "pending" : "off")} owner-eligible=${eligible("ownerEligible")} lead-eligible=${eligible("leadEligible")}`);
+    const entry = renderTaskStatusLine(events, task, workspaceFilter);
+    if (entry !== null) rendered.push({ task, ...entry });
+  }
+  if (!options?.lean) return rendered.map((entry) => entry.line);
+  const accepted = rendered.filter((entry) => entry.settled === "accepted").map((entry) => entry.task);
+  const closed = rendered.filter((entry) => entry.settled === "closed").map((entry) => entry.task);
+  const active = rendered.filter((entry) => entry.settled === null).map((entry) => entry.line);
+  const lines = [];
+  if (accepted.length > 0 || closed.length > 0) {
+    const parts = [];
+    if (accepted.length > 0) {
+      const tail = accepted.slice(-LEAN_SETTLED_TAIL).join(", ");
+      parts.push(`accepted=${accepted.length} (${accepted.length > LEAN_SETTLED_TAIL ? `latest ${LEAN_SETTLED_TAIL}: ` : ""}${tail})`);
+    }
+    if (closed.length > 0) {
+      const tail = closed.slice(-LEAN_SETTLED_TAIL).join(", ");
+      parts.push(`closed=${closed.length} (${closed.length > LEAN_SETTLED_TAIL ? `latest ${LEAN_SETTLED_TAIL}: ` : ""}${tail})`);
+    }
+    lines.push(`settled: ${parts.join(" \xB7 ")} \u2014 pass full=true for all ${rendered.length} rows`);
+  }
+  lines.push(...active);
+  if (active.length === 0 && lines.length > 0) {
+    lines.push("active: none (all contracted tasks are settled)");
   }
   return lines;
 }

@@ -619,3 +619,22 @@ test("factory close --task <id> --reason <text> retires a Task through the spool
   assert.equal(again.status, 2);
   assert.match(again.stderr, /already-closed/);
 });
+
+test("taskStatusLines lean mode collapses settled (accepted and closed) tasks into one summary line while preserving active rows", async () => {
+  const { taskStatusLines } = await import("../src/task-status.ts");
+  const events: Parameters<typeof taskStatusLines>[0] = [
+    { seq: 1, ts: "2026-11-10T00:00:00Z", event: "contract_set", task: "T-01", workspace: "/ws", gate: "true", artifact: "a.md" },
+    { seq: 2, ts: "2026-11-10T00:01:00Z", event: "gate_finished", task: "T-01", attempt: 1, exit: 0, verdict: "green", sha: "11111112222222", note: "ok" },
+    { seq: 3, ts: "2026-11-10T00:02:00Z", event: "attempt_accepted", task: "T-01", attempt: 1 },
+    { seq: 4, ts: "2026-11-10T00:03:00Z", event: "contract_set", task: "T-02", workspace: "/ws", gate: "true", artifact: "b.md" },
+    { seq: 5, ts: "2026-11-10T00:04:00Z", event: "task_closed", task: "T-02", reason: "split", closed_by: "lead" },
+    { seq: 6, ts: "2026-11-10T00:05:00Z", event: "contract_set", task: "T-03-scout", workspace: "/ws", gate: "", artifact: "c.md", disposition: "scout", description: "scout brief" },
+  ];
+  const lean = taskStatusLines(events, undefined, { lean: true });
+  assert.equal(lean.length, 2);
+  assert.match(lean[0]!, /^settled: accepted=1 \(T-01\) · closed=1 \(T-02\) — pass full=true for all 3 rows$/);
+  assert.match(lean[1]!, /^T-03-scout attempts=0 verdict=- sha=- accepted=no/);
+
+  const full = taskStatusLines(events);
+  assert.equal(full.length, 3, "default/full mode returns every historical row verbatim");
+});

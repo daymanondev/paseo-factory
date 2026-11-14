@@ -164,6 +164,7 @@ export { EVENT_NAMES, MAX_ATTEMPTS, PEER_DISPOSITIONS, PEER_HANDOFF_OUTCOMES } f
 
 export { projectTask } from "./task-state.ts";
 export { taskStatusLines } from "./task-status.ts";
+export type { TaskStatusOptions } from "./task-status.ts";
 export type { AcceptanceRole, AttemptState, ReviewState, TaskClosure } from "./task-state.ts";
 
 export { legacyIdentityMappingIsValid, planLegacyIdentity, resolveLedgerReference, remapLedgerReferences, classifyEventIdentities, semanticEventContent, canonicalHistoryJson, historyHash } from "./history-identity.ts";

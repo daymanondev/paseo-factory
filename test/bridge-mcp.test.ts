@@ -221,7 +221,7 @@ test("bridge.mjs exposes strictly role-scoped tools in tools/list and enforces r
       ],
     });
     const leadTools = ((leadResponses[1].result as { tools: Array<{ name: string }> }).tools).map((t) => t.name).sort();
-    assert.deepEqual(leadTools, ["lead_close_task", "lead_create_worktree", "lead_dispatch_agent", "lead_merge", "lead_needs_human", "lead_remove_worktree", "lead_repoke_agent", "lead_report_to_supervisor", "lead_retire_task", "lead_set_contract", "lead_update_notebook", "lead_verify"]);
+    assert.deepEqual(leadTools, ["lead_close_task", "lead_create_worktree", "lead_dispatch_agent", "lead_merge", "lead_needs_human", "lead_read_ledger", "lead_remove_worktree", "lead_repoke_agent", "lead_report_to_supervisor", "lead_retire_task", "lead_set_contract", "lead_update_notebook", "lead_verify"]);
 
     // 3. Working Agent session
     const agentResponses = await runMcpSession({
@@ -482,10 +482,31 @@ test("bridge.mjs executes Supervisor, Lead, and Agent tools end-to-end over the 
     assert.match(reportRes.content[0].text, /end your turn/i);
     assert.ok(sentPrompts.some((p) => p.id === "sup-1" && p.text.includes("Wave complete: feat-x accepted")));
 
-    const statusCall = await runMcpSession({ args: ["--correlation", supCorr.correlationId, "--state-dir", stateDir], cwd: repoDir, requests: [{ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "supervisor_read_ledger", arguments: {} } }] });
-    const statusRes = statusCall[0].result as { isError?: boolean; content: Array<{ text: string }> };
-    assert.notEqual(statusRes.isError, true, statusRes.content[0].text);
-    assert.match(statusRes.content[0].text, /feat-x.*accepted=yes/);
+    const statusCall = await runMcpSession({
+      args: ["--correlation", supCorr.correlationId, "--state-dir", stateDir],
+      cwd: repoDir,
+      requests: [
+        { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "supervisor_read_ledger", arguments: {} } },
+        { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "supervisor_read_ledger", arguments: { full: true } } },
+      ],
+    });
+    const leanStatusRes = statusCall[0].result as { isError?: boolean; content: Array<{ text: string }> };
+    assert.notEqual(leanStatusRes.isError, true, leanStatusRes.content[0].text);
+    assert.match(leanStatusRes.content[0].text, /settled: accepted=1 \(feat-x\)/);
+    assert.match(leanStatusRes.content[0].text, /active: none/);
+
+    const fullStatusRes = statusCall[1].result as { isError?: boolean; content: Array<{ text: string }> };
+    assert.notEqual(fullStatusRes.isError, true, fullStatusRes.content[0].text);
+    assert.match(fullStatusRes.content[0].text, /feat-x.*accepted=yes/);
+
+    const leadStatusCall = await runMcpSession({
+      args: ["--correlation", leadCorr.correlationId, "--state-dir", stateDir],
+      cwd: repoDir,
+      requests: [{ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_read_ledger", arguments: {} } }],
+    });
+    const leadStatusRes = leadStatusCall[0].result as { isError?: boolean; content: Array<{ text: string }> };
+    assert.notEqual(leadStatusRes.isError, true, leadStatusRes.content[0].text);
+    assert.match(leadStatusRes.content[0].text, /settled: accepted=1 \(feat-x\)/);
   } finally {
     spool.stop();
     rmSync(homeDir, { recursive: true, force: true });
@@ -574,11 +595,15 @@ test("v0.6.1 (ADR 0057 §11): supervisor_dispatch_lead writes the Supervisor bin
     rmSync(repoDir, { recursive: true, force: true });
   }
 
-  // The structural pin (spec story 18): the bridge itself never touches
-  // project.json — the binding rides the Project identity mirror's writer.
+  // The structural pin (spec story 18 + zero-relative-import self-contained bridge):
+  // the handwritten section of bridge.mjs never touches project.json directly —
+  // the binding rides the generated `ledgerProject.writeSupervisorBinding` closure
+  // with zero relative ./*.mjs imports that could break when staged alone.
   const bridgeSource = readFileSync(BRIDGE_BIN, "utf8");
-  assert.doesNotMatch(bridgeSource, /project\.json/, "no project.json path is named, parsed, or written inside bridge.mjs");
-  assert.match(bridgeSource, /from "\.\/project\.mjs"/, "the binding write rides the plugin/bin project mirror");
+  const handwrittenBridge = bridgeSource.replace(/\/\/ BEGIN GENERATED [\s\S]*?\/\/ END GENERATED [^\n]+/g, "");
+  assert.doesNotMatch(handwrittenBridge, /project\.json/, "no project.json path is named, parsed, or written in handwritten bridge.mjs");
+  assert.match(handwrittenBridge, /ledgerProject\.writeSupervisorBinding/, "the binding write rides the generated ledgerProject single-writer");
+  assert.doesNotMatch(bridgeSource, /from "\.\//, "bridge.mjs carries zero relative imports");
 });
 
 test("lead_update_notebook writes <projectStateDir>/notebook.md through JSON-RPC and refuses over-limit content with the named code (ticket 06, spec Seam 1)", async () => {

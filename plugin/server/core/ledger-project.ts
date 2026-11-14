@@ -19,7 +19,7 @@
  */
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, readdirSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { basename, isAbsolute, join, resolve } from "node:path";
 import { readLedgerEvents } from "./ledger-read.ts";
 import { resolveRealGitBinary } from "./worktree-policy.ts";
@@ -58,6 +58,35 @@ export type ResolvedProjectLedger =
 /** The canonical per-Project ledger location. */
 export function projectLedgerPath(stateDir: string, slug: string): string {
   return join(stateDir, "projects", slug, "ledger.jsonl");
+}
+
+/**
+ * The Supervisor binding's single writer for the zero-dependency CLIs and
+ * self-contained MCP bridge (v0.6.1, ADR 0057 §11, spec story 18): updates
+ * `<stateDir>/projects/<slug>/project.json` via read-merge-write with every
+ * unrelated field preserved verbatim, landed atomically (tmp + rename) so a
+ * crash mid-write can never tear `project.json`. An absent or unparseable
+ * registration writes nothing. Returns true when the file changed.
+ */
+export function writeSupervisorBinding(stateDir: string, projectSlug: string, agentId: string): boolean {
+  const projectDir = join(stateDir, "projects", projectSlug);
+  const path = join(projectDir, "project.json");
+  if (!existsSync(path)) return false;
+  let registration: Record<string, unknown>;
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return false;
+    registration = parsed as Record<string, unknown>;
+  } catch {
+    return false; // a corrupt registration is never overwritten by a binding update
+  }
+  if (registration.supervisor === agentId) return false;
+  registration.supervisor = agentId;
+  mkdirSync(projectDir, { recursive: true });
+  const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
+  writeFileSync(tmp, `${JSON.stringify(registration, null, 2)}\n`);
+  renameSync(tmp, path);
+  return true;
 }
 
 /**

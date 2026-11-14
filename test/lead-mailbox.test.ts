@@ -2480,6 +2480,7 @@ test("v0.6.1 (ADR 0057 §11 hygiene): a disk-fed successor kickoff dates the han
   assert.match(kickoff, /# Fresh handoff\nWave N complete, T-09 green\./, "the handover body rides the kickoff");
   assert.doesNotMatch(kickoff, /Staleness notice/, "a dated, current handover is trusted — no staleness line");
   assert.doesNotMatch(kickoff, /paseo-factory handoff:/, "the file's metadata header never leaks into the kickoff");
+  assert.match(kickoff, /Successor Turn-1 Discipline:.*do NOT `grep` or `cat` raw `<projectStateDir>\/ledger\.jsonl`/, "successor kickoff guards against raw ledger.jsonl archaeology");
   assert.match(kickoff, /Directive for the disk-fed successor/, "the queued mail still rides the same turn");
 });
 

@@ -241,11 +241,12 @@ export const sharedTools: Record<string, ToolDefinition> = {
   },
   factory_status: {
     name: "factory_status",
-    description: "Return the Project's folded Ledger task digest (`attempts`, `verdict`, `sha`, `accepted`, `eye`, `choke`).",
+    description: "Return the Project's folded Ledger task digest. By default for seats (`lead_read_ledger` / `supervisor_read_ledger`), settled (`accepted` / `closed`) Tasks collapse into one summary line and only active unaccepted Tasks expand (`LEAN_HISTORY`); pass `full: true` to return every historical row.",
     inputSchema: {
       type: "object",
       properties: {
         workspace: { type: "string", description: "Optional Project root path filter." },
+        full: { type: "boolean", description: "When true, return every historical Task row instead of collapsing settled Tasks." },
       },
     },
   },
@@ -254,11 +255,12 @@ export const sharedTools: Record<string, ToolDefinition> = {
 
 export const sharedRoles = {
   supervisor: ["supervisor_accept_task", "supervisor_dispatch_lead", "supervisor_read_ledger", "supervisor_end_cycle", "lead_close_task", "lead_retire_task"],
-  lead: ["lead_repoke_agent", "lead_needs_human", "lead_create_worktree", "lead_set_contract", "lead_dispatch_agent", "lead_verify", "lead_merge", "lead_remove_worktree", "lead_report_to_supervisor", "lead_close_task", "lead_retire_task", "lead_update_notebook"],
+  lead: ["lead_repoke_agent", "lead_needs_human", "lead_create_worktree", "lead_set_contract", "lead_dispatch_agent", "lead_verify", "lead_merge", "lead_remove_worktree", "lead_report_to_supervisor", "lead_close_task", "lead_retire_task", "lead_update_notebook", "lead_read_ledger"],
   agent: ["agent_claim", "agent_escalate_blocker"],
   unbound: ["factory_dispatch_supervisor", "factory_status"],
 };
 sharedTools.supervisor_read_ledger = { ...sharedTools.factory_status, name: "supervisor_read_ledger" };
+sharedTools.lead_read_ledger = { ...sharedTools.factory_status, name: "lead_read_ledger" };
 sharedTools.supervisor_end_cycle = { name: "supervisor_end_cycle", description: "Finish this Supervisor turn and await the next Owner directive or Lead report.", inputSchema: { type: "object", properties: {} } };
 for (const [name, source] of Object.entries({ lead_dispatch_agent: "lead_spawn_agent", lead_merge: "lead_accept_task", lead_retire_task: "lead_close_task" })) {
   sharedTools[name] = { ...sharedTools[source], name };

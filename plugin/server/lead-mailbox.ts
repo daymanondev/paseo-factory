@@ -2260,6 +2260,8 @@ function renderSuccessorKickoff(input: {
     "",
     `You are the fresh successor Lead of this project, spawned at 0% context after the outgoing Lead handed off (${input.reason ?? "context-mark"}). Three layers of continuity follow — the first two are machine-verified, built by the plugin from the live daemon and the ledger, never from prose:`,
     "",
+    "Successor Turn-1 Discipline: Where the Outgoing Lead handoff prose below conflicts with the Machine-Verified Active Peer Roster, Ledger State Digest, or Project notebook above, the machine-verified layers win immediately — do NOT `grep` or `cat` raw `<projectStateDir>/ledger.jsonl` to re-audit settled waves; call `lead_read_ledger({})` if needed, read at most the `Read-First Files` (<= 3 files), and dispatch a read-only `disposition: \"scout\"` Peer when codebase state since the handoff is unclear.",
+    "",
     "## Machine-Verified Active Peer Roster",
     "",
     input.roster,
