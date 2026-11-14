@@ -5,6 +5,7 @@ import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { createFactoryRegistry, resolveProject, writeProjectRegistration } from "../plugin/server/projects.ts";
+import { createLeadMailRuntime } from "../plugin/server/lead-mailbox.ts";
 import { createSurfaceHandlers } from "../plugin/server/surface-rpc.ts";
 import type { SpoolReply, SpoolRotateRequest } from "../plugin/server/spool.ts";
 import { handleSpoolRequest, parseSpoolRequest, spoolRootFor, startSpool } from "../plugin/server/spool.ts";
@@ -49,7 +50,17 @@ function makeRotateSpool(t: TestContext, hooks: {
     stateDir,
     home,
     daemon: { agents: { list: async () => ({ entries: [] }) } } as never,
+    rotateProjectMailbox: (slug) => leadMail.rotateProjectMailbox(slug),
   });
+  const leadMail = createLeadMailRuntime({
+    factory: registry.root,
+    registry,
+    stateDir,
+    daemon: { agents: { list: async () => ({ entries: [] }) } } as never,
+    ensureLead: (input) => surface.leadEnsure(input),
+    retireLead: (input) => surface.leadRotate(input),
+  });
+  t.after(() => leadMail.stop());
   const requests: SpoolRotateRequest[] = [];
   const realRotate: RotateHook = async (request) => {
     const reply = await surface.projectRotate({
