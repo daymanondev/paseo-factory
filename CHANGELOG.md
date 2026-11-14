@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.2] - 2026-11-14
+
+**Lead visual-evidence boundary on Open Design projects, and a compact `CONTEXT.md`.**
+
+### Added
+
+- **Lead-only visual-evidence boundary for Open Design-linked projects.** On Projects with `design/open-design-link.json`, the `Lead` role contract, bootstrap prompt, `APPEND_SYSTEM.md`, and kickoff packet now instruct `Lead` to accept waves from text artifacts (`report-<task>-<n>.md`, 6-Field Handoff, `git show --stat`, `git diff`, and Gate results), never load batch screenshot / storyboard / simulator images (`*.png`, `*.jpg`, `*.webp`, e.g. `evidence-*/`) into its long-lived session context (preventing cumulative inline-image history from hitting provider per-request image caps), and delegate multi-screen visual parity checks to a fresh read-only `reviewer` or `scout` Peer. `Supervisor`, `Peer`, and non-Open-Design Projects are unchanged.
+
+### Changed
+
+- **Trimmed `CONTEXT.md` under 22 KiB.** Full historical prose is archived at `docs/history/CONTEXT-2026-full.md` while keeping every live domain term and `_Avoid_` boundary concise.
+
 ## [0.10.1] - 2026-11-14
 
 **Start Supervisor works again on Paseo 0.15.**
