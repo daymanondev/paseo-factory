@@ -69,7 +69,8 @@ import { commitSeatMemoryOnRoot } from "./core/workspace.ts";
  *     pumps — the normal succession path raises the successor with the
  *     handover plus a staleness line.
  */
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Factory } from "./core/factory.ts";
 import { readCorrelations } from "./core/correlations.ts";
@@ -92,6 +93,7 @@ import {
 } from "./core/mailbox.ts";
 import type { LeadMailFrom, LeadMailItem, LeadMailKind, MailRecipient } from "./core/mailbox.ts";
 import { boundTaskPeers, peerIsRunning } from "./task-peers.ts";
+import { driverWavesInFlight, projectEventsOf as sharedProjectEventsOf, projectFactoryOf, projectPeersInFlight, projectStreamOf as sharedProjectStreamOf, taskFactoryOf as sharedTaskFactoryOf, taskHasSettledPeerOutcome } from "./peer-in-flight.ts";
 import { foldTasks, renderLedgerLine } from "./view.ts";
 import type { TaskView } from "../shared/view.ts";
 import type {
@@ -311,6 +313,12 @@ export interface LeadMailRuntime {
    */
   resetProjectMailbox(slug: string): void;
   /**
+   * Rotate seats (ADR 0060): cancels every in-flight seat job of one Project,
+   * clears its seat runtime and drops its mail and Lead handover files — the
+   * Peers' handoff state is left alone.
+   */
+  rotateProjectMailbox(slug: string): void;
+  /**
    * Marks one seat `agentId` as having already received its initial kickoff
    * turn (v0.0.28, ADR 0018 §2).
    */
@@ -401,30 +409,12 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
   // one registry); tests pass their own `registry` so the runtime, the Spool,
   // and the assertions share ONE instance per stateDir.
   const registry = deps.registry ?? factoryRegistryFor(deps.stateDir, { root: deps.factory });
-  const projectFactory = (slug: string): Factory => {
-    try {
-      return registry.factoryForProject(slug);
-    } catch {
-      return deps.factory;
-    }
-  };
+  const ledgerSource = { factory: deps.factory, registry };
+  const projectFactory = (slug: string): Factory => projectFactoryOf(ledgerSource, slug);
   /** The Factory owning `task` for this Project — the Project's own first, the wired root-bridge second. */
-  const taskFactoryOf = (slug: string, task: string | undefined): Factory => {
-    const project = projectFactory(slug);
-    if (project === deps.factory || task === undefined || task === "") return project;
-    if (project.contractFor(task) !== undefined) return project;
-    return deps.factory.contractFor(task) !== undefined ? deps.factory : project;
-  };
+  const taskFactoryOf = (slug: string, task: string | undefined): Factory => sharedTaskFactoryOf(ledgerSource, slug, task);
   /** The Project's Ledger stream: its OWN Factory's events plus any task the wired Factory still owns (the legacy root bridge). */
-  const projectStreamOf = (slug: string): readonly LedgerEvent[] => {
-    const project = projectFactory(slug);
-    if (project === deps.factory) return deps.factory.ledger.events;
-    const wiredOnly = deps.factory.ledger.events.filter((evt) => {
-      if (!("task" in evt) || typeof evt.task !== "string") return true; // machine-level facts stay visible
-      return project.contractFor(evt.task) === undefined;
-    });
-    return [...project.ledger.events, ...wiredOnly];
-  };
+  const projectStreamOf = (slug: string): readonly LedgerEvent[] => sharedProjectStreamOf(ledgerSource, slug);
   /** Every available Ledger stream — the root fallback's plus each ALREADY-OPEN
    * Project's (a pure peek: the polling paths must never open, validate, or
    * recover a Ledger mid-maintenance, and a read never mints state). */
@@ -461,9 +451,34 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     },
   });
 
+  // The Project's seat epoch (ADR 0060, S1): Rotate seats bumps it, and every
+  // lane job carries the epoch it was admitted under. Rotate lands from
+  // outside the lane (it holds the Project's own Factory, this lane holds the
+  // root's), so a job paused on an await can resume after the rotation. Every
+  // such job re-checks `stillCurrent` after each await and before each write
+  // that could carry old context forward — a handover file, a Substitute, a
+  // seat create, a kickoff — and abandons when the epoch moved.
+  const seatEpochs = new Map<string, number>();
+  const seatEpochOf = (slug: string): number => seatEpochs.get(slug) ?? 0;
+  const laneEpochs = new AsyncLocalStorage<{ slug: string; epoch: number }>();
+  const stillCurrent = (slug: string, where: string): boolean => {
+    const lease = laneEpochs.getStore();
+    if (lease === undefined || lease.slug !== slug || lease.epoch === seatEpochOf(slug)) return true;
+    log(`lead-mailbox: ${where} of ${slug} abandoned — the Project's seats were rotated while it was in flight`);
+    return false;
+  };
+  /** A seat created for a job the rotation superseded: retire every live Lead candidate, nothing carries over. */
+  const abandonSupersededLead = async (slug: string, root: string): Promise<void> => {
+    const retired = await deps.retireLead({ projectRoot: root }).catch((error) => ({ ok: false as const, code: "retire-failed", error: messageOf(error) }));
+    if (!retired.ok && retired.code !== "no-lead") log(`lead-mailbox: could not retire the superseded Lead of ${slug} (${retired.code}: ${retired.error})`);
+  };
+
   const projectLane = <T>(slug: string, run: () => Promise<T>): Promise<T> => {
     const prior = lanes.get(slug) ?? Promise.resolve();
-    const admitted = () => withProjectIngressLock(deps.stateDir, slug, () => deps.factory.history.runOperation(run));
+    const admitted = () =>
+      withProjectIngressLock(deps.stateDir, slug, () =>
+        deps.factory.history.runOperation(() => laneEpochs.run({ slug, epoch: seatEpochOf(slug) }, run)),
+      );
     const job = prior.then(admitted, admitted);
     lanes.set(
       slug,
@@ -593,12 +608,17 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       log(`lead-mailbox: cannot read the daemon's agents for ${slug} — holding ${state.queued.length} item(s) queued (${messageOf(err)})`);
       return;
     }
+    if (!stillCurrent(slug, "mail drain")) return;
     if (lead === undefined || lead.status === "error") {
       const registration = readProjectRegistration(deps.stateDir, slug);
       if (deps.ensureLead !== undefined && registration?.root !== undefined) {
         const carriedHandoff =
           lead !== undefined ? (pendingHandoffByAgentId.get(lead.id) ?? inFlightHandoffByAgentId.get(lead.id)) : undefined;
         const ensured = await deps.ensureLead({ projectRoot: registration.root });
+        if (!stillCurrent(slug, "mail drain")) {
+          if (ensured.ok) await abandonSupersededLead(slug, registration.root);
+          return;
+        }
         if (!ensured.ok) {
           log(`lead-mailbox: cannot ensure lead for ${slug} (${ensured.code}: ${ensured.error}) — holding ${state.queued.length} item(s)`);
           return;
@@ -612,6 +632,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
           log(`lead-mailbox: cannot read the daemon's agents for ${slug} — holding ${state.queued.length} item(s) queued (${messageOf(err)})`);
           return;
         }
+        if (!stillCurrent(slug, "mail drain")) return;
       }
     }
     if (lead === undefined) return; // no live Lead — the next dispatch ensures one and pumps again
@@ -622,6 +643,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       const events = root !== "" ? projectEventsOf(slug, root) : [];
       const tasks = foldTasks(events);
       const live = await liveAgentsById();
+      if (!stillCurrent(slug, "mail drain")) return;
       const roster = renderPeerRoster({
         stateDir: deps.stateDir,
         slug,
@@ -785,6 +807,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     if (registration === undefined) return; // no root binding — nothing to persist against
     const daemon = resolveDaemon();
     const lead = await liveLeadAgent(daemon, slug);
+    if (!stillCurrent(slug, "rotation observation")) return;
     if (lead === undefined || lead.status !== "running") return;
     const tokens = readLeadContextTokens(lead, deps.usagePaths);
     const mark = handoffMarkTokens("lead", tokens.maxTokens);
@@ -804,14 +827,18 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
    */
   const tryBeginPendingHandoff = async (slug: string): Promise<boolean> => {
     if (readRotationState(slug) !== "rotation_pending") return false;
-    if (await projectPeerInFlight(slug)) {
+    const holding = await projectPeerInFlight(slug);
+    if (!stillCurrent(slug, "pending handoff")) return false;
+    if (holding) {
       const events = projectStreamOf(slug); const live = await liveAgentsById();
+      if (!stillCurrent(slug, "pending handoff")) return false;
       updateProgress(slug, { state: "scheduled", waitingPeers: countWaitingPeers(slug, events, live) });
       return false;
     }
     const reg = readProjectRegistration(deps.stateDir, slug);
     if (reg?.root === undefined) return false;
     const lead = await liveLeadAgent(resolveDaemon(), slug).catch(() => undefined);
+    if (!stillCurrent(slug, "pending handoff")) return false;
     if (lead !== undefined && lead.status !== "error" && !isSeatReadyForMail(lead)) return false;
     try {
       await beginHandoff(slug, reg.root);
@@ -1092,6 +1119,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     } catch {
       // a sensor miss never blocks the machine
     }
+    if (!stillCurrent(slug, "turn settle")) return;
     if ((usedTokens !== null && usedTokens >= mark) || rotation === "rotation_pending") {
       // (3) Over threshold at the boundary (v0.0.93, ADR 0031 Quiet-Point
       // Succession): durably mark `rotation_pending` first, then begin the
@@ -1102,7 +1130,9 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       // the wave settles.
       writeRotationState(slug, root, { rotationState: "rotation_pending" });
       updateProgress(slug, { state: "scheduled" });
-      if (await projectPeerInFlight(slug)) {
+      const peersHolding = await projectPeerInFlight(slug);
+      if (!stillCurrent(slug, "turn settle")) return;
+      if (peersHolding) {
         log(`lead-mailbox: ${slug}'s lead rotation held in rotation_pending — a Task Peer is still running, the outgoing Lead stays live`);
         return;
       }
@@ -1116,6 +1146,10 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     if (retryingFailedLeadBatch && root) {
       const carriedHandoff = pendingHandoffByAgentId.get(input.agentId);
       const ensured = await deps.ensureLead({ projectRoot: root });
+      if (!stillCurrent(slug, "failed-batch retry")) {
+        if (ensured.ok) await abandonSupersededLead(slug, root);
+        return;
+      }
       if (ensured.ok && carriedHandoff !== undefined && ensured.agentId !== input.agentId) {
         pendingHandoffByAgentId.delete(input.agentId);
         pendingHandoffByAgentId.set(ensured.agentId, carriedHandoff);
@@ -1126,6 +1160,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
 
   /** Arm 3 — lock the mailbox (holding all mail), then steer the one bounded Handoff Extraction prompt (with Fuse 1 immediate bypass). */
   const beginHandoff = async (slug: string, root: string): Promise<void> => {
+    if (!stillCurrent(slug, "handoff start")) return;
     updateProgress(slug, { state: "handing-over", waitingPeers: undefined });
     const handoffRequestedAt = new Date().toISOString();
     // Persist the snapshot before the outgoing seat can overwrite its previous handoff.
@@ -1139,6 +1174,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     } catch {
       lead = undefined;
     }
+    if (!stillCurrent(slug, "handoff start")) return;
     if (lead === undefined || lead.status === "error") {
       log(
         `lead-mailbox: ${slug} handoff extraction bypassed (${lead === undefined ? "no live lead" : "lead in error state"}) — completing handoff immediately`,
@@ -1165,6 +1201,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       });
       return;
     }
+    if (!stillCurrent(slug, "handoff start")) return;
     log(`lead-mailbox: ${slug} locked for handoff — extraction prompt sent to ${lead.id}`);
     extractionOutstandingBySlug.add(slug);
     armHandoffTimer(slug, root);
@@ -1186,6 +1223,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     root: string,
     input: LeadTurnEndedInput & { fuseReason?: "extraction-send-failed" | "extraction-timeout" | "extraction-send-cap"; handoffRequestedAt?: string },
   ): Promise<void> => {
+    if (!stillCurrent(slug, "handoff completion")) return;
     clearHandoffTimer(slug);
     extractionOutstandingBySlug.delete(slug);
     const statePath = projectStateDir(deps.stateDir, slug);
@@ -1205,6 +1243,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
           });
           handoffText = lastAssistantText(timeline);
         } catch { /* Native timelines are best effort. */ }
+        if (!stillCurrent(slug, "handoff completion")) return;
       }
     }
     if (!validHandoffText(handoffText) && input.fuseReason !== "extraction-send-failed") {
@@ -1235,6 +1274,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
         const page = await resolveDaemon().agents.ref(input.agentId).timeline.refetch({ direction: "tail", limit: 6 });
         timeline = (page.entries ?? []).map(entry => { const item = entry.item ?? entry as { text?: string }; return item.text ?? ""; }).join("\n\n");
       } catch { /* timeline is best effort */ }
+      if (!stillCurrent(slug, "handoff completion")) return;
       const events = projectEventsOf(slug, root);
       handoffText = buildSubstituteHandover({ digest: renderLedgerDigest(events), notebook: readNotebook(projectNotebookPath(deps.stateDir, slug)), git: readHandoverGit(root), tasks: renderOpenTaskEvidence(foldTasks(events)), timeline, maxBytes: LEAD_HANDOFF_MAX_BYTES });
     } else handoffText = capHandoffText(handoffText!, LEAD_HANDOFF_MAX_BYTES);
@@ -1253,6 +1293,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     const events = projectEventsOf(slug, root);
     const tasks = foldTasks(events);
     const live = await liveAgentsById();
+    if (!stillCurrent(slug, "handoff completion")) return;
     const roster = renderPeerRoster({
       stateDir: deps.stateDir,
       slug,
@@ -1271,8 +1312,10 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       const outgoingId = readProjectRegistration(deps.stateDir, slug)?.lead ?? input.agentId;
       const outgoingLead = live.get(outgoingId) ?? (await liveLeadAgent(resolveDaemon(), slug).catch(() => undefined));
       if (outgoingLead !== undefined) await deps.usage.flushAgent(outgoingLead, { slug });
+      if (!stillCurrent(slug, "handoff completion")) return;
     }
     const retired = await deps.retireLead({ projectRoot: root });
+    if (!stillCurrent(slug, "handoff completion")) return;
     if (!retired.ok && retired.code !== "no-lead") {
       log(`lead-mailbox: handoff of ${slug} could not archive the outgoing lead (${retired.code}: ${retired.error}) — the mailbox stays locked, mail holds queued`);
       return;
@@ -1283,6 +1326,10 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     updateProgress(slug, { state: "creating-successor", failure: undefined });
     let ensured: EnsureLeadResult;
     try { ensured = await deps.ensureLead({ projectRoot: root }); } catch (error) { ensured = { ok: false, code: "successor-create-failed", error: messageOf(error) }; }
+    if (!stillCurrent(slug, "handoff completion")) {
+      if (ensured.ok) await abandonSupersededLead(slug, root);
+      return;
+    }
     if (!ensured.ok) {
       updateProgress(slug, { state: "failed", failure: ensured.error });
       log(`lead-mailbox: handoff of ${slug} could not spawn the successor (${ensured.code}: ${ensured.error}) — the mailbox stays locked, mail holds queued`);
@@ -1293,6 +1340,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     writeRotationState(slug, root, { rotationState: "normal", handoffRequestedAt: null });
     updateProgress(slug, { state: "done", waitingPeers: undefined, failure: undefined });
     await drainLeadMailbox(slug);
+    if (!stillCurrent(slug, "handoff completion")) return;
     const retiredLabel = retired.ok ? retired.agentId : (input.agentId || "absent-lead");
     // Loud degraded completion (v0.2.2, ADR 0050 Decision 4, amending ADR 0018
     // §3's "without paging Supervisor"): a completion that did not come from a
@@ -1372,6 +1420,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       log(`lead-mailbox: cannot read the daemon's agents for ${slug}'s handoff fuse — the state stands (${messageOf(err)})`);
       return;
     }
+    if (!stillCurrent(slug, "handoff fuse")) return;
     const complete = (fuseReason: "extraction-send-failed" | "extraction-timeout" | "extraction-send-cap"): Promise<void> =>
       completeHandoff(slug, reg.root ?? root, {
         agentId: reg.lead ?? lead?.id ?? "",
@@ -1405,6 +1454,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
         await complete("extraction-send-failed");
         return;
       }
+      if (!stillCurrent(slug, "handoff fuse")) return;
       const sentAt = new Date().toISOString();
       atomicJson(extractionPath(slug), { ...(snapshot ?? {}), requestedAt: sentAt, stale: false, sends: sends + 1 });
       writeRotationState(slug, reg.root ?? root, { rotationState: "handing_over", handoffRequestedAt: sentAt });
@@ -1421,11 +1471,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
 
   /** The Project's ledger slice — every event whose task's contract workspace sits inside the root (the snapshot's own scoping law; v0.0.89 per-Project isolation over the bridged stream). */
   const projectEventsOf = (slug: string, root: string): readonly LedgerEvent[] =>
-    projectStreamOf(slug).filter((evt) => {
-      if (!("task" in evt) || typeof evt.task !== "string") return false;
-      const contract = taskFactoryOf(slug, evt.task).contractFor(evt.task);
-      return contract !== undefined && (contract.workspace === root || contract.workspace.startsWith(`${root}/`));
-    });
+    sharedProjectEventsOf(ledgerSource, deps.stateDir, slug, root);
 
   /** Live daemon agents by id — best effort; a daemon miss renders "(not live)" statuses, never blocks the handoff. */
   const liveAgentsById = async (): Promise<Map<string, SurfaceAgentSnapshot>> => {
@@ -1440,28 +1486,8 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
   };
 
   const projectHasPeerWork = (slug: string, events: readonly LedgerEvent[], live: readonly SurfaceAgentSnapshot[]): boolean =>
-    driverWaveInFlight(events, live, slug) || foldTasks(events).some(task => !task.accepted &&
+    driverWavesInFlight(events, live, slug).length > 0 || foldTasks(events).some(task => !task.accepted &&
       boundTaskPeers({ stateDir: deps.stateDir, slug, task: task.task, events, live }).some(peerIsRunning));
-
-  /**
-   * Ledger-first quiet-point check for `rotation_pending` (v0.0.99, ADR 0031
-   * §3): once a Task's folded Ledger status in the current Contract epoch has
-   * reached a Peer-terminal state (`ready-to-accept` / GREEN, `needs-human`,
-   * `red` at `MAX_ATTEMPTS`, or a queued `from: "peer"` blocker in
-   * `mailbox.jsonl` — a `kind: "peer_challenge"` challenge awaiting the Lead's
-   * ruling or a `kind: "needs_human"` ceiling stall), the Task is in Lead's
-   * court and no longer counts as having Peer work in flight — even while the
-   * Peer's `agent_claim` or `agent_escalate_blocker` tool call is still
-   * returning inside an active turn (`peer.status === "running"`).
-   */
-  const taskHasSettledPeerOutcome = (task: TaskView, queuedPeerBlockerTasks?: ReadonlySet<string>): boolean =>
-    task.accepted ||
-    task.status === "accepted" ||
-    task.status === "closed" ||
-    task.status === "ready-to-accept" ||
-    task.status === "needs-human" ||
-    (task.status === "red" && task.attempts.length >= MAX_ATTEMPTS) ||
-    (queuedPeerBlockerTasks?.has(task.task) ?? false);
 
   /**
    * The quiet-point predicate for `rotation_pending` (v0.0.99/v0.0.93, ADR
@@ -1479,45 +1505,8 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
   const projectPeerInFlight = async (slug: string): Promise<boolean> => {
     const reg = readProjectRegistration(deps.stateDir, slug);
     if (reg?.root === undefined) return false;
-    const events = projectEventsOf(slug, reg.root);
-    const tasks = foldTasks(events);
-    let queuedPeerBlockerTasks: Set<string> | undefined;
-    let queuedPeerMailTasks: Set<string> | undefined;
-    try {
-      const mailbox = readLeadMailbox(mailboxPath(slug));
-      const queuedPeerMail = mailbox.queued.filter((item) => item.from === "peer" && typeof item.task === "string");
-      queuedPeerBlockerTasks = new Set(queuedPeerMail.filter((item) => item.kind === "needs_human" || item.kind === "peer_challenge").map((item) => item.task!));
-      queuedPeerMailTasks = new Set(queuedPeerMail.map((item) => item.task!));
-    } catch {
-      queuedPeerBlockerTasks = undefined;
-      queuedPeerMailTasks = undefined;
-    }
-    const settledTasks = new Set(
-      tasks.filter((task) => taskHasSettledPeerOutcome(task, queuedPeerBlockerTasks)).map((task) => task.task),
-    );
     const live = [...(await liveAgentsById()).values()];
-    const activeWaveEvents = settledTasks.size > 0 || (queuedPeerMailTasks?.size ?? 0) > 0
-      ? events.filter(
-          (evt) =>
-            !("task" in evt) ||
-            typeof evt.task !== "string" ||
-            (!settledTasks.has(evt.task) && !(queuedPeerMailTasks?.has(evt.task) ?? false)),
-        )
-      : events;
-    if (driverWaveInFlight(activeWaveEvents, live, slug, "live")) return true;
-    // v0.8.5: a dispatched, unsettled Task (`running`, or `red` below the
-    // ceiling) whose bound Peer is live and not `error` holds, whatever the
-    // Peer's status — `idle` after the Owner's Esc, between
-    // turns, or after a red Attempt. Only an outcome (verdict, needs-human,
-    // close, any queued Peer mail) or a dead/archived Peer releases it.
-    return tasks.some((task) => {
-      if (settledTasks.has(task.task)) return false;
-      const dispatchedAndOpen =
-        (task.status === "running" || task.status === "red") && !(queuedPeerMailTasks?.has(task.task) ?? false);
-      return boundTaskPeers({ stateDir: deps.stateDir, slug, task: task.task, events, live }).some(
-        (peer) => peerIsRunning(peer) || (dispatchedAndOpen && peer.status !== "error"),
-      );
-    });
+    return projectPeersInFlight({ stateDir: deps.stateDir, slug, root: reg.root, source: ledgerSource, live, law: "quiet-point" }).length > 0;
   };
 
   /**
@@ -1656,6 +1645,10 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
           request.task ??
           readCorrelations(deps.stateDir).find((r) => r.correlationId === request.submitter || r.agentId === request.submitter)?.task;
         const ensured = await deps.ensureLead({ projectRoot: root });
+        if (!stillCurrent(slug, "lead dispatch")) {
+          if (ensured.ok) await abandonSupersededLead(slug, root);
+          return { ok: false, code: "project-rotated", error: "the Project's seats were rotated while this dispatch was in flight — send it again" };
+        }
         if (!ensured.ok) return ensured;
         const from = request.from ?? "owner";
         // ADR 0053 Decision 2 / spec Decision 6: a Peer challenge
@@ -1763,7 +1756,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       ? {
           id: request.id,
           ok: true,
-          summary: `directive held for Supervisor — none is live for ${slug}; it delivers to the next Supervisor (the Factory panel's Needs you says so) — stop this turn immediately without editing files`,
+          summary: `directive held for Supervisor — none is live for ${slug}; it delivers to the next Supervisor (the Factory panel's Needs you says so). To seat one: open a New Chat in Paseo Desktop and select the \`Supervisor (Factory)\` profile at the Project root: ${root} — stop this turn immediately without editing files`,
           project: slug,
           mailId,
         }
@@ -1866,7 +1859,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       } catch {
         // best-effort live agent inspection for dead/orphaned worktree spawn rounds
       }
-      if (driverWaveInFlight(projectEventsOf(resolved.slug, resolved.root), liveAgents, resolved.slug)) return; // held in mailbox.jsonl — the wave's last outcome pumps it
+      if (driverWavesInFlight(projectEventsOf(resolved.slug, resolved.root), liveAgents, resolved.slug).length > 0) return; // held in mailbox.jsonl — the wave's last outcome pumps it
       await pumpProjectLead(resolved.slug);
     } catch (err) {
       log(`lead-mailbox: peer notification for ${input.task} failed — the outcome stays in the ledger (${messageOf(err)})`);
@@ -2030,6 +2023,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
               timeline = (page.entries ?? []).map(entry => (entry.item ?? entry as { text?: string }).text ?? "").filter(Boolean).join("\n\n") || timeline;
             } catch { /* Lost-Lead recovery remains useful without optional evidence. */ }
             finally { clearTimeout(evidenceTimer); }
+            if (!stillCurrent(registration.slug, "lost-Lead recovery")) return;
             const body = buildSubstituteHandover({ digest: renderLedgerDigest(events), notebook: readNotebook(projectNotebookPath(deps.stateDir, registration.slug)), git: readHandoverGit(registration.root), tasks: renderOpenTaskEvidence(foldTasks(events)), timeline, maxBytes: LEAD_HANDOFF_MAX_BYTES });
             mkdirSync(projectStateDir(deps.stateDir, registration.slug), { recursive: true });
             writeFileSync(join(projectStateDir(deps.stateDir, registration.slug), "lead-handoff.md"), renderHandoffFile(body, { leadId: agentId, writtenAt: new Date().toISOString() }));
@@ -2049,6 +2043,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
           } catch (err) {
             log(`lead-mailbox: released-supervisor settle of ${registration.slug} deferred (${messageOf(err)}) — the record stands`);
           }
+          if (!stillCurrent(registration.slug, "lost-Lead recovery")) return;
           // (4) The succession pump — the ensure arm creates the successor.
           await drainLeadMailbox(registration.slug);
         } catch (err) {
@@ -2058,10 +2053,17 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     }
   };
 
-  const resetProjectMailbox = (slug: string): void => {
+  /**
+   * The seat state both a Project reset and Rotate seats drop (ADR 0060): the
+   * handoff timers and progress, the in-memory kickoff/handoff flags of the
+   * bound Lead and Supervisor, and the persisted rotation fields. Peer handoff
+   * state is NOT in it — a reset cancels Peers itself, Rotate never touches
+   * them.
+   */
+  const clearSeatRuntime = (slug: string): void => {
+    seatEpochs.set(slug, seatEpochOf(slug) + 1);
     supervisorHandoff.reset(slug);
     writeHandoffProgress(deps.stateDir, slug, null);
-    peerHandoff.reset(slug);
     clearHandoffTimer(slug);
     handingOverBySlug.delete(slug);
     extractionOutstandingBySlug.delete(slug);
@@ -2084,6 +2086,30 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     }
     if (reg !== undefined && (reg.rotationState !== undefined || reg.handoffRequestedAt !== undefined)) {
       writeRotationState(slug, reg.root, { rotationState: null, handoffRequestedAt: null });
+    }
+  };
+
+  const resetProjectMailbox = (slug: string): void => {
+    clearSeatRuntime(slug);
+    peerHandoff.reset(slug);
+  };
+
+  /**
+   * Rotate seats (ADR 0060): supersedes every in-flight job of the Project
+   * (the epoch moves), clears the seat runtime and drops the files that carry
+   * the old seats' context — held and un-acked mail, the Lead's handover and
+   * extraction record. The Supervisor's records go with `supervisorHandoff.reset`
+   * and the Lead's progress with `clearSeatRuntime`. Safe to call again after
+   * the retires: the Lead's retire requeues its un-acked batch into the file.
+   */
+  const rotateProjectMailbox = (slug: string): void => {
+    clearSeatRuntime(slug);
+    for (const path of [mailboxPath(slug), join(projectStateDir(deps.stateDir, slug), "lead-handoff.md"), extractionPath(slug)]) {
+      try {
+        rmSync(path, { force: true });
+      } catch (err) {
+        log(`lead-mailbox: could not drop ${path} on rotate (${messageOf(err)})`);
+      }
     }
   };
 
@@ -2143,6 +2169,10 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
         if (current?.state !== "failed") return { ok: false, code: "handoff-not-failed", error: "Only a failed handoff can be retried" };
         updateProgress(input.slug, { state: "creating-successor", failure: undefined });
         const ensured = await deps.ensureLead({ projectRoot: reg.root }).catch(error => ({ ok: false as const, code: "successor-create-failed", error: messageOf(error) }));
+        if (!stillCurrent(input.slug, "handoff retry")) {
+          if (ensured.ok) await abandonSupersededLead(input.slug, reg.root);
+          return { ok: false, code: "project-rotated", error: "The Project's seats were rotated while this handoff retry was in flight" };
+        }
         if (!ensured.ok) updateProgress(input.slug, { state: "failed", failure: ensured.error });
         else {
           const events = projectEventsOf(input.slug, reg.root);
@@ -2188,6 +2218,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     markPluginArchive,
     clearPluginArchive,
     resetProjectMailbox,
+    rotateProjectMailbox,
     markKickoffSent,
     stop,
   };
@@ -2195,7 +2226,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
   // sets a marker right before its archive call flies and clears it inside a
   // failure path nobody awaits, so both effects must land before control
   // returns (the markKickoffSent precedent).
-  const sync = new Set(["startupRecovery", "settleLeadRotation", "resetProjectMailbox", "markKickoffSent", "markPluginArchive", "clearPluginArchive", "hasPendingHandoff"]);
+  const sync = new Set(["startupRecovery", "settleLeadRotation", "resetProjectMailbox", "rotateProjectMailbox", "markKickoffSent", "markPluginArchive", "clearPluginArchive", "hasPendingHandoff"]);
   return new Proxy(runtime, { get(target, key, receiver) {
     const value = Reflect.get(target, key, receiver);
     if (typeof value !== "function" || key === "stop") return value;
@@ -2454,73 +2485,6 @@ function contractWorkspaceOf(events: readonly LedgerEvent[], task: string): stri
   return workspace;
 }
 
-/**
- * The driver-held signal, derived from the ledger alone (spec §Implementation
- * Decisions 4, last bullet): a synchronous CLI Driver wave is in flight while
- * any task's latest spawn round is still open — `spawn_dispatched` with
- * neither a terminal verdict (`gate_finished`) nor a `needs_human` close
- * after it. The wave's last terminal outcome clears the predicate, and that
- * outcome's own peer hook pumps the held batch.
- *
- * v0.0.92 (spec §Implementation Decision 4): the live-agents liveness check
- * runs for EVERY open round — a legacy `spawn_dispatched` with no `worktree`
- * field is checked by `labels.task` and the spawned agent id, never skipped.
- * A `Peer` that has terminated, errored, or been archived (the cascade kill
- * during `Lead handoff`) removes its round immediately, so a dead `Peer` can
- * never deadlock `drainLeadMailbox` from delivering the successor Lead's
- * Turn-1 kickoff. The `labels.task` arm stays Project-scoped: two Projects
- * may share a Task id, and a neighbor's live `Peer` is not this Project's
- * wave. `agent` is absent on today's `spawn_dispatched` lines (recorded
- * before any agent exists) — the id arm is the defensive read for any future
- * writer that stamps it, with the CLI Driver's own `"driver"` marker treated
- * as absent.
- *
- * v0.2.2 (ADR 0050 §1, the durable in-flight arm): `liveness: "live"` keeps
- * an open round while its bound `Peer` is merely live and not `error` —
- * `idle`/`closed` included, because `idle`-because-paused and
- * `idle`-between-turns are indistinguishable at the only layer that survives
- * restarts (the ledger plus the live daemon snapshot). Only the quiet-point
- * check (`projectPeerInFlight`) passes `"live"`; the default `"running"`
- * arm (running/initializing only) keeps governing `notifyPeer`'s pump gate
- * and `projectHasPeerWork`; a `Peer` that has already queued its verdict
- * must never hold the Lead's mail delivery.
- */
-function driverWaveInFlight(
-  events: readonly LedgerEvent[],
-  liveAgents?: readonly SurfaceAgentSnapshot[],
-  projectSlug?: string,
-  liveness?: "running" | "live",
-): boolean {
-  const openRounds = new Map<string, Extract<LedgerEvent, { event: "spawn_dispatched" }>>();
-  for (const evt of events) {
-    if (!("task" in evt) || typeof evt.task !== "string") continue;
-    if (evt.event === "spawn_dispatched") openRounds.set(evt.task, evt);
-    else if (evt.event === "contract_set" || evt.event === "gate_finished" || evt.event === "needs_human") {
-      openRounds.delete(evt.task);
-    }
-  }
-  if (openRounds.size > 0 && liveAgents !== undefined) {
-    for (const [task, spawnEvt] of [...openRounds.entries()]) {
-      const wt = typeof spawnEvt.worktree === "string" && spawnEvt.worktree !== "" ? spawnEvt.worktree : undefined;
-      const stampedAgent = (spawnEvt as { agent?: unknown }).agent;
-      const spawnedAgentId =
-        typeof stampedAgent === "string" && stampedAgent !== "" && stampedAgent !== "driver" ? stampedAgent : undefined;
-      const peerIsLively = (agent: SurfaceAgentSnapshot): boolean =>
-        liveness === "live" ? agent.status !== "error" : agent.status === "running" || agent.status === "initializing";
-      const hasLivePeer = liveAgents.some(
-        (agent) =>
-          agent.archivedAt === null &&
-          peerIsLively(agent) &&
-          ((wt !== undefined && typeof agent.cwd === "string" && (agent.cwd === wt || agent.cwd.startsWith(`${wt}/`))) ||
-            (agent.labels?.task === task &&
-              (projectSlug === undefined || agent.labels?.project === undefined || agent.labels?.project === projectSlug)) ||
-            (spawnedAgentId !== undefined && agent.id === spawnedAgentId)),
-      );
-      if (!hasLivePeer) openRounds.delete(task);
-    }
-  }
-  return openRounds.size > 0;
-}
 
 /** One queued batch as the single prompt the Lead receives — every waiting item, in enqueue order. */
 function renderMailPrompt(items: readonly LeadMailItem[]): string {

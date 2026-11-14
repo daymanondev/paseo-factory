@@ -19,7 +19,7 @@ import type { PluginHookContext, PluginHookEvents, PluginHookRequests, PluginSer
 import { pendingUpgradeFor } from "./server/core/upgrade-state.ts";
 import { ensureFactoryBinScripts } from "./server/core/agy-home.ts";
 import { PLUGIN_ID, pluginDirFor, resolvePaseoHome, stateDirFor } from "./server/paths.ts";
-import { ensureFactorySkillSafe } from "./server/core/skill.ts";
+import { ensureFactorySkillRootsSafe } from "./server/core/skill.ts";
 import { provisionPiAgentHome } from "./server/core/pi-home.ts";
 import { effectiveLanesForReconcile, healFactoryRoleProvidersInConfig, reconcilePaseoRoleProviders } from "./server/core/role-providers.ts";
 import { reloadDaemonConfigViaWs, warmPluginDaemonApiViaWs } from "./server/daemon-cli.ts";
@@ -41,7 +41,7 @@ import { migrateLegacyExecutionState } from "./server/core/project-settings.ts";
 // migrateLegacyRootState(stateDir, { projects: Array<{ slug, gitRoot? }> }).
 import { migrateLegacyRootState } from "./server/core/ledger-migration.ts";
 
-const SHELL_VERSION = "0.8.6";
+const SHELL_VERSION = "0.10.1";
 
 const log = (message: string) => console.log(`[${PLUGIN_ID}] ${message}`);
 
@@ -54,9 +54,8 @@ export default function contribute(server: PluginServerContext) {
     const quoted = (value: string) => (/\s/.test(value) ? `"${value}"` : value);
     const runner = /Paseo Helper/i.test(process.execPath) ? `ELECTRON_RUN_AS_NODE=1 ${quoted(process.execPath)}` : quoted(process.execPath);
     const factoryCmd = activePluginDir === undefined ? "factory" : `${runner} ${quoted(join(activePluginDir, "bin", "factory.mjs"))}`;
-    for (const skillsRoot of [join(homedir(), ".agents", "skills"), join(homedir(), ".claude", "skills")]) {
-      const skillPath = ensureFactorySkillSafe(skillsRoot, { factoryCmd }, log);
-      if (logReconciled && skillPath !== null) log(`skill: /factory reconciled at ${skillPath}`);
+    for (const skillPath of ensureFactorySkillRootsSafe(homedir(), { factoryCmd }, log)) {
+      if (logReconciled) log(`skill: /factory reconciled at ${skillPath}`);
     }
   };
 
@@ -158,8 +157,9 @@ export default function contribute(server: PluginServerContext) {
       }
 
       // The global `/factory` skill (v0.0.20, ADR 0013 §3; v0.0.23, ADR 0015 §5):
-      // reconcile both `~/.agents/skills/factory/SKILL.md` (pi / opencode) and
-      // `~/.claude/skills/factory/SKILL.md` (claude) at boot so the Owner can type
+      // reconcile `~/.agents/skills/factory/SKILL.md` (pi / opencode),
+      // `~/.claude/skills/factory/SKILL.md` (claude) and
+      // `~/.pi/agent/skills/factory/SKILL.md` (pi agent dir, ADR 0036) at boot so the Owner can type
       // `/factory <directive>` in any session and bootstrap or dispatch into the
       // Project's SLP loop via `factory supervisor dispatch`. The skill carries
       // this install's exact factory CLI invocation (the seats' `factoryCmd`
@@ -323,6 +323,7 @@ export default function contribute(server: PluginServerContext) {
     markPluginArchive: (input) => leadMail.markPluginArchive(input.agentId),
     clearPluginArchive: (input) => leadMail.clearPluginArchive(input.agentId),
     resetProjectMailbox: (slug) => leadMail.resetProjectMailbox(slug),
+    rotateProjectMailbox: (slug) => leadMail.rotateProjectMailbox(slug),
     leadDispatch: (request, options) => leadMail.dispatchLead(request, options),
     supervisorReport: (request) => leadMail.reportSupervisor(request),
     // v0.6.1 (ADR 0057 §5): a newly bound Supervisor receives its Seat kickoff
@@ -480,6 +481,30 @@ export default function contribute(server: PluginServerContext) {
             message: reply.error,
           };
     },
+    projectRotate: async (request) => {
+      const reply = await surface.projectRotate(
+        {
+          ...(request.workspace !== undefined ? { projectRoot: request.workspace } : {}),
+          ...(request.project !== undefined ? { project: request.project } : {}),
+        },
+        { paseo: paseoApi as never, ...(request.seat !== undefined ? { seat: request.seat } : {}) },
+      );
+      return reply.ok
+        ? {
+            id: request.id,
+            ok: true as const,
+            summary: reply.summary,
+            project: reply.project,
+            projectRoot: reply.projectRoot,
+            archivedSeats: reply.archivedSeats,
+          }
+        : {
+            id: request.id,
+            ok: false as const,
+            code: reply.code,
+            message: reply.error,
+          };
+    },
     projectDelete: async (request) => {
       const reply = await surface.projectDelete(
         {
@@ -506,6 +531,28 @@ export default function contribute(server: PluginServerContext) {
             removedFiles: reply.removedFiles,
             archivedSeats: reply.archivedSeats,
             archivedAgents: reply.archivedAgents,
+          }
+        : {
+            id: request.id,
+            ok: false as const,
+            code: reply.code,
+            message: reply.error,
+          };
+    },
+    projectRegister: async (request) => {
+      const reply = await surface.projectRegister(
+        { workspace: request.workspace },
+        { paseo: paseoApi as never, ...(request.seat !== undefined ? { seat: request.seat } : {}) },
+      );
+      return reply.ok
+        ? {
+            id: request.id,
+            ok: true as const,
+            summary: reply.summary,
+            project: reply.slug,
+            projectRoot: reply.root,
+            bootstrapped: reply.bootstrapped,
+            alreadyRegistered: reply.alreadyRegistered,
           }
         : {
             id: request.id,

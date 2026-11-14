@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createFactory } from "../plugin/server/core/factory.ts";
+import { createFactoryRegistry } from "../plugin/server/projects.ts";
 import { CorrelationRegistry } from "../plugin/server/core/correlations.ts";
 import { resolveProject } from "../plugin/server/core/project.ts";
 import { taskWorktreePath } from "../plugin/server/core/workspace.ts";
@@ -40,6 +41,8 @@ interface FakeAgent {
 }
 
 function fakeDaemon(agents: FakeAgent[]) {
+  /** Test gates: hold one daemon call open so a concurrent act can land mid-flight. */
+  const hooks: { timeline?: () => Promise<void>; create?: () => Promise<void> } = {};
   const created: { config: { provider: string }; cwd: string; title: string; labels: Record<string, string>; prompt?: string }[] = [];
   const sent: { agentId: string; text: string }[] = [];
   // The fake daemon's agent.archive.after listeners (v0.6.1, ADR 0057 §4) —
@@ -88,6 +91,7 @@ function fakeDaemon(agents: FakeAgent[]) {
         };
       },
       create: async (options) => {
+        await hooks.create?.();
         created.push({ config: options.config, cwd: options.cwd, title: options.title ?? "", labels: options.labels ?? {}, prompt: options.prompt });
         const id = `agent-created-${created.length}`;
         agents.push({ id, title: options.title ?? undefined, provider: options.config.provider, labels: options.labels, cwd: options.cwd });
@@ -103,7 +107,7 @@ function fakeDaemon(agents: FakeAgent[]) {
           await notifyArchived(id); // a faithful daemon fires agent.archive.after on its own archive too
           return { archivedAt: new Date().toISOString() };
         },
-        timeline: { refetch: async () => ({ entries: [] }) },
+        timeline: { refetch: async () => { await hooks.timeline?.(); return { entries: [] }; } },
       }),
     },
     providers: {
@@ -111,10 +115,10 @@ function fakeDaemon(agents: FakeAgent[]) {
       listModels: async () => ({ models: [] }),
     },
   };
-  return { daemon, created, sent, agents, emitArchive, archiveListeners };
+  return { daemon, created, sent, agents, emitArchive, archiveListeners, hooks };
 }
 
-function makeSpooledRuntime(t: TestContext, agents: FakeAgent[] = [], options?: { handoffTimeoutMs?: number; ownerHandoffTimeoutMs?: number }) {
+function makeSpooledRuntime(t: TestContext, agents: FakeAgent[] = [], options?: { handoffTimeoutMs?: number; ownerHandoffTimeoutMs?: number; registry?: boolean }) {
   const dir = makeTempDir();
   disposeDir(t, dir);
   const projectRoot = join(dir, "repo");
@@ -127,13 +131,18 @@ function makeSpooledRuntime(t: TestContext, agents: FakeAgent[] = [], options?: 
 
   const home = join(dir, "paseo-home");
   const stateDir = join(home, "plugin-state", "paseo-factory");
-  const factory = createFactory({ stateDir });
+  // `registry: true` is the production shape: one Factory per Project, so a
+  // Project's exclusive maintenance (Rotate) does NOT stop the root Factory's mailbox lane.
+  const registry = options?.registry === true ? createFactoryRegistry({ stateDir }) : undefined;
+  if (registry !== undefined) t.after(() => registry.stop());
+  const factory = registry?.root ?? createFactory({ stateDir });
   writeProjectRegistration(stateDir, slug, { root: projectRoot });
   const fake = fakeDaemon(agents);
   const logs: string[] = [];
   const warnings: string[] = [];
   const surface = createSurfaceHandlers({
     factory,
+    ...(registry === undefined ? {} : { registry }),
     stateDir,
     home,
     daemon: fake.daemon,
@@ -144,9 +153,12 @@ function makeSpooledRuntime(t: TestContext, agents: FakeAgent[] = [], options?: 
     markPluginArchive: (input) => leadMail.markPluginArchive(input.agentId),
     clearPluginArchive: (input) => leadMail.clearPluginArchive(input.agentId),
     leadDispatch: (request) => leadMail.dispatchLead(request),
+    resetProjectMailbox: (slug) => leadMail.resetProjectMailbox(slug),
+    rotateProjectMailbox: (slug) => leadMail.rotateProjectMailbox(slug),
   });
   const leadMail = createLeadMailRuntime({
     factory,
+    ...(registry === undefined ? {} : { registry }),
     stateDir,
     daemon: fake.daemon,
     ensureLead: (input) => surface.leadEnsure(input),
@@ -270,6 +282,10 @@ test("supervisor_dispatch from normal chat never creates a Supervisor — with a
   const heldReply = readReply(heldSpool, "sup-disp-held");
   assert.equal(heldReply.supervisorAgentId, undefined);
   assert.match(String(heldReply.summary), /directive held for Supervisor — none is live/);
+  // CLI Project onboarding (ticket 03): the held reply carries the exact seat-opening step.
+  assert.match(String(heldReply.summary), /open a New Chat in Paseo Desktop and select the `Supervisor \(Factory\)` profile at the Project root/);
+  assert.ok(String(heldReply.summary).includes(held.projectRoot), "the step names the Project root to open the chat in");
+  assert.match(String(heldReply.summary), /stop this turn immediately without editing files/);
   assert.equal(held.fake.created.length, 0, "the dispatch creates no Supervisor");
   assert.equal(held.fake.sent.length, 0);
   assert.deepEqual(
@@ -300,6 +316,7 @@ test("supervisor_dispatch from normal chat never creates a Supervisor — with a
   assert.equal(reply.supervisorAgentId, started.ok ? started.agentId : "");
   assert.match(String(reply.summary), new RegExp(`directive routed to Supervisor \\(${started.ok ? started.agentId : ""}\\)`));
   assert.match(String(reply.summary), /stop this turn immediately without editing files/);
+  assert.doesNotMatch(String(reply.summary), /New Chat/, "a routed directive needs no seat-opening step");
 
   assert.equal(fake.created.length, 1);
   assert.deepEqual(fake.created[0]?.labels, { seat: "supervisor", project: slug });
@@ -2640,6 +2657,134 @@ test("v0.6.1 (ADR 0057 §4): a Project reset's and delete's own archives never t
   assert.ok(deleted.archivedSeats.includes(doomedLead.id), "the delete archived the bound Lead through the cleanup seam");
   assert.equal(fake.agents.some((agent) => agent.id === doomedLead.id), false);
   assert.equal(fake.created.length, 0, "the delete's archive events never raise a successor either");
+});
+
+test("ADR 0060: Rotate seats archives both seats with no lost-Lead recovery, no Substitute handover and no recreated Lead — the next Supervisor dispatch raises a Lead whose kickoff carries no handover", async (t) => {
+  const { stateDir, slug, projectRoot, surface, leadMail, fake } = makeSpooledRuntime(t);
+  const supervisor = await surface.supervisorEnsure({ projectRoot });
+  const lead = await surface.leadEnsure({ projectRoot });
+  assert.ok(supervisor.ok && lead.ok);
+  // Mail mid-delivery and queued behind it, plus the on-disk handover records of the old Lead.
+  await leadMail.enqueueLeadMail(slug, { from: "supervisor", kind: "directive", text: "Directive in flight when the rotation lands" });
+  await leadMail.pumpProjectLead(slug);
+  await leadMail.enqueueLeadMail(slug, { from: "supervisor", kind: "directive", text: "Directive still queued" });
+  const projectDir = projectStateDir(stateDir, slug);
+  writeFileSync(join(projectDir, "lead-handoff.md"), "# the old Lead's handover — STALE-CONTEXT\n");
+  writeFileSync(join(projectDir, "lead-handoff-extraction.json"), `${JSON.stringify({ leadLostAt: "2026-11-12T08:00:00.000Z" })}\n`);
+  writeFileSync(join(projectDir, "notebook.md"), "## 1. Verification & Run Recipe\nrun it\n");
+  const createdBefore = fake.created.length;
+
+  const rotated = await surface.projectRotate({ projectRoot });
+  assert.ok(rotated.ok, rotated.ok ? "" : rotated.error);
+  assert.deepEqual(rotated.archivedSeats, [lead.agentId, supervisor.agentId]);
+
+  // Pumps and turn boundaries after the act find nothing: no Lead rises.
+  await leadMail.pumpProjectLead(slug);
+  await leadMail.pumpAll();
+  await leadMail.onLeadTurnEnded({ agentId: lead.agentId, outcome: { kind: "canceled" }, timeline: [] });
+  assert.equal(fake.created.length, createdBefore, "no Lead (or any seat) is recreated");
+  const reg = readProjectRegistration(stateDir, slug);
+  assert.equal(reg?.lead, undefined);
+  assert.equal(reg?.supervisor, undefined);
+  assert.equal(existsSync(join(projectDir, "lead-handoff.md")), false, "no Substitute handover is written, the old one is dropped");
+  assert.equal(existsSync(join(projectDir, "lead-handoff-extraction.json")), false);
+  assert.equal(readMailboxLines(stateDir, slug).some((event) => event.reason === "lead_lost"), false, "no lead_lost recovery fired");
+  assert.equal(existsSync(join(projectDir, "notebook.md")), true, "the notebook survives");
+
+  // The Owner opens a fresh Supervisor; its first dispatch creates a fresh Lead with the standard kickoff and no handover.
+  const started = await surface.supervisorStart({ projectRoot });
+  assert.ok(started.ok, started.ok ? "" : started.error);
+  const dispatched = await leadMail.dispatchLead({ id: "ld-after-rotate", kind: "lead_dispatch", workspace: projectRoot, message: "Start the next wave", seat: "supervisor" });
+  assert.equal(dispatched.ok, true, dispatched.ok ? "" : JSON.stringify(dispatched));
+  const freshLead = readProjectRegistration(stateDir, slug)?.lead;
+  assert.ok(freshLead !== undefined && freshLead !== lead.agentId, "a fresh Lead is bound");
+  const firstTexts = [
+    ...fake.created.filter((entry) => entry.labels.seat === "lead").map((entry) => entry.prompt ?? ""),
+    ...fake.sent.filter((entry) => entry.agentId === freshLead).map((entry) => entry.text),
+  ].join("\n");
+  assert.match(firstTexts, /Start the next wave/, "the Lead's first prompt carries the dispatched directive");
+  assert.match(firstTexts, /Verification & Run Recipe/, "and the standard kickoff's notebook");
+  assert.doesNotMatch(firstTexts, /# Lead handoff|Outgoing Lead handoff|Plugin-built handover|Staleness notice|STALE-CONTEXT|Directive still queued|Directive in flight/, "no handover, no stale notice, no old mail");
+});
+
+/** A gate one test opens by hand: `wait()` parks the daemon call, `release()` lets it through. */
+function gate() {
+  let open!: () => void;
+  const opened = new Promise<void>((resolve) => { open = resolve; });
+  let reached = false;
+  return { wait: async () => { reached = true; await opened; }, release: open, get reached() { return reached; } };
+}
+
+const liveSeats = (fake: { agents: FakeAgent[] }, seat: string): FakeAgent[] => fake.agents.filter((agent) => agent.labels?.seat === seat);
+
+test("ADR 0060 (S1): a Lead handoff paused mid-flight when Rotate lands writes no lead-handoff.md, no Substitute and raises no Lead afterwards", async (t) => {
+  const { stateDir, slug, projectRoot, surface, leadMail, fake } = makeSpooledRuntime(t, [], { registry: true });
+  const lead = await surface.leadEnsure({ projectRoot });
+  assert.ok(lead.ok);
+  const projectDir = projectStateDir(stateDir, slug);
+  const paused = gate();
+  fake.hooks.timeline = paused.wait; // the handoff's Substitute evidence read parks here
+  const createdBefore = fake.created.length;
+  const handoff = leadMail.handoff({ slug, seat: "lead", action: "replaceNow" });
+  await until(() => assert.equal(paused.reached, true));
+
+  const rotated = await surface.projectRotate({ projectRoot });
+  assert.ok(rotated.ok, rotated.ok ? "" : rotated.error);
+  paused.release();
+  await handoff;
+  await leadMail.pumpProjectLead(slug);
+  await leadMail.pumpAll();
+
+  assert.deepEqual(liveSeats(fake, "lead"), [], "no live Lead after the rotation");
+  assert.equal(fake.created.length, createdBefore, "no successor was created");
+  assert.equal(existsSync(join(projectDir, "lead-handoff.md")), false, "no Substitute handover was written");
+  assert.equal(existsSync(join(projectDir, "lead-handoff-extraction.json")), false);
+  assert.equal(readProjectRegistration(stateDir, slug)?.lead, undefined);
+  assert.equal(readProjectRegistration(stateDir, slug)?.rotationState, undefined);
+});
+
+test("ADR 0060 (S1): a Lead handoff whose successor creation is pending when Rotate lands leaves no live Lead", async (t) => {
+  const { stateDir, slug, projectRoot, surface, leadMail, fake } = makeSpooledRuntime(t, [], { registry: true });
+  const lead = await surface.leadEnsure({ projectRoot });
+  assert.ok(lead.ok);
+  const projectDir = projectStateDir(stateDir, slug);
+  const paused = gate();
+  const handoff = leadMail.handoff({ slug, seat: "lead", action: "replaceNow" });
+  fake.hooks.create = paused.wait; // the successor's daemon create parks here
+  await until(() => assert.equal(paused.reached, true));
+
+  const rotating = surface.projectRotate({ projectRoot });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  paused.release();
+  const rotated = await rotating;
+  await handoff;
+  await leadMail.pumpProjectLead(slug);
+
+  assert.ok(rotated.ok, rotated.ok ? "" : rotated.error);
+  assert.deepEqual(liveSeats(fake, "lead"), [], "the half-created successor is archived too");
+  assert.equal(readProjectRegistration(stateDir, slug)?.lead, undefined);
+  assert.equal(existsSync(join(projectDir, "lead-handoff.md")), false, "no handover survives");
+  assert.equal(existsSync(join(projectDir, "mailbox.jsonl")), false);
+});
+
+test("ADR 0060 (S1): a handoff extraction pending when Rotate lands never completes into a successor when the old Lead's turn ends", async (t) => {
+  const { stateDir, slug, projectRoot, surface, leadMail, fake } = makeSpooledRuntime(t, [], { registry: true });
+  const lead = await surface.leadEnsure({ projectRoot });
+  assert.ok(lead.ok);
+  // The Owner's handoff: the extraction prompt is out and the Project sits in handing_over.
+  const started = await leadMail.handoff({ slug, seat: "lead", action: "start", reason: "owner" });
+  assert.ok(started.ok);
+  assert.equal(readProjectRegistration(stateDir, slug)?.rotationState, "handing_over");
+  const second = lead;
+  const createdBefore = fake.created.length;
+
+  const rotated = await surface.projectRotate({ projectRoot });
+  assert.ok(rotated.ok, rotated.ok ? "" : rotated.error);
+  await leadMail.onLeadTurnEnded({ agentId: second.agentId, outcome: { kind: "completed" }, timeline: [{ type: "assistant_message", text: "A perfectly good handover that must never reach a successor." }] });
+
+  assert.equal(fake.created.length, createdBefore);
+  assert.deepEqual(liveSeats(fake, "lead"), []);
+  assert.equal(existsSync(join(projectStateDir(stateDir, slug), "lead-handoff.md")), false);
 });
 
 test("v0.6.1 (ADR 0057 §4): the released Supervisor archives when the Lead handoff retires the parented Lead — end to end through the rotation machine", async (t) => {

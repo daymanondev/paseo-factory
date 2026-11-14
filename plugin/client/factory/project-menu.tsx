@@ -1,5 +1,5 @@
-/** The reduced Project menu (W10, ADR 0057 §8): Reset, Delete and Open Settings.
- * Reset/Delete retain their two-step confirmation; a missing folder keeps Delete only.
+/** The reduced Project menu (W10, ADR 0057 §8): Reset, Rotate seats, Delete and Open Settings.
+ * Reset/Rotate/Delete retain their two-step confirmation; a missing folder keeps Delete only.
  * Mobile mounts no menu writes. Model, pack and design controls live in the tab.
  */
 import type { PluginTheme } from "@getpaseo/plugin";
@@ -17,7 +17,7 @@ export interface MenuSkillPack {
   autoDetected: boolean;
 }
 
-export type MenuConfirming = "reset" | "delete" | null;
+export type MenuConfirming = "reset" | "rotate" | "delete" | null;
 
 function MenuSection({ theme, id, title, children }: { theme: PluginTheme; id: string; title: string; children: ReactNode }) {
   return (
@@ -46,8 +46,8 @@ function ConfirmableDanger({
   onConfirm,
 }: {
   theme: PluginTheme;
-  kind: "reset" | "delete";
-  icon: "RotateCcw" | "Trash2";
+  kind: Exclude<MenuConfirming, null>;
+  icon: "RotateCcw" | "RefreshCw" | "Trash2";
   label: string;
   confirmLabel: string;
   busy: boolean;
@@ -99,6 +99,7 @@ export function ProjectMenu({
   missingRoot,
   openSettings,
   resetProject,
+  rotateSeats,
   deleteProject,
   initialConfirming = null,
 }: {
@@ -110,13 +111,14 @@ export function ProjectMenu({
   missingRoot: boolean;
   openSettings(): void;
   resetProject(): void;
+  rotateSeats(): void;
   deleteProject(): void;
   /** Seeds the two-step confirm — hosts and tests; the live state is local. */
   initialConfirming?: MenuConfirming;
 }) {
   const [confirming, setConfirming] = useState<MenuConfirming>(initialConfirming);
 
-  // The two-step confirm re-arms after 5s — the Header's Reset/Delete law.
+  // The two-step confirm re-arms after 5s — the Header's Reset/Rotate/Delete law.
   useEffect(() => {
     if (confirming === null) return;
     const timer = setTimeout(() => setConfirming(null), 5000);
@@ -147,6 +149,19 @@ export function ProjectMenu({
                 onConfirm={resetProject}
               />
             ) : null}
+            {!missingRoot ? (
+              <ConfirmableDanger
+                theme={theme}
+                kind="rotate"
+                icon="RefreshCw"
+                label="Rotate seats"
+                confirmLabel="Confirm Rotate"
+                busy={busy}
+                confirming={confirming === "rotate"}
+                setConfirming={(on) => setConfirming(on ? "rotate" : null)}
+                onConfirm={rotateSeats}
+              />
+            ) : null}
             <ConfirmableDanger
               theme={theme}
               kind="delete"
@@ -161,7 +176,7 @@ export function ProjectMenu({
             />
           </View>
         </MenuSection>
-      ) : <Text style={text(theme, "meta")}>Manage Project settings, Reset and Delete on Paseo Desktop.</Text>}
+      ) : <Text style={text(theme, "meta")}>Manage Project settings, Reset, Rotate and Delete on Paseo Desktop.</Text>}
     </View>
   );
 }

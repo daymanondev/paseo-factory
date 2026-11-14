@@ -27,8 +27,9 @@ _Avoid_: manager, foreman, orchestrator, "the loop", Driver, parenting `Lead` un
 ### Work and criteria
 
 **Project**:
-One Git repository supervised by the factory (`<basename>-<sha1(gitRoot).slice(0,6)>`), owning `<stateDir>/projects/<project-slug>/` (`project.json`, `ledger.jsonl`, `mailbox.jsonl`, `notebook.md`, `usage.json`, `project-settings.json`, `report-*`, `gate-*`, `worktrees/*`) and its `T-01..N` / `seq` stream. Retains `missingRoot` identity if the folder is deleted so `Project delete` still purges it.
+One Git repository supervised by the factory (`<basename>-<sha1(gitRoot).slice(0,6)>`), owning `<stateDir>/projects/<project-slug>/` (`project.json`, `ledger.jsonl`, `mailbox.jsonl`, `notebook.md`, `usage.json`, `project-settings.json`, `report-*`, `gate-*`, `worktrees/*`) and its `T-01..N` / `seq` stream (`factory project register/list/doctor`, ADR 0059). Retains `missingRoot` identity if the folder is deleted so `Project delete` still purges it.
 _Avoid_: workspace, folder, team, shared root `ledger.jsonl`
+_Note_: `--workspace <dir>` on `factory supervisor dispatch`, `project register`, and `doctor` resolves to the Project's git root; the Project — not the subfolder — is what gets registered (ADR 0059).
 
 **Task**:
 Unit of work in a Project, identified by a filename-safe id and judged against one active `Contract`.
@@ -119,7 +120,7 @@ _Avoid_: mutable `outbox.json`, separate `supervisor-mailbox.jsonl`, hidden auto
 _Avoid_: Handoff for a same-provider model change
 
 **Handoff** (**Supervisor handoff** / **Lead handoff** / **Peer handoff**):
-Seat succession (`context-mark`, `provider-change`, `owner`) through `scheduled → handing over → creating successor → done | substitute handover | failed`, cancelable before successor creation. **Handoff mark** is `min(160k, 65% window)` for `Supervisor`/`Lead` (Needs-you prompt on `Supervisor`; quiet-point auto-rotation on `Lead`) and `min(200k, 80% window)` for `Peer` (`<= 1` auto-handoff/epoch before `context-ceiling`). Falls back to plugin-built **Substitute handover** on `Replace now` or failed/stale extraction (`docs/adr/0050-*`, `0057-*`).
+Seat succession (`context-mark`, `provider-change`, `owner`) through `scheduled → handing over → creating successor → done | substitute handover | failed`, cancelable before successor creation. **Handoff mark** is `min(160k, 65% window)` for `Supervisor`/`Lead` (Needs-you prompt on `Supervisor`; quiet-point auto-rotation on `Lead`) and `min(200k, 80% window)` for `Peer` (`<= 1` auto-handoff/epoch before `context-ceiling`). Falls back to plugin-built **Substitute handover** on `Replace now` or failed/stale extraction (`docs/adr/0050-*`, `0057-*`). The one explicit replacement with no handover (Substitute included) is **Rotate seats** (ADR 0060), an Owner-only act.
 _Avoid_: fixed 128k rule, blank successors, stale notes passed as fresh, auto-rotating `Supervisor`, rotating `Lead` with unsettled Peers, discarding `Peer` worktree progress
 
 ### Surface and configuration
@@ -129,8 +130,8 @@ React Native Paseo UI scoped to one Project per workspace via the single writer:
 _Avoid_: dashboard, room panel, Project switcher, Start Lead button, UI Task acceptance, Kanban/Timeline/Seat-graph, mobile settings writes
 
 **Open Design project link**, **Design provenance note**, **Design catalog**, & **Design source**:
-Per-Project Open Design sync into `<project-root>/design/` (`project-settings.json` + plugin-owned `design/open-design-link.json`, never overwritten by a Peer **Design provenance note**, `docs/adr/0040-*`, `0041-*`). `Lead` reads only **Design catalog** (`design-manifest.json`, `screens-data.js`, `app-data.js`, `screens.html`), never **Design source** (`index.html`, `app.js`, `*.css`).
-_Avoid_: zip exports, UI mockups in `Private vault`, `Lead` reading `app.js`/`index.html`
+Per-Project Open Design sync into `<project-root>/design/` (`project-settings.json` + plugin-owned `design/open-design-link.json`, never overwritten by a Peer **Design provenance note**, `docs/adr/0040-*`, `0041-*`). `Lead` reads only **Design catalog** (`design-manifest.json`, `screens-data.js`, `app-data.js`, `screens.html`), never **Design source** (`index.html`, `app.js`, `*.css`) or batch screenshot/storyboard images (`*.png/*.jpg/*.webp`, delegating multi-screen visual parity checks to a read-only `reviewer`/`scout` Peer).
+_Avoid_: zip exports, UI mockups in `Private vault`, `Lead` reading `app.js`/`index.html` or loading batch `evidence-*/` screenshots into its long-lived session
 
 **Design overview canvas** & **Screen contracts**:
 Desktop `Open Studio` (Dual-Path HTTP + RPC fallback) over Flow Board, framed Prototype, and Tokens (`docs/adr/0034-*`, `0037-*`, `0041-*`), with **Screen-state routing** (`?screen=<id>&state=<state>`), **Screen surface** (`mobile`/`desktop`/`responsive`), **Mobile app shell** (`390×844` touch shell), **Pure product chrome**, and **In-shell contextual state**.
@@ -140,9 +141,9 @@ _Avoid_: popup previews, mobile `<table>` dumps, in-mockup debug bars, full-scre
 Three machine-reconciled Paseo providers (`factory-supervisor`, `factory-lead`, `factory-peer` with `resumeOnStartup: false`, `paseoTools.enabled: false`), rewritten per Project from five-lane **Lane config** (`lanes.json`: `supervisor`, `lead`, `worker`, `watch`, legacy `freshEyes`) on `agent.create.before`; **Lane profile** (`profiles.json`) applies copy-on-apply with no live pointer (`docs/adr/0017-*`, `0026-*`, `0055-*`, `0057-*`).
 _Avoid_: `sw2-*` matrix, retired `zcode` provider, `retro` lane, live profile pointers
 
-**Project reset** & **Project delete**:
-Owner-only spool actions (`seat-cannot-reset` for seats): **Project reset** wipes seats/Peers/worktrees, Ledger/mailbox/notebook/reports/gates, and `<project-root>` while keeping registration, `lanes.json`, and `project-settings.json`; **Project delete** removes all Factory/Paseo records and `<projectStateDir>` (`docs/adr/0024-*`, `0045-*`).
-_Avoid_: manual `rm -rf`, cross-Project blast radius, confusing reset with delete
+**Rotate seats**, **Project reset**, & **Project delete**:
+Owner-only spool actions (`seat-cannot-rotate` / `seat-cannot-reset` for seats): **Rotate seats** (`factory project rotate` / Project `⋯` menu, ADR 0060) retires `Lead` then `Supervisor` with no handoff (bumping seat epoch, dropping `mailbox.jsonl` and handovers while keeping `notebook.md`, `lanes.json`, Ledger, and Task worktrees; refused on `peers-live`, `handoff-in-progress`, or `ledger-unreadable`); **Project reset** wipes seats/Peers/worktrees, Ledger/mailbox/notebook/`supervisor-handoff.md`/reports/gates, and `<project-root>` while keeping registration, `lanes.json`, and `project-settings.json`; **Project delete** removes all Factory/Paseo records and `<projectStateDir>` (`docs/adr/0024-*`, `0045-*`).
+_Avoid_: manual `rm -rf`, cross-Project blast radius, confusing rotate with reset or delete, rotating with live unsettled Peers
 
 **Pi harness home** & **Helper MCP catalog**:
 **Pi harness home** (`<stateDir>/pi-agent/<role>`) provisions compaction-proof `APPEND_SYSTEM.md`, read-only `defaultTools` for `supervisor`/`lead`, `600s` `paseo_factory` MCP, and role-scoped skills. **Helper MCP catalog** (`<stateDir>/helper-mcps.json`) discovers host MCPs read-only and provisions Owner-synced servers + OAuth strictly to `Peer`s, never `Supervisor`/`Lead` (`docs/adr/0013-*`, `0016-*`, `0039-*`, `0042-*`).

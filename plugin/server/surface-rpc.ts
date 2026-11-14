@@ -15,6 +15,7 @@ import { pluginDirFor } from "./paths.ts";
 import { liveSeatCandidates, seatCandidates } from "./seats.ts";
 import { checkProjectResetRepository, removeProjectStateDirectory, resetProjectRepository } from "./project-reset.ts";
 import { boundTaskPeers } from "./task-peers.ts";
+import { peerHandoffsInProgress, projectPeersInFlight } from "./peer-in-flight.ts";
 import { withProjectIngressLock } from "./core/project-ingress-lock.ts";
 import { projectTask } from "./core/task-state.ts";
 import { upgradeFactory } from "./core/history-upgrade.ts";
@@ -77,7 +78,7 @@ import type { DaemonPluginAction, DaemonPluginItem, DaemonPluginSourceStatus, Da
 import { effectiveLanesForReconcile, reconcilePaseoRoleProviders } from "./core/role-providers.ts";
 import { FACTORY_SEAT_PROVIDER_IDS, SEAT_TITLES, inferRoleFromProviderId, isSupervisorCandidate, resolveEffectiveProviderFamily } from "./roles.ts";
 import type { SeatName } from "./roles.ts";
-import { ensureProjectRegistered, writeProjectRegistration, resolveTargetProject } from "./projects.ts";
+import { ensureProjectRegistered, isProjectSeat, registerLaneSlug, resolveTargetProject, seatCannotRegisterMessage, writeProjectRegistration } from "./projects.ts";
 import type { FactoryRegistry } from "./projects.ts";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { COMPANION_CATALOG, COMPANION_TOOLS_CATALOG, CORE_PLUGIN_ENTRY, MANAGEABLE_PLUGIN_IDS, MANAGEABLE_TOOL_IDS } from "../shared/companions.ts";
@@ -106,6 +107,7 @@ import {
   onboardingInspect,
   projectDelete,
   projectReset,
+  projectRotate,
   seatsDirectory,
   snapshot,
   supervisorAdopt,
@@ -424,6 +426,13 @@ export interface SurfaceDeps {
    * null usage half, never a failed snapshot.
    */
   usage?: UsageRuntime;
+  /**
+   * Rotate seats (ADR 0060): the Lead-mailbox runtime's own clear — supersedes
+   * the Project's in-flight seat jobs, drops its mail and Lead/Supervisor
+   * handover records and cancels in-flight seat handoffs. Without it the act
+   * is refused `project-rotate-unavailable`.
+   */
+  rotateProjectMailbox?: (slug: string) => void;
   onLog?: (message: string) => void;
 }
 
@@ -544,6 +553,39 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     }
     if (target.code === "ambiguous-task-project") return { ok: false, code: target.code, error: target.message };
     return { ok: true, factory: deps.factory };
+  };
+
+  /**
+   * The Project an Owner act (`projectReset`, `projectRotate`) targets: an
+   * explicit root (a git repo, or a registered root), else a registered slug,
+   * else the single registered Project. Refusals are `unknown-project` /
+   * `ambiguous-project`; `verb` words the ambiguity hint.
+   */
+  const resolveActTarget = (
+    input: { projectRoot?: string; project?: string },
+    verb: string,
+  ): { ok: true; project: { slug: string; root: string } } | ReturnType<typeof failure> => {
+    if (input.projectRoot !== undefined && input.projectRoot.trim() !== "") {
+      const rawRoot = input.projectRoot.trim();
+      const resolved = resolveProject(rawRoot);
+      if (resolved.ok) return { ok: true, project: { slug: resolved.slug, root: resolved.root } };
+      const byRoot = listProjectRegistrations(deps.stateDir).find((reg) => reg.root === rawRoot);
+      if (byRoot !== undefined) return { ok: true, project: { slug: byRoot.slug, root: byRoot.root } };
+      return failure("unknown-project", `project root ${rawRoot} does not resolve to a git repository — ${resolved.reason}`);
+    }
+    if (input.project !== undefined && input.project.trim() !== "") {
+      const slug = input.project.trim();
+      const reg = readProjectRegistration(deps.stateDir, slug);
+      if (reg !== undefined) return { ok: true, project: { slug: reg.slug, root: reg.root } };
+      return failure("unknown-project", `project "${slug}" is not registered — pass projectRoot or a known project slug`);
+    }
+    const registrations = listProjectRegistrations(deps.stateDir);
+    if (registrations.length === 1) return { ok: true, project: { slug: registrations[0]!.slug, root: registrations[0]!.root } };
+    if (registrations.length === 0) return failure("unknown-project", "no project specified and no project is registered");
+    return failure(
+      "ambiguous-project",
+      `more than one project is registered (${registrations.map((r) => r.slug).join(", ")}) — pass projectRoot or project to name the one to ${verb}`,
+    );
   };
 
   /** The maintenance lane a project reset/delete runs on — the target Project's own Factory. */
@@ -1369,10 +1411,16 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       // under <project-root> is written (the <home>-supervisor folder and
       // its AGENTS.md overwrite are retired; roles.ts owns the injection).
       const title = SEAT_TITLES[seat];
-      // A role-provider start (ADR 0056) names only the `factory-<seat>` id:
-      // the before-create hook rewrites it onto this Project's own lane.
+      // A role-provider start (ADR 0056) names the `factory-<seat>` id; the
+      // before-create hook rewrites it onto this Project's own lane. The host
+      // SDK (`@getpaseo/client` ≥ 0.15) refuses a bare id — `config.provider`
+      // must be `provider/model` — so the role id carries the lane's model,
+      // exactly the provider + model pair Paseo's native picker sends.
+      const roleProviderId = FACTORY_SEAT_PROVIDER_IDS[seat === "supervisor" ? "supervisor" : "lead"];
       const config = options?.roleProvider === true
-        ? { provider: FACTORY_SEAT_PROVIDER_IDS[seat === "supervisor" ? "supervisor" : "lead"] }
+        ? parsed !== undefined
+          ? { provider: `${roleProviderId}/${parsed.model}`, ...(parsed.thinking !== undefined ? { thinkingOptionId: parsed.thinking } : {}) }
+          : { provider: roleProviderId }
         : parsed?.thinking !== undefined
           ? { provider: `${parsed.provider}/${parsed.model}`, thinkingOptionId: parsed.thinking }
           : { provider: lane };
@@ -2159,13 +2207,14 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
   const registerProjectFolder = async (
     folder: string,
     context?: SurfaceCallContext,
+    refusalHint = "open the Factory panel from a different workspace folder",
   ): Promise<
     | { ok: true; slug: string; root: string; name: string; bootstrapped: boolean }
     | { ok: false; code: string; error: string }
   > => {
     const resolved = resolveOrBootstrapProject(folder, { stateDir: deps.stateDir, paseoHome: deps.home });
     if (!resolved.ok) {
-      return failure(resolved.code, `${resolved.reason} — open the Factory panel from a different workspace folder`);
+      return failure(resolved.code, `${resolved.reason} — ${refusalHint}`);
     }
     ensureProjectRegistered(deps.stateDir, resolved);
     const daemon = resolveDaemon(context);
@@ -3236,6 +3285,53 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     },
 
     /**
+     * Owner-only Project registration for the CLI (`factory project register`,
+     * delivered over the Spool — the plugin stays the single writer, ADR 0004).
+     * An already-registered folder is reported and nothing is written. Otherwise
+     * the registration goes through `registerProjectFolder` — the very writer the
+     * onboarding Start uses — so a greenfield non-Git folder is bootstrapped
+     * (`git init` + an empty initial commit; `$HOME`, `/` and the factory's own
+     * state are refused) before its slug resolves and the Project is registered.
+     */
+    async projectRegister(input: { workspace: string }, context?: SurfaceCallContext & { seat?: string }) {
+      const callerSeat = typeof context?.seat === "string" ? context.seat.trim() : "";
+      if (isProjectSeat(callerSeat)) {
+        return failure("seat-cannot-register", seatCannotRegisterMessage(callerSeat));
+      }
+      const workspace = (input?.workspace ?? "").trim();
+      if (workspace === "") return failure("missing-directory", "project register needs a workspace folder — pass --workspace <dir>");
+      const existing = resolveProject(workspace);
+      const registration = existing.ok ? readProjectRegistration(deps.stateDir, existing.slug) : undefined;
+      if (existing.ok && registration !== undefined) {
+        const name = registration.name ?? (basename(registration.root) || existing.slug);
+        return {
+          ok: true as const,
+          slug: existing.slug,
+          root: registration.root,
+          name,
+          bootstrapped: false,
+          alreadyRegistered: true,
+          summary: `Project ${existing.slug} (${registration.root}) is already registered — nothing changed`,
+        };
+      }
+      const registered = await registerProjectFolder(workspace, context, "run `factory project register --workspace <dir>` from a project folder of its own");
+      if (!registered.ok) return registered;
+      const summary = registered.bootstrapped
+        ? `initialised Git and registered Project ${registered.slug} (${registered.root})`
+        : `registered Project ${registered.slug} (${registered.root})`;
+      log(`project register: ${summary}`);
+      return {
+        ok: true as const,
+        slug: registered.slug,
+        root: registered.root,
+        name: registered.name,
+        bootstrapped: registered.bootstrapped,
+        alreadyRegistered: false,
+        summary,
+      };
+    },
+
+    /**
      * Owner-only full Project delete (v0.0.35, ADR 0024): refuses seats with
      * `seat-cannot-delete`, cancels and archives all bound daemon agents and
      * workspaces, deletes temporary task worktrees and `factory/*` branches
@@ -3255,7 +3351,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           : typeof context?.seat === "string" && context.seat.trim() !== ""
             ? context.seat.trim()
             : "";
-      if (callerSeat === "supervisor" || callerSeat === "lead" || callerSeat === "agent") {
+      if (isProjectSeat(callerSeat)) {
         return failure(
           "seat-cannot-delete",
           `${callerSeat} seat cannot run factory project delete — Project deletion is an Owner-only act`,
@@ -3405,41 +3501,9 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       input: { projectRoot?: string; project?: string; keepSeats?: boolean } = {},
       context?: SurfaceCallContext,
     ) {
-      let project: { slug: string; root: string } | undefined;
-      if (input.projectRoot !== undefined && input.projectRoot.trim() !== "") {
-        const rawRoot = input.projectRoot.trim();
-        const resolved = resolveProject(rawRoot);
-        if (resolved.ok) {
-          project = { slug: resolved.slug, root: resolved.root };
-        } else {
-          const byRoot = listProjectRegistrations(deps.stateDir).find((reg) => reg.root === rawRoot);
-          if (byRoot !== undefined) {
-            project = { slug: byRoot.slug, root: byRoot.root };
-          } else {
-            return failure("unknown-project", `project root ${rawRoot} does not resolve to a git repository — ${resolved.reason}`);
-          }
-        }
-      } else if (input.project !== undefined && input.project.trim() !== "") {
-        const slug = input.project.trim();
-        const reg = readProjectRegistration(deps.stateDir, slug);
-        if (reg !== undefined) {
-          project = { slug: reg.slug, root: reg.root };
-        } else {
-          return failure("unknown-project", `project "${slug}" is not registered — pass projectRoot or a known project slug`);
-        }
-      } else {
-        const registrations = listProjectRegistrations(deps.stateDir);
-        if (registrations.length === 1) {
-          project = { slug: registrations[0]!.slug, root: registrations[0]!.root };
-        } else if (registrations.length === 0) {
-          return failure("unknown-project", "no project specified and no project is registered");
-        } else {
-          return failure(
-            "ambiguous-project",
-            `more than one project is registered (${registrations.map((r) => r.slug).join(", ")}) — pass projectRoot or project to name the one to reset`,
-          );
-        }
-      }
+      const target = resolveActTarget(input, "reset");
+      if (!target.ok) return target;
+      const project = target.project;
 
       const protectedPluginDir = deps.pluginDir ?? pluginDirFor(deps.home);
       if (input.keepSeats !== true) {
@@ -3571,6 +3635,150 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         removedFiles,
         archivedSeats,
         archivedAgents,
+        summary,
+        ...(snap.ok ? { view: snap.view } : {}),
+      };
+    },
+
+    /**
+     * Rotate seats (ADR 0060): the Owner's one no-handover seat replacement.
+     * Refused (nothing archived or deleted) with `seat-cannot-rotate` for a
+     * stamped seat caller, `ledger-unreadable` when the Ledger cannot be
+     * read, `peers-live` while any live non-`error` Peer is bound to a Task
+     * that is not accepted or closed (queued Peer mail never settles it), and
+     * `handoff-in-progress` while a Peer handoff runs. Otherwise supersedes the
+     * Project's in-flight seat jobs, clears its mail and handover records
+     * (`rotateProjectMailbox`, the Lead-mailbox runtime's own clear), retires
+     * the Lead and then the Supervisor through the marked-archive path (never
+     * lost-Lead recovery, no extraction, no Substitute handover), clears the
+     * seat bindings, then sweeps once more for any seat that appeared in the
+     * meantime. The notebook, lanes, Ledger, usage, worktrees, Task workspaces
+     * and the Project's registration stay; Peers are never touched. A seat
+     * retire that fails says plainly what was already dropped, and the act is
+     * safe to run again. A Project with no bound seat succeeds with nothing
+     * archived.
+     */
+    async projectRotate(
+      input: { projectRoot?: string; project?: string; seat?: string } = {},
+      context?: SurfaceCallContext & { seat?: string },
+    ) {
+      const callerSeat =
+        typeof input?.seat === "string" && input.seat.trim() !== ""
+          ? input.seat.trim()
+          : typeof context?.seat === "string" && context.seat.trim() !== ""
+            ? context.seat.trim()
+            : "";
+      if (isProjectSeat(callerSeat)) {
+        return failure(
+          "seat-cannot-rotate",
+          `Seat ${callerSeat} cannot call factory project rotate; rotating a Project's seats is an Owner-only action.`,
+        );
+      }
+      const target = resolveActTarget(input, "rotate");
+      if (!target.ok) return target;
+      if (deps.rotateProjectMailbox === undefined) {
+        return failure("project-rotate-unavailable", "the Lead-mailbox runtime is not wired into this surface — rotating seats needs it to cancel in-flight handoffs");
+      }
+      const project = target.project;
+      const daemon = resolveDaemon(context);
+
+      // 1. Refuse while a live Peer holds work — the Owner decides what happens to in-flight Tasks.
+      let live: SurfaceAgentSnapshot[];
+      try {
+        const page = await daemon.agents.list({ filter: { includeArchived: false, includeBackground: true } });
+        live = page.entries.map((entry) => entry.agent).filter((agent) => agent.archivedAt === null);
+      } catch (err) {
+        return failure("daemon-unavailable", `cannot check for live Peers — daemon unavailable: ${messageOf(err)}`);
+      }
+      const source = { factory: deps.factory, ...(deps.registry === undefined ? {} : { registry: deps.registry }) };
+      let holding: ReturnType<typeof projectPeersInFlight>;
+      let handoffTasks: string[];
+      try {
+        // Strict: an unreadable Ledger cannot prove "no live Peer", so it refuses.
+        holding = projectPeersInFlight({ stateDir: deps.stateDir, slug: project.slug, root: project.root, source, live, law: "rotate", strict: true });
+        handoffTasks = peerHandoffsInProgress({ stateDir: deps.stateDir, slug: project.slug, root: project.root, source, strict: true });
+      } catch (err) {
+        log(`rotate: project ${project.slug} ledger unreadable — ${messageOf(err)}`);
+        return failure("ledger-unreadable", `cannot rotate project ${project.slug} — its Ledger is unreadable, so live Peers cannot be ruled out (${messageOf(err)}). Nothing was archived or deleted.`);
+      }
+      if (holding.length > 0) {
+        const named = holding.map((round) => `${round.task}${round.agentIds.length > 0 ? ` (${round.agentIds.join(", ")})` : ""}`).join("; ");
+        return failure(
+          "peers-live",
+          `project ${project.slug} still has live Peer work — ${named}. Let it finish or close the Task, then rotate again; nothing was archived or deleted.`,
+        );
+      }
+      if (handoffTasks.length > 0) {
+        return failure(
+          "handoff-in-progress",
+          `project ${project.slug} has a Peer handoff in progress — ${handoffTasks.join(", ")}. Let it finish, then rotate again; nothing was archived or deleted.`,
+        );
+      }
+
+      // 2. Supersede the Project's in-flight seat jobs and drop queued mail and
+      // handover records FIRST, so a concurrent pump finds nothing to deliver
+      // and a paused handoff abandons itself instead of recreating a Lead.
+      const archivedSeats: string[] = [];
+      const archivedBy: string[] = [];
+      const retireBoth = async () => {
+        for (const seat of ["lead", "supervisor"] as const) {
+          const retired = await retireSeat(seat, project.slug, project.root, context);
+          if (retired.ok) {
+            const label = seat === "lead" ? "Lead" : "Supervisor";
+            if (retired.agentIds.length > 0 && !archivedBy.includes(label)) archivedBy.push(label);
+            archivedSeats.push(...retired.agentIds);
+          } else if (retired.code !== "no-lead" && retired.code !== "no-supervisor") {
+            return { seat, retired };
+          }
+        }
+        return undefined;
+      };
+      deps.rotateProjectMailbox(project.slug);
+
+      // 3. Lead first, then Supervisor — marked archives only. A failed retire stops here: the
+      // mail and handovers are already dropped, and the reply says which seat is still bound.
+      const stalled = await retireBoth();
+      if (stalled !== undefined) {
+        const label = stalled.seat === "lead" ? "Lead" : "Supervisor";
+        log(`rotate: project ${project.slug} stopped at the ${label} retire (${stalled.retired.code}: ${stalled.retired.error})`);
+        return failure(
+          stalled.retired.code,
+          `Rotate stopped partway: the ${label} could not be archived (${stalled.retired.error}). Queued mail and handover records of project ${project.slug} were already dropped${archivedSeats.length > 0 ? ` and ${archivedBy.join(" and ")} archived` : ""}; the ${label} seat is still bound. Run Rotate again — it is safe to re-run.`,
+        );
+      }
+
+      // 4. Clear the registration's seat and handoff fields, then sweep again: any Lead or
+      // Supervisor that appeared since the first retire (found by label, not by binding) goes too.
+      writeProjectRegistration(deps.stateDir, project.slug, {
+        root: project.root,
+        supervisor: null,
+        lead: null,
+        releasedSupervisors: null,
+        rotationState: null,
+        handoffRequestedAt: null,
+      });
+      const swept = await retireBoth();
+      if (swept !== undefined) {
+        const label = swept.seat === "lead" ? "Lead" : "Supervisor";
+        return failure(
+          swept.retired.code,
+          `Rotate stopped partway: a ${label} that appeared during the rotation could not be archived (${swept.retired.error}). Queued mail and handover records of project ${project.slug} were already dropped and the other seats archived; run Rotate again — it is safe to re-run.`,
+        );
+      }
+      // The retires requeue a Lead's un-acked batch into the mailbox file; drop it and every record again.
+      deps.rotateProjectMailbox(project.slug);
+
+      const snap = await this.snapshot({ projectRoot: project.root }, context);
+      const archivedText = archivedSeats.length === 0
+        ? "no Supervisor or Lead was bound, nothing archived"
+        : `archived ${archivedBy.join(" and ")} (${archivedSeats.length} seat agent${archivedSeats.length === 1 ? "" : "s"})`;
+      const summary = `Rotated seats of project ${project.slug}: ${archivedText}. Next: open a New Chat with the \`Supervisor (Factory)\` profile at ${project.root}.`;
+      log(`rotate: ${summary}`);
+      return {
+        ok: true as const,
+        project: project.slug,
+        projectRoot: project.root,
+        archivedSeats,
         summary,
         ...(snap.ok ? { view: snap.view } : {}),
       };
@@ -4026,6 +4234,10 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       }
     },
   };
+  /** The Owner's whole-Project acts: each runs on its target Project's own Factory lane. */
+  const PROJECT_ACT_HANDLERS: ReadonlySet<string> = new Set(["projectReset", "projectDelete", "projectRotate"]);
+  /** The handlers that take their lane's exclusive maintenance — the Project acts plus register. The one place the set is named. */
+  const EXCLUSIVE_MAINTENANCE_HANDLERS: ReadonlySet<string> = new Set([...PROJECT_ACT_HANDLERS, "projectRegister"]);
   const reads = new Set(["cachedProviders", "sanitizeLane", "snapshot", "seatsDirectory", "pluginsCheckUpdates", "selfUpdateStatus", "selfUpdateApply", "historyImport", "historyImports", "historyUpgrade", "vaultHydrate", "vaultPull", "vaultPush", "vaultSync", "vaultImport"]);
   const wrappers = new Map<PropertyKey, unknown>();
   return new Proxy(handlers, {
@@ -4036,8 +4248,16 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       // Project's OWN maintenance lane — independent Projects keep admitting
       // ordinary work while one Project's history is exclusively held.
       if (!wrappers.has(key)) wrappers.set(key, (...args: unknown[]) => {
-        const lane = key === "projectReset" || key === "projectDelete" ? factoryForResetTarget(args[0] as { projectRoot?: string; project?: string; projectSlug?: string; workspace?: string } | undefined) : deps.factory;
-        return !lane.history.maintenanceActive && (key === "projectReset" || key === "projectDelete")
+        // A register takes the lane of the Project its folder is already registered as (the spool's router uses the same helper).
+        const registerSlug = key === "projectRegister" && deps.registry !== undefined
+          ? registerLaneSlug(deps.registry, (args[0] as { workspace?: string } | undefined)?.workspace)
+          : undefined;
+        const lane = PROJECT_ACT_HANDLERS.has(key)
+          ? factoryForResetTarget(args[0] as { projectRoot?: string; project?: string; projectSlug?: string; workspace?: string } | undefined)
+          : registerSlug !== undefined && deps.registry !== undefined
+            ? deps.registry.factoryForProject(registerSlug)
+            : deps.factory;
+        return !lane.history.maintenanceActive && EXCLUSIVE_MAINTENANCE_HANDLERS.has(key)
           ? lane.history.withExclusiveMaintenance(() => value.apply(receiver, args))
           : lane.history.runOperation(() => value.apply(receiver, args), { newWork: true });
       });
@@ -4101,6 +4321,7 @@ export function registerSurfaceRpc(
   server.handle(onboardingCommit, (input, context) => handlers.onboardingCommit(input, pass(context)));
   server.handle(projectDelete, (input, context) => handlers.projectDelete(input, pass(context)));
   server.handle(projectReset, (input, context) => handlers.projectReset(input, pass(context)));
+  server.handle(projectRotate, (input, context) => handlers.projectRotate(input, pass(context)));
   server.handle(leadDispatch, (input, context) => handlers.leadDispatch(input, pass(context)));
   server.handle(skillsImport, input => handlers.skillsImport(input));
   server.handle(skillsTogglePack, input => handlers.skillsTogglePack(input));

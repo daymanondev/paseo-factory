@@ -36,11 +36,11 @@
  * the factory, no reply from the plugin, or an unreadable ledger).
  */
 import { parseArgs } from "node:util";
-import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { join, resolve as resolvePath } from "node:path";
 import { readLedgerEvents } from "./ledger-read.mjs";
 import { taskStatusLines } from "./task-status.mjs";
-import { awaitReply, randomId, resolveHome, spoolRootFor, stateDirFor, submit } from "./spool-client.mjs";
+import { awaitReply, randomId, resolveHome, resolveHomeSource, spoolRootFor, stampedSeatFromEnv, stateDirFor, submit } from "./spool-client.mjs";
 import {
   LANE_NAMES,
   applyLaneProfile,
@@ -55,6 +55,7 @@ import {
   saveLanes,
 } from "./lanes-config.mjs";
 import { resolveProject } from "./project.mjs";
+import { diagnose, formatDiagnosis, readProjectRegistrations, workspaceRegistrationState } from "./project-read.mjs";
 
 // The contract stanza's authoring-law block mirrors docs/runbooks/live-run.md
 // step 3 (the ratified R2–R6 batch, ticket 02 / v0.0.8) — help text and
@@ -250,17 +251,56 @@ commands:
 
   supervisor Seat-aware directive dispatch or Lead -> Supervisor reporting
              (v0.0.23, ADR 0015 §3/§5).
-             supervisor dispatch [--project <slug>] [--workspace <dir>] --message "<text>"
+             supervisor dispatch [--project <slug>] [--workspace <dir>] [--allow-unregistered] --message "<text>"
                                            route a directive into the Project's
                                            Supervisor mailbox (to="supervisor")
                                            when called from a normal chat, or
                                            transparently into Lead (to="lead")
                                            when called from Supervisor.
+                                           With --workspace from a normal chat the
+                                           folder must be a registered Project:
+                                           otherwise it exits 2 naming "project
+                                           register" / "project list" and queues
+                                           nothing. --allow-unregistered restores
+                                           the legacy held dispatch (mail held for
+                                           a Supervisor seated later).
              supervisor report [--project <slug>] [--workspace <dir>] --message "<text>"
                                            queue a Lead wave-completion or
                                            escalation report in the Project's
                                            Supervisor mailbox (to="supervisor",
                                            from="lead", kind="report").
+
+  project register
+             Owner-only, idempotent: turn a folder into a registered factory
+             Project. The plugin — never the CLI — writes the registration
+             (single writer, ADR 0004): a non-Git folder is first bootstrapped
+             (git init + an empty initial commit; the user home and the
+             filesystem root are refused, ADR 0024), then the Project is
+             registered; an already-registered Project is reported and nothing
+             is written. The reply names the daemon home it was registered
+             under (--home > $PASEO_HOME > ~/.paseo). Needs the plugin running:
+             with it down the command exits 2 naming the recovery step.
+             project register [--workspace <dir>] [--json] [--wait-secs <n>]
+             --workspace defaults to the current directory (resolved up to its
+             git root); --json prints {ok, slug, root, home, alreadyRegistered,
+             bootstrapped}; failures exit 2 with "factory: <code>: <message>".
+
+  project rotate
+             Owner-only: replace a Project's seats with no handover (ADR 0060).
+             The plugin archives the Lead, then the Supervisor, drops held mail
+             and every handover record, and clears the seat bindings; the
+             notebook, lanes, Ledger, open Tasks and worktrees stay. Refused
+             peers-live while a Peer still holds an unsettled Task (nothing
+             is touched): finish or close the Task, then run it again. The
+             reply names the archived seats, the home, and the next step:
+             open a New Chat with the \`Supervisor (Factory)\` profile at the
+             Project root. Needs the plugin running (exit 2 otherwise).
+             project rotate [--workspace <dir> | --project <slug>] [--json]
+                            [--wait-secs <n>]
+             with neither flag the single registered Project is rotated
+             (several: exit 2 naming --project); --json prints {ok, project,
+             root, home, archivedSeats, summary}; failures exit 2 with
+             "factory: <code>: <message>" and the command to run next.
 
   reset      Owner-only clean-slate Project reset (v0.0.24, ADR 0015 §6):
              purges the Project's ledger events, task reports/worktrees, and
@@ -294,6 +334,24 @@ commands:
              ever covered (pre-0.0.8) render duration-only — never a
              fabricated zero. Whole ledger always, no filters in v1. A local
              read; the plugin need not be running.
+
+  project list [--json]
+             Every registered Project — slug, root and the daemon home it
+             belongs to — read locally from <stateDir>/projects/<slug>/
+             project.json (only well-formed registrations count; the plugin
+             need not be running, nothing is written). --json prints
+             {"home": "<home>", "projects": [{"slug", "root", "home"}]}.
+
+  doctor [--workspace <dir>] [--door <path>] [--json]
+             Local-only preflight, never prompts: the CLI door (this script, or
+             the --door path a skill baked in) and the plugin install the home
+             records — both flagged stale when missing (exit 2, with the
+             repair command) — the home in effect and which rung chose it
+             (--home | PASEO_HOME | default), the folder's slug (walking up to
+             the git root), whether that Project is registered, and the next
+             command to run. --json prints {ok, home, homeSource, cli{path,
+             exists}, install{path, exists}, cwd, workspace{resolved, dir,
+             root, slug | reason}, registered, next}.
 
   upgrade    preflight | apply | resume | restore [--project <registered-slug>]\n             [--transaction <id>] [--dry-run] — explicit Owner-only history maintenance.\n\n  vault      The Private vault's seven verbs (v0.0.21–v0.0.22, ADR 0014):
              status | hydrate | pull | push | seal | sync | import against the
@@ -396,6 +454,8 @@ attribution (v0.0.9): contract and accept stamp who submitted — the
   (ADR 0010 §3); "lead" is judged at the factory, not trusted from here.`;
 
 const DEFAULT_WAIT_SECS = 60;
+/** `project register` answers a person at a terminal: a plugin that is down is reported after 30s, not 60. */
+const REGISTER_WAIT_SECS = 30;
 
 /**
  * The acceptance authority seats (v0.0.14, ADR 0010 §3): `owner` and
@@ -415,8 +475,7 @@ const stampedAgent = typeof process.env.PASEO_AGENT_ID === "string" ? process.en
 const stampedCorrelation =
   typeof process.env.PASEO_FACTORY_CORRELATION === "string" ? process.env.PASEO_FACTORY_CORRELATION.trim() : "";
 const submitter = stampedAgent !== "" ? stampedAgent : stampedCorrelation !== "" ? stampedCorrelation : "owner";
-const rawSeat = typeof process.env.PASEO_FACTORY_SEAT === "string" ? process.env.PASEO_FACTORY_SEAT.trim() : "";
-const stampedSeat = rawSeat === "supervisor" || rawSeat === "lead" || rawSeat === "agent" ? rawSeat : undefined;
+const stampedSeat = stampedSeatFromEnv();
 
 /** Pipe writes are asynchronous: immediate process.exit can truncate large machine-readable output. */
 async function writeJsonAndExit(value, code = 0) {
@@ -455,6 +514,8 @@ if (command === "--help" || command === "help" || command === undefined) {
 const home = resolveHome(homeFlag);
 const stateDir = stateDirFor(home);
 const spoolRoot = spoolRootFor(stateDir);
+/** The copy-pasteable `factory` prefix every recovery hint prints — `--home` named (and quoted) only when the Owner passed one. */
+const factoryCmd = homeFlag === undefined ? "factory" : `factory --home "${home}"`;
 
 function parseCommandOptions(spec) {
   try {
@@ -484,6 +545,20 @@ function waitSeconds(parsed, defaultSecs = DEFAULT_WAIT_SECS) {
   const n = Number(raw);
   if (!Number.isFinite(n) || n <= 0) fail("--wait-secs must be a positive number");
   return n;
+}
+
+// No reply from the plugin: withdraw the request so it cannot surprise-apply on a
+// later plugin start. The plugin may still have picked it up just before the
+// unlink, so the message never claims nothing happened — `mayHave` says what to
+// confirm, `then` what to run once Paseo Desktop is up. Always exits 2.
+function withdrawUnansweredRequest(spoolRoot, id, { home, waitSecs, mayHave, then }) {
+  try { unlinkSync(join(spoolRoot, "requests", `${id}.json`)); } catch { /* already picked up or gone */ }
+  console.error(
+    `factory: the paseo-factory plugin is not running — no reply from the plugin for home ${home} after ${waitSecs}s. ` +
+      `The request was withdrawn, but a plugin that picked it up a moment ago may still have ${mayHave}\n` +
+      `Start Paseo Desktop with the paseo-factory plugin enabled (for a remote machine pass --home <that machine's paseo home>), then ${then}`,
+  );
+  process.exit(2);
 }
 
 async function roundTrip(request, waitSecs) {
@@ -878,28 +953,12 @@ function resolveProjectSlug(commandName, projectDir) {
 
 /**
  * Every registered Project's slug (v0.0.89, ADR 0045 §1) — the durable
- * `<stateDir>/projects/<slug>/project.json` registry, read locally the way
- * the core's listProjectRegistrations reads it (the CLIs import no src/
- * code, ADR 0004). Slug order; an unreadable entry names no Project.
+ * `<stateDir>/projects/<slug>/project.json` registry, read locally through
+ * project-read.mjs (the CLIs import no src/ code, ADR 0004). Slug order; an
+ * unreadable entry names no Project.
  */
 function registeredProjectSlugs(stateDir) {
-  const projectsDir = join(stateDir, "projects");
-  let entries;
-  try {
-    entries = readdirSync(projectsDir);
-  } catch {
-    return [];
-  }
-  const slugs = [];
-  for (const entry of entries.sort()) {
-    try {
-      const registration = JSON.parse(readFileSync(join(projectsDir, entry, "project.json"), "utf8"));
-      if (registration && typeof registration.root === "string" && registration.root !== "") slugs.push(entry);
-    } catch {
-      // not a registration — never a guess
-    }
-  }
-  return slugs;
+  return readProjectRegistrations(stateDir).map((registration) => registration.slug);
 }
 
 if (command === "profile") {
@@ -1131,16 +1190,24 @@ if (command === "lead") {
   fail(`lead: unknown subcommand "${sub ?? "(none)"}" — use "lead rotate --project <dir>" or "lead dispatch --project <slug> --message \\"<text>\\""`);
 }
 
+/** The exact seat-opening step for a Project with no live Supervisor (ADR 0057 §5: the plugin never creates one). */
+const SEAT_OPENING_STEP = (root) =>
+  `open a New Chat in Paseo Desktop and select the \`Supervisor (Factory)\` profile at the Project root: ${root}`;
+
 if (command === "supervisor") {
   const parsed = parseCommandOptions({
     project: { type: "string" },
     workspace: { type: "string" },
     message: { type: "string" },
     "wait-secs": { type: "string" },
+    "allow-unregistered": { type: "boolean", default: false },
   });
   const sub = parsed.positionals[0];
 
   if (sub === "dispatch" || sub === "report") {
+    if (parsed.values["allow-unregistered"] === true && sub !== "dispatch") {
+      fail("supervisor report: --allow-unregistered only applies to supervisor dispatch");
+    }
     const message = typeof parsed.values.message === "string" ? parsed.values.message : parsed.positionals[1];
     if (message === undefined || message.trim() === "") {
       fail(`supervisor ${sub}: --message "<text>" is required (or one positional message)`);
@@ -1156,6 +1223,35 @@ if (command === "supervisor") {
     }
     if (hasProject && hasWorkspace) {
       fail(`supervisor ${sub}: name exactly one target — --project <slug> or --workspace <dir>`);
+    }
+    // The dispatch guard (CLI Project onboarding): an Owner's directive aimed at
+    // a folder that is not a registered Project would queue mail no Supervisor
+    // will ever read — a fake success. Refuse it here, locally and prompt-free
+    // (plugin-down safe, nothing written), naming the exact next commands.
+    // Seat-stamped shells (a Supervisor dispatching to its Lead) are never
+    // guarded; `--allow-unregistered` restores the legacy held dispatch.
+    if (sub === "dispatch" && hasWorkspace && stampedSeat === undefined) {
+      const workspaceDir = resolvePath(parsed.values.workspace);
+      const state = workspaceRegistrationState(stateDir, workspaceDir);
+      if (!state.resolved) {
+        console.error(
+          `factory: unknown-project: workspace ${workspaceDir} does not resolve to a git repository — ${state.reason}\n` +
+            `  nothing was queued. next:\n` +
+            `    ${factoryCmd} project register --workspace "${workspaceDir}"   (bootstraps a git repository for a greenfield folder)\n` +
+            `    ${factoryCmd} project list   (pick an existing registered Project, then dispatch with --project <slug>)`,
+        );
+        process.exit(2);
+      }
+      if (!state.registered && parsed.values["allow-unregistered"] !== true) {
+        console.error(
+          `factory: unregistered-project: ${state.root} (slug ${state.slug}) is not a registered Project in home ${home} — nothing was queued; a directive for it would sit in a mailbox no Supervisor reads. next:\n` +
+            `    ${factoryCmd} project register --workspace "${state.root}"   (then re-run this dispatch)\n` +
+            `    ${factoryCmd} project list   (pick an existing registered Project, then dispatch with --project <slug>)\n` +
+            `  No Supervisor is live for an unregistered Project. After registering, ${SEAT_OPENING_STEP(state.root)}\n` +
+            `  Legacy (dispatch first, seat a Supervisor later): re-run with --allow-unregistered to hold the directive for the next Supervisor.`,
+        );
+        process.exit(2);
+      }
     }
     const reply = await roundTrip(
       {
@@ -1174,6 +1270,178 @@ if (command === "supervisor") {
   fail(`supervisor: unknown subcommand "${sub ?? "(none)"}" — use "supervisor dispatch --workspace <dir> --message \\"<text>\\"" or "supervisor report --workspace <dir> --message \\"<text>\\""`);
 }
 
+if (command === "project" && rest[0] === "register") {
+  // `factory project register` (CLI Project onboarding): the Owner's one explicit,
+  // idempotent act that turns a folder into a registered Project. The CLI only
+  // submits — the plugin is the single writer (ADR 0004): it bootstraps a
+  // greenfield non-Git folder (git init + empty commit; $HOME and / refused,
+  // ADR 0024) and writes the registration through the seat/surface path's own
+  // writer. Prompt-free by construction; failures exit 2.
+  const parsed = parseCommandOptions({
+    workspace: { type: "string" },
+    json: { type: "boolean", default: false },
+    "wait-secs": { type: "string" },
+  });
+  if (parsed.positionals.length > 1) fail(`project register: unexpected positional "${parsed.positionals[1]}"`);
+  if (stampedSeat !== undefined) {
+    console.error(
+      `factory: seat-cannot-register: Seat ${stampedSeat} cannot call factory project register; registering a Project is an Owner-only action.`,
+    );
+    process.exit(2);
+  }
+  if (typeof parsed.values.workspace === "string" && parsed.values.workspace.trim() === "") {
+    fail("project register: --workspace needs a directory");
+  }
+  const workspace = resolvePath(typeof parsed.values.workspace === "string" ? parsed.values.workspace : process.cwd());
+  const waitSecs = waitSeconds(parsed, REGISTER_WAIT_SECS);
+  const payload = { id: randomId(), kind: "project_register", workspace, submitter };
+  submit(spoolRoot, payload);
+  const reply = await awaitReply(spoolRoot, payload.id, waitSecs * 1000);
+  if (reply === null) {
+    withdrawUnansweredRequest(spoolRoot, payload.id, {
+      home,
+      waitSecs,
+      mayHave: `registered this Project: confirm with\n  ${factoryCmd} project list`,
+      then: `re-run if it is not listed:\n  ${factoryCmd} project register --workspace "${workspace}"`,
+    });
+  }
+  if (!reply.ok) {
+    console.error(`factory: ${reply.code}: ${reply.message}`);
+    process.exit(2);
+  }
+  const result = {
+    ok: true,
+    slug: reply.project,
+    root: reply.projectRoot,
+    home,
+    alreadyRegistered: reply.alreadyRegistered === true,
+    bootstrapped: reply.bootstrapped === true,
+  };
+  if (parsed.values.json === true) await writeJsonAndExit(result);
+  console.log(`factory: ${reply.summary} (home: ${home})`);
+  process.exit(0);
+}
+
+// `factory project rotate` (ADR 0060): the Owner's one no-handover seat
+// replacement. The CLI only submits — the plugin is the single writer (ADR 0004):
+// it refuses while a Peer holds an unsettled Task, archives the Lead then the
+// Supervisor, drops held mail and handover records, and clears the bindings.
+// Its Spool kind is `project_rotate` (never the legacy `lead_rotate`). Failures exit 2.
+if (command === "project" && rest[0] === "rotate") {
+  const parsed = parseCommandOptions({
+    workspace: { type: "string" },
+    project: { type: "string" },
+    json: { type: "boolean", default: false },
+    "wait-secs": { type: "string" },
+  });
+  if (parsed.positionals.length > 1) fail(`project rotate: unexpected positional "${parsed.positionals[1]}"`);
+  if (stampedSeat !== undefined) {
+    console.error(
+      `factory: seat-cannot-rotate: Seat ${stampedSeat} cannot call factory project rotate; rotating a Project's seats is an Owner-only action.`,
+    );
+    process.exit(2);
+  }
+  const hasWorkspace = typeof parsed.values.workspace === "string";
+  const hasProject = typeof parsed.values.project === "string";
+  if (hasWorkspace && parsed.values.workspace.trim() === "") fail("project rotate: --workspace needs a directory");
+  if (hasProject && parsed.values.project.trim() === "") fail("project rotate: --project needs a slug");
+  if (hasWorkspace && hasProject) fail("project rotate: name the Project with either --workspace <dir> or --project <slug>, not both");
+  const workspace = hasWorkspace ? resolvePath(parsed.values.workspace) : undefined;
+  const project = hasProject ? parsed.values.project.trim() : undefined;
+  // The copy-pasteable "run it again" line: the same target the Owner named.
+  const rotateCmd = `${factoryCmd} project rotate${workspace !== undefined ? ` --workspace "${workspace}"` : project !== undefined ? ` --project "${project}"` : ""}`;
+  const waitSecs = waitSeconds(parsed);
+  const payload = {
+    id: randomId(),
+    kind: "project_rotate",
+    ...(workspace !== undefined ? { workspace } : {}),
+    ...(project !== undefined ? { project } : {}),
+    submitter,
+  };
+  submit(spoolRoot, payload);
+  const reply = await awaitReply(spoolRoot, payload.id, waitSecs * 1000);
+  if (reply === null) {
+    withdrawUnansweredRequest(spoolRoot, payload.id, {
+      home,
+      waitSecs,
+      mayHave: `rotated this Project's seats: look at the Project's Supervisor and Lead in Paseo Desktop before re-running.`,
+      then: `run:\n  ${rotateCmd}`,
+    });
+  }
+  if (!reply.ok) {
+    console.error(`factory: ${reply.code}: ${reply.message}`);
+    if (reply.code === "peers-live") {
+      console.error(`Finish or close the Tasks named above, then run the same command again:\n  ${rotateCmd}`);
+    } else if (reply.code === "handoff-in-progress") {
+      console.error(`Let the Peer handoff named above finish, then run the same command again:\n  ${rotateCmd}`);
+    } else if (reply.code === "ledger-unreadable") {
+      console.error(`Nothing was touched. Repair or restore the Project's Ledger, then run the same command again:\n  ${rotateCmd}`);
+    } else if (reply.code === "unknown-project") {
+      console.error(`See what is registered, or register the folder, then run the rotate again:\n  ${factoryCmd} project list\n  ${factoryCmd} project register --workspace "<dir>"`);
+    } else if (reply.code === "ambiguous-project") {
+      console.error(`Name the Project to rotate:\n  ${factoryCmd} project rotate --project <slug>\n(${factoryCmd} project list shows the slugs)`);
+    } else if (reply.code === "daemon-unavailable") {
+      console.error(`Nothing was touched. Make sure Paseo Desktop is running, then run:\n  ${rotateCmd}`);
+    }
+    process.exit(2);
+  }
+  const archivedSeats = Array.isArray(reply.archivedSeats) ? reply.archivedSeats : [];
+  const result = {
+    ok: true,
+    project: reply.project,
+    root: reply.projectRoot,
+    home,
+    archivedSeats,
+    summary: reply.summary,
+  };
+  if (parsed.values.json === true) await writeJsonAndExit(result);
+  console.log(`factory: ${reply.summary} (home: ${home})`);
+  if (archivedSeats.length > 0) console.log(`  archived seats: ${archivedSeats.join(", ")}`);
+  process.exit(0);
+}
+
+// `project list` (ticket 01): a local read of the per-Project registry
+// manifest — the plugin need not be running, nothing is written, nothing prompts.
+if (command === "project" && rest[0] === "list") {
+  const parsed = parseCommandOptions({ json: { type: "boolean", default: false } });
+  if (parsed.positionals.length > 1) fail(`project list: unexpected positional "${parsed.positionals[1]}"`);
+  const projects = readProjectRegistrations(stateDir).map((registration) => ({ slug: registration.slug, root: registration.root, home }));
+  if (parsed.values.json === true) await writeJsonAndExit({ home, projects });
+  if (projects.length === 0) {
+    console.log(
+      `factory: no registered Projects in ${home}\n  register this folder: ${factoryCmd} project register --workspace "$PWD"`,
+    );
+    process.exit(0);
+  }
+  console.log(`factory: ${projects.length} registered Project${projects.length === 1 ? "" : "s"} in ${home}`);
+  for (const project of projects) console.log(`  ${project.slug}  ${project.root}  (home: ${project.home})`);
+  process.exit(0);
+}
+
+// `doctor` (ticket 01): a local-only preflight — the active CLI door, the home
+// in use, the folder's slug and registration state. Never needs the plugin,
+// never prompts; exit 2 only when the door or the recorded install is stale.
+if (command === "doctor") {
+  const parsed = parseCommandOptions({
+    json: { type: "boolean", default: false },
+    workspace: { type: "string" },
+    door: { type: "string" },
+  });
+  if (parsed.positionals.length > 0) fail(`doctor: unexpected positional "${parsed.positionals[0]}"`);
+  const diagnosis = diagnose({
+    home,
+    homeSource: resolveHomeSource(homeFlag),
+    stateDir,
+    workspaceDir: resolvePath(parsed.values.workspace ?? process.cwd()),
+    doorPath: resolvePath(parsed.values.door ?? process.argv[1]),
+    cmd: factoryCmd,
+  });
+  const code = diagnosis.ok ? 0 : 2;
+  if (parsed.values.json === true) await writeJsonAndExit(diagnosis, code);
+  console.log(formatDiagnosis(diagnosis));
+  process.exit(code);
+}
+
 if (command === "reset" || command === "delete" || command === "project") {
   const parsed = parseCommandOptions({
     workspace: { type: "string" },
@@ -1185,7 +1453,7 @@ if (command === "reset" || command === "delete" || command === "project") {
   if (command === "project") {
     const sub = parsed.positionals[0];
     if (sub !== "delete" && sub !== "reset") {
-      fail(`project: unknown subcommand "${sub ?? "(none)"}" — use "project delete [--workspace <dir>] [--project <slug>]" or "project reset [--workspace <dir>] [--project <slug>]"`);
+      fail(`project: unknown subcommand "${sub ?? "(none)"}" — use "project list [--json]", "project register [--workspace <dir>]", "project rotate [--workspace <dir> | --project <slug>]", "project delete [--workspace <dir>] [--project <slug>]" or "project reset [--workspace <dir>] [--project <slug>]"`);
     }
     if (parsed.positionals.length > 1) {
       fail(`project ${sub}: unexpected positional "${parsed.positionals[1]}"`);
@@ -1196,7 +1464,7 @@ if (command === "reset" || command === "delete" || command === "project") {
   }
 
   if (act === "delete") {
-    if (stampedSeat === "supervisor" || stampedSeat === "lead" || stampedSeat === "agent") {
+    if (stampedSeat !== undefined) {
       console.error(
         `factory: seat-cannot-delete: Seat ${stampedSeat} cannot call factory project delete; project deletion is an Owner-only action.`,
       );
@@ -1217,7 +1485,7 @@ if (command === "reset" || command === "delete" || command === "project") {
     process.exit(0);
   }
 
-  if (stampedSeat === "supervisor" || stampedSeat === "lead" || stampedSeat === "agent") {
+  if (stampedSeat !== undefined) {
     console.error(
       `factory: seat-cannot-reset: Seat ${stampedSeat} cannot call factory reset; project reset is an Owner-only action.`,
     );
