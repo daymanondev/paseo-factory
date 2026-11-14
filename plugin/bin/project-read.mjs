@@ -4,15 +4,10 @@
  * `factory project list` and `factory doctor` — verbs that must work while no
  * plugin is running, so they read `<stateDir>/projects/<slug>/project.json`
  * directly (the lane-profile store's local-read precedent, ADR 0026 §2) and
- * never write. The registration rule is the one the rest of the CLI uses
- * (`registeredProjectSlugs` in factory.mjs): a well-formed registration is a
- * parseable `project.json` object with a non-empty string `root`.
- *
- * Exports for later tickets (dispatch guard, skill pre-flight):
- *   readProjectRegistrations(stateDir)      -> [{ slug, root }] (slug order)
- *   readProjectRegistration(stateDir, slug) -> { slug, root } | undefined
- *   resolveHomeSource(flag, env)            -> "--home" | "PASEO_HOME" | "default"
- *   workspaceRegistrationState(stateDir, dir) -> resolved/registered state for a folder
+ * never write. This is the CLI's one registration rule — a well-formed
+ * registration is a parseable `project.json` object with a non-empty string
+ * `root` — and `factory.mjs` (status, cost, dispatch guard) reads Projects
+ * through it too.
  */
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { isAbsolute, join, relative, sep } from "node:path";
@@ -47,30 +42,16 @@ export function readProjectRegistrations(stateDir) {
   return registrations;
 }
 
-/** Which rung of the home precedence won: `--home` > `$PASEO_HOME` > `~/.paseo`. */
-export function resolveHomeSource(flag, env = process.env) {
-  if (flag !== undefined) return "--home";
-  if (typeof env.PASEO_HOME === "string" && env.PASEO_HOME.trim() !== "") return "PASEO_HOME";
-  return "default";
-}
-
 /**
  * Resolves a folder to its Project (git root walk-up, via resolveProject) and
  * reports whether that Project holds a well-formed registration in `stateDir`.
  * `{ resolved: false, reason }` when git cannot answer for the folder (not a
- * repository); otherwise `{ resolved: true, root, slug, registered, registration? }`.
+ * repository); otherwise `{ resolved: true, root, slug, registered }`.
  */
 export function workspaceRegistrationState(stateDir, dir) {
   const project = resolveProject(dir);
   if (!project.ok) return { resolved: false, reason: project.reason };
-  const registration = readProjectRegistration(stateDir, project.slug);
-  return {
-    resolved: true,
-    root: project.root,
-    slug: project.slug,
-    registered: registration !== undefined,
-    ...(registration === undefined ? {} : { registration }),
-  };
+  return { resolved: true, root: project.root, slug: project.slug, registered: readProjectRegistration(stateDir, project.slug) !== undefined };
 }
 
 const PLUGIN_ID = "paseo-factory";

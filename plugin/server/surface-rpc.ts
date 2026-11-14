@@ -77,7 +77,7 @@ import type { DaemonPluginAction, DaemonPluginItem, DaemonPluginSourceStatus, Da
 import { effectiveLanesForReconcile, reconcilePaseoRoleProviders } from "./core/role-providers.ts";
 import { FACTORY_SEAT_PROVIDER_IDS, SEAT_TITLES, inferRoleFromProviderId, isSupervisorCandidate, resolveEffectiveProviderFamily } from "./roles.ts";
 import type { SeatName } from "./roles.ts";
-import { ensureProjectRegistered, writeProjectRegistration, resolveTargetProject } from "./projects.ts";
+import { ensureProjectRegistered, isProjectSeat, registerLaneSlug, resolveTargetProject, seatCannotRegisterMessage, writeProjectRegistration } from "./projects.ts";
 import type { FactoryRegistry } from "./projects.ts";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { COMPANION_CATALOG, COMPANION_TOOLS_CATALOG, CORE_PLUGIN_ENTRY, MANAGEABLE_PLUGIN_IDS, MANAGEABLE_TOOL_IDS } from "../shared/companions.ts";
@@ -3247,8 +3247,8 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
      */
     async projectRegister(input: { workspace: string }, context?: SurfaceCallContext & { seat?: string }) {
       const callerSeat = typeof context?.seat === "string" ? context.seat.trim() : "";
-      if (callerSeat === "supervisor" || callerSeat === "lead" || callerSeat === "agent") {
-        return failure("seat-cannot-register", `${callerSeat} seat cannot run factory project register — registering a Project is an Owner-only act`);
+      if (isProjectSeat(callerSeat)) {
+        return failure("seat-cannot-register", seatCannotRegisterMessage(callerSeat));
       }
       const workspace = (input?.workspace ?? "").trim();
       if (workspace === "") return failure("missing-directory", "project register needs a workspace folder — pass --workspace <dir>");
@@ -3303,7 +3303,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           : typeof context?.seat === "string" && context.seat.trim() !== ""
             ? context.seat.trim()
             : "";
-      if (callerSeat === "supervisor" || callerSeat === "lead" || callerSeat === "agent") {
+      if (isProjectSeat(callerSeat)) {
         return failure(
           "seat-cannot-delete",
           `${callerSeat} seat cannot run factory project delete — Project deletion is an Owner-only act`,
@@ -4084,15 +4084,14 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       // Project's OWN maintenance lane — independent Projects keep admitting
       // ordinary work while one Project's history is exclusively held.
       if (!wrappers.has(key)) wrappers.set(key, (...args: unknown[]) => {
-        // A register takes the lane of the Project its folder is already registered as
-        // (the one a delete/reset of it holds), else the root lane — same law as the spool's router.
-        const registerOwner = key === "projectRegister" && deps.registry !== undefined
-          ? resolveTargetProject(deps.registry, { workspace: (args[0] as { workspace?: string } | undefined)?.workspace })
+        // A register takes the lane of the Project its folder is already registered as (the spool's router uses the same helper).
+        const registerSlug = key === "projectRegister" && deps.registry !== undefined
+          ? registerLaneSlug(deps.registry, (args[0] as { workspace?: string } | undefined)?.workspace)
           : undefined;
         const lane = key === "projectReset" || key === "projectDelete"
           ? factoryForResetTarget(args[0] as { projectRoot?: string; project?: string; projectSlug?: string; workspace?: string } | undefined)
-          : registerOwner?.ok === true && registerOwner.via === "workspace" && deps.registry !== undefined
-            ? deps.registry.factoryForProject(registerOwner.slug)
+          : registerSlug !== undefined && deps.registry !== undefined
+            ? deps.registry.factoryForProject(registerSlug)
             : deps.factory;
         return !lane.history.maintenanceActive && (key === "projectReset" || key === "projectDelete" || key === "projectRegister")
           ? lane.history.withExclusiveMaintenance(() => value.apply(receiver, args))

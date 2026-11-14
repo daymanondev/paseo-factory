@@ -319,3 +319,33 @@ function slugFromWorkspace(stateDir: string, workspace: string): string | undefi
   if (resolved.ok && existingRegistration(stateDir, resolved.slug) !== undefined) return resolved.slug;
   return undefined;
 }
+
+// ---- Project-act authority and lanes shared by the Spool and the surface handlers ------------
+
+/** A Factory seat — the three roles an Owner-only Project act refuses. */
+export type ProjectSeat = "supervisor" | "lead" | "agent";
+
+/** True for a stamped Factory seat; the Owner (no stamp) and any other string are not seats. */
+export function isProjectSeat(value: unknown): value is ProjectSeat {
+  return value === "supervisor" || value === "lead" || value === "agent";
+}
+
+/** The one refusal both doors (Spool and surface) give a seat that tries `factory project register`. */
+export function seatCannotRegisterMessage(seat: ProjectSeat): string {
+  return `Seat ${seat} cannot call factory project register; registering a Project is an Owner-only action.`;
+}
+
+/**
+ * The maintenance lane a Project register takes. A register targets the folder
+ * it names, never a guessed Project: it takes the lane of the Project that
+ * folder is ALREADY registered as — the lane a delete/reset of that Project
+ * holds, so the two cannot interleave. A not-yet-registered folder has nothing
+ * to race and rides the root lane (the first register of a Project is also an
+ * exclusive-maintenance act there: it may `git init` and writes the registry).
+ * The single-registered-Project fallback never applies. Returns the owning
+ * slug, or undefined for the root lane.
+ */
+export function registerLaneSlug(registry: FactoryRegistry, workspace: string | undefined): string | undefined {
+  const owner = resolveTargetProject(registry, { workspace });
+  return owner.ok && owner.via === "workspace" ? owner.slug : undefined;
+}

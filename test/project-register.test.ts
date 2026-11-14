@@ -24,7 +24,10 @@ const ownerCli = join(repoRoot, "plugin", "bin", "factory.mjs");
 
 // ---- fixtures ------------------------------------------------------------------------------
 
-function makeRegisterSpool(t: TestContext, hooks: { projectDelete?: (request: { id: string; project?: string; workspace?: string }) => Promise<SpoolReply> } = {}) {
+function makeRegisterSpool(t: TestContext, hooks: {
+  projectDelete?: (request: { id: string; project?: string; workspace?: string }) => Promise<SpoolReply>;
+  projectReset?: (request: { id: string; project?: string; workspace?: string }) => Promise<SpoolReply>;
+} = {}) {
   const dir = makeTempDir();
   disposeDir(t, dir);
   const home = join(dir, "paseo-home");
@@ -67,6 +70,7 @@ function makeRegisterSpool(t: TestContext, hooks: { projectDelete?: (request: { 
         : { id: request.id, ok: false as const, code: reply.code, message: reply.error };
     },
     ...(hooks.projectDelete === undefined ? {} : { projectDelete: (request) => hooks.projectDelete!(request) }),
+    ...(hooks.projectReset === undefined ? {} : { projectReset: (request) => hooks.projectReset!(request) }),
   });
   t.after(() => spool.stop());
   return { dir, home, stateDir, registry, surface, spool, opened, events };
@@ -293,6 +297,37 @@ test("project_register is serialized with Project delete: it never starts while 
   assert.deepEqual(ctx.events, ["register:start", "register:end"], "register ran once, strictly after the delete finished");
 });
 
+test("project_register is serialized with Project reset: it never starts while a reset on the same Project is in flight", async (t) => {
+  let releaseReset: () => void = () => {};
+  const resetGate = new Promise<void>((resolve) => { releaseReset = resolve; });
+  const trace: string[] = [];
+  const ctx = makeRegisterSpool(t, {
+    projectReset: async (request) => {
+      trace.push("reset:start");
+      await resetGate;
+      trace.push("reset:end");
+      return { id: request.id, ok: true, summary: "reset" };
+    },
+  });
+  const root = makeRepo(ctx.dir, "demo");
+  const resolved = resolveProject(root);
+  assert.ok(resolved.ok);
+  writeProjectRegistration(ctx.stateDir, resolved.slug, { root });
+  const spoolRoot = spoolRootFor(ctx.stateDir);
+
+  dropRequest(spoolRoot, { id: "a-rst", kind: "reset", project: resolved.slug });
+  await until(() => assert.deepEqual(trace, ["reset:start"]));
+  dropRequest(spoolRoot, { id: "b-reg", kind: "project_register", workspace: root });
+  await new Promise((resolve) => setTimeout(resolve, POLL_MS * 8));
+  assert.deepEqual(ctx.events, [], "the register handler has not started while the reset holds the Project");
+
+  releaseReset();
+  const reply = await replyOf(spoolRoot, "b-reg");
+  assert.equal(reply.ok, true, JSON.stringify(reply));
+  assert.deepEqual(trace, ["reset:start", "reset:end"]);
+  assert.deepEqual(ctx.events, ["register:start", "register:end"], "register ran once, strictly after the reset finished");
+});
+
 // ---- Seam 2: the CLI subprocess ---------------------------------------------------------------
 
 interface CliResult { status: number | null; stdout: string; stderr: string }
@@ -409,7 +444,9 @@ test("CLI: with the plugin down it exits 2 naming the recovery step, writes no s
   assert.equal(result.status, 2);
   assert.match(result.stderr, /plugin is not running/i);
   assert.ok(result.stderr.includes(home), "names the home it looked at");
-  assert.ok(result.stderr.includes(`factory --home ${home} project register --workspace ${realpathSync(root)}`), "a copy-pasteable retry command");
+  assert.ok(result.stderr.includes(`factory --home "${home}" project register --workspace "${realpathSync(root)}"`), "a copy-pasteable retry command, quoted so a path with spaces survives");
+  assert.doesNotMatch(result.stderr, /nothing was registered/i, "the plugin may have picked the request up just before it was withdrawn — never claim nothing happened");
+  assert.ok(result.stderr.includes(`factory --home "${home}" project list`), "tells the Owner how to confirm whether the registration landed");
   assert.deepEqual(listProjectRegistrations(stateDir), [], "the CLI never writes Project state itself");
   assert.equal(existsSync(join(stateDir, "projects")), false);
   const requests = join(spoolRootFor(stateDir), "requests");
