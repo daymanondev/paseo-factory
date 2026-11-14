@@ -480,6 +480,30 @@ export default function contribute(server: PluginServerContext) {
             message: reply.error,
           };
     },
+    projectRotate: async (request) => {
+      const reply = await surface.projectRotate(
+        {
+          ...(request.workspace !== undefined ? { projectRoot: request.workspace } : {}),
+          ...(request.project !== undefined ? { project: request.project } : {}),
+        },
+        { paseo: paseoApi as never },
+      );
+      return reply.ok
+        ? {
+            id: request.id,
+            ok: true as const,
+            summary: reply.summary,
+            project: reply.project,
+            projectRoot: reply.projectRoot,
+            archivedSeats: reply.archivedSeats,
+          }
+        : {
+            id: request.id,
+            ok: false as const,
+            code: reply.code,
+            message: reply.error,
+          };
+    },
     projectDelete: async (request) => {
       const reply = await surface.projectDelete(
         {
