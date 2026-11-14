@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.5] - 2026-11-14
+
+**Pausing a Peer no longer ends its task.**
+
+### Fixed
+
+- **Esc on a Peer counted as task completion, and let the Lead hand off mid-task.** The driver treated any idle Peer whose prompt was consumed as finished: it metered and archived the Peer even when it had not claimed. With the Peer archived, a Lead waiting at its 160k mark saw a quiet point and started its handoff while the task was still open. Now an idle Peer finishes only when the ledger shows an outcome since its spawn: a green gate, needs-human, an accepted attempt or a closed task. Otherwise it stays live and watched, and you can resume it in place. A re-spawn, a reset re-contract or a close still retires it, and the old watch never respawns over a newer run.
+- **The Lead's automatic handoff waits for every dispatched task.** A running task, or one that is red below the attempt ceiling, holds the Lead's quiet point while its Peer is alive, whatever the Peer's status. This includes an idle Peer after a red attempt, and it survives restarts. A queued Peer verdict or blocker, or a dead or archived Peer, still releases it. Hand off now / Replace now still work at any time.
+
+### Added
+
+- **A Peer whose turn ends without a Claim is nudged once, then reported to the Lead.** The nudge tells the Peer to keep working and claim, or to escalate a blocker. If the next turn also ends without a Claim, the Lead gets one report mail asking it to rule, respawn, re-contract or close. A turn you cancel with Esc is never nudged. See ADR 0058.
+
+## [0.8.5] - 2026-11-14
+
 ## [0.8.4] - 2026-11-14
 
 **Seats get their Factory tools back.**
