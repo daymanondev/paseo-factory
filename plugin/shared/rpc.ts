@@ -271,6 +271,31 @@ export const projectReset = defineRpc({
   ]),
 });
 
+/**
+ * Rotate seats (ADR 0060): the Owner-only, no-handover retirement of a
+ * Project's Supervisor and Lead. Refused with `peers-live` while any live
+ * Peer holds an unsettled Task; keeps the notebook, lanes, Ledger, usage and
+ * worktrees. `archivedSeats` is empty when no seat was bound.
+ */
+export const projectRotate = defineRpc({
+  name: "factory.project.rotate",
+  input: z.object({
+    projectRoot: z.string().optional(),
+    project: z.string().optional(),
+  }),
+  output: z.union([
+    z.object({
+      ok: z.literal(true),
+      project: z.string(),
+      projectRoot: z.string(),
+      archivedSeats: z.array(z.string()),
+      summary: z.string(),
+      view: FactoryViewSchema.optional(),
+    }),
+    Failure,
+  ]),
+});
+
 // The onboarding wizard's two doors (v0.6.0 W7, ADR 0056 + the ADR 0017
 // amendment), replacing the folder picker and the pasted path. `inspect` is the
 // read-only look at the workspace's folder the first two steps render — Git,

@@ -144,6 +144,7 @@ function makeSpooledRuntime(t: TestContext, agents: FakeAgent[] = [], options?: 
     markPluginArchive: (input) => leadMail.markPluginArchive(input.agentId),
     clearPluginArchive: (input) => leadMail.clearPluginArchive(input.agentId),
     leadDispatch: (request) => leadMail.dispatchLead(request),
+    resetProjectMailbox: (slug) => leadMail.resetProjectMailbox(slug),
   });
   const leadMail = createLeadMailRuntime({
     factory,
@@ -2645,6 +2646,54 @@ test("v0.6.1 (ADR 0057 §4): a Project reset's and delete's own archives never t
   assert.ok(deleted.archivedSeats.includes(doomedLead.id), "the delete archived the bound Lead through the cleanup seam");
   assert.equal(fake.agents.some((agent) => agent.id === doomedLead.id), false);
   assert.equal(fake.created.length, 0, "the delete's archive events never raise a successor either");
+});
+
+test("ADR 0060: Rotate seats archives both seats with no lost-Lead recovery, no Substitute handover and no recreated Lead — the next Supervisor dispatch raises a Lead whose kickoff carries no handover", async (t) => {
+  const { stateDir, slug, projectRoot, surface, leadMail, fake } = makeSpooledRuntime(t);
+  const supervisor = await surface.supervisorEnsure({ projectRoot });
+  const lead = await surface.leadEnsure({ projectRoot });
+  assert.ok(supervisor.ok && lead.ok);
+  // Mail mid-delivery and queued behind it, plus the on-disk handover records of the old Lead.
+  await leadMail.enqueueLeadMail(slug, { from: "supervisor", kind: "directive", text: "Directive in flight when the rotation lands" });
+  await leadMail.pumpProjectLead(slug);
+  await leadMail.enqueueLeadMail(slug, { from: "supervisor", kind: "directive", text: "Directive still queued" });
+  const projectDir = projectStateDir(stateDir, slug);
+  writeFileSync(join(projectDir, "lead-handoff.md"), "# the old Lead's handover — STALE-CONTEXT\n");
+  writeFileSync(join(projectDir, "lead-handoff-extraction.json"), `${JSON.stringify({ leadLostAt: "2026-11-12T08:00:00.000Z" })}\n`);
+  writeFileSync(join(projectDir, "notebook.md"), "## 1. Verification & Run Recipe\nrun it\n");
+  const createdBefore = fake.created.length;
+
+  const rotated = await surface.projectRotate({ projectRoot });
+  assert.ok(rotated.ok, rotated.ok ? "" : rotated.error);
+  assert.deepEqual(rotated.archivedSeats, [lead.agentId, supervisor.agentId]);
+
+  // Pumps and turn boundaries after the act find nothing: no Lead rises.
+  await leadMail.pumpProjectLead(slug);
+  await leadMail.pumpAll();
+  await leadMail.onLeadTurnEnded({ agentId: lead.agentId, outcome: { kind: "canceled" }, timeline: [] });
+  assert.equal(fake.created.length, createdBefore, "no Lead (or any seat) is recreated");
+  const reg = readProjectRegistration(stateDir, slug);
+  assert.equal(reg?.lead, undefined);
+  assert.equal(reg?.supervisor, undefined);
+  assert.equal(existsSync(join(projectDir, "lead-handoff.md")), false, "no Substitute handover is written, the old one is dropped");
+  assert.equal(existsSync(join(projectDir, "lead-handoff-extraction.json")), false);
+  assert.equal(readMailboxLines(stateDir, slug).some((event) => event.reason === "lead_lost"), false, "no lead_lost recovery fired");
+  assert.equal(existsSync(join(projectDir, "notebook.md")), true, "the notebook survives");
+
+  // The Owner opens a fresh Supervisor; its first dispatch creates a fresh Lead with the standard kickoff and no handover.
+  const started = await surface.supervisorStart({ projectRoot });
+  assert.ok(started.ok, started.ok ? "" : started.error);
+  const dispatched = await leadMail.dispatchLead({ id: "ld-after-rotate", kind: "lead_dispatch", workspace: projectRoot, message: "Start the next wave", seat: "supervisor" });
+  assert.equal(dispatched.ok, true, dispatched.ok ? "" : JSON.stringify(dispatched));
+  const freshLead = readProjectRegistration(stateDir, slug)?.lead;
+  assert.ok(freshLead !== undefined && freshLead !== lead.agentId, "a fresh Lead is bound");
+  const firstTexts = [
+    ...fake.created.filter((entry) => entry.labels.seat === "lead").map((entry) => entry.prompt ?? ""),
+    ...fake.sent.filter((entry) => entry.agentId === freshLead).map((entry) => entry.text),
+  ].join("\n");
+  assert.match(firstTexts, /Start the next wave/, "the Lead's first prompt carries the dispatched directive");
+  assert.match(firstTexts, /Verification & Run Recipe/, "and the standard kickoff's notebook");
+  assert.doesNotMatch(firstTexts, /# Lead handoff|Outgoing Lead handoff|Plugin-built handover|Staleness notice|STALE-CONTEXT|Directive still queued|Directive in flight/, "no handover, no stale notice, no old mail");
 });
 
 test("v0.6.1 (ADR 0057 §4): the released Supervisor archives when the Lead handoff retires the parented Lead — end to end through the rotation machine", async (t) => {
