@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-14
+
+**`/factory` works from any folder: register, list, and doctor from the CLI, and no more fake-success dispatch.**
+
+### Added
+
+- **`factory project list`.** Prints every registered Project with its slug, root and daemon home (`--json` for scripts). It reads the registry locally, so it works with the plugin down.
+- **`factory doctor`.** A local preflight that never prompts. It reports the home in use (`--home` > `$PASEO_HOME` > `~/.paseo`), the current folder's slug (resolved up to the git root), whether that Project is registered, and the next command to run. It exits 2 when the recorded plugin install is stale or missing.
+- **`factory project register [--workspace <dir>]`.** Registers a folder as a Project in one explicit command. The CLI submits a `project_register` Spool request and the plugin does the write (ADR 0004), through the same writer as the seat path. A non-git folder gets `git init` and an empty commit first; your home folder and `/` are refused (ADR 0024). Re-running it reports the existing registration. Only the Owner can register; seats get `seat-cannot-register`. Registration is serialized with Project delete and reset. If the plugin doesn't answer within `--wait-secs` (30s by default), it exits 2 with the recovery command.
+- **`/factory` pre-flight.** Before dispatching, the skill resolves the git root and echoes the Project and daemon home it will use. In an unregistered folder it offers a choice: register here, pick an existing Project (dispatched with `--project <slug>`), or abort. After a fresh registration, if you have saved lane profiles, it offers once to apply one, after the directive has been sent.
+- **The `/factory` skill is managed in `~/.pi/agent/skills` too.** Boot reconciles it into all three skill roots (`~/.agents/skills`, `~/.claude/skills`, `~/.pi/agent/skills`) with the current install's CLI path, and a hand-edited or stale copy reverts on the next boot.
+
+### Changed
+
+- **`supervisor dispatch --workspace` refuses an unregistered git repo.** It used to exit 0 and hold the directive in a mailbox no Supervisor would ever read. It now exits 2, queues nothing, and names `factory project register`, `factory project list` and how to open a Supervisor seat. **If a script relied on the old behaviour, add `--allow-unregistered`.** A non-git workspace still fails with `unknown-project`, now with next-command hints. See ADR 0059.
+- **Held dispatch replies say how to wake the Project.** When no Supervisor is live, the reply tells you to open a New Chat with the `Supervisor (Factory)` profile at the Project root.
+
 ## [0.8.6] - 2026-11-14
 
 **Thin Lead context, lean ledger reads, and a zero-relative-import MCP bridge.**
