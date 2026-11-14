@@ -40,7 +40,7 @@ import { existsSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from
 import { join, resolve as resolvePath } from "node:path";
 import { readLedgerEvents } from "./ledger-read.mjs";
 import { taskStatusLines } from "./task-status.mjs";
-import { awaitReply, randomId, resolveHome, resolveHomeSource, spoolRootFor, stateDirFor, submit } from "./spool-client.mjs";
+import { awaitReply, randomId, resolveHome, resolveHomeSource, spoolRootFor, stampedSeatFromEnv, stateDirFor, submit } from "./spool-client.mjs";
 import {
   LANE_NAMES,
   applyLaneProfile,
@@ -458,8 +458,7 @@ const stampedAgent = typeof process.env.PASEO_AGENT_ID === "string" ? process.en
 const stampedCorrelation =
   typeof process.env.PASEO_FACTORY_CORRELATION === "string" ? process.env.PASEO_FACTORY_CORRELATION.trim() : "";
 const submitter = stampedAgent !== "" ? stampedAgent : stampedCorrelation !== "" ? stampedCorrelation : "owner";
-const rawSeat = typeof process.env.PASEO_FACTORY_SEAT === "string" ? process.env.PASEO_FACTORY_SEAT.trim() : "";
-const stampedSeat = rawSeat === "supervisor" || rawSeat === "lead" || rawSeat === "agent" ? rawSeat : undefined;
+const stampedSeat = stampedSeatFromEnv();
 
 /** Pipe writes are asynchronous: immediate process.exit can truncate large machine-readable output. */
 async function writeJsonAndExit(value, code = 0) {
@@ -1253,7 +1252,7 @@ if (command === "project" && rest[0] === "register") {
     "wait-secs": { type: "string" },
   });
   if (parsed.positionals.length > 1) fail(`project register: unexpected positional "${parsed.positionals[1]}"`);
-  if (stampedSeat === "supervisor" || stampedSeat === "lead" || stampedSeat === "agent") {
+  if (stampedSeat !== undefined) {
     console.error(
       `factory: seat-cannot-register: Seat ${stampedSeat} cannot call factory project register; registering a Project is an Owner-only action.`,
     );
@@ -1362,7 +1361,7 @@ if (command === "reset" || command === "delete" || command === "project") {
   }
 
   if (act === "delete") {
-    if (stampedSeat === "supervisor" || stampedSeat === "lead" || stampedSeat === "agent") {
+    if (stampedSeat !== undefined) {
       console.error(
         `factory: seat-cannot-delete: Seat ${stampedSeat} cannot call factory project delete; project deletion is an Owner-only action.`,
       );
@@ -1383,7 +1382,7 @@ if (command === "reset" || command === "delete" || command === "project") {
     process.exit(0);
   }
 
-  if (stampedSeat === "supervisor" || stampedSeat === "lead" || stampedSeat === "agent") {
+  if (stampedSeat !== undefined) {
     console.error(
       `factory: seat-cannot-reset: Seat ${stampedSeat} cannot call factory reset; project reset is an Owner-only action.`,
     );

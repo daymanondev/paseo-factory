@@ -44,7 +44,7 @@ import type { LaneThinkingCatalogEntry, PeerThinkingLevel } from "./core/lanes.t
 import { listProjectRegistrations, readProjectRegistration, resolveProject, writeProjectRegistration } from "./core/project.ts";
 import { writeProjectNotebook } from "./core/preflight.ts";
 import { allocateTaskWorktree } from "./core/mcp/worktrees.ts";
-import { ensureProjectRegistered, resolveTargetProject } from "./projects.ts";
+import { ensureProjectRegistered, isProjectSeat, registerLaneSlug, resolveTargetProject, seatCannotRegisterMessage } from "./projects.ts";
 import type { FactoryRegistry, TargetProjectContext } from "./projects.ts";
 import { FACTORY_SEAT_PROVIDER_IDS, formatPeerAgentTitle, formatPeerWorkspaceTitle } from "./roles.ts";
 import { acceptanceSummary, archiveAcceptedTaskWorkspace, executeAcceptance } from "./commands.ts";
@@ -1525,14 +1525,10 @@ export function routeSpoolRequest(root: Factory, request: SpoolRequest, registry
     const resolved = resolveProject(request.workspace);
     if (resolved.ok) ensureProjectRegistered(registry.stateDir, resolved);
   }
-  // A register targets the folder it names, never a guessed Project: it takes
-  // the maintenance lane of the Project that folder is ALREADY registered as —
-  // the lane a delete/reset of that Project holds, so the two cannot
-  // interleave — and a not-yet-registered folder (nothing to race) rides the
-  // root lane. The single-registered-Project fallback never applies.
+  // A register's lane is the maintenance lane of the Project its folder is already registered as (see registerLaneSlug).
   if (request.kind === "project_register") {
-    const owner = resolveTargetProject(registry, { workspace: request.workspace });
-    return owner.ok && owner.via === "workspace" ? { factory: registry.factoryForProject(owner.slug), slug: owner.slug } : { factory: root };
+    const slug = registerLaneSlug(registry, request.workspace);
+    return slug !== undefined ? { factory: registry.factoryForProject(slug), slug } : { factory: root };
   }
   const context = contextOfSpoolRequest(request);
   const target = resolveTargetProject(registry, context);
@@ -1613,7 +1609,7 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
     // Hard Spool Command Authority by Seat (v0.0.23, ADR 0015 §1; v0.0.24, ADR 0015 §6; v0.0.35, ADR 0024).
     if (
       request.kind === "reset" &&
-      (effectiveSeat === "supervisor" || effectiveSeat === "lead" || effectiveSeat === "agent")
+      isProjectSeat(effectiveSeat)
     ) {
       return {
         id: request.id,
@@ -1624,7 +1620,7 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
     }
     if (
       request.kind === "delete" &&
-      (effectiveSeat === "supervisor" || effectiveSeat === "lead" || effectiveSeat === "agent")
+      isProjectSeat(effectiveSeat)
     ) {
       return {
         id: request.id,
@@ -1635,13 +1631,13 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
     }
     if (
       request.kind === "project_register" &&
-      (effectiveSeat === "supervisor" || effectiveSeat === "lead" || effectiveSeat === "agent")
+      isProjectSeat(effectiveSeat)
     ) {
       return {
         id: request.id,
         ok: false,
         code: "seat-cannot-register",
-        message: `Seat ${effectiveSeat} cannot call factory project register; registering a Project is an Owner-only action.`,
+        message: seatCannotRegisterMessage(effectiveSeat),
       };
     }
     if (

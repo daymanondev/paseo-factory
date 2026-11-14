@@ -167,7 +167,8 @@ return module.exports;
 // END GENERATED SPOOL TRANSPORT
 export const { spoolRequestSemanticKey, findPendingSemanticDuplicate } = spoolTransport;
 
-function stampedSeatFromEnv(env = process.env) {
+/** The Factory seat the shell is stamped with (`PASEO_FACTORY_SEAT`), or undefined for the Owner. */
+export function stampedSeatFromEnv(env = process.env) {
   const raw = typeof env.PASEO_FACTORY_SEAT === "string" ? env.PASEO_FACTORY_SEAT.trim() : "";
   return raw === "supervisor" || raw === "lead" || raw === "agent" ? raw : undefined;
 }

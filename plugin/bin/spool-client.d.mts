@@ -10,6 +10,8 @@ export declare function stateDirFor(paseoHome: string): string;
 /** Which rung of the home precedence won: `--home`, `PASEO_HOME` or the `~/.paseo` default. */
 export declare function resolveHomeSource(flag: string | undefined, env?: Record<string, string | undefined>): "--home" | "PASEO_HOME" | "default";
 export declare function resolveHome(flag: string | undefined): string;
+/** The Factory seat the shell is stamped with (`PASEO_FACTORY_SEAT`), or undefined for the Owner. */
+export declare function stampedSeatFromEnv(env?: Record<string, string | undefined>): "supervisor" | "lead" | "agent" | undefined;
 export declare function spoolRootFor(stateDir: string): string;
 /** Drops a request file (write-then-rename) and returns its path; the id travels in the filename and the body. */
 export declare function submit(spoolRoot: string, request: { id: string; kind: string; [key: string]: unknown }): string;
