@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.4] - 2026-11-14
+
+**Seats get their Factory tools back.**
+
+### Fixed
+
+- **The `paseo_factory` MCP bridge died on start, so Supervisor and Lead had no Factory tools.** Since v0.6.1 the bridge imports `project.mjs` (and through it `worktree-policy.mjs`), but the plugin only staged `bridge.mjs`, the hook and `ledger-project.mjs` into `plugin-state/paseo-factory/bin/`. Every seat started since then got a bridge that crashed with `ERR_MODULE_NOT_FOUND`: no `supervisor_dispatch_lead`, no `lead_set_contract`. Supervisors fell back to the `factory` CLI using a path to an install that a later update had deleted ("Cannot find module …/checkout/plugin/bin/factory.mjs"), and Leads read the plugin's source to work out how to dispatch. The plugin now stages every module the bridge and hook import, followed transitively, and a test starts the staged bridge and lists its tools.
+
 ## [0.8.3] - 2026-11-14
 
 **Update the Factory from the Factory tab.**
