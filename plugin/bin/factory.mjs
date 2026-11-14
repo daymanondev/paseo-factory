@@ -36,7 +36,7 @@
  * the factory, no reply from the plugin, or an unreadable ledger).
  */
 import { parseArgs } from "node:util";
-import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { join, resolve as resolvePath } from "node:path";
 import { readLedgerEvents } from "./ledger-read.mjs";
 import { taskStatusLines } from "./task-status.mjs";
@@ -263,6 +263,21 @@ commands:
                                            Supervisor mailbox (to="supervisor",
                                            from="lead", kind="report").
 
+  project register
+             Owner-only, idempotent: turn a folder into a registered factory
+             Project. The plugin — never the CLI — writes the registration
+             (single writer, ADR 0004): a non-Git folder is first bootstrapped
+             (git init + an empty initial commit; the user home and the
+             filesystem root are refused, ADR 0024), then the Project is
+             registered; an already-registered Project is reported and nothing
+             is written. The reply names the daemon home it was registered
+             under (--home > $PASEO_HOME > ~/.paseo). Needs the plugin running:
+             with it down the command exits 2 naming the recovery step.
+             project register [--workspace <dir>] [--json] [--wait-secs <n>]
+             --workspace defaults to the current directory (resolved up to its
+             git root); --json prints {ok, slug, root, home, alreadyRegistered,
+             bootstrapped}; failures exit 2 with "factory: <code>: <message>".
+
   reset      Owner-only clean-slate Project reset (v0.0.24, ADR 0015 §6):
              purges the Project's ledger events, task reports/worktrees, and
              per-Project state directory (<stateDir>/projects/<slug>/), and
@@ -415,6 +430,8 @@ attribution (v0.0.9): contract and accept stamp who submitted — the
   (ADR 0010 §3); "lead" is judged at the factory, not trusted from here.`;
 
 const DEFAULT_WAIT_SECS = 60;
+/** `project register` answers a person at a terminal: a plugin that is down is reported after 30s, not 60. */
+const REGISTER_WAIT_SECS = 30;
 
 /**
  * The acceptance authority seats (v0.0.14, ADR 0010 §3): `owner` and
@@ -1193,6 +1210,61 @@ if (command === "supervisor") {
   fail(`supervisor: unknown subcommand "${sub ?? "(none)"}" — use "supervisor dispatch --workspace <dir> --message \\"<text>\\"" or "supervisor report --workspace <dir> --message \\"<text>\\""`);
 }
 
+if (command === "project" && rest[0] === "register") {
+  // `factory project register` (CLI Project onboarding): the Owner's one explicit,
+  // idempotent act that turns a folder into a registered Project. The CLI only
+  // submits — the plugin is the single writer (ADR 0004): it bootstraps a
+  // greenfield non-Git folder (git init + empty commit; $HOME and / refused,
+  // ADR 0024) and writes the registration through the seat/surface path's own
+  // writer. Prompt-free by construction; failures exit 2.
+  const parsed = parseCommandOptions({
+    workspace: { type: "string" },
+    json: { type: "boolean", default: false },
+    "wait-secs": { type: "string" },
+  });
+  if (parsed.positionals.length > 1) fail(`project register: unexpected positional "${parsed.positionals[1]}"`);
+  if (stampedSeat === "supervisor" || stampedSeat === "lead" || stampedSeat === "agent") {
+    console.error(
+      `factory: seat-cannot-register: Seat ${stampedSeat} cannot call factory project register; registering a Project is an Owner-only action.`,
+    );
+    process.exit(2);
+  }
+  if (typeof parsed.values.workspace === "string" && parsed.values.workspace.trim() === "") {
+    fail("project register: --workspace needs a directory");
+  }
+  const workspace = resolvePath(typeof parsed.values.workspace === "string" ? parsed.values.workspace : process.cwd());
+  const waitSecs = waitSeconds(parsed, REGISTER_WAIT_SECS);
+  const payload = { id: randomId(), kind: "project_register", workspace, submitter };
+  submit(spoolRoot, payload);
+  const reply = await awaitReply(spoolRoot, payload.id, waitSecs * 1000);
+  if (reply === null) {
+    // Plugin down: an unanswered register is withdrawn so it can never surprise-apply
+    // on a later plugin start — the Owner re-runs the command once the plugin is up.
+    try { unlinkSync(join(spoolRoot, "requests", `${payload.id}.json`)); } catch { /* already picked up or gone */ }
+    console.error(
+      `factory: the paseo-factory plugin is not running — no reply from the plugin for home ${home} after ${waitSecs}s, so nothing was registered. ` +
+        `Start Paseo Desktop with the paseo-factory plugin enabled (for a remote machine pass --home <that machine's paseo home>), then re-run:\n` +
+        `  factory --home ${home} project register --workspace ${workspace}`,
+    );
+    process.exit(2);
+  }
+  if (!reply.ok) {
+    console.error(`factory: ${reply.code}: ${reply.message}`);
+    process.exit(2);
+  }
+  const result = {
+    ok: true,
+    slug: reply.project,
+    root: reply.projectRoot,
+    home,
+    alreadyRegistered: reply.alreadyRegistered === true,
+    bootstrapped: reply.bootstrapped === true,
+  };
+  if (parsed.values.json === true) await writeJsonAndExit(result);
+  console.log(`factory: ${reply.summary} (home: ${home})`);
+  process.exit(0);
+}
+
 // `project list` (ticket 01): a local read of the per-Project registry
 // manifest — the plugin need not be running, nothing is written, nothing prompts.
 if (command === "project" && rest[0] === "list") {
@@ -1246,7 +1318,7 @@ if (command === "reset" || command === "delete" || command === "project") {
   if (command === "project") {
     const sub = parsed.positionals[0];
     if (sub !== "delete" && sub !== "reset") {
-      fail(`project: unknown subcommand "${sub ?? "(none)"}" — use "project delete [--workspace <dir>] [--project <slug>]" or "project reset [--workspace <dir>] [--project <slug>]"`);
+      fail(`project: unknown subcommand "${sub ?? "(none)"}" — use "project list [--json]", "project register [--workspace <dir>]", "project delete [--workspace <dir>] [--project <slug>]" or "project reset [--workspace <dir>] [--project <slug>]"`);
     }
     if (parsed.positionals.length > 1) {
       fail(`project ${sub}: unexpected positional "${parsed.positionals[1]}"`);

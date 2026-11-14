@@ -514,6 +514,28 @@ export default function contribute(server: PluginServerContext) {
             message: reply.error,
           };
     },
+    projectRegister: async (request) => {
+      const reply = await surface.projectRegister(
+        { workspace: request.workspace },
+        { paseo: paseoApi as never, ...(request.seat !== undefined ? { seat: request.seat } : {}) },
+      );
+      return reply.ok
+        ? {
+            id: request.id,
+            ok: true as const,
+            summary: reply.summary,
+            project: reply.slug,
+            projectRoot: reply.root,
+            bootstrapped: reply.bootstrapped,
+            alreadyRegistered: reply.alreadyRegistered,
+          }
+        : {
+            id: request.id,
+            ok: false as const,
+            code: reply.code,
+            message: reply.error,
+          };
+    },
     peerMail: leadMail.notifyPeer,
     usageMeter: (input) => usage.meterTaskBoundary(input),
     recordUsage: async (input) => {
