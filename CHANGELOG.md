@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.3] - 2026-11-14
+
+**Updated Peer handoffs and repokes at the same SHA wake the Lead instead of replaying.**
+
+### Fixed
+
+- **Re-claiming at the same commit SHA with an updated 6-Field Handoff (or after `lead_repoke_agent`) was swallowed as an idempotent duplicate.** Read-only Peers (`scout`, `architect`, `reviewer`) and same-SHA handoff updates matched the prior GREEN attempt by SHA alone, discarding the updated handoff/report and skipping `peerMailHook`, which left `Lead` waiting forever after a reconciliation repoke. Claim replay now requires an identical normalized handoff, matching mechanical marker, and no intervening `repoke_dispatched`; genuine updates open a normal Attempt, write the new `report-<task>-<n>.md`, and notify `Lead`.
+
 ## [0.10.2] - 2026-11-14
 
 **Lead visual-evidence boundary on Open Design projects, and a compact `CONTEXT.md`.**
