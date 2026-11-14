@@ -353,16 +353,32 @@ test("pre-flight: the Owner's explicit choice gates registration; no silent auto
   assert.ok(!preflight.includes("--allow-unregistered") || /only when the Owner (explicitly )?asks/i.test(modeA), "the legacy held-dispatch flag is Owner-opt-in only");
 });
 
-test("pre-flight: after a fresh register, one optional lane-profile apply-or-skip — only when profiles exist, never blocking dispatch", () => {
+test("pre-flight: after a fresh register the directive dispatches first, then one optional lane-profile apply-or-skip — only when profiles exist", () => {
   const reg = at("factory project register --workspace");
-  const list = at("factory profile list --json", reg);
+  const dispatch = at('factory supervisor dispatch --workspace "$PWD"', reg);
+  const list = at("factory profile list --json", dispatch);
   const apply = at('factory profile apply <id> --project "<root>"', list);
-  const dispatch = at('factory supervisor dispatch --workspace "$PWD"', apply);
-  assert.ok(reg < list && list < apply && apply < dispatch, "register, then profile list, then apply, then dispatch");
-  const step = modeA.slice(list, dispatch);
+  assert.ok(reg < dispatch && dispatch < list && list < apply, "register, then dispatch, then profile list, then apply");
+  assert.ok(!modeA.slice(0, dispatch).includes("factory profile list"), "no profile question sits ahead of the dispatch — it never delays the Owner's directive");
+  const step = modeA.slice(list - 400, apply + 200);
+  assert.ok(/alreadyRegistered/.test(step), "offered only after a register that created the Project");
   assert.ok(/no profile[s]?\b.*(no question|silent|skip)/is.test(step), "no profiles: no question, default lanes apply silently");
   assert.ok(/apply or skip/i.test(step) && /one question/i.test(step), "exactly one apply-or-skip question");
-  assert.ok(/never (block|delay)/i.test(step), "the profile step never blocks or delays the dispatch");
+});
+
+test("pre-flight: a seat skips the gate AND the echo — it never echoes doctor fields it did not fetch", () => {
+  const gate = modeA.slice(at("**Pre-flight**"), at("**Pre-flight**") + 400);
+  assert.ok(/seat/i.test(gate) && /PASEO_FACTORY_SEAT/.test(gate), "the gate names the seat exemption");
+  assert.ok(/skips? (to|straight to) (step 3|the dispatch)/i.test(gate), "a seat jumps past step 2's echo, straight to the dispatch");
+  assert.ok(!/skips? to step 2/i.test(modeA), "no leftover jump to the echo step");
+});
+
+test("pre-flight: doctor exit 2 is described as it behaves — a stale recorded plugin install; a missing CLI door fails before doctor runs", () => {
+  const gate = modeA.slice(at("**Pre-flight**"), at("**Pre-flight**") + 900);
+  assert.ok(/exit 2/i.test(gate) && /stale (recorded )?plugin install/i.test(gate), "exit 2 means the stale recorded plugin install");
+  assert.ok(!/exit 2 means a stale CLI door/i.test(modeA), "exit 2 is no longer attributed to the CLI door");
+  assert.ok(/(door|command) (is )?missing|cannot (be )?run|fails to run|not found/i.test(gate), "a missing door is named as a separate failure");
+  assert.ok(/(update|reinstall)/i.test(gate) && /plugin/i.test(gate), "the Owner is told to update or reinstall the plugin");
 });
 
 test("pre-flight: register failures are relayed — plugin-down names Paseo Desktop, nothing is dispatched", () => {

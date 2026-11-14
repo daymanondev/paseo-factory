@@ -498,6 +498,8 @@ if (command === "--help" || command === "help" || command === undefined) {
 const home = resolveHome(homeFlag);
 const stateDir = stateDirFor(home);
 const spoolRoot = spoolRootFor(stateDir);
+/** The copy-pasteable `factory` prefix every recovery hint prints — `--home` named (and quoted) only when the Owner passed one. */
+const factoryCmd = homeFlag === undefined ? "factory" : `factory --home "${home}"`;
 
 function parseCommandOptions(spec) {
   try {
@@ -1217,21 +1219,20 @@ if (command === "supervisor") {
     if (sub === "dispatch" && hasWorkspace && stampedSeat === undefined) {
       const workspaceDir = resolvePath(parsed.values.workspace);
       const state = workspaceRegistrationState(stateDir, workspaceDir);
-      const cmd = homeFlag === undefined ? "factory" : `factory --home "${home}"`;
       if (!state.resolved) {
         console.error(
           `factory: unknown-project: workspace ${workspaceDir} does not resolve to a git repository — ${state.reason}\n` +
             `  nothing was queued. next:\n` +
-            `    ${cmd} project register --workspace "${workspaceDir}"   (bootstraps a git repository for a greenfield folder)\n` +
-            `    ${cmd} project list   (pick an existing registered Project, then dispatch with --project <slug>)`,
+            `    ${factoryCmd} project register --workspace "${workspaceDir}"   (bootstraps a git repository for a greenfield folder)\n` +
+            `    ${factoryCmd} project list   (pick an existing registered Project, then dispatch with --project <slug>)`,
         );
         process.exit(2);
       }
       if (!state.registered && parsed.values["allow-unregistered"] !== true) {
         console.error(
           `factory: unregistered-project: ${state.root} (slug ${state.slug}) is not a registered Project in home ${home} — nothing was queued; a directive for it would sit in a mailbox no Supervisor reads. next:\n` +
-            `    ${cmd} project register --workspace "${state.root}"   (then re-run this dispatch)\n` +
-            `    ${cmd} project list   (pick an existing registered Project, then dispatch with --project <slug>)\n` +
+            `    ${factoryCmd} project register --workspace "${state.root}"   (then re-run this dispatch)\n` +
+            `    ${factoryCmd} project list   (pick an existing registered Project, then dispatch with --project <slug>)\n` +
             `  No Supervisor is live for an unregistered Project. After registering, ${SEAT_OPENING_STEP(state.root)}\n` +
             `  Legacy (dispatch first, seat a Supervisor later): re-run with --allow-unregistered to hold the directive for the next Supervisor.`,
         );
@@ -1283,13 +1284,16 @@ if (command === "project" && rest[0] === "register") {
   submit(spoolRoot, payload);
   const reply = await awaitReply(spoolRoot, payload.id, waitSecs * 1000);
   if (reply === null) {
-    // Plugin down: an unanswered register is withdrawn so it can never surprise-apply
-    // on a later plugin start — the Owner re-runs the command once the plugin is up.
+    // No reply: withdraw the request so it cannot surprise-apply on a later plugin
+    // start. The plugin may still have picked it up just before the unlink, so the
+    // message never claims nothing happened — it tells the Owner to confirm.
     try { unlinkSync(join(spoolRoot, "requests", `${payload.id}.json`)); } catch { /* already picked up or gone */ }
     console.error(
-      `factory: the paseo-factory plugin is not running — no reply from the plugin for home ${home} after ${waitSecs}s, so nothing was registered. ` +
-        `Start Paseo Desktop with the paseo-factory plugin enabled (for a remote machine pass --home <that machine's paseo home>), then re-run:\n` +
-        `  factory --home ${home} project register --workspace ${workspace}`,
+      `factory: the paseo-factory plugin is not running — no reply from the plugin for home ${home} after ${waitSecs}s. ` +
+        `The request was withdrawn, but a plugin that picked it up a moment ago may still have registered this Project: confirm with\n` +
+        `  ${factoryCmd} project list\n` +
+        `Start Paseo Desktop with the paseo-factory plugin enabled (for a remote machine pass --home <that machine's paseo home>), then re-run if it is not listed:\n` +
+        `  ${factoryCmd} project register --workspace "${workspace}"`,
     );
     process.exit(2);
   }
@@ -1319,7 +1323,7 @@ if (command === "project" && rest[0] === "list") {
   if (parsed.values.json === true) await writeJsonAndExit({ home, projects });
   if (projects.length === 0) {
     console.log(
-      `factory: no registered Projects in ${home}\n  register this folder: factory ${homeFlag === undefined ? "" : `--home "${home}" `}project register --workspace "$PWD"`,
+      `factory: no registered Projects in ${home}\n  register this folder: ${factoryCmd} project register --workspace "$PWD"`,
     );
     process.exit(0);
   }
@@ -1344,7 +1348,7 @@ if (command === "doctor") {
     stateDir,
     workspaceDir: resolvePath(parsed.values.workspace ?? process.cwd()),
     doorPath: resolvePath(parsed.values.door ?? process.argv[1]),
-    cmd: homeFlag === undefined ? "factory" : `factory --home "${home}"`,
+    cmd: factoryCmd,
   });
   const code = diagnosis.ok ? 0 : 2;
   if (parsed.values.json === true) await writeJsonAndExit(diagnosis, code);
