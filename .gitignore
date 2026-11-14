@@ -21,3 +21,6 @@ __pycache__/
 
 # Local issue tracker (engineering skills) — not published
 .scratch/
+
+# Local archive of shipped .scratch features (out of agent sight)
+.archive/
