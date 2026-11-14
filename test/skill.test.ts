@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import type { TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { ensureFactorySkill, ensureFactorySkillSafe, factorySkillPath, renderFactorySkill } from "../src/index.ts";
 import contribute from "../plugin/index.server.ts";
@@ -174,6 +174,125 @@ test("plugin boot reconciles factory/SKILL.md into both ~/.agents/skills and ~/.
     const expected = renderFactorySkill({ factoryCmd: "factory" });
     assert.equal(readFileSync(agentsSkill, "utf8"), expected, "~/.agents/skills copy matches renderFactorySkill");
     assert.equal(readFileSync(claudeSkill, "utf8"), expected, "~/.claude/skills copy matches renderFactorySkill");
+  } finally {
+    stop();
+  }
+});
+
+/** Boots the real plugin entry against a fake HOME; returns its stop door. */
+function bootPluginAt(t: TestContext, dir: string): () => void {
+  const prevHome = process.env.HOME;
+  const prevPaseoHome = process.env.PASEO_HOME;
+  process.env.HOME = dir;
+  process.env.PASEO_HOME = join(dir, ".paseo");
+  t.after(() => {
+    if (prevHome === undefined) delete process.env.HOME;
+    else process.env.HOME = prevHome;
+    if (prevPaseoHome === undefined) delete process.env.PASEO_HOME;
+    else process.env.PASEO_HOME = prevPaseoHome;
+  });
+  const fakeServer = { on: () => () => {}, before: () => () => {}, handle: () => () => {} };
+  return contribute(fakeServer as unknown as Parameters<typeof contribute>[0]);
+}
+
+/** The three harness skill roots under one home — pi / opencode, claude, and (ADR 0036) the pi agent dir. */
+const skillRoots = (home: string): string[] => [
+  join(home, ".agents", "skills"),
+  join(home, ".claude", "skills"),
+  join(home, ".pi", "agent", "skills"),
+];
+
+test("plugin boot reconciles factory/SKILL.md into all three roots including ~/.pi/agent/skills (ADR 0036)", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const stop = bootPluginAt(t, dir);
+  try {
+    const expected = renderFactorySkill({ factoryCmd: "factory" });
+    for (const root of skillRoots(dir)) {
+      assert.ok(existsSync(factorySkillPath(root)), `${root}/factory/SKILL.md reconciled at boot`);
+      assert.equal(readFileSync(factorySkillPath(root), "utf8"), expected, `${root} copy matches the canonical render`);
+    }
+  } finally {
+    stop();
+  }
+});
+
+test("a hand-edited copy in any of the three roots reverts to the canonical content on the next boot", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  for (const root of skillRoots(dir)) {
+    mkdirSync(join(root, "factory"), { recursive: true });
+    writeFileSync(factorySkillPath(root), `a stale hand-copy in ${root}\n`);
+  }
+  const stop = bootPluginAt(t, dir);
+  try {
+    const expected = renderFactorySkill({ factoryCmd: "factory" });
+    for (const root of skillRoots(dir)) {
+      assert.equal(readFileSync(factorySkillPath(root), "utf8"), expected, `${root} drifted copy reverted`);
+    }
+  } finally {
+    stop();
+  }
+});
+
+test("an unusable third root warns once and boot still reconciles the other roots", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  // A regular FILE where ~/.pi must be a directory: the pi root cannot be written.
+  writeFileSync(join(dir, ".pi"), "occupied by a file\n");
+  const logs: string[] = [];
+  const realLog = console.log;
+  console.log = (...args: unknown[]) => { logs.push(args.join(" ")); };
+  let stop: (() => void) | undefined;
+  try {
+    stop = bootPluginAt(t, dir);
+  } finally {
+    console.log = realLog;
+  }
+  try {
+    const expected = renderFactorySkill({ factoryCmd: "factory" });
+    assert.equal(readFileSync(factorySkillPath(join(dir, ".agents", "skills")), "utf8"), expected);
+    assert.equal(readFileSync(factorySkillPath(join(dir, ".claude", "skills")), "utf8"), expected);
+    const piWarnings = logs.filter((line) => line.includes("skill: could not reconcile") && line.includes(join(".pi", "agent", "skills")));
+    assert.equal(piWarnings.length, 1, "the unusable pi root warns exactly once");
+  } finally {
+    stop?.();
+  }
+});
+
+test("after an install refresh the next sync re-renders every root with the new install's door — no baked checkout UUID survives", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const paseoHome = join(dir, ".paseo");
+  const oldUuid = "4a2d08ae-314c-4be6-a586-73a51c6a8577";
+  const newUuid = "7615f22f-7223-4bf3-a112-e94361435609";
+  const installAt = (uuid: string): string => {
+    const pluginDir = join(paseoHome, "plugins", "paseo-factory", uuid, "checkout", "plugin");
+    mkdirSync(join(pluginDir, "bin"), { recursive: true });
+    writeFileSync(join(pluginDir, "paseo.plugin.json"), JSON.stringify({ id: "paseo-factory" }));
+    writeFileSync(
+      join(paseoHome, "config.json"),
+      JSON.stringify({ plugins: { "paseo-factory": { source: "directory", path: pluginDir, enabled: true } } }),
+    );
+    return pluginDir;
+  };
+  const settle = async (check: () => boolean): Promise<void> => {
+    for (let i = 0; i < 100 && !check(); i += 1) await new Promise((resolve) => setTimeout(resolve, 50));
+  };
+  const everyRoot = (predicate: (content: string) => boolean): boolean =>
+    skillRoots(dir).every((root) => existsSync(factorySkillPath(root)) && predicate(readFileSync(factorySkillPath(root), "utf8")));
+
+  mkdirSync(paseoHome, { recursive: true });
+  installAt(oldUuid);
+  const stop = bootPluginAt(t, dir);
+  try {
+    assert.ok(everyRoot((c) => c.includes(oldUuid)), "initial boot bakes the active install's door into every root");
+
+    // Paseo updates the plugin: a new checkout + config.json; the post-boot re-sync follows.
+    installAt(newUuid);
+    await settle(() => everyRoot((c) => c.includes(newUuid)));
+    assert.ok(everyRoot((c) => c.includes(newUuid)), "the re-sync re-renders every root with the new install's door");
+    assert.ok(everyRoot((c) => !c.includes(oldUuid)), "no root keeps the old install UUID");
   } finally {
     stop();
   }
