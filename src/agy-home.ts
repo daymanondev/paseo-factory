@@ -122,6 +122,27 @@ function resolvePluginBinDir(stateDir: string, pluginDir?: string): string {
   return defaultRepoBinDir();
 }
 
+const RELATIVE_MJS_IMPORT = /(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s+)["']\.\/([\w.-]+\.mjs)["']/g;
+
+/**
+ * The entry files that exist in `sourceBinDir` plus every `./<name>.mjs` they
+ * import (static or dynamic), transitively — what must sit beside a staged
+ * copy for it to load. Missing imports are skipped (the copy cannot invent them).
+ */
+export function factoryBinImportClosure(sourceBinDir: string, entries: readonly string[]): string[] {
+  const seen = new Set<string>();
+  const queue = [...entries];
+  while (queue.length > 0) {
+    const name = queue.shift()!;
+    if (seen.has(name)) continue;
+    let text: string;
+    try { text = readFileSync(join(sourceBinDir, name), "utf8"); } catch { continue; }
+    seen.add(name);
+    for (const match of text.matchAll(RELATIVE_MJS_IMPORT)) queue.push(match[1]!);
+  }
+  return [...seen];
+}
+
 export function ensureFactoryBinScripts(stateDir: string, pluginDir?: string): { bridgeBinPath: string; agyHookBinPath: string } {
   const binDir = join(stateDir, "bin");
   mkdirSync(binDir, { recursive: true });
@@ -131,23 +152,14 @@ export function ensureFactoryBinScripts(stateDir: string, pluginDir?: string): {
   const agyHookBinPath = join(binDir, "agy-pre-tool-hook.mjs");
 
   if (sourceBinDir !== "") {
-    const srcBridge = join(sourceBinDir, "bridge.mjs");
-    if (existsSync(srcBridge)) {
-      copyFileSync(srcBridge, bridgeBinPath);
-      chmodSync(bridgeBinPath, 0o755);
-    }
-    const srcHook = join(sourceBinDir, "agy-pre-tool-hook.mjs");
-    if (existsSync(srcHook)) {
-      copyFileSync(srcHook, agyHookBinPath);
-      chmodSync(agyHookBinPath, 0o755);
-    }
-    // v0.0.92: the per-Project ledger resolver both staged binaries import —
-    // without it beside them, `<stateDir>/bin/` runs a broken bridge and hook.
-    const srcLedgerProject = join(sourceBinDir, "ledger-project.mjs");
-    if (existsSync(srcLedgerProject)) {
-      const destLedgerProject = join(binDir, "ledger-project.mjs");
-      copyFileSync(srcLedgerProject, destLedgerProject);
-      chmodSync(destLedgerProject, 0o755);
+    // Both staged binaries plus every sibling module they import, transitively
+    // (v0.8.4): a hand-kept list missed `project.mjs` / `worktree-policy.mjs`
+    // when the bridge started importing them (v0.6.1), so every seat started
+    // since then got a bridge that died on load — no `paseo_factory` MCP tools.
+    for (const name of factoryBinImportClosure(sourceBinDir, ["bridge.mjs", "agy-pre-tool-hook.mjs"])) {
+      const dest = join(binDir, name);
+      copyFileSync(join(sourceBinDir, name), dest);
+      chmodSync(dest, 0o755);
     }
     const stagedRuntimeBin = join(stateDir, "runtime-bin");
     if (resolve(sourceBinDir) !== resolve(stagedRuntimeBin)) {
