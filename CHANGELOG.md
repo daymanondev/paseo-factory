@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.6] - 2026-11-14
+
+**Thin Lead context, lean ledger reads, and a zero-relative-import MCP bridge.**
+
+### Added
+
+- **`lead_read_ledger` and lean seat status (`LEAN_HISTORY`).** Lead now has `lead_read_ledger`, and both `lead_read_ledger` and `supervisor_read_ledger` collapse settled (`accepted` and `closed`) tasks into one summary line by default while keeping active unaccepted tasks expanded (`full: true` returns every historical row). CLI `factory status` and unbound `factory_status` stay full by default.
+- **Scout-First Context Discipline, Missing-Capability Fail-Fast Guard, and Successor Turn-1 Discipline.** Lead's contract and kickoff packet replace whole-repo self-reads with a bounded orientation budget (`notebook.md`, top-level manifests, Open Design catalog, `lead_read_ledger`, and `<= 3` targeted boundary files) and require read-only `scout` / `architect` Peer dispatches for deeper discovery. Both MCP and CLI fallbacks remain documented, paired with a fail-fast guard forbidding archaeology in `~/.paseo/plugins/**` or `<stateDir>/runtime-bin/**` and a successor Turn-1 guard against raw `grep`/`cat` over `ledger.jsonl`.
+
+### Changed
+
+- **Self-contained `bridge.mjs` and `agy-pre-tool-hook.mjs`.** Both binaries now inline the `ledgerProject` policy closure (including atomic `writeSupervisorBinding`) at build time and carry zero relative `./*.mjs` imports, so `<stateDir>/bin/bridge.mjs` and `<stateDir>/bin/agy-pre-tool-hook.mjs` can never fail with `ERR_MODULE_NOT_FOUND` when staged or copied alone.
+
 ## [0.8.5] - 2026-11-14
 
 **Pausing a Peer no longer ends its task.**

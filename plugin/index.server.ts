@@ -41,7 +41,7 @@ import { migrateLegacyExecutionState } from "./server/core/project-settings.ts";
 // migrateLegacyRootState(stateDir, { projects: Array<{ slug, gitRoot? }> }).
 import { migrateLegacyRootState } from "./server/core/ledger-migration.ts";
 
-const SHELL_VERSION = "0.8.5";
+const SHELL_VERSION = "0.8.6";
 
 const log = (message: string) => console.log(`[${PLUGIN_ID}] ${message}`);
 
