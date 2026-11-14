@@ -2,10 +2,11 @@ import { test } from "node:test";
 import type { TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { ensureFactorySkill, ensureFactorySkillSafe, factorySkillPath, renderFactorySkill } from "../src/index.ts";
 import contribute from "../plugin/index.server.ts";
-import { disposeDir, makeTempDir } from "./helpers.ts";
+import { disposeDir, makeTempDir, repoRoot } from "./helpers.ts";
 
 /**
  * The global `/factory` skill seam (v0.0.20, ADR 0013 Decision 3, §User Story
@@ -295,5 +296,97 @@ test("after an install refresh the next sync re-renders every root with the new 
     assert.ok(everyRoot((c) => !c.includes(oldUuid)), "no root keeps the old install UUID");
   } finally {
     stop();
+  }
+});
+
+/**
+ * Ticket 05 of factory-cli-project-onboarding: the pre-flight gate. The
+ * rendered skill is the whole artifact (an agent follows the prose), so the
+ * protocol is pinned through rendered-content assertions at this seam.
+ */
+const preflight = renderFactorySkill({ factoryCmd: "factory" });
+/** Mode A's prose, ahead of Mode B — the pre-flight lives in the directive arm. */
+const modeA = preflight.slice(preflight.indexOf("## Mode A"), preflight.indexOf("## Mode B"));
+const at = (needle: string, from = 0) => {
+  const i = modeA.indexOf(needle, from);
+  assert.ok(i >= 0, `Mode A names ${JSON.stringify(needle)}`);
+  return i;
+};
+
+test("pre-flight: Mode A resolves the git root and queries registration before any dispatch", () => {
+  const doctor = at('factory doctor --workspace "$PWD" --json');
+  const dispatch = at('factory supervisor dispatch --workspace "$PWD" --message "<directive>"');
+  assert.ok(doctor < dispatch, "the registration query precedes the dispatch command");
+  assert.ok(modeA.includes("`.registered`") && modeA.includes("`.workspace.root`"), "the registration answer is read from doctor's JSON");
+  assert.ok(/subdirector/i.test(modeA) && /git root/i.test(modeA), "a subdirectory invocation resolves to the git root and says so");
+});
+
+test("pre-flight: an unregistered folder gets a three-way choice — register here / pick existing / abort", () => {
+  const choice = at("Register here");
+  assert.ok(modeA.includes("Pick an existing Project") && modeA.includes("Abort"), "all three options are offered");
+  assert.ok(at("Abort", choice) > choice, "register-here leads the list, abort closes it");
+  assert.ok(at("factory project register --workspace", choice) > choice, "register here runs project register on the resolved root");
+  assert.ok(modeA.includes("factory project list --json"), "the existing-Project list comes from project list --json");
+  assert.ok(/slug.*root.*home/s.test(modeA.slice(modeA.indexOf("Pick an existing Project"))), "pick-existing labels carry slug + root + home");
+});
+
+test("pre-flight: pick-existing dispatches with explicit --project <slug> routing", () => {
+  assert.ok(modeA.includes('factory supervisor dispatch --project <slug> --message "<directive>"'), "dispatch routes by --project <slug>");
+});
+
+test("pre-flight: abort ends the turn with nothing written and nothing dispatched", () => {
+  const abort = modeA.slice(modeA.indexOf("**Abort**"), modeA.indexOf("**Abort**") + 300);
+  assert.ok(/end (the|your) turn/i.test(abort), "abort ends the turn");
+  assert.ok(/nothing (is )?written/i.test(abort) && /no dispatch/i.test(abort), "abort writes nothing and dispatches nothing");
+});
+
+test("pre-flight: the resolved workspace and daemon home are echoed before any dispatch", () => {
+  const echo = at("Echo");
+  assert.ok(echo < at('factory supervisor dispatch --workspace "$PWD"'), "the echo precedes the dispatch");
+  const line = modeA.slice(echo, echo + 400);
+  assert.ok(/workspace/i.test(line) && /home/i.test(line), "the echo names the workspace and the daemon home");
+});
+
+test("pre-flight: the Owner's explicit choice gates registration; no silent auto-register and no last-used fallback", () => {
+  assert.ok(/never register or dispatch (on|without)/i.test(modeA), "register/dispatch only on the Owner's explicit choice");
+  assert.ok(!/last[- ]used|most recent(ly)?|previous(ly)? used|default to the (only|first)/i.test(preflight), "no last-used / most-recent / default-pick fallback anywhere");
+  assert.ok(!preflight.includes("--allow-unregistered") || /only when the Owner (explicitly )?asks/i.test(modeA), "the legacy held-dispatch flag is Owner-opt-in only");
+});
+
+test("pre-flight: after a fresh register, one optional lane-profile apply-or-skip — only when profiles exist, never blocking dispatch", () => {
+  const reg = at("factory project register --workspace");
+  const list = at("factory profile list --json", reg);
+  const apply = at('factory profile apply <id> --project "<root>"', list);
+  const dispatch = at('factory supervisor dispatch --workspace "$PWD"', apply);
+  assert.ok(reg < list && list < apply && apply < dispatch, "register, then profile list, then apply, then dispatch");
+  const step = modeA.slice(list, dispatch);
+  assert.ok(/no profile[s]?\b.*(no question|silent|skip)/is.test(step), "no profiles: no question, default lanes apply silently");
+  assert.ok(/apply or skip/i.test(step) && /one question/i.test(step), "exactly one apply-or-skip question");
+  assert.ok(/never (block|delay)/i.test(step), "the profile step never blocks or delays the dispatch");
+});
+
+test("pre-flight: register failures are relayed — plugin-down names Paseo Desktop, nothing is dispatched", () => {
+  assert.ok(modeA.includes("plugin is not running") && modeA.includes("Paseo Desktop"), "plugin-down guidance");
+  assert.ok(modeA.includes("unregistered-project"), "stays consistent with the guard's refusal code");
+});
+
+test("pre-flight: every factory verb and flag the rendered skill names is one the CLI documents", () => {
+  const help = spawnSync(process.execPath, [join(repoRoot, "plugin", "bin", "factory.mjs"), "help"], { encoding: "utf8" }).stdout;
+  const usageLines = help.split("\n").map((l) => l.trim());
+  // Every command is a backticked span or an indented line starting at the door.
+  const commands = [...preflight.matchAll(/(?:`|^ {2})factory ([^`\n]+)/gm)].map((m) => {
+    const tokens = m[1]!.trim().split(/\s+/);
+    const verb = tokens.slice(0, tokens.findIndex((t) => !/^[a-z]+$/.test(t)) === -1 ? tokens.length : tokens.findIndex((t) => !/^[a-z]+$/.test(t))).join(" ");
+    return { verb, flags: tokens.filter((t) => t.startsWith("--")) };
+  });
+  assert.ok(commands.length >= 6, "the skill names several CLI commands");
+  for (const { verb, flags } of commands) {
+    const blocks = usageLines.filter((l) => l === verb || l.startsWith(verb + " "));
+    assert.ok(blocks.length > 0, `the CLI documents \`factory ${verb}\``);
+    for (const flag of flags) assert.ok(blocks.some((l) => l.includes(flag)), `\`factory ${verb}\` documents ${flag}`);
+  }
+  const verbs = new Set(commands.map((c) => c.verb));
+  for (const verb of ["doctor", "project register", "project list", "profile list", "profile apply", "supervisor dispatch"]) {
+    assert.ok(verbs.has(verb), `the skill names \`factory ${verb}\``);
   }
 });
