@@ -55,7 +55,7 @@ import {
   saveLanes,
 } from "./lanes-config.mjs";
 import { resolveProject } from "./project.mjs";
-import { diagnose, formatDiagnosis, readProjectRegistrations, resolveHomeSource } from "./project-read.mjs";
+import { diagnose, formatDiagnosis, readProjectRegistrations, resolveHomeSource, workspaceRegistrationState } from "./project-read.mjs";
 
 // The contract stanza's authoring-law block mirrors docs/runbooks/live-run.md
 // step 3 (the ratified R2–R6 batch, ticket 02 / v0.0.8) — help text and
@@ -251,12 +251,19 @@ commands:
 
   supervisor Seat-aware directive dispatch or Lead -> Supervisor reporting
              (v0.0.23, ADR 0015 §3/§5).
-             supervisor dispatch [--project <slug>] [--workspace <dir>] --message "<text>"
+             supervisor dispatch [--project <slug>] [--workspace <dir>] [--allow-unregistered] --message "<text>"
                                            route a directive into the Project's
                                            Supervisor mailbox (to="supervisor")
                                            when called from a normal chat, or
                                            transparently into Lead (to="lead")
                                            when called from Supervisor.
+                                           With --workspace from a normal chat the
+                                           folder must be a registered Project:
+                                           otherwise it exits 2 naming "project
+                                           register" / "project list" and queues
+                                           nothing. --allow-unregistered restores
+                                           the legacy held dispatch (mail held for
+                                           a Supervisor seated later).
              supervisor report [--project <slug>] [--workspace <dir>] --message "<text>"
                                            queue a Lead wave-completion or
                                            escalation report in the Project's
@@ -1167,16 +1174,24 @@ if (command === "lead") {
   fail(`lead: unknown subcommand "${sub ?? "(none)"}" — use "lead rotate --project <dir>" or "lead dispatch --project <slug> --message \\"<text>\\""`);
 }
 
+/** The exact seat-opening step for a Project with no live Supervisor (ADR 0057 §5: the plugin never creates one). */
+const SEAT_OPENING_STEP = (root) =>
+  `open a New Chat in Paseo Desktop and select the \`Supervisor (Factory)\` profile at the Project root: ${root}`;
+
 if (command === "supervisor") {
   const parsed = parseCommandOptions({
     project: { type: "string" },
     workspace: { type: "string" },
     message: { type: "string" },
     "wait-secs": { type: "string" },
+    "allow-unregistered": { type: "boolean", default: false },
   });
   const sub = parsed.positionals[0];
 
   if (sub === "dispatch" || sub === "report") {
+    if (parsed.values["allow-unregistered"] === true && sub !== "dispatch") {
+      fail("supervisor report: --allow-unregistered only applies to supervisor dispatch");
+    }
     const message = typeof parsed.values.message === "string" ? parsed.values.message : parsed.positionals[1];
     if (message === undefined || message.trim() === "") {
       fail(`supervisor ${sub}: --message "<text>" is required (or one positional message)`);
@@ -1192,6 +1207,36 @@ if (command === "supervisor") {
     }
     if (hasProject && hasWorkspace) {
       fail(`supervisor ${sub}: name exactly one target — --project <slug> or --workspace <dir>`);
+    }
+    // The dispatch guard (CLI Project onboarding): an Owner's directive aimed at
+    // a folder that is not a registered Project would queue mail no Supervisor
+    // will ever read — a fake success. Refuse it here, locally and prompt-free
+    // (plugin-down safe, nothing written), naming the exact next commands.
+    // Seat-stamped shells (a Supervisor dispatching to its Lead) are never
+    // guarded; `--allow-unregistered` restores the legacy held dispatch.
+    if (sub === "dispatch" && hasWorkspace && stampedSeat === undefined) {
+      const workspaceDir = resolvePath(parsed.values.workspace);
+      const state = workspaceRegistrationState(stateDir, workspaceDir);
+      const cmd = homeFlag === undefined ? "factory" : `factory --home "${home}"`;
+      if (!state.resolved) {
+        console.error(
+          `factory: unknown-project: workspace ${workspaceDir} does not resolve to a git repository — ${state.reason}\n` +
+            `  nothing was queued. next:\n` +
+            `    ${cmd} project register --workspace "${workspaceDir}"   (bootstraps a git repository for a greenfield folder)\n` +
+            `    ${cmd} project list   (pick an existing registered Project, then dispatch with --project <slug>)`,
+        );
+        process.exit(2);
+      }
+      if (!state.registered && parsed.values["allow-unregistered"] !== true) {
+        console.error(
+          `factory: unregistered-project: ${state.root} (slug ${state.slug}) is not a registered Project in home ${home} — nothing was queued; a directive for it would sit in a mailbox no Supervisor reads. next:\n` +
+            `    ${cmd} project register --workspace "${state.root}"   (then re-run this dispatch)\n` +
+            `    ${cmd} project list   (pick an existing registered Project, then dispatch with --project <slug>)\n` +
+            `  No Supervisor is live for an unregistered Project. After registering, ${SEAT_OPENING_STEP(state.root)}\n` +
+            `  Legacy (dispatch first, seat a Supervisor later): re-run with --allow-unregistered to hold the directive for the next Supervisor.`,
+        );
+        process.exit(2);
+      }
     }
     const reply = await roundTrip(
       {
