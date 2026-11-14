@@ -1763,7 +1763,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       ? {
           id: request.id,
           ok: true,
-          summary: `directive held for Supervisor — none is live for ${slug}; it delivers to the next Supervisor (the Factory panel's Needs you says so) — stop this turn immediately without editing files`,
+          summary: `directive held for Supervisor — none is live for ${slug}; it delivers to the next Supervisor (the Factory panel's Needs you says so). To seat one: open a New Chat in Paseo Desktop and select the \`Supervisor (Factory)\` profile at the Project root: ${root} — stop this turn immediately without editing files`,
           project: slug,
           mailId,
         }

@@ -1039,7 +1039,13 @@ test("factory supervisor dispatch and factory supervisor report: usage refusals,
   });
   t.after(() => spool.stop());
 
-  // 1. Normal chat (PASEO_FACTORY_SEAT unset): routes to Supervisor.
+  // 1. Normal chat (PASEO_FACTORY_SEAT unset): routes to Supervisor. The dispatch
+  // guard (CLI Project onboarding, ticket 03) only lets a normal chat dispatch into a
+  // registered Project, so register the workspace the way the plugin's writer leaves it.
+  const registered = resolveProject(workspace);
+  assert.ok(registered.ok);
+  mkdirSync(join(stateDir, "projects", registered.slug), { recursive: true });
+  writeFileSync(join(stateDir, "projects", registered.slug, "project.json"), `${JSON.stringify({ slug: registered.slug, root: registered.root })}\n`);
   const chatDispatch = await run(
     ownerCli,
     ["--home", home, "supervisor", "dispatch", "--workspace", workspace, "--message", "Build 2048", "--wait-secs", "10"],

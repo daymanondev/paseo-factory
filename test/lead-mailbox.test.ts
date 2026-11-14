@@ -270,6 +270,10 @@ test("supervisor_dispatch from normal chat never creates a Supervisor — with a
   const heldReply = readReply(heldSpool, "sup-disp-held");
   assert.equal(heldReply.supervisorAgentId, undefined);
   assert.match(String(heldReply.summary), /directive held for Supervisor — none is live/);
+  // CLI Project onboarding (ticket 03): the held reply carries the exact seat-opening step.
+  assert.match(String(heldReply.summary), /open a New Chat in Paseo Desktop and select the `Supervisor \(Factory\)` profile at the Project root/);
+  assert.ok(String(heldReply.summary).includes(held.projectRoot), "the step names the Project root to open the chat in");
+  assert.match(String(heldReply.summary), /stop this turn immediately without editing files/);
   assert.equal(held.fake.created.length, 0, "the dispatch creates no Supervisor");
   assert.equal(held.fake.sent.length, 0);
   assert.deepEqual(
@@ -300,6 +304,7 @@ test("supervisor_dispatch from normal chat never creates a Supervisor — with a
   assert.equal(reply.supervisorAgentId, started.ok ? started.agentId : "");
   assert.match(String(reply.summary), new RegExp(`directive routed to Supervisor \\(${started.ok ? started.agentId : ""}\\)`));
   assert.match(String(reply.summary), /stop this turn immediately without editing files/);
+  assert.doesNotMatch(String(reply.summary), /New Chat/, "a routed directive needs no seat-opening step");
 
   assert.equal(fake.created.length, 1);
   assert.deepEqual(fake.created[0]?.labels, { seat: "supervisor", project: slug });
