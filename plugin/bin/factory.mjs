@@ -55,6 +55,7 @@ import {
   saveLanes,
 } from "./lanes-config.mjs";
 import { resolveProject } from "./project.mjs";
+import { diagnose, formatDiagnosis, readProjectRegistrations, resolveHomeSource } from "./project-read.mjs";
 
 // The contract stanza's authoring-law block mirrors docs/runbooks/live-run.md
 // step 3 (the ratified R2–R6 batch, ticket 02 / v0.0.8) — help text and
@@ -294,6 +295,24 @@ commands:
              ever covered (pre-0.0.8) render duration-only — never a
              fabricated zero. Whole ledger always, no filters in v1. A local
              read; the plugin need not be running.
+
+  project list [--json]
+             Every registered Project — slug, root and the daemon home it
+             belongs to — read locally from <stateDir>/projects/<slug>/
+             project.json (only well-formed registrations count; the plugin
+             need not be running, nothing is written). --json prints
+             {"home": "<home>", "projects": [{"slug", "root", "home"}]}.
+
+  doctor [--workspace <dir>] [--door <path>] [--json]
+             Local-only preflight, never prompts: the CLI door (this script, or
+             the --door path a skill baked in) and the plugin install the home
+             records — both flagged stale when missing (exit 2, with the
+             repair command) — the home in effect and which rung chose it
+             (--home | PASEO_HOME | default), the folder's slug (walking up to
+             the git root), whether that Project is registered, and the next
+             command to run. --json prints {ok, home, homeSource, cli{path,
+             exists}, install{path, exists}, cwd, workspace{resolved, dir,
+             root, slug | reason}, registered, next}.
 
   upgrade    preflight | apply | resume | restore [--project <registered-slug>]\n             [--transaction <id>] [--dry-run] — explicit Owner-only history maintenance.\n\n  vault      The Private vault's seven verbs (v0.0.21–v0.0.22, ADR 0014):
              status | hydrate | pull | push | seal | sync | import against the
@@ -1172,6 +1191,48 @@ if (command === "supervisor") {
   }
 
   fail(`supervisor: unknown subcommand "${sub ?? "(none)"}" — use "supervisor dispatch --workspace <dir> --message \\"<text>\\"" or "supervisor report --workspace <dir> --message \\"<text>\\""`);
+}
+
+// `project list` (ticket 01): a local read of the per-Project registry
+// manifest — the plugin need not be running, nothing is written, nothing prompts.
+if (command === "project" && rest[0] === "list") {
+  const parsed = parseCommandOptions({ json: { type: "boolean", default: false } });
+  if (parsed.positionals.length > 1) fail(`project list: unexpected positional "${parsed.positionals[1]}"`);
+  const projects = readProjectRegistrations(stateDir).map((registration) => ({ slug: registration.slug, root: registration.root, home }));
+  if (parsed.values.json === true) await writeJsonAndExit({ home, projects });
+  if (projects.length === 0) {
+    console.log(
+      `factory: no registered Projects in ${home}\n  register this folder: factory ${homeFlag === undefined ? "" : `--home "${home}" `}project register --workspace "$PWD"`,
+    );
+    process.exit(0);
+  }
+  console.log(`factory: ${projects.length} registered Project${projects.length === 1 ? "" : "s"} in ${home}`);
+  for (const project of projects) console.log(`  ${project.slug}  ${project.root}  (home: ${project.home})`);
+  process.exit(0);
+}
+
+// `doctor` (ticket 01): a local-only preflight — the active CLI door, the home
+// in use, the folder's slug and registration state. Never needs the plugin,
+// never prompts; exit 2 only when the door or the recorded install is stale.
+if (command === "doctor") {
+  const parsed = parseCommandOptions({
+    json: { type: "boolean", default: false },
+    workspace: { type: "string" },
+    door: { type: "string" },
+  });
+  if (parsed.positionals.length > 0) fail(`doctor: unexpected positional "${parsed.positionals[0]}"`);
+  const diagnosis = diagnose({
+    home,
+    homeSource: resolveHomeSource(homeFlag),
+    stateDir,
+    workspaceDir: resolvePath(parsed.values.workspace ?? process.cwd()),
+    doorPath: resolvePath(parsed.values.door ?? process.argv[1]),
+    cmd: homeFlag === undefined ? "factory" : `factory --home "${home}"`,
+  });
+  const code = diagnosis.ok ? 0 : 2;
+  if (parsed.values.json === true) await writeJsonAndExit(diagnosis, code);
+  console.log(formatDiagnosis(diagnosis));
+  process.exit(code);
 }
 
 if (command === "reset" || command === "delete" || command === "project") {
