@@ -334,13 +334,13 @@ test("Project menu on desktop preserves two-step Reset / Delete", async () => {
   const { renderToStaticMarkup } = await import("react-dom/server");
   const props = {
     theme, mobile: false, busy: false, missingRoot: false,
-    openSettings() {}, resetProject() {}, deleteProject() {},
+    openSettings() {}, resetProject() {}, rotateSeats() {}, deleteProject() {},
   };
   const html = renderToStaticMarkup(createElement(ProjectMenu, props));
-  for (const hook of ["factory-panel-open-settings", "factory-panel-menu-reset", "factory-panel-menu-delete"]) {
+  for (const hook of ["factory-panel-open-settings", "factory-panel-menu-reset", "factory-panel-menu-rotate", "factory-panel-menu-delete"]) {
     assert.ok(hasHook(html, hook), `${hook} renders on desktop`);
   }
-  assert.doesNotMatch(html, /Confirm Reset|Confirm Delete/, "a single press never destroys — both start unarmed");
+  assert.doesNotMatch(html, /Confirm Reset|Confirm Delete|Confirm Rotate/, "a single press never destroys — all start unarmed");
 
   const resetArmed = renderToStaticMarkup(createElement(ProjectMenu, { ...props, initialConfirming: "reset" }));
   assert.match(resetArmed, /Confirm Reset/);
@@ -350,6 +350,13 @@ test("Project menu on desktop preserves two-step Reset / Delete", async () => {
   const deleteArmed = renderToStaticMarkup(createElement(ProjectMenu, { ...props, initialConfirming: "delete" }));
   assert.ok(hasHook(deleteArmed, "factory-panel-menu-confirm-delete"));
   assert.doesNotMatch(deleteArmed, /Confirm Reset/);
+  const rotateArmed = renderToStaticMarkup(createElement(ProjectMenu, { ...props, initialConfirming: "rotate" }));
+  assert.ok(hasHook(rotateArmed, "factory-panel-menu-confirm-rotate"), "armed Rotate renders its confirm");
+  assert.match(rotateArmed, /Confirm Rotate/);
+  assert.equal(hasHook(rotateArmed, "factory-panel-menu-rotate"), false, "the idle button is replaced by the confirm");
+  assert.doesNotMatch(rotateArmed, /Confirm Reset|Confirm Delete/);
+  assert.match(rotateArmed, /Cancel/);
+  assert.ok(hasHook(rotateArmed, "factory-panel-menu-reset"), "the other acts stay idle while Rotate is armed");
 });
 
 test("Project menu on mobile is view-only — no pack toggles, no Reset, no Delete", async () => {
@@ -358,11 +365,11 @@ test("Project menu on mobile is view-only — no pack toggles, no Reset, no Dele
   const { renderToStaticMarkup } = await import("react-dom/server");
   const html = renderToStaticMarkup(createElement(ProjectMenu, {
     theme, mobile: true, busy: false, missingRoot: false,
-    openSettings() {}, resetProject() {}, deleteProject() {},
+    openSettings() {}, resetProject() {}, rotateSeats() {}, deleteProject() {},
   }));
   assert.doesNotMatch(html, /Models for this Project|Skill packs/);
   assert.doesNotMatch(html, /<button/, "a mobile menu carries no writes at all");
-  for (const hook of ["factory-panel-skill-expo", "factory-panel-menu-reset", "factory-panel-menu-delete"]) {
+  for (const hook of ["factory-panel-skill-expo", "factory-panel-menu-reset", "factory-panel-menu-rotate", "factory-panel-menu-confirm-rotate", "factory-panel-menu-delete"]) {
     assert.equal(hasHook(html, hook), false, `${hook} stays off mobile`);
   }
 });
@@ -373,10 +380,11 @@ test("a Project whose folder is gone keeps Delete but drops Reset and the model 
   const { renderToStaticMarkup } = await import("react-dom/server");
   const html = renderToStaticMarkup(createElement(ProjectMenu, {
     theme, mobile: false, busy: false, missingRoot: true,
-    openSettings() {}, resetProject() {}, deleteProject() {},
+    openSettings() {}, resetProject() {}, rotateSeats() {}, deleteProject() {},
   }));
   assert.ok(hasHook(html, "factory-panel-menu-delete"));
   assert.equal(hasHook(html, "factory-panel-menu-reset"), false);
+  assert.equal(hasHook(html, "factory-panel-menu-rotate"), false, "Rotate needs the folder too");
   assert.equal(hasHook(html, "factory-panel-open-settings"), false);
 });
 
@@ -470,12 +478,15 @@ test("the shell reads mobile from the host layout platform, mounts the panel on 
 
 test("shell wiring: every action rides its RPC — handoff, Start Supervisor (then opens the new seat), Reset, Delete — and no Lead start or accept RPC is bound", () => {
   const shell = read("plugin/client/factory/shell.tsx");
-  for (const rpc of ["handoffStart", "supervisorStart", "projectReset", "projectDelete"]) {
+  for (const rpc of ["handoffStart", "supervisorStart", "projectReset", "projectRotate", "projectDelete"]) {
     assert.match(shell, new RegExp(`useRpc\\(${rpc}\\)`), `${rpc} is bound`);
   }
   assert.doesNotMatch(shell, /useRpc\((leadEnsure|supervisorEnsure|leadDispatch)\)/, "the only seat creation is Start Supervisor");
   assert.match(shell, /navigation\?\.openAgent\(\{ agentId: reply\.agentId/, "Start Supervisor opens the conversation it created");
   assert.match(shell, /<ProjectMenu/);
+  assert.match(shell, /act\("Rotate seats", \(\) => projectRotateCall\(\{ projectRoot \}\)\)/, "Rotate seats rides act so the reply summary or the peers-live refusal is the toast");
+  assert.match(shell, /rotateSeats=\{rotateSeats\}/);
+  assert.match(shell, /const rotateSeats = \(\): void => \{\s*if \(projectRoot === undefined \|\| mobile\) return;/, "Rotate is guarded on desktop");
 });
 
 test("W6 mobile pins: the shell hands the menu its read-only mode and the panel and menu gate their writes on the mobile flag", () => {
