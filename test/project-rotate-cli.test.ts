@@ -5,15 +5,16 @@ import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { createFactoryRegistry, resolveProject, writeProjectRegistration } from "../plugin/server/projects.ts";
+import { createLeadMailRuntime } from "../plugin/server/lead-mailbox.ts";
 import { createSurfaceHandlers } from "../plugin/server/surface-rpc.ts";
-import type { SpoolReply, SpoolRotateRequest } from "../plugin/server/spool.ts";
+import type { SpoolReply, SpoolProjectRotateRequest } from "../plugin/server/spool.ts";
 import { handleSpoolRequest, parseSpoolRequest, spoolRootFor, startSpool } from "../plugin/server/spool.ts";
 import { disposeDir, gitCommitAll, makeTempDir, repoRoot } from "./helpers.ts";
 
 /**
  * Ticket 02 of the Rotate-seats spec (ADR 0060): `factory project rotate`.
  * Two seams, external behaviour only —
- *  1. the Spool seam: a dropped `rotate` request (parse, seat refusal, handler
+ *  1. the Spool seam: a dropped `project_rotate` request (parse, seat refusal, handler
  *     routing, the exclusive-maintenance lane) against `startSpool`;
  *  2. the CLI subprocess seam: the real `factory.mjs` against that spool.
  * The `projectRotate` handler's own behaviour is ticket 01's seam
@@ -27,7 +28,7 @@ const NEXT_STEP = "Next: open a New Chat with the `Supervisor (Factory)` profile
 
 // ---- fixtures ------------------------------------------------------------------------------
 
-type RotateHook = (request: SpoolRotateRequest) => Promise<SpoolReply>;
+type RotateHook = (request: SpoolProjectRotateRequest) => Promise<SpoolReply>;
 
 function makeRotateSpool(t: TestContext, hooks: {
   /** Replaces the real-surface handler wiring. */
@@ -49,8 +50,18 @@ function makeRotateSpool(t: TestContext, hooks: {
     stateDir,
     home,
     daemon: { agents: { list: async () => ({ entries: [] }) } } as never,
+    rotateProjectMailbox: (slug) => leadMail.rotateProjectMailbox(slug),
   });
-  const requests: SpoolRotateRequest[] = [];
+  const leadMail = createLeadMailRuntime({
+    factory: registry.root,
+    registry,
+    stateDir,
+    daemon: { agents: { list: async () => ({ entries: [] }) } } as never,
+    ensureLead: (input) => surface.leadEnsure(input),
+    retireLead: (input) => surface.leadRotate(input),
+  });
+  t.after(() => leadMail.stop());
+  const requests: SpoolProjectRotateRequest[] = [];
   const realRotate: RotateHook = async (request) => {
     const reply = await surface.projectRotate({
       ...(request.workspace !== undefined ? { projectRoot: request.workspace } : {}),
@@ -64,7 +75,7 @@ function makeRotateSpool(t: TestContext, hooks: {
   const spool = startSpool(stateDir, registry.root, {
     pollMs: POLL_MS,
     registry,
-    ...(hooks.wired === false ? {} : { projectRotate: async (request: SpoolRotateRequest) => { requests.push({ ...request }); return rotate(request); } }),
+    ...(hooks.wired === false ? {} : { projectRotate: async (request: SpoolProjectRotateRequest) => { requests.push({ ...request }); return rotate(request); } }),
     ...(hooks.projectReset === undefined ? {} : { projectReset: (request) => hooks.projectReset!(request) }),
     ...(hooks.projectRegister === undefined ? {} : { projectRegister: (request) => hooks.projectRegister!(request) }),
   });
@@ -122,7 +133,7 @@ function submittedRequestFiles(stateDir: string): string[] {
   return ["requests", "processed"].flatMap((name) => (existsSync(join(root, name)) ? readdirSync(join(root, name)) : []));
 }
 
-const okReply = (request: SpoolRotateRequest, archivedSeats: string[] = ["agent-lead-1", "agent-sup-1"]): SpoolReply => ({
+const okReply = (request: SpoolProjectRotateRequest, archivedSeats: string[] = ["agent-lead-1", "agent-sup-1"]): SpoolReply => ({
   id: request.id,
   ok: true,
   summary: `Rotated seats of project demo: archived Lead and Supervisor (2 seat agents). ${NEXT_STEP} /work/demo.`,
@@ -134,23 +145,23 @@ const okReply = (request: SpoolRotateRequest, archivedSeats: string[] = ["agent-
 // ---- Seam 1: the Spool ---------------------------------------------------------------------------
 
 test("parseSpoolRequest admits the rotate shape — an optional workspace or project, nothing else carried", () => {
-  assert.deepEqual(parseSpoolRequest({ id: "r1", kind: "rotate", workspace: "/tmp/x", submitter: "owner" }), {
+  assert.deepEqual(parseSpoolRequest({ id: "r1", kind: "project_rotate", workspace: "/tmp/x", submitter: "owner" }), {
     id: "r1",
-    kind: "rotate",
+    kind: "project_rotate",
     workspace: "/tmp/x",
     submitter: "owner",
   });
-  assert.deepEqual(parseSpoolRequest({ id: "r2", kind: "rotate", project: "demo", seat: "lead", keepSeats: true }), {
+  assert.deepEqual(parseSpoolRequest({ id: "r2", kind: "project_rotate", project: "demo", seat: "lead", keepSeats: true }), {
     id: "r2",
-    kind: "rotate",
+    kind: "project_rotate",
     project: "demo",
     seat: "lead",
   }, "a reset-only field is dropped, a seat stamp is kept");
-  assert.deepEqual(parseSpoolRequest({ id: "r3", kind: "rotate" }), { id: "r3", kind: "rotate" }, "no target is a valid shape — the handler resolves the single registered Project");
-  assert.equal(parseSpoolRequest({ id: "r4", kind: "rotate", workspace: "  " }), undefined, "blank workspace");
-  assert.equal(parseSpoolRequest({ id: "r5", kind: "rotate", project: "" }), undefined, "blank project");
-  assert.equal(parseSpoolRequest({ id: "r6", kind: "rotate", workspace: 7 }), undefined, "non-string workspace");
-  assert.equal(parseSpoolRequest({ id: "r7", kind: "rotate", project: ["demo"] }), undefined, "non-string project");
+  assert.deepEqual(parseSpoolRequest({ id: "r3", kind: "project_rotate" }), { id: "r3", kind: "project_rotate" }, "no target is a valid shape — the handler resolves the single registered Project");
+  assert.equal(parseSpoolRequest({ id: "r4", kind: "project_rotate", workspace: "  " }), undefined, "blank workspace");
+  assert.equal(parseSpoolRequest({ id: "r5", kind: "project_rotate", project: "" }), undefined, "blank project");
+  assert.equal(parseSpoolRequest({ id: "r6", kind: "project_rotate", workspace: 7 }), undefined, "non-string workspace");
+  assert.equal(parseSpoolRequest({ id: "r7", kind: "project_rotate", project: ["demo"] }), undefined, "non-string project");
 });
 
 test("rotate is its own kind — `lead_rotate` still parses as the legacy Lead handoff request", () => {
@@ -160,7 +171,7 @@ test("rotate is its own kind — `lead_rotate` still parses as the legacy Lead h
 
 test("rotate without a wired handler is refused by name, never a silent pass", async (t) => {
   const { registry } = makeRotateSpool(t, { wired: false });
-  const reply = await handleSpoolRequest(registry.root, { id: "r0", kind: "rotate", workspace: "/tmp/x" });
+  const reply = await handleSpoolRequest(registry.root, { id: "r0", kind: "project_rotate", workspace: "/tmp/x" });
   assert.equal(reply.ok, false);
   if (!reply.ok) assert.equal(reply.code, "project-rotate-unavailable");
 });
@@ -168,7 +179,7 @@ test("rotate without a wired handler is refused by name, never a silent pass", a
 test("only the Owner rotates — a supervisor, lead or agent seat is refused seat-cannot-rotate and the handler never runs", async (t) => {
   const { stateDir, requests } = makeRotateSpool(t, { projectRotate: async (request) => okReply(request) });
   for (const seat of ["supervisor", "lead", "agent"] as const) {
-    dropRequest(spoolRootFor(stateDir), { id: `rot-${seat}`, kind: "rotate", project: "demo", submitter: `agent-${seat}-1`, seat });
+    dropRequest(spoolRootFor(stateDir), { id: `rot-${seat}`, kind: "project_rotate", project: "demo", submitter: `agent-${seat}-1`, seat });
     const reply = await replyOf(spoolRootFor(stateDir), `rot-${seat}`);
     assert.equal(reply.ok, false, `${seat} must be refused`);
     assert.equal(reply.code, "seat-cannot-rotate");
@@ -180,14 +191,14 @@ test("only the Owner rotates — a supervisor, lead or agent seat is refused sea
 test("the Owner's rotate reaches the handler with submitter owner and the named Project, and its reply rides back", async (t) => {
   const ctx = makeRotateSpool(t, { projectRotate: async (request) => okReply(request) });
   const spoolRoot = spoolRootFor(ctx.stateDir);
-  dropRequest(spoolRoot, { id: "own-rot", kind: "rotate", project: "demo", workspace: "/work/demo", submitter: "owner" });
+  dropRequest(spoolRoot, { id: "own-rot", kind: "project_rotate", project: "demo", workspace: "/work/demo", submitter: "owner" });
   const reply = await replyOf(spoolRoot, "own-rot");
   assert.equal(reply.ok, true, JSON.stringify(reply));
   assert.deepEqual(reply.archivedSeats, ["agent-lead-1", "agent-sup-1"]);
   assert.equal(reply.project, "demo");
   assert.match(String(reply.summary), /Supervisor \(Factory\)/);
   assert.equal(ctx.requests.length, 1);
-  assert.equal(ctx.requests[0]?.kind, "rotate");
+  assert.equal(ctx.requests[0]?.kind, "project_rotate");
   assert.equal(ctx.requests[0]?.project, "demo");
   assert.equal(ctx.requests[0]?.workspace, "/work/demo");
   assert.equal(ctx.requests[0]?.submitter, "owner");
@@ -197,7 +208,7 @@ test("a handler failure — peers-live — reaches the requester as a normal ref
   const ctx = makeRotateSpool(t, {
     projectRotate: async (request) => ({ id: request.id, ok: false, code: "peers-live", message: "Project demo has live Peers: T-1 (agent-peer-1)." }),
   });
-  dropRequest(spoolRootFor(ctx.stateDir), { id: "pl", kind: "rotate", project: "demo", submitter: "owner" });
+  dropRequest(spoolRootFor(ctx.stateDir), { id: "pl", kind: "project_rotate", project: "demo", submitter: "owner" });
   const reply = await replyOf(spoolRootFor(ctx.stateDir), "pl");
   assert.equal(reply.ok, false);
   assert.equal(reply.code, "peers-live");
@@ -207,7 +218,7 @@ test("a handler failure — peers-live — reaches the requester as a normal ref
 test("against the real surface: rotating a registered Project with no seats replies ok, archivedSeats empty, and names the next step", async (t) => {
   const ctx = makeRotateSpool(t);
   const project = registerProject(ctx);
-  dropRequest(spoolRootFor(ctx.stateDir), { id: "real-1", kind: "rotate", workspace: project.root, submitter: "owner" });
+  dropRequest(spoolRootFor(ctx.stateDir), { id: "real-1", kind: "project_rotate", workspace: project.root, submitter: "owner" });
   const reply = await replyOf(spoolRootFor(ctx.stateDir), "real-1");
   assert.equal(reply.ok, true, JSON.stringify(reply));
   assert.equal(reply.project, project.slug);
@@ -215,7 +226,7 @@ test("against the real surface: rotating a registered Project with no seats repl
   assert.deepEqual(reply.archivedSeats, []);
   assert.ok(String(reply.summary).includes("Supervisor (Factory)"));
 
-  dropRequest(spoolRootFor(ctx.stateDir), { id: "real-2", kind: "rotate", project: "no-such-project", submitter: "owner" });
+  dropRequest(spoolRootFor(ctx.stateDir), { id: "real-2", kind: "project_rotate", project: "no-such-project", submitter: "owner" });
   const unknown = await replyOf(spoolRootFor(ctx.stateDir), "real-2");
   assert.equal(unknown.ok, false);
   assert.equal(unknown.code, "unknown-project");
@@ -243,7 +254,7 @@ test("rotate is serialized with Project reset: it never starts while a reset on 
 
   dropRequest(spoolRoot, { id: "a-rst", kind: "reset", project: project.slug });
   await until(() => assert.deepEqual(trace, ["reset:start"]));
-  dropRequest(spoolRoot, { id: "b-rot", kind: "rotate", project: project.slug, submitter: "owner" });
+  dropRequest(spoolRoot, { id: "b-rot", kind: "project_rotate", project: project.slug, submitter: "owner" });
   await new Promise((resolve) => setTimeout(resolve, POLL_MS * 8));
   assert.deepEqual(trace, ["reset:start"], "rotate has not started while the reset holds the Project");
 
@@ -277,10 +288,10 @@ test("rotate is serialized with project_register and with another rotate on the 
   const project = registerProject(ctx);
   const spoolRoot = spoolRootFor(ctx.stateDir);
 
-  dropRequest(spoolRoot, { id: "rot-a", kind: "rotate", project: project.slug, submitter: "owner" });
+  dropRequest(spoolRoot, { id: "rot-a", kind: "project_rotate", project: project.slug, submitter: "owner" });
   await until(() => assert.deepEqual(trace, ["rot-a:start"]));
   dropRequest(spoolRoot, { id: "reg-b", kind: "project_register", workspace: project.root });
-  dropRequest(spoolRoot, { id: "rot-c", kind: "rotate", workspace: project.root, submitter: "owner" });
+  dropRequest(spoolRoot, { id: "rot-c", kind: "project_rotate", workspace: project.root, submitter: "owner" });
   await new Promise((resolve) => setTimeout(resolve, POLL_MS * 8));
   assert.deepEqual(trace, ["rot-a:start"], "neither the register nor the second rotate starts while the first holds the Project");
 
@@ -323,7 +334,7 @@ test("CLI: `project rotate --workspace <repo>` submits kind rotate as the Owner 
   assert.ok(result.stdout.includes(ctx.home), "names the home the rotation ran under");
   assert.ok(result.stdout.includes("agent-lead-1") && result.stdout.includes("agent-sup-1"), "names the archived seat agents");
   assert.equal(ctx.requests.length, 1);
-  assert.equal(ctx.requests[0]?.kind, "rotate", "the Spool kind is rotate, not lead_rotate");
+  assert.equal(ctx.requests[0]?.kind, "project_rotate", "the Spool kind is project_rotate, not lead_rotate");
   assert.equal(ctx.requests[0]?.workspace, ctx.dir);
   assert.equal(ctx.requests[0]?.project, undefined);
   assert.equal(ctx.requests[0]?.submitter, "owner");

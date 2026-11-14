@@ -130,7 +130,7 @@ export function createSupervisorHandoffRuntime(deps: {
   return {
     active, pump,
     stop() { for (const timer of timers.values()) clearTimeout(timer); timers.clear(); },
-    reset(slug: string) { clearTimer(slug); writeHandoffProgress(deps.stateDir, slug, null, 'supervisor'); rmSync(path(slug, 'supervisor-handoff-extraction.json'), { force: true }); },
+    reset(slug: string) { clearTimer(slug); writeHandoffProgress(deps.stateDir, slug, null, 'supervisor'); rmSync(path(slug, 'supervisor-handoff-extraction.json'), { force: true }); rmSync(path(slug, 'supervisor-handoff.md'), { force: true }); },
     async turnEnded(slug: string, id: string, text: string | null, outcome: 'completed' | 'failed' | 'canceled') {
       if (!active(slug) || episode(slug)?.outgoingId !== id || progress(slug)?.state !== 'handing-over') return false;
       const data = episode(slug)!;

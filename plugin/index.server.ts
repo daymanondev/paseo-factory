@@ -323,6 +323,7 @@ export default function contribute(server: PluginServerContext) {
     markPluginArchive: (input) => leadMail.markPluginArchive(input.agentId),
     clearPluginArchive: (input) => leadMail.clearPluginArchive(input.agentId),
     resetProjectMailbox: (slug) => leadMail.resetProjectMailbox(slug),
+    rotateProjectMailbox: (slug) => leadMail.rotateProjectMailbox(slug),
     leadDispatch: (request, options) => leadMail.dispatchLead(request, options),
     supervisorReport: (request) => leadMail.reportSupervisor(request),
     // v0.6.1 (ADR 0057 §5): a newly bound Supervisor receives its Seat kickoff
@@ -486,7 +487,7 @@ export default function contribute(server: PluginServerContext) {
           ...(request.workspace !== undefined ? { projectRoot: request.workspace } : {}),
           ...(request.project !== undefined ? { project: request.project } : {}),
         },
-        { paseo: paseoApi as never },
+        { paseo: paseoApi as never, ...(request.seat !== undefined ? { seat: request.seat } : {}) },
       );
       return reply.ok
         ? {

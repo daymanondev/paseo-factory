@@ -1,12 +1,23 @@
 /**
  * The Peer-in-flight predicates the Lead-mailbox quiet point and the surface's
- * Rotate seats refusal share (ADR 0060): one law, two callers. Pure over the
- * Ledger events, the live daemon snapshot and the queued mail, so a refusal
- * can name the Tasks and Peers that hold.
+ * Rotate seats refusal share (ADR 0060): one module, two callers. The module
+ * computes its own inputs from the Project's slug and root (the Ledger stream
+ * and the queued mail), so both callers read the same facts, and a refusal can
+ * name the Tasks and Peers that hold. The two callers differ only in the
+ * settle law they ask for: the quiet point lets a Peer's verdict or queued
+ * blocker return the Task to the Lead; Rotate holds on any live Peer until
+ * the Task is accepted or closed.
  */
+import { realpathSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { MAX_ATTEMPTS } from "./core/events.ts";
 import type { LedgerEvent } from "./core/events.ts";
+import type { Factory } from "./core/factory.ts";
+import { readLeadMailbox } from "./core/mailbox.ts";
 import type { LeadMailItem } from "./core/mailbox.ts";
+import { projectStateDir } from "./core/project.ts";
+import { readHandoffProgress } from "./handoff-progress.ts";
+import type { FactoryRegistry } from "./projects.ts";
 import type { TaskView } from "../shared/view.ts";
 import { foldTasks } from "./view.ts";
 import { boundTaskPeers, peerIsRunning } from "./task-peers.ts";
@@ -109,33 +120,108 @@ export function driverWavesInFlight(
   return [...openRounds.keys()].map((task) => ({ task, agentIds: holderIds.get(task) ?? [] }));
 }
 
-export function driverWaveInFlight(
-  events: readonly LedgerEvent[],
-  liveAgents?: readonly SurfaceAgentSnapshot[],
-  projectSlug?: string,
-  liveness?: "running" | "live",
-): boolean {
-  return driverWavesInFlight(events, liveAgents, projectSlug, liveness).length > 0;
+/**
+ * Where a Project's Ledger stream comes from: the wired (root) Factory and,
+ * in production, the Per-Project Factory registry. A slug the registry cannot
+ * open falls back to the wired Factory — unless the caller asks `strict`, in
+ * which case the error surfaces so a safety refusal can fail closed.
+ */
+export interface ProjectLedgerSource {
+  factory: Factory;
+  registry?: FactoryRegistry;
+}
+
+export function projectFactoryOf(source: ProjectLedgerSource, slug: string, strict = false): Factory {
+  if (source.registry === undefined) return source.factory;
+  try {
+    return source.registry.factoryForProject(slug);
+  } catch (err) {
+    if (strict) throw err;
+    return source.factory;
+  }
+}
+
+/** The Factory owning `task` for this Project — the Project's own first, the wired root-bridge second. */
+export function taskFactoryOf(source: ProjectLedgerSource, slug: string, task: string | undefined, strict = false): Factory {
+  const project = projectFactoryOf(source, slug, strict);
+  if (project === source.factory || task === undefined || task === "") return project;
+  if (project.contractFor(task) !== undefined) return project;
+  return source.factory.contractFor(task) !== undefined ? source.factory : project;
+}
+
+/** The Project's Ledger stream: its OWN Factory's events plus any task the wired Factory still owns (the legacy root bridge). */
+export function projectStreamOf(source: ProjectLedgerSource, slug: string, strict = false): readonly LedgerEvent[] {
+  const project = projectFactoryOf(source, slug, strict);
+  if (project === source.factory) return source.factory.ledger.events;
+  const wiredOnly = source.factory.ledger.events.filter((evt) => {
+    if (!("task" in evt) || typeof evt.task !== "string") return true; // machine-level facts stay visible
+    return project.contractFor(evt.task) === undefined;
+  });
+  return [...project.ledger.events, ...wiredOnly];
+}
+
+function realpathSafe(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
+  }
+}
+
+/** The Project's task-scoped events: tasks whose Contract workspace sits inside `root` (symlinks resolved) or the Project's worktrees dir. */
+export function projectEventsOf(source: ProjectLedgerSource, stateDir: string, slug: string, root: string, strict = false): readonly LedgerEvent[] {
+  const normRoot = realpathSafe(resolve(root));
+  const worktreesDir = join(projectStateDir(stateDir, slug), "worktrees");
+  return projectStreamOf(source, slug, strict).filter((evt) => {
+    if (!("task" in evt) || typeof evt.task !== "string") return false;
+    const contract = taskFactoryOf(source, slug, evt.task, strict).contractFor(evt.task);
+    if (contract === undefined) return false;
+    const ws = contract.workspace;
+    const normWs = realpathSafe(resolve(ws));
+    return ws === root || ws.startsWith(`${root}/`) || normWs === normRoot || normWs.startsWith(`${normRoot}/`) ||
+      ws === worktreesDir || ws.startsWith(`${worktreesDir}/`);
+  });
+}
+
+/** The Project's queued mailbox items, or `undefined` when the mailbox is unreadable. */
+export function readQueuedMail(stateDir: string, slug: string): readonly LeadMailItem[] | undefined {
+  try {
+    return readLeadMailbox(join(projectStateDir(stateDir, slug), "mailbox.jsonl")).queued;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
  * v0.2.2 (ADR 0050 §1) + v0.8.5: the Tasks a live, non-`error` Peer still
  * holds — a spawn round still open with a live bound Peer, or any live
  * non-`error` Peer bound to an unsettled dispatched Task (`idle` after the
- * Owner's Esc included). Tasks that reached a Peer-terminal outcome or carry
- * queued `from: "peer"` mail (the work is back in the Lead's court) never
- * hold. `queued` is the Project's queued mailbox items, or `undefined` when
- * the mailbox is unreadable. Empty means the Project has no live Peer work.
+ * Owner's Esc included). Empty means the Project has no live Peer work.
+ *
+ * `law` picks what settles a Task:
+ * - `"quiet-point"` (the Lead's quiet point): a Peer-terminal outcome or any
+ *   queued `from: "peer"` mail returns the Task to the Lead, so it never holds.
+ * - `"rotate"` (ADR 0060): only an accepted or closed Task settles. A Peer's
+ *   queued challenge or blocker is exactly the work Rotate would delete, so
+ *   queued mail never releases a live Peer.
+ *
+ * `strict` makes an unreadable Ledger throw instead of reading as empty — a
+ * refusal built on this result must fail closed.
  */
 export function projectPeersInFlight(input: {
   stateDir: string;
   slug: string;
-  events: readonly LedgerEvent[];
+  root: string;
+  source: ProjectLedgerSource;
   live: readonly SurfaceAgentSnapshot[];
-  queued?: readonly LeadMailItem[];
+  law: "quiet-point" | "rotate";
+  strict?: boolean;
 }): InFlightRound[] {
-  const { stateDir, slug, events, live, queued } = input;
+  const { stateDir, slug, root, source, live, law } = input;
+  const events = projectEventsOf(source, stateDir, slug, root, input.strict === true);
   const tasks = foldTasks(events);
+  const rotate = law === "rotate";
+  const queued = rotate ? undefined : readQueuedMail(stateDir, slug);
   let queuedPeerBlockerTasks: Set<string> | undefined;
   let queuedPeerMailTasks: Set<string> | undefined;
   if (queued !== undefined) {
@@ -144,7 +230,9 @@ export function projectPeersInFlight(input: {
     queuedPeerMailTasks = new Set(queuedPeerMail.map((item) => item.task!));
   }
   const settledTasks = new Set(
-    tasks.filter((task) => taskHasSettledPeerOutcome(task, queuedPeerBlockerTasks)).map((task) => task.task),
+    tasks
+      .filter((task) => rotate ? task.accepted || task.status === "accepted" || task.status === "closed" : taskHasSettledPeerOutcome(task, queuedPeerBlockerTasks))
+      .map((task) => task.task),
   );
   const activeWaveEvents = settledTasks.size > 0 || (queuedPeerMailTasks?.size ?? 0) > 0
     ? events.filter(
@@ -164,11 +252,12 @@ export function projectPeersInFlight(input: {
   // A dispatched, unsettled Task (`running`, or `red` below the ceiling) whose
   // bound Peer is live and not `error` holds, whatever the Peer's status.
   // Only an outcome (verdict, needs-human, close, any queued Peer mail) or a
-  // dead/archived Peer releases it.
+  // dead/archived Peer releases it. Under the Rotate law every unsettled Task
+  // qualifies.
   for (const task of tasks) {
     if (settledTasks.has(task.task)) continue;
     const dispatchedAndOpen =
-      (task.status === "running" || task.status === "red") && !(queuedPeerMailTasks?.has(task.task) ?? false);
+      rotate || ((task.status === "running" || task.status === "red") && !(queuedPeerMailTasks?.has(task.task) ?? false));
     const holders = boundTaskPeers({ stateDir, slug, task: task.task, events, live }).filter(
       (peer) => peerIsRunning(peer) || (dispatchedAndOpen && peer.status !== "error"),
     );
@@ -177,3 +266,26 @@ export function projectPeersInFlight(input: {
   return [...held.entries()].map(([task, ids]) => ({ task, agentIds: [...ids] }));
 }
 
+/**
+ * The Tasks of the Project whose Peer handoff (the context-ceiling
+ * replacement) is still in progress. Rotate refuses while one runs: it never
+ * cancels or resets a Peer's state, and a replacement mid-flight is a live
+ * Peer for every purpose that matters here.
+ */
+export function peerHandoffsInProgress(input: {
+  stateDir: string;
+  slug: string;
+  root: string;
+  source: ProjectLedgerSource;
+  strict?: boolean;
+}): string[] {
+  const { stateDir, slug } = input;
+  const tasks = new Set<string>();
+  for (const evt of projectEventsOf(input.source, stateDir, slug, input.root, input.strict === true)) {
+    if ("task" in evt && typeof evt.task === "string") tasks.add(evt.task);
+  }
+  return [...tasks].filter((task) => {
+    const state = readHandoffProgress(stateDir, slug, `peer:${task}`)?.state;
+    return state !== undefined && state !== "done" && state !== "failed";
+  });
+}

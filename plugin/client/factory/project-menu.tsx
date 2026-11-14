@@ -46,7 +46,7 @@ function ConfirmableDanger({
   onConfirm,
 }: {
   theme: PluginTheme;
-  kind: "reset" | "rotate" | "delete";
+  kind: Exclude<MenuConfirming, null>;
   icon: "RotateCcw" | "RefreshCw" | "Trash2";
   label: string;
   confirmLabel: string;
@@ -118,7 +118,7 @@ export function ProjectMenu({
 }) {
   const [confirming, setConfirming] = useState<MenuConfirming>(initialConfirming);
 
-  // The two-step confirm re-arms after 5s — the Header's Reset/Delete law.
+  // The two-step confirm re-arms after 5s — the Header's Reset/Rotate/Delete law.
   useEffect(() => {
     if (confirming === null) return;
     const timer = setTimeout(() => setConfirming(null), 5000);
