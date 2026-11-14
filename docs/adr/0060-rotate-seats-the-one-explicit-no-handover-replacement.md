@@ -1,7 +1,7 @@
 # 0060 — Rotate Seats: The One Explicit No-Handover Replacement
 
 - **Date:** 2026-11-14
-- **Status:** Accepted. The Owner approved the spec; implemented on `spec/factory-rotate-seats`, ships in the next release.
+- **Status:** Accepted. The Owner approved the spec; implemented on `spec/factory-rotate-seats`, shipped in v0.10.0.
 - **Amends:** [ADR 0057](0057-every-seat-replacement-is-a-handoff-supervisor-handoff-and-wide-colourful-factory-tab.md) Decision 1. The rule "every seat replacement is a handoff" and the removal of "every retire-seat path that archives without a handover" gain one explicit, Owner-only exception.
 - **Spec:** `.scratch/factory-rotate-seats/spec.md`.
 

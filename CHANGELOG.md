@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-11-14
+
+**Rotate seats: start a long-idle Project with a fresh Supervisor and Lead, no handoff.**
+
+### Added
+
+- **Rotate seats.** A new Owner-only Project act, in the Factory tab's `⋯` menu (desktop only, two-step confirm next to Reset and Delete) and as `factory project rotate [--workspace <dir> | --project <slug>] [--json]`. It archives the Project's Lead and then its Supervisor with no extraction and no Substitute handover, drops held and un-acknowledged mailbox mail and every on-disk handover, and clears the seat bindings. The notebook, lanes, Ledger, usage history and Task worktrees are kept. Afterwards, open a New Chat with the `Supervisor (Factory)` profile at the Project root; its first dispatch creates a fresh Lead with no handover. See ADR 0060, which makes this the one explicit exception to ADR 0057's "every seat replacement is a handoff".
+- **Rotate refuses instead of losing work.** It is refused, touching nothing, while any live Peer is bound to a Task that is not accepted or closed (`peers-live`, naming the Tasks and agents), while a Peer handoff is in progress (`handoff-in-progress`), or when the Ledger cannot be read (`ledger-unreadable`). Seats are refused `seat-cannot-rotate` at the CLI, the Spool and the plugin.
+- **A handoff in flight cannot bring the old seats back.** Rotate and Reset bump a per-Project seat epoch; a mailbox job or Lead handoff that was already running abandons itself, writes no handover and retires any seat it had just raised. If a seat archive fails part-way, the reply says what was already dropped and which seat is still bound, and re-running Rotate completes it.
+
+### Changed
+
+- **Project reset also removes `supervisor-handoff.md`.**
+
 ## [0.9.0] - 2026-11-14
 
 **`/factory` works from any folder: register, list, and doctor from the CLI, and no more fake-success dispatch.**
