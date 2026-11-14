@@ -9,7 +9,7 @@ import { useRpc } from "@getpaseo/plugin/client";
 import { Modal, ScrollView, useToast } from "@getpaseo/plugin/client/ui";
 import { useEffect, useRef, useState } from "react";
 import { Text, View } from "react-native";
-import { skillsImport, skillsTogglePack, lanesSet, lanesSetBatch, handoffStart, handoffReplaceNow, handoffCancel, handoffRetry, handoffHandover, onboardingCommit, onboardingInspect, openDesignCatalog, openDesignSync, helperMcpsSyncAndProbe, helperMcpsSetEnabled, pluginsInstall, pluginsManage, pluginsCheckUpdates, selfUpdateApply, selfUpdateStatus, profilesApply, profilesDelete, profilesSave, projectDelete, projectReset, snapshot, supervisorAdopt, supervisorStart, vaultConfigure, vaultHydrate, vaultImport, vaultSync } from "../../shared/rpc.ts";
+import { skillsImport, skillsTogglePack, lanesSet, lanesSetBatch, handoffStart, handoffReplaceNow, handoffCancel, handoffRetry, handoffHandover, onboardingCommit, onboardingInspect, openDesignCatalog, openDesignSync, helperMcpsSyncAndProbe, helperMcpsSetEnabled, pluginsInstall, pluginsManage, pluginsCheckUpdates, selfUpdateApply, selfUpdateStatus, profilesApply, profilesDelete, profilesSave, projectDelete, projectReset, projectRotate, snapshot, supervisorAdopt, supervisorStart, vaultConfigure, vaultHydrate, vaultImport, vaultSync } from "../../shared/rpc.ts";
 import type { ManageablePluginId } from "../../shared/companions.ts";
 import type { FactoryView, LaneName } from "../../shared/view.ts";
 import { SPACING, text } from "../kit/theme.ts";
@@ -78,6 +78,7 @@ export function FactoryShell({
   const openDesignCatalogCall = useRpc(openDesignCatalog);
   const openDesignSyncCall = useRpc(openDesignSync);
   const projectResetCall = useRpc(projectReset);
+  const projectRotateCall = useRpc(projectRotate);
   const projectDeleteCall = useRpc(projectDelete);
   // The v0.0.38 lane acts (ADR 0026 §2/§5): one useRpc per contract, every
   // dispatch through act() — the SeatsPane stays a pure render of the view
@@ -344,6 +345,10 @@ export function FactoryShell({
   const resetProject = (): void => {
     if (projectRoot === undefined) return;
     void act("Reset Project", () => projectResetCall({ projectRoot }));
+  };
+  const rotateSeats = (): void => {
+    if (projectRoot === undefined || mobile) return;
+    void act("Rotate seats", () => projectRotateCall({ projectRoot }));
   };
   const deleteProject = (): void => {
     const target = view.project;
@@ -751,6 +756,7 @@ export function FactoryShell({
                   missingRoot={view.project.missingRoot === true}
                   openSettings={() => openSettings?.()}
                   resetProject={resetProject}
+                  rotateSeats={rotateSeats}
                   deleteProject={deleteProject}
                 />
               ) : null
