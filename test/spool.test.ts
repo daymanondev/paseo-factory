@@ -913,17 +913,17 @@ test("handleSpoolRequest refuses rotate from supervisor, lead, and agent with se
   };
 
   for (const seat of ["supervisor", "lead", "agent"] as const) {
-    const refused = await handleSpoolRequest(factory, { id: `rot-${seat}`, kind: "rotate", project: "ws", submitter: `agent-${seat}-1`, seat }, { projectRotate });
+    const refused = await handleSpoolRequest(factory, { id: `rot-${seat}`, kind: "project_rotate", project: "ws", submitter: `agent-${seat}-1`, seat }, { projectRotate });
     assert.equal(refused.ok, false, `expected ${seat} rotate to be refused`);
     if (!refused.ok) assert.equal(refused.code, "seat-cannot-rotate");
   }
   assert.equal(seen.length, 0, "no handler call for a refused seat");
 
-  const owner = await handleSpoolRequest(factory, { id: "rot-owner", kind: "rotate", project: "ws", submitter: "owner" }, { projectRotate });
+  const owner = await handleSpoolRequest(factory, { id: "rot-owner", kind: "project_rotate", project: "ws", submitter: "owner" }, { projectRotate });
   assert.equal(owner.ok, true);
   assert.equal(seen.length, 1);
   assert.equal(seen[0]?.submitter, "owner");
-  assert.equal(seen[0]?.kind, "rotate");
+  assert.equal(seen[0]?.kind, "project_rotate");
 });
 
 test("handleSpoolRequest sanitizes spawn and respawn provider via sanitizeLane before recording to ledger (v0.0.24, ADR 0015 §1)", async (t) => {

@@ -547,6 +547,20 @@ function waitSeconds(parsed, defaultSecs = DEFAULT_WAIT_SECS) {
   return n;
 }
 
+// No reply from the plugin: withdraw the request so it cannot surprise-apply on a
+// later plugin start. The plugin may still have picked it up just before the
+// unlink, so the message never claims nothing happened — `mayHave` says what to
+// confirm, `then` what to run once Paseo Desktop is up. Always exits 2.
+function withdrawUnansweredRequest(spoolRoot, id, { home, waitSecs, mayHave, then }) {
+  try { unlinkSync(join(spoolRoot, "requests", `${id}.json`)); } catch { /* already picked up or gone */ }
+  console.error(
+    `factory: the paseo-factory plugin is not running — no reply from the plugin for home ${home} after ${waitSecs}s. ` +
+      `The request was withdrawn, but a plugin that picked it up a moment ago may still have ${mayHave}\n` +
+      `Start Paseo Desktop with the paseo-factory plugin enabled (for a remote machine pass --home <that machine's paseo home>), then ${then}`,
+  );
+  process.exit(2);
+}
+
 async function roundTrip(request, waitSecs) {
   const payload = {
     ...request,
@@ -1284,18 +1298,12 @@ if (command === "project" && rest[0] === "register") {
   submit(spoolRoot, payload);
   const reply = await awaitReply(spoolRoot, payload.id, waitSecs * 1000);
   if (reply === null) {
-    // No reply: withdraw the request so it cannot surprise-apply on a later plugin
-    // start. The plugin may still have picked it up just before the unlink, so the
-    // message never claims nothing happened — it tells the Owner to confirm.
-    try { unlinkSync(join(spoolRoot, "requests", `${payload.id}.json`)); } catch { /* already picked up or gone */ }
-    console.error(
-      `factory: the paseo-factory plugin is not running — no reply from the plugin for home ${home} after ${waitSecs}s. ` +
-        `The request was withdrawn, but a plugin that picked it up a moment ago may still have registered this Project: confirm with\n` +
-        `  ${factoryCmd} project list\n` +
-        `Start Paseo Desktop with the paseo-factory plugin enabled (for a remote machine pass --home <that machine's paseo home>), then re-run if it is not listed:\n` +
-        `  ${factoryCmd} project register --workspace "${workspace}"`,
-    );
-    process.exit(2);
+    withdrawUnansweredRequest(spoolRoot, payload.id, {
+      home,
+      waitSecs,
+      mayHave: `registered this Project: confirm with\n  ${factoryCmd} project list`,
+      then: `re-run if it is not listed:\n  ${factoryCmd} project register --workspace "${workspace}"`,
+    });
   }
   if (!reply.ok) {
     console.error(`factory: ${reply.code}: ${reply.message}`);
@@ -1318,7 +1326,7 @@ if (command === "project" && rest[0] === "register") {
 // replacement. The CLI only submits — the plugin is the single writer (ADR 0004):
 // it refuses while a Peer holds an unsettled Task, archives the Lead then the
 // Supervisor, drops held mail and handover records, and clears the bindings.
-// Its Spool kind is `rotate` (never the legacy `lead_rotate`). Failures exit 2.
+// Its Spool kind is `project_rotate` (never the legacy `lead_rotate`). Failures exit 2.
 if (command === "project" && rest[0] === "rotate") {
   const parsed = parseCommandOptions({
     workspace: { type: "string" },
@@ -1345,7 +1353,7 @@ if (command === "project" && rest[0] === "rotate") {
   const waitSecs = waitSeconds(parsed);
   const payload = {
     id: randomId(),
-    kind: "rotate",
+    kind: "project_rotate",
     ...(workspace !== undefined ? { workspace } : {}),
     ...(project !== undefined ? { project } : {}),
     submitter,
@@ -1353,22 +1361,21 @@ if (command === "project" && rest[0] === "rotate") {
   submit(spoolRoot, payload);
   const reply = await awaitReply(spoolRoot, payload.id, waitSecs * 1000);
   if (reply === null) {
-    // No reply: withdraw the request so it cannot surprise-rotate on a later plugin
-    // start. The plugin may still have picked it up just before the unlink, so the
-    // message never claims nothing happened.
-    try { unlinkSync(join(spoolRoot, "requests", `${payload.id}.json`)); } catch { /* already picked up or gone */ }
-    console.error(
-      `factory: the paseo-factory plugin is not running — no reply from the plugin for home ${home} after ${waitSecs}s. ` +
-        `The request was withdrawn, but a plugin that picked it up a moment ago may still have rotated this Project's seats: look at the Project's Supervisor and Lead in Paseo Desktop before re-running.\n` +
-        `Start Paseo Desktop with the paseo-factory plugin enabled (for a remote machine pass --home <that machine's paseo home>), then run:\n` +
-        `  ${rotateCmd}`,
-    );
-    process.exit(2);
+    withdrawUnansweredRequest(spoolRoot, payload.id, {
+      home,
+      waitSecs,
+      mayHave: `rotated this Project's seats: look at the Project's Supervisor and Lead in Paseo Desktop before re-running.`,
+      then: `run:\n  ${rotateCmd}`,
+    });
   }
   if (!reply.ok) {
     console.error(`factory: ${reply.code}: ${reply.message}`);
     if (reply.code === "peers-live") {
       console.error(`Finish or close the Tasks named above, then run the same command again:\n  ${rotateCmd}`);
+    } else if (reply.code === "handoff-in-progress") {
+      console.error(`Let the Peer handoff named above finish, then run the same command again:\n  ${rotateCmd}`);
+    } else if (reply.code === "ledger-unreadable") {
+      console.error(`Nothing was touched. Repair or restore the Project's Ledger, then run the same command again:\n  ${rotateCmd}`);
     } else if (reply.code === "unknown-project") {
       console.error(`See what is registered, or register the folder, then run the rotate again:\n  ${factoryCmd} project list\n  ${factoryCmd} project register --workspace "<dir>"`);
     } else if (reply.code === "ambiguous-project") {

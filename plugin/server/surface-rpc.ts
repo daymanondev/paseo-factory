@@ -4228,6 +4228,10 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       }
     },
   };
+  /** The Owner's whole-Project acts: each runs on its target Project's own Factory lane. */
+  const PROJECT_ACT_HANDLERS: ReadonlySet<string> = new Set(["projectReset", "projectDelete", "projectRotate"]);
+  /** The handlers that take their lane's exclusive maintenance — the Project acts plus register. The one place the set is named. */
+  const EXCLUSIVE_MAINTENANCE_HANDLERS: ReadonlySet<string> = new Set([...PROJECT_ACT_HANDLERS, "projectRegister"]);
   const reads = new Set(["cachedProviders", "sanitizeLane", "snapshot", "seatsDirectory", "pluginsCheckUpdates", "selfUpdateStatus", "selfUpdateApply", "historyImport", "historyImports", "historyUpgrade", "vaultHydrate", "vaultPull", "vaultPush", "vaultSync", "vaultImport"]);
   const wrappers = new Map<PropertyKey, unknown>();
   return new Proxy(handlers, {
@@ -4242,12 +4246,12 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         const registerSlug = key === "projectRegister" && deps.registry !== undefined
           ? registerLaneSlug(deps.registry, (args[0] as { workspace?: string } | undefined)?.workspace)
           : undefined;
-        const lane = key === "projectReset" || key === "projectDelete" || key === "projectRotate"
+        const lane = PROJECT_ACT_HANDLERS.has(key)
           ? factoryForResetTarget(args[0] as { projectRoot?: string; project?: string; projectSlug?: string; workspace?: string } | undefined)
           : registerSlug !== undefined && deps.registry !== undefined
             ? deps.registry.factoryForProject(registerSlug)
             : deps.factory;
-        return !lane.history.maintenanceActive && (key === "projectReset" || key === "projectDelete" || key === "projectRotate" || key === "projectRegister")
+        return !lane.history.maintenanceActive && EXCLUSIVE_MAINTENANCE_HANDLERS.has(key)
           ? lane.history.withExclusiveMaintenance(() => value.apply(receiver, args))
           : lane.history.runOperation(() => value.apply(receiver, args), { newWork: true });
       });
