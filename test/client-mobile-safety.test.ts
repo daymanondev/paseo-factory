@@ -767,9 +767,9 @@ test('W14: iOS and Android expose exactly the Project model, handoff and adoptio
             await act(() => button.click());
           };
           await click('factory-panel-menu-toggle');
-          assert.match(container.querySelector('[data-testid="factory-panel-menu"]')!.textContent!, /on Paseo Desktop/, 'desktop-only Project actions explain where to continue');
+          assert.match(container.querySelector('[data-testid="factory-panel-menu"]')!.textContent!, /Reset, Rotate and Delete on Paseo Desktop/, 'desktop-only Project actions explain where to continue');
           await click('factory-tab-project');
-          for (const id of ['factory-handoff-retry', 'factory-panel-needs-you-action-retry', 'factory-profile-chip-menu', 'factory-skill-pack-expo', 'factory-panel-open-settings', 'factory-panel-menu-reset', 'factory-panel-menu-delete', 'factory-panel-menu-confirm-reset', 'factory-panel-menu-confirm-delete', 'factory-panel-start-supervisor', 'factory-panel-needs-you-action-prerequisites', 'factory-panel-needs-you-action-supervisor', 'factory-panel-needs-you-action-design', 'factory-open-design-sync', 'factory-open-design-studio']) {
+          for (const id of ['factory-handoff-retry', 'factory-panel-needs-you-action-retry', 'factory-profile-chip-menu', 'factory-skill-pack-expo', 'factory-panel-open-settings', 'factory-panel-menu-reset', 'factory-panel-menu-rotate', 'factory-panel-menu-delete', 'factory-panel-menu-confirm-reset', 'factory-panel-menu-confirm-rotate', 'factory-panel-menu-confirm-delete', 'factory-panel-start-supervisor', 'factory-panel-needs-you-action-prerequisites', 'factory-panel-needs-you-action-supervisor', 'factory-panel-needs-you-action-design', 'factory-open-design-sync', 'factory-open-design-studio']) {
             assert.equal(container.querySelector(`[data-testid="${id}"]`), null, `${platform} hides ${id}`);
           }
           assert.ok(container.querySelector('[data-testid="factory-panel-od"]'), 'the design status shows on the Project tab');
