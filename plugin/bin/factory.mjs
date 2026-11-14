@@ -285,6 +285,23 @@ commands:
              git root); --json prints {ok, slug, root, home, alreadyRegistered,
              bootstrapped}; failures exit 2 with "factory: <code>: <message>".
 
+  project rotate
+             Owner-only: replace a Project's seats with no handover (ADR 0060).
+             The plugin archives the Lead, then the Supervisor, drops held mail
+             and every handover record, and clears the seat bindings; the
+             notebook, lanes, Ledger, open Tasks and worktrees stay. Refused
+             peers-live while a Peer still holds an unsettled Task (nothing
+             is touched): finish or close the Task, then run it again. The
+             reply names the archived seats, the home, and the next step:
+             open a New Chat with the \`Supervisor (Factory)\` profile at the
+             Project root. Needs the plugin running (exit 2 otherwise).
+             project rotate [--workspace <dir> | --project <slug>] [--json]
+                            [--wait-secs <n>]
+             with neither flag the single registered Project is rotated
+             (several: exit 2 naming --project); --json prints {ok, project,
+             root, home, archivedSeats, summary}; failures exit 2 with
+             "factory: <code>: <message>" and the command to run next.
+
   reset      Owner-only clean-slate Project reset (v0.0.24, ADR 0015 §6):
              purges the Project's ledger events, task reports/worktrees, and
              per-Project state directory (<stateDir>/projects/<slug>/), and
@@ -1297,6 +1314,85 @@ if (command === "project" && rest[0] === "register") {
   process.exit(0);
 }
 
+// `factory project rotate` (ADR 0060): the Owner's one no-handover seat
+// replacement. The CLI only submits — the plugin is the single writer (ADR 0004):
+// it refuses while a Peer holds an unsettled Task, archives the Lead then the
+// Supervisor, drops held mail and handover records, and clears the bindings.
+// Its Spool kind is `rotate` (never the legacy `lead_rotate`). Failures exit 2.
+if (command === "project" && rest[0] === "rotate") {
+  const parsed = parseCommandOptions({
+    workspace: { type: "string" },
+    project: { type: "string" },
+    json: { type: "boolean", default: false },
+    "wait-secs": { type: "string" },
+  });
+  if (parsed.positionals.length > 1) fail(`project rotate: unexpected positional "${parsed.positionals[1]}"`);
+  if (stampedSeat !== undefined) {
+    console.error(
+      `factory: seat-cannot-rotate: Seat ${stampedSeat} cannot call factory project rotate; rotating a Project's seats is an Owner-only action.`,
+    );
+    process.exit(2);
+  }
+  const hasWorkspace = typeof parsed.values.workspace === "string";
+  const hasProject = typeof parsed.values.project === "string";
+  if (hasWorkspace && parsed.values.workspace.trim() === "") fail("project rotate: --workspace needs a directory");
+  if (hasProject && parsed.values.project.trim() === "") fail("project rotate: --project needs a slug");
+  if (hasWorkspace && hasProject) fail("project rotate: name the Project with either --workspace <dir> or --project <slug>, not both");
+  const workspace = hasWorkspace ? resolvePath(parsed.values.workspace) : undefined;
+  const project = hasProject ? parsed.values.project.trim() : undefined;
+  // The copy-pasteable "run it again" line: the same target the Owner named.
+  const rotateCmd = `${factoryCmd} project rotate${workspace !== undefined ? ` --workspace "${workspace}"` : project !== undefined ? ` --project "${project}"` : ""}`;
+  const waitSecs = waitSeconds(parsed);
+  const payload = {
+    id: randomId(),
+    kind: "rotate",
+    ...(workspace !== undefined ? { workspace } : {}),
+    ...(project !== undefined ? { project } : {}),
+    submitter,
+  };
+  submit(spoolRoot, payload);
+  const reply = await awaitReply(spoolRoot, payload.id, waitSecs * 1000);
+  if (reply === null) {
+    // No reply: withdraw the request so it cannot surprise-rotate on a later plugin
+    // start. The plugin may still have picked it up just before the unlink, so the
+    // message never claims nothing happened.
+    try { unlinkSync(join(spoolRoot, "requests", `${payload.id}.json`)); } catch { /* already picked up or gone */ }
+    console.error(
+      `factory: the paseo-factory plugin is not running — no reply from the plugin for home ${home} after ${waitSecs}s. ` +
+        `The request was withdrawn, but a plugin that picked it up a moment ago may still have rotated this Project's seats: look at the Project's Supervisor and Lead in Paseo Desktop before re-running.\n` +
+        `Start Paseo Desktop with the paseo-factory plugin enabled (for a remote machine pass --home <that machine's paseo home>), then run:\n` +
+        `  ${rotateCmd}`,
+    );
+    process.exit(2);
+  }
+  if (!reply.ok) {
+    console.error(`factory: ${reply.code}: ${reply.message}`);
+    if (reply.code === "peers-live") {
+      console.error(`Finish or close the Tasks named above, then run the same command again:\n  ${rotateCmd}`);
+    } else if (reply.code === "unknown-project") {
+      console.error(`See what is registered, or register the folder, then run the rotate again:\n  ${factoryCmd} project list\n  ${factoryCmd} project register --workspace "<dir>"`);
+    } else if (reply.code === "ambiguous-project") {
+      console.error(`Name the Project to rotate:\n  ${factoryCmd} project rotate --project <slug>\n(${factoryCmd} project list shows the slugs)`);
+    } else if (reply.code === "daemon-unavailable") {
+      console.error(`Nothing was touched. Make sure Paseo Desktop is running, then run:\n  ${rotateCmd}`);
+    }
+    process.exit(2);
+  }
+  const archivedSeats = Array.isArray(reply.archivedSeats) ? reply.archivedSeats : [];
+  const result = {
+    ok: true,
+    project: reply.project,
+    root: reply.projectRoot,
+    home,
+    archivedSeats,
+    summary: reply.summary,
+  };
+  if (parsed.values.json === true) await writeJsonAndExit(result);
+  console.log(`factory: ${reply.summary} (home: ${home})`);
+  if (archivedSeats.length > 0) console.log(`  archived seats: ${archivedSeats.join(", ")}`);
+  process.exit(0);
+}
+
 // `project list` (ticket 01): a local read of the per-Project registry
 // manifest — the plugin need not be running, nothing is written, nothing prompts.
 if (command === "project" && rest[0] === "list") {
@@ -1350,7 +1446,7 @@ if (command === "reset" || command === "delete" || command === "project") {
   if (command === "project") {
     const sub = parsed.positionals[0];
     if (sub !== "delete" && sub !== "reset") {
-      fail(`project: unknown subcommand "${sub ?? "(none)"}" — use "project list [--json]", "project register [--workspace <dir>]", "project delete [--workspace <dir>] [--project <slug>]" or "project reset [--workspace <dir>] [--project <slug>]"`);
+      fail(`project: unknown subcommand "${sub ?? "(none)"}" — use "project list [--json]", "project register [--workspace <dir>]", "project rotate [--workspace <dir> | --project <slug>]", "project delete [--workspace <dir>] [--project <slug>]" or "project reset [--workspace <dir>] [--project <slug>]"`);
     }
     if (parsed.positionals.length > 1) {
       fail(`project ${sub}: unexpected positional "${parsed.positionals[1]}"`);

@@ -336,6 +336,22 @@ export interface SpoolResetRequest {
 }
 
 /**
+ * Owner-only Rotate seats (ADR 0060): `factory project rotate` retires the
+ * Project's Lead then Supervisor with no handover and clears the seat
+ * bindings — the surface handlers' `projectRotate` is the implementation.
+ * Its own kind: `lead_rotate` stays the legacy spelling of the Lead handoff.
+ * Refused with `code: "seat-cannot-rotate"` when called from any non-Owner seat.
+ */
+export interface SpoolRotateRequest {
+  id: string;
+  kind: "rotate";
+  workspace?: string;
+  project?: string;
+  submitter?: string;
+  seat?: SpoolSeat;
+}
+
+/**
  * Owner-only Project Delete (v0.0.35, ADR 0024): `factory project delete` /
  * `factory delete` purges all Factory state, worktrees, branches, correlations,
  * `<stateDir>/projects/<slug>/` (including `project.json` and `lanes.json`),
@@ -520,6 +536,7 @@ export type SpoolRequest =
   | SpoolSupervisorDispatchRequest
   | SpoolSupervisorReportRequest
   | SpoolResetRequest
+  | SpoolRotateRequest
   | SpoolDeleteRequest
   | SpoolProjectRegisterRequest
   | SpawnRequest
@@ -546,6 +563,9 @@ export type SupervisorReportHandler = (request: SpoolSupervisorReportRequest) =>
 
 /** Resets a Project — the surface handlers' `projectReset` is the implementation (v0.0.24, ADR 0015 §6). */
 export type ProjectResetHandler = (request: SpoolResetRequest) => Promise<SpoolReply>;
+
+/** Rotates a Project's seats (no handover) — the surface handlers' `projectRotate` is the implementation (ADR 0060). */
+export type ProjectRotateHandler = (request: SpoolRotateRequest) => Promise<SpoolReply>;
 
 /** Deletes a Project completely — the surface handlers' `projectDelete` is the implementation (v0.0.35, ADR 0024). */
 export type ProjectDeleteHandler = (request: SpoolDeleteRequest) => Promise<SpoolReply>;
@@ -905,6 +925,18 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
       ...(req.project === undefined ? {} : { project: req.project }),
       ...(req.workspace === undefined ? {} : { workspace: req.workspace }),
       ...(req.keepSeats === undefined ? {} : { keepSeats: req.keepSeats }),
+      ...submitterField,
+      ...seatField,
+    };
+  }
+  if (req.kind === "rotate") {
+    if (req.project !== undefined && (typeof req.project !== "string" || req.project.trim() === "")) return undefined;
+    if (req.workspace !== undefined && (typeof req.workspace !== "string" || req.workspace.trim() === "")) return undefined;
+    return {
+      id: req.id,
+      kind: "rotate",
+      ...(req.project === undefined ? {} : { project: req.project }),
+      ...(req.workspace === undefined ? {} : { workspace: req.workspace }),
       ...submitterField,
       ...seatField,
     };
@@ -1469,6 +1501,7 @@ const PROJECT_SCOPED_SPOOL_KINDS = new Set([
   "ask",
   "notebook",
   "reset",
+  "rotate",
   "delete",
   "project_register",
 ]);
@@ -1495,6 +1528,7 @@ function contextOfSpoolRequest(request: SpoolRequest): TargetProjectContext {
     case "ask":
       return { project: request.projectSlug, task: request.task, workspace: request.cwd, agentId: request.agent, submitter: request.submitter };
     case "reset":
+    case "rotate":
       return { project: request.project, workspace: request.workspace, submitter: request.submitter };
     case "delete":
       return {
@@ -1549,7 +1583,7 @@ export function routeSpoolRequest(root: Factory, request: SpoolRequest, registry
     }
     return { factory, slug: target.slug };
   }
-  if (request.kind === "reset" || request.kind === "delete") return { factory: root };
+  if (request.kind === "reset" || request.kind === "rotate" || request.kind === "delete") return { factory: root };
   if (target.code === "unknown-project" || target.code === "ambiguous-task-project") {
     return { reply: { id: request.id, ok: false, code: target.code, message: target.message } };
   }
@@ -1569,7 +1603,7 @@ export async function handleSpoolRequest(
   if ("reply" in routing) return routing.reply;
   const effective = routing.factory;
   if (request.kind === "upgrade" || request.kind === "history_import" || request.kind === "history_import_status") return handleAdmittedSpoolRequest(effective, request, deps);
-  if ((request.kind === "reset" || request.kind === "delete" || request.kind === "project_register") && !effective.history.maintenanceActive) return effective.history.withExclusiveMaintenance(() => handleAdmittedSpoolRequest(effective, request, deps, registry));
+  if ((request.kind === "reset" || request.kind === "rotate" || request.kind === "delete" || request.kind === "project_register") && !effective.history.maintenanceActive) return effective.history.withExclusiveMaintenance(() => handleAdmittedSpoolRequest(effective, request, deps, registry));
   const admitted = () => effective.history.runOperation(() => handleAdmittedSpoolRequest(effective, request, deps, registry), { newWork: !["ask", "meter", "repoke", "respawn", "needs_human"].includes(request.kind) });
   const run = () => {
     const workspace = request.kind === "contract" ? request.workspace : (request.kind === "spawn" || request.kind === "respawn") ? effective.contractFor(request.task)?.workspace : undefined;
@@ -1589,7 +1623,7 @@ export async function handleSpoolRequest(
 }
 
 async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolRequest, deps: SpoolDeps, registry?: FactoryRegistry): Promise<SpoolReply> {
-  const { ask: askHandler, leadRotate: leadRotateHandler, leadDispatch: leadDispatchHandler, peerMail: peerMailHook, supervisorDispatch: supervisorDispatchHandler, supervisorReport: supervisorReportHandler, daemon, projectReset: projectResetHandler, projectDelete: projectDeleteHandler, projectRegister: projectRegisterHandler, sanitizeLane, home, usageMeter, recordUsage } = deps;
+  const { ask: askHandler, leadRotate: leadRotateHandler, leadDispatch: leadDispatchHandler, peerMail: peerMailHook, supervisorDispatch: supervisorDispatchHandler, supervisorReport: supervisorReportHandler, daemon, projectReset: projectResetHandler, projectRotate: projectRotateHandler, projectDelete: projectDeleteHandler, projectRegister: projectRegisterHandler, sanitizeLane, home, usageMeter, recordUsage } = deps;
   const resolvedDaemon = resolveDaemonArg(daemon);
   try {
     const effectiveSeat = await resolveEffectiveSeat(factory, resolvedDaemon, request);
@@ -1616,6 +1650,17 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
         ok: false,
         code: "seat-cannot-reset",
         message: `Seat ${effectiveSeat} cannot call factory reset; project reset is an Owner-only action.`,
+      };
+    }
+    if (
+      request.kind === "rotate" &&
+      isProjectSeat(effectiveSeat)
+    ) {
+      return {
+        id: request.id,
+        ok: false,
+        code: "seat-cannot-rotate",
+        message: `Seat ${effectiveSeat} cannot call factory project rotate; rotating a Project's seats is an Owner-only action.`,
       };
     }
     if (
@@ -1911,6 +1956,17 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
         };
       }
       return await projectResetHandler(request);
+    }
+    if (request.kind === "rotate") {
+      if (projectRotateHandler === undefined) {
+        return {
+          id: request.id,
+          ok: false,
+          code: "project-rotate-unavailable",
+          message: "this daemon's factory plugin does not handle seat rotation — update the plugin",
+        };
+      }
+      return await projectRotateHandler(request);
     }
     if (request.kind === "delete") {
       if (projectDeleteHandler === undefined) {
@@ -2405,6 +2461,8 @@ export interface SpoolOptions {
   supervisorReport?: SupervisorReportHandler;
   /** The Project-reset handler (v0.0.24); without it `reset` requests are refused. */
   projectReset?: ProjectResetHandler;
+  /** The seat-rotation handler (ADR 0060); without it `rotate` requests are refused `project-rotate-unavailable`. */
+  projectRotate?: ProjectRotateHandler;
   /** The Project-delete handler (v0.0.35); without it `delete` requests are refused. */
   projectDelete?: ProjectDeleteHandler;
   /** The Project-register handler; without it `project_register` requests are refused. */
@@ -2689,6 +2747,6 @@ async function handleRequestFile(id: string, requestPath: string, replyPath: str
   } catch { /* malformed requests still receive a reply */ }
   const work = () => handleAdmittedRequestFile(id, requestPath, replyPath, processedPath, admitted, log, deps, registry);
   if (kind === "upgrade") await work();
-  else if (kind === "reset" || kind === "delete" || kind === "project_delete" || kind === "project_register") await admitted.history.withExclusiveMaintenance(work);
+  else if (kind === "reset" || kind === "rotate" || kind === "delete" || kind === "project_delete" || kind === "project_register") await admitted.history.withExclusiveMaintenance(work);
   else await admitted.history.runOperation(work, { newWork: !["ask", "meter", "repoke", "respawn", "needs_human", "history_import", "history_import_status", ""].includes(kind) });
 }
