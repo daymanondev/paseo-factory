@@ -64,6 +64,14 @@ function admitHandoff(handoff: PeerHandoffFields | undefined): PeerHandoffFields
   };
 }
 
+/** Admission's ownership default is the only text normalization for replay. */
+function sameHandoff(left: PeerHandoffFields | undefined, right: PeerHandoffFields | undefined): boolean {
+  if (left === undefined || right === undefined) return left === right;
+  return left.outcome === right.outcome && left.scope === right.scope &&
+    left.verification === right.verification && left.unknowns === right.unknowns &&
+    (left.ownership ?? "lease returned") === (right.ownership ?? "lease returned");
+}
+
 // ---- the mechanical 4-Part Brief gate (v0.5.0, ADR 0054 §1) --------------------------------
 
 /** The canonical section headings every SLP Lead Brief carries (LEAD_WAVE_LAWS, ADR 0054 §1). */
@@ -904,10 +912,16 @@ export function createFactory(options: FactoryOptions): Factory {
       );
       if (completed?.gate !== undefined) {
         const report = completed.events.findLast((event) => event.event === "report_written");
-        if (report?.event === "report_written") {
+        const replayedClaim = completed.events.findLast((event): event is ClaimReported => event.event === "claim_reported");
+        // A poke after the claim began requests another reconciliation turn;
+        // a poke answered by that claim does not invalidate its retries.
+        const repoked = replayedClaim !== undefined && history.some(
+          (event) => event.event === "repoke_dispatched" && event.seq > replayedClaim.seq,
+        );
+        if (report?.event === "report_written" && replayedClaim !== undefined && !repoked &&
+          replayedClaim.mechanical === mechanical && sameHandoff(replayedClaim.handoff, admittedHandoff)) {
           // The replayed outcome is the attempt's own evidence — the admitted
           // handoff rides it exactly as the first delivery did (ADR 0053 §4).
-          const replayedClaim = completed.events.findLast((event): event is ClaimReported => event.event === "claim_reported");
           return {
             attempt: completed.attempt,
             verdict: "green",
