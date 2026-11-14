@@ -1411,10 +1411,16 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       // under <project-root> is written (the <home>-supervisor folder and
       // its AGENTS.md overwrite are retired; roles.ts owns the injection).
       const title = SEAT_TITLES[seat];
-      // A role-provider start (ADR 0056) names only the `factory-<seat>` id:
-      // the before-create hook rewrites it onto this Project's own lane.
+      // A role-provider start (ADR 0056) names the `factory-<seat>` id; the
+      // before-create hook rewrites it onto this Project's own lane. The host
+      // SDK (`@getpaseo/client` ≥ 0.15) refuses a bare id — `config.provider`
+      // must be `provider/model` — so the role id carries the lane's model,
+      // exactly the provider + model pair Paseo's native picker sends.
+      const roleProviderId = FACTORY_SEAT_PROVIDER_IDS[seat === "supervisor" ? "supervisor" : "lead"];
       const config = options?.roleProvider === true
-        ? { provider: FACTORY_SEAT_PROVIDER_IDS[seat === "supervisor" ? "supervisor" : "lead"] }
+        ? parsed !== undefined
+          ? { provider: `${roleProviderId}/${parsed.model}`, ...(parsed.thinking !== undefined ? { thinkingOptionId: parsed.thinking } : {}) }
+          : { provider: roleProviderId }
         : parsed?.thinking !== undefined
           ? { provider: `${parsed.provider}/${parsed.model}`, thinkingOptionId: parsed.thinking }
           : { provider: lane };

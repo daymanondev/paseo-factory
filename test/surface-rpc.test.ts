@@ -80,6 +80,19 @@ interface FakeAgent {
   persistence?: { nativeHandle?: string; sessionId?: string };
 }
 
+/**
+ * The host's create law (`@getpaseo/client` ≥ 0.15 `parseProviderModel`):
+ * `config.provider` must be `provider/model` with both halves non-empty, or
+ * the SDK throws before the request reaches the daemon. A bare role id like
+ * `factory-supervisor` is refused here exactly as the real host refuses it.
+ */
+function assertHostProviderModel(selection: string): void {
+  const separator = selection.indexOf("/");
+  if (separator <= 0 || separator === selection.length - 1) {
+    throw new Error('Expected config.provider in "provider/model" format');
+  }
+}
+
 function fakeDaemon(agents: FakeAgent[]) {
   const created: { config: { provider: string; thinkingOptionId?: string }; cwd: string; title: string; labels: Record<string, string>; prompt?: string }[] = [];
   const sent: { agentId: string; text: string }[] = [];
@@ -126,6 +139,7 @@ function fakeDaemon(agents: FakeAgent[]) {
         };
       },
       create: async (options) => {
+        assertHostProviderModel(options.config.provider);
         created.push({ config: options.config, cwd: options.cwd, title: options.title ?? "", labels: options.labels ?? {}, prompt: options.prompt });
         const id = `agent-created-${created.length}`;
         agents.push({
@@ -7055,7 +7069,7 @@ test("supervisor.start: a vacant seat starts through the role provider — recog
 
   assert.equal(wsCreated.length, 1, "the seat is created inside the Project's Paseo workspace");
   assert.equal(wsCreated[0]!.workspaceId, "ws-panel-main");
-  assert.equal(wsCreated[0]!.provider, "factory-supervisor", "the role provider path — the same id Paseo's native picker launches");
+  assert.equal(wsCreated[0]!.provider, "factory-supervisor/opus-4-8", "the role provider path — the same id Paseo's native picker launches, carrying the Supervisor lane's model (the host SDK refuses a bare id)");
   assert.equal(wsCreated[0]!.title, "Supervisor");
   assert.deepEqual(wsCreated[0]!.labels, { seat: "supervisor", project: project.slug });
   assert.equal(wsCreated[0]!.parent, undefined);
@@ -7253,7 +7267,7 @@ test("onboarding.commit: a plain folder with initGit is initialised and register
   assert.equal(reg.supervisor, reply.agentId, "the Supervisor is bound like a native-picker seat");
   assert.equal(reg.lead ?? null, null, "no Lead binding");
   assert.equal(wired.created.length, 1);
-  assert.equal(wired.created[0]!.provider, "factory-supervisor", "the role provider path");
+  assert.equal(wired.created[0]!.provider, "factory-supervisor/opus-4-8", "the role provider path, in the host's provider/model form");
   assert.equal(wired.created[0]!.workspaceId, "ws-onboard");
   // v0.6.1 (ADR 0057 §5, story 16): the directive rides the Seat kickoff packet's first turn.
   assert.equal(fake.sent.length, 1, "the directive is the seat's first user message");
@@ -7328,7 +7342,7 @@ test("onboarding.commit: only model choices that differ from the machine default
   assert.equal(projectLanes.lanes.supervisor, "claude/opus-4-8");
   const written = JSON.parse(readFileSync(lanesPath(join(stateDir, "projects", project.slug)), "utf8")) as Record<string, string>;
   assert.deepEqual(Object.keys(written), ["lead"], "unchanged lanes keep inheriting the machine table");
-  assert.equal(fake.created[0]!.config.provider, "factory-supervisor");
+  assert.equal(fake.created[0]!.config.provider, "factory-supervisor/opus-4-8");
 
   const plain = makeProject(t, "commit-models-none");
   const none = await handlers.onboardingCommit({ folder: plain.root, models: { supervisor: "claude/opus-4-8", lead: "pi/zcode/glm-5.3", worker: "pi/zcode/glm-5.3" } });
