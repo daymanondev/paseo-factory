@@ -2159,13 +2159,14 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
   const registerProjectFolder = async (
     folder: string,
     context?: SurfaceCallContext,
+    refusalHint = "open the Factory panel from a different workspace folder",
   ): Promise<
     | { ok: true; slug: string; root: string; name: string; bootstrapped: boolean }
     | { ok: false; code: string; error: string }
   > => {
     const resolved = resolveOrBootstrapProject(folder, { stateDir: deps.stateDir, paseoHome: deps.home });
     if (!resolved.ok) {
-      return failure(resolved.code, `${resolved.reason} — open the Factory panel from a different workspace folder`);
+      return failure(resolved.code, `${resolved.reason} — ${refusalHint}`);
     }
     ensureProjectRegistered(deps.stateDir, resolved);
     const daemon = resolveDaemon(context);
@@ -3236,6 +3237,53 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     },
 
     /**
+     * Owner-only Project registration for the CLI (`factory project register`,
+     * delivered over the Spool — the plugin stays the single writer, ADR 0004).
+     * An already-registered folder is reported and nothing is written. Otherwise
+     * the registration goes through `registerProjectFolder` — the very writer the
+     * onboarding Start uses — so a greenfield non-Git folder is bootstrapped
+     * (`git init` + an empty initial commit; `$HOME`, `/` and the factory's own
+     * state are refused) before its slug resolves and the Project is registered.
+     */
+    async projectRegister(input: { workspace: string }, context?: SurfaceCallContext & { seat?: string }) {
+      const callerSeat = typeof context?.seat === "string" ? context.seat.trim() : "";
+      if (callerSeat === "supervisor" || callerSeat === "lead" || callerSeat === "agent") {
+        return failure("seat-cannot-register", `${callerSeat} seat cannot run factory project register — registering a Project is an Owner-only act`);
+      }
+      const workspace = (input?.workspace ?? "").trim();
+      if (workspace === "") return failure("missing-directory", "project register needs a workspace folder — pass --workspace <dir>");
+      const existing = resolveProject(workspace);
+      const registration = existing.ok ? readProjectRegistration(deps.stateDir, existing.slug) : undefined;
+      if (existing.ok && registration !== undefined) {
+        const name = registration.name ?? (basename(registration.root) || existing.slug);
+        return {
+          ok: true as const,
+          slug: existing.slug,
+          root: registration.root,
+          name,
+          bootstrapped: false,
+          alreadyRegistered: true,
+          summary: `Project ${existing.slug} (${registration.root}) is already registered — nothing changed`,
+        };
+      }
+      const registered = await registerProjectFolder(workspace, context, "run `factory project register --workspace <dir>` from a project folder of its own");
+      if (!registered.ok) return registered;
+      const summary = registered.bootstrapped
+        ? `initialised Git and registered Project ${registered.slug} (${registered.root})`
+        : `registered Project ${registered.slug} (${registered.root})`;
+      log(`project register: ${summary}`);
+      return {
+        ok: true as const,
+        slug: registered.slug,
+        root: registered.root,
+        name: registered.name,
+        bootstrapped: registered.bootstrapped,
+        alreadyRegistered: false,
+        summary,
+      };
+    },
+
+    /**
      * Owner-only full Project delete (v0.0.35, ADR 0024): refuses seats with
      * `seat-cannot-delete`, cancels and archives all bound daemon agents and
      * workspaces, deletes temporary task worktrees and `factory/*` branches
@@ -4036,8 +4084,17 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       // Project's OWN maintenance lane — independent Projects keep admitting
       // ordinary work while one Project's history is exclusively held.
       if (!wrappers.has(key)) wrappers.set(key, (...args: unknown[]) => {
-        const lane = key === "projectReset" || key === "projectDelete" ? factoryForResetTarget(args[0] as { projectRoot?: string; project?: string; projectSlug?: string; workspace?: string } | undefined) : deps.factory;
-        return !lane.history.maintenanceActive && (key === "projectReset" || key === "projectDelete")
+        // A register takes the lane of the Project its folder is already registered as
+        // (the one a delete/reset of it holds), else the root lane — same law as the spool's router.
+        const registerOwner = key === "projectRegister" && deps.registry !== undefined
+          ? resolveTargetProject(deps.registry, { workspace: (args[0] as { workspace?: string } | undefined)?.workspace })
+          : undefined;
+        const lane = key === "projectReset" || key === "projectDelete"
+          ? factoryForResetTarget(args[0] as { projectRoot?: string; project?: string; projectSlug?: string; workspace?: string } | undefined)
+          : registerOwner?.ok === true && registerOwner.via === "workspace" && deps.registry !== undefined
+            ? deps.registry.factoryForProject(registerOwner.slug)
+            : deps.factory;
+        return !lane.history.maintenanceActive && (key === "projectReset" || key === "projectDelete" || key === "projectRegister")
           ? lane.history.withExclusiveMaintenance(() => value.apply(receiver, args))
           : lane.history.runOperation(() => value.apply(receiver, args), { newWork: true });
       });
