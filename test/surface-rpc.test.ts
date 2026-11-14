@@ -42,6 +42,7 @@ import { lanesPath, loadLanes, saveLanes } from "../src/lanes.ts";
 import { CORE_FACTORY_SKILLS } from "../plugin/server/core/companion-tools.ts";
 import { FACTORY_ROLE_PROVIDERS } from "../src/role-providers.ts";
 import { prepareTaskWorktree } from "../src/workspace.ts";
+import { readHandoffProgress, writeHandoffProgress } from "../plugin/server/handoff-progress.ts";
 import { deliverLeadMail, enqueueLeadMail } from "../src/mailbox.ts";
 import { disposeDir, gitCommitAll, makeTempDir, writeLanes } from "./helpers.ts";
 
@@ -3939,6 +3940,192 @@ test("v0.0.24 (ADR 0015 §5): projectReset wipes a project's ledger events, task
   assert.equal(keptReg?.taskWorkspaces, undefined);
   assert.equal(keptReg?.dispatchers, undefined);
   assert.equal(factory.contractFor("T-RESET-2"), undefined);
+});
+
+// ---- Rotate seats (ADR 0060): the Owner's one no-handover seat replacement ----
+
+test("ADR 0060: projectRotate archives the Lead then the Supervisor, drops mail and every handover record, clears the bindings, and keeps the notebook, lanes, Ledger, worktrees and open Tasks", async (t) => {
+  const project = makeProject(t, "rotate-target");
+  const { stateDir, home, factory, fake, stopped } = makeSurface(t);
+  const mailboxResets: string[] = [];
+  const handlers = createSurfaceHandlers({
+    factory,
+    stateDir,
+    home,
+    daemon: fake.daemon,
+    stopAgent: async (agentId) => {
+      stopped.push(agentId);
+      return { ok: true };
+    },
+    resetProjectMailbox: (slug) => {
+      mailboxResets.push(slug);
+    },
+  });
+  saveLanes(stateDir, { supervisor: "pi/zai/glm-5.3", lead: "pi/zai/glm-5.3", worker: "pi/zai/glm-5.3" }, project.slug);
+  const lanesFile = join(stateDir, "projects", project.slug, "lanes.json");
+  const supervisor = await handlers.supervisorEnsure({ projectRoot: project.root });
+  const lead = await handlers.leadEnsure({ projectRoot: project.root });
+  assert.ok(supervisor.ok && lead.ok);
+
+  // An open Task with a worktree but NO live Peer: it must survive the rotation.
+  factory.setContract({ task: "T-ROT-1", workspace: project.root, gate: "true", artifact: "README.md" });
+  const wt = prepareTaskWorktree({ stateDir, workspace: project.root, task: "T-ROT-1" });
+  assert.ok(wt.ok, wt.ok ? "" : wt.reason);
+
+  const projectDir = join(stateDir, "projects", project.slug);
+  enqueueLeadMail(join(projectDir, "mailbox.jsonl"), { from: "owner", kind: "directive", text: "stale directive" });
+  for (const name of ["lead-handoff.md", "lead-handoff-extraction.json", "supervisor-handoff.md", "supervisor-handoff-extraction.json", "handoff-lead.json", "handoff-supervisor.json", "notebook.md", "usage.json"]) {
+    writeFileSync(join(projectDir, name), name === "notebook.md" ? "## 1. Verification & Run Recipe\n" : "{}\n");
+  }
+  writeProjectRegistration(stateDir, project.slug, {
+    root: project.root,
+    rotationState: "handing_over",
+    handoffRequestedAt: "2026-10-20T00:00:00.000Z",
+    releasedSupervisors: [{ agentId: "agent-released-old", waitingOnLead: lead.agentId, releasedAt: "2026-10-20T00:00:00.000Z" }],
+    taskWorkspaces: { "T-ROT-1": "ws-wt-1" },
+    dispatchers: ["chat-dispatcher-1"],
+    workspaceId: "ws-main",
+    paseoProjectId: "paseo-proj-1",
+  });
+
+  const reply = await handlers.projectRotate({ projectRoot: project.root });
+  assert.ok(reply.ok, reply.ok ? "" : reply.error);
+  assert.equal(reply.project, project.slug);
+  assert.equal(reply.projectRoot, project.root);
+  assert.deepEqual(reply.archivedSeats, [lead.agentId, supervisor.agentId], "Lead first, then Supervisor, each reported by id");
+  assert.ok(fake.archived.indexOf(lead.agentId) !== -1 && fake.archived.indexOf(lead.agentId) < fake.archived.indexOf(supervisor.agentId), "the daemon archived the Lead before the Supervisor");
+  assert.ok(fake.archived.includes("agent-released-old"), "a released Supervisor waiting on the Lead is archived with it");
+  assert.match(reply.summary, /Rotated seats of project/);
+  assert.match(reply.summary, /Supervisor \(Factory\)/, "the reply names the exact next step");
+  assert.deepEqual(mailboxResets, [project.slug]);
+
+  // Mail and every handover/handoff record are gone.
+  for (const name of ["mailbox.jsonl", "lead-handoff.md", "lead-handoff-extraction.json", "supervisor-handoff.md", "supervisor-handoff-extraction.json", "handoff-lead.json", "handoff-supervisor.json"]) {
+    assert.equal(existsSync(join(projectDir, name)), false, `${name} was removed`);
+  }
+  // The Project's memory and history stay.
+  assert.equal(existsSync(join(projectDir, "notebook.md")), true, "the notebook is kept");
+  assert.equal(existsSync(join(projectDir, "usage.json")), true, "usage history is kept");
+  assert.equal(existsSync(lanesFile), true, "lanes.json is kept");
+  assert.equal(existsSync(wt.path), true, "the Task worktree is kept");
+  assert.equal(factory.contractFor("T-ROT-1")?.workspace, project.root, "the open Task stays in the Ledger");
+
+  // The registration drops the seat/handoff fields and keeps the Project's identity and workspaces.
+  const reg = readProjectRegistration(stateDir, project.slug);
+  assert.equal(reg?.root, project.root);
+  assert.equal(reg?.supervisor, undefined);
+  assert.equal(reg?.lead, undefined);
+  assert.equal(reg?.releasedSupervisors, undefined);
+  assert.equal(reg?.rotationState, undefined);
+  assert.equal(reg?.handoffRequestedAt, undefined);
+  assert.equal(reg?.workspaceId, "ws-main");
+  assert.equal(reg?.paseoProjectId, "paseo-proj-1");
+  assert.deepEqual(reg?.taskWorkspaces, { "T-ROT-1": "ws-wt-1" });
+  assert.deepEqual(reg?.dispatchers, ["chat-dispatcher-1"]);
+});
+
+test("ADR 0060: projectRotate is refused with peers-live — naming the Task and agent, an idle Peer included — and changes nothing", async (t) => {
+  const project = makeProject(t, "rotate-peers");
+  const agents: FakeAgent[] = [];
+  const { stateDir, factory, handlers, fake, stopped } = makeSurface(t, agents);
+  const supervisor = await handlers.supervisorEnsure({ projectRoot: project.root });
+  const lead = await handlers.leadEnsure({ projectRoot: project.root });
+  assert.ok(supervisor.ok && lead.ok);
+
+  factory.setContract({ task: "T-LIVE-1", workspace: project.root, gate: "true", artifact: "README.md" });
+  const wt = prepareTaskWorktree({ stateDir, workspace: project.root, task: "T-LIVE-1" });
+  assert.ok(wt.ok, wt.ok ? "" : wt.reason);
+  factory.requestSpawn({ task: "T-LIVE-1", provider: "pi/zai/glm-5.3", arity: 1, worktree: wt.path });
+  // Paused by the Owner's Esc: idle, yet still the Task's live Peer.
+  agents.push({ id: "agent-peer-idle", labels: { seat: "agent", project: project.slug, task: "T-LIVE-1" }, cwd: wt.path, status: "idle" });
+
+  const projectDir = join(stateDir, "projects", project.slug);
+  enqueueLeadMail(join(projectDir, "mailbox.jsonl"), { from: "owner", kind: "directive", text: "keep me" });
+  writeFileSync(join(projectDir, "lead-handoff.md"), "# keep me\n");
+
+  const refused = await handlers.projectRotate({ projectRoot: project.root });
+  assert.equal(refused.ok, false);
+  assert.ok(!refused.ok);
+  assert.equal(refused.code, "peers-live");
+  assert.match(refused.error, /T-LIVE-1/);
+  assert.match(refused.error, /agent-peer-idle/);
+  assert.deepEqual(fake.archived, [], "nothing archived");
+  assert.deepEqual(stopped, [], "nothing cancelled");
+  assert.equal(existsSync(join(projectDir, "mailbox.jsonl")), true, "mail kept");
+  assert.equal(existsSync(join(projectDir, "lead-handoff.md")), true, "handover kept");
+  const reg = readProjectRegistration(stateDir, project.slug);
+  assert.equal(reg?.supervisor, supervisor.agentId);
+  assert.equal(reg?.lead, lead.agentId);
+
+  // A Peer in error no longer holds the Task; the rotation goes through.
+  agents.find((agent) => agent.id === "agent-peer-idle")!.status = "error";
+  const allowed = await handlers.projectRotate({ projectRoot: project.root });
+  assert.ok(allowed.ok, allowed.ok ? "" : allowed.error);
+});
+
+test("ADR 0060: projectRotate on a Project with no bound seats succeeds and says nothing was archived", async (t) => {
+  const project = makeProject(t, "rotate-empty");
+  const { stateDir, handlers, fake } = makeSurface(t);
+  writeProjectRegistration(stateDir, project.slug, { root: project.root });
+  const reply = await handlers.projectRotate({ project: project.slug });
+  assert.ok(reply.ok, reply.ok ? "" : reply.error);
+  assert.deepEqual(reply.archivedSeats, []);
+  assert.match(reply.summary, /nothing archived/);
+  assert.match(reply.summary, /Supervisor \(Factory\)/);
+  assert.deepEqual(fake.archived, []);
+  assert.equal(readProjectRegistration(stateDir, project.slug)?.root, project.root, "the Project stays registered");
+});
+
+test("ADR 0060: projectRotate cancels an in-flight handoff — its progress is dropped and a half-created successor is archived too", async (t) => {
+  const project = makeProject(t, "rotate-handoff");
+  const agents: FakeAgent[] = [];
+  const { stateDir, handlers, fake } = makeSurface(t, agents);
+  const lead = await handlers.leadEnsure({ projectRoot: project.root });
+  assert.ok(lead.ok);
+  // The handoff's successor Lead was created but not yet bound.
+  agents.push({ id: "agent-lead-successor", labels: { seat: "lead", project: project.slug } });
+  const now = "2026-10-20T00:00:00.000Z";
+  const progress = { seat: "lead", reason: "owner" as const, state: "creating-successor" as const, fromLane: { provider: "pi", model: "a" }, toLane: { provider: "pi", model: "b" }, startedAt: now, updatedAt: now };
+  writeHandoffProgress(stateDir, project.slug, progress);
+  writeHandoffProgress(stateDir, project.slug, { ...progress, seat: "supervisor", state: "handing-over" });
+  writeProjectRegistration(stateDir, project.slug, { root: project.root, rotationState: "handing_over", handoffRequestedAt: now });
+
+  const reply = await handlers.projectRotate({ projectRoot: project.root });
+  assert.ok(reply.ok, reply.ok ? "" : reply.error);
+  assert.ok(fake.archived.includes(lead.agentId) && fake.archived.includes("agent-lead-successor"), "every live Lead candidate is archived");
+  assert.equal(readHandoffProgress(stateDir, project.slug, "lead"), null);
+  assert.equal(readHandoffProgress(stateDir, project.slug, "supervisor"), null);
+  const reg = readProjectRegistration(stateDir, project.slug);
+  assert.equal(reg?.rotationState, undefined);
+  assert.equal(reg?.handoffRequestedAt, undefined);
+});
+
+test("ADR 0060: projectRotate fails unknown-project and ambiguous-project exactly as projectReset does", async (t) => {
+  const a = makeProject(t, "rotate-a");
+  const b = makeProject(t, "rotate-b");
+  const { stateDir, handlers } = makeSurface(t);
+
+  const none = await handlers.projectRotate({});
+  assert.ok(!none.ok);
+  assert.equal(none.code, "unknown-project");
+  assert.deepEqual(none, { ...(await handlers.projectReset({})) });
+
+  const unregistered = await handlers.projectRotate({ project: "nope" });
+  assert.ok(!unregistered.ok);
+  assert.equal(unregistered.code, "unknown-project");
+  assert.match(unregistered.error, /"nope" is not registered/);
+
+  writeProjectRegistration(stateDir, a.slug, { root: a.root });
+  writeProjectRegistration(stateDir, b.slug, { root: b.root });
+  const ambiguous = await handlers.projectRotate({});
+  assert.ok(!ambiguous.ok);
+  assert.equal(ambiguous.code, "ambiguous-project");
+  assert.match(ambiguous.error, new RegExp(a.slug));
+  assert.match(ambiguous.error, /to rotate/);
+
+  const notRepo = await handlers.projectRotate({ projectRoot: join(a.root, "..", "no-such-dir") });
+  assert.ok(!notRepo.ok);
+  assert.equal(notRepo.code, "unknown-project");
 });
 
 // ---- v0.0.25 (ADR 0012 §2–§4): Core + Companion Version Visibility & On-Demand Update Check ----

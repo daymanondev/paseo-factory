@@ -92,6 +92,7 @@ import {
 } from "./core/mailbox.ts";
 import type { LeadMailFrom, LeadMailItem, LeadMailKind, MailRecipient } from "./core/mailbox.ts";
 import { boundTaskPeers, peerIsRunning } from "./task-peers.ts";
+import { driverWaveInFlight, projectPeersInFlight, taskHasSettledPeerOutcome } from "./peer-in-flight.ts";
 import { foldTasks, renderLedgerLine } from "./view.ts";
 import type { TaskView } from "../shared/view.ts";
 import type {
@@ -1444,26 +1445,6 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       boundTaskPeers({ stateDir: deps.stateDir, slug, task: task.task, events, live }).some(peerIsRunning));
 
   /**
-   * Ledger-first quiet-point check for `rotation_pending` (v0.0.99, ADR 0031
-   * §3): once a Task's folded Ledger status in the current Contract epoch has
-   * reached a Peer-terminal state (`ready-to-accept` / GREEN, `needs-human`,
-   * `red` at `MAX_ATTEMPTS`, or a queued `from: "peer"` blocker in
-   * `mailbox.jsonl` — a `kind: "peer_challenge"` challenge awaiting the Lead's
-   * ruling or a `kind: "needs_human"` ceiling stall), the Task is in Lead's
-   * court and no longer counts as having Peer work in flight — even while the
-   * Peer's `agent_claim` or `agent_escalate_blocker` tool call is still
-   * returning inside an active turn (`peer.status === "running"`).
-   */
-  const taskHasSettledPeerOutcome = (task: TaskView, queuedPeerBlockerTasks?: ReadonlySet<string>): boolean =>
-    task.accepted ||
-    task.status === "accepted" ||
-    task.status === "closed" ||
-    task.status === "ready-to-accept" ||
-    task.status === "needs-human" ||
-    (task.status === "red" && task.attempts.length >= MAX_ATTEMPTS) ||
-    (queuedPeerBlockerTasks?.has(task.task) ?? false);
-
-  /**
    * The quiet-point predicate for `rotation_pending` (v0.0.99/v0.0.93, ADR
    * 0031 §3). v0.2.2 (ADR 0050 §1) adds the durable in-flight arm: a Task
    * whose spawn round is still open and whose bound Peer is live on the
@@ -1479,45 +1460,14 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
   const projectPeerInFlight = async (slug: string): Promise<boolean> => {
     const reg = readProjectRegistration(deps.stateDir, slug);
     if (reg?.root === undefined) return false;
-    const events = projectEventsOf(slug, reg.root);
-    const tasks = foldTasks(events);
-    let queuedPeerBlockerTasks: Set<string> | undefined;
-    let queuedPeerMailTasks: Set<string> | undefined;
+    let queued: readonly LeadMailItem[] | undefined;
     try {
-      const mailbox = readLeadMailbox(mailboxPath(slug));
-      const queuedPeerMail = mailbox.queued.filter((item) => item.from === "peer" && typeof item.task === "string");
-      queuedPeerBlockerTasks = new Set(queuedPeerMail.filter((item) => item.kind === "needs_human" || item.kind === "peer_challenge").map((item) => item.task!));
-      queuedPeerMailTasks = new Set(queuedPeerMail.map((item) => item.task!));
+      queued = readLeadMailbox(mailboxPath(slug)).queued;
     } catch {
-      queuedPeerBlockerTasks = undefined;
-      queuedPeerMailTasks = undefined;
+      queued = undefined;
     }
-    const settledTasks = new Set(
-      tasks.filter((task) => taskHasSettledPeerOutcome(task, queuedPeerBlockerTasks)).map((task) => task.task),
-    );
     const live = [...(await liveAgentsById()).values()];
-    const activeWaveEvents = settledTasks.size > 0 || (queuedPeerMailTasks?.size ?? 0) > 0
-      ? events.filter(
-          (evt) =>
-            !("task" in evt) ||
-            typeof evt.task !== "string" ||
-            (!settledTasks.has(evt.task) && !(queuedPeerMailTasks?.has(evt.task) ?? false)),
-        )
-      : events;
-    if (driverWaveInFlight(activeWaveEvents, live, slug, "live")) return true;
-    // v0.8.5: a dispatched, unsettled Task (`running`, or `red` below the
-    // ceiling) whose bound Peer is live and not `error` holds, whatever the
-    // Peer's status — `idle` after the Owner's Esc, between
-    // turns, or after a red Attempt. Only an outcome (verdict, needs-human,
-    // close, any queued Peer mail) or a dead/archived Peer releases it.
-    return tasks.some((task) => {
-      if (settledTasks.has(task.task)) return false;
-      const dispatchedAndOpen =
-        (task.status === "running" || task.status === "red") && !(queuedPeerMailTasks?.has(task.task) ?? false);
-      return boundTaskPeers({ stateDir: deps.stateDir, slug, task: task.task, events, live }).some(
-        (peer) => peerIsRunning(peer) || (dispatchedAndOpen && peer.status !== "error"),
-      );
-    });
+    return projectPeersInFlight({ stateDir: deps.stateDir, slug, events: projectEventsOf(slug, reg.root), live, ...(queued === undefined ? {} : { queued }) }).length > 0;
   };
 
   /**
@@ -2454,73 +2404,6 @@ function contractWorkspaceOf(events: readonly LedgerEvent[], task: string): stri
   return workspace;
 }
 
-/**
- * The driver-held signal, derived from the ledger alone (spec §Implementation
- * Decisions 4, last bullet): a synchronous CLI Driver wave is in flight while
- * any task's latest spawn round is still open — `spawn_dispatched` with
- * neither a terminal verdict (`gate_finished`) nor a `needs_human` close
- * after it. The wave's last terminal outcome clears the predicate, and that
- * outcome's own peer hook pumps the held batch.
- *
- * v0.0.92 (spec §Implementation Decision 4): the live-agents liveness check
- * runs for EVERY open round — a legacy `spawn_dispatched` with no `worktree`
- * field is checked by `labels.task` and the spawned agent id, never skipped.
- * A `Peer` that has terminated, errored, or been archived (the cascade kill
- * during `Lead handoff`) removes its round immediately, so a dead `Peer` can
- * never deadlock `drainLeadMailbox` from delivering the successor Lead's
- * Turn-1 kickoff. The `labels.task` arm stays Project-scoped: two Projects
- * may share a Task id, and a neighbor's live `Peer` is not this Project's
- * wave. `agent` is absent on today's `spawn_dispatched` lines (recorded
- * before any agent exists) — the id arm is the defensive read for any future
- * writer that stamps it, with the CLI Driver's own `"driver"` marker treated
- * as absent.
- *
- * v0.2.2 (ADR 0050 §1, the durable in-flight arm): `liveness: "live"` keeps
- * an open round while its bound `Peer` is merely live and not `error` —
- * `idle`/`closed` included, because `idle`-because-paused and
- * `idle`-between-turns are indistinguishable at the only layer that survives
- * restarts (the ledger plus the live daemon snapshot). Only the quiet-point
- * check (`projectPeerInFlight`) passes `"live"`; the default `"running"`
- * arm (running/initializing only) keeps governing `notifyPeer`'s pump gate
- * and `projectHasPeerWork`; a `Peer` that has already queued its verdict
- * must never hold the Lead's mail delivery.
- */
-function driverWaveInFlight(
-  events: readonly LedgerEvent[],
-  liveAgents?: readonly SurfaceAgentSnapshot[],
-  projectSlug?: string,
-  liveness?: "running" | "live",
-): boolean {
-  const openRounds = new Map<string, Extract<LedgerEvent, { event: "spawn_dispatched" }>>();
-  for (const evt of events) {
-    if (!("task" in evt) || typeof evt.task !== "string") continue;
-    if (evt.event === "spawn_dispatched") openRounds.set(evt.task, evt);
-    else if (evt.event === "contract_set" || evt.event === "gate_finished" || evt.event === "needs_human") {
-      openRounds.delete(evt.task);
-    }
-  }
-  if (openRounds.size > 0 && liveAgents !== undefined) {
-    for (const [task, spawnEvt] of [...openRounds.entries()]) {
-      const wt = typeof spawnEvt.worktree === "string" && spawnEvt.worktree !== "" ? spawnEvt.worktree : undefined;
-      const stampedAgent = (spawnEvt as { agent?: unknown }).agent;
-      const spawnedAgentId =
-        typeof stampedAgent === "string" && stampedAgent !== "" && stampedAgent !== "driver" ? stampedAgent : undefined;
-      const peerIsLively = (agent: SurfaceAgentSnapshot): boolean =>
-        liveness === "live" ? agent.status !== "error" : agent.status === "running" || agent.status === "initializing";
-      const hasLivePeer = liveAgents.some(
-        (agent) =>
-          agent.archivedAt === null &&
-          peerIsLively(agent) &&
-          ((wt !== undefined && typeof agent.cwd === "string" && (agent.cwd === wt || agent.cwd.startsWith(`${wt}/`))) ||
-            (agent.labels?.task === task &&
-              (projectSlug === undefined || agent.labels?.project === undefined || agent.labels?.project === projectSlug)) ||
-            (spawnedAgentId !== undefined && agent.id === spawnedAgentId)),
-      );
-      if (!hasLivePeer) openRounds.delete(task);
-    }
-  }
-  return openRounds.size > 0;
-}
 
 /** One queued batch as the single prompt the Lead receives — every waiting item, in enqueue order. */
 function renderMailPrompt(items: readonly LeadMailItem[]): string {
