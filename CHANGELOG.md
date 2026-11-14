@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-11-14
+
+**Start Supervisor works again on Paseo 0.15.**
+
+### Fixed
+
+- **Start Supervisor failed with `Expected config.provider in "provider/model" format`.** Paseo's 0.15 host SDK refuses a bare provider id, and the Factory tab's Start Supervisor button (and the onboarding commit's start) sent bare `factory-supervisor`, so no Supervisor could be created. It now sends `factory-supervisor/<the Supervisor lane's model>`, which is the same provider and model pair Paseo's own `Supervisor (Factory)` picker sends. The seat is still rewritten onto the Project's lane.
+
 ## [0.10.0] - 2026-11-14
 
 **Rotate seats: start a long-idle Project with a fresh Supervisor and Lead, no handoff.**
