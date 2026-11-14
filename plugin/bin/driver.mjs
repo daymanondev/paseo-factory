@@ -789,6 +789,52 @@ export function verdictOfThisRun(events, task) {
 }
 
 /**
+ * Whether an `idle` Peer may count as finished (v0.8.5): only when the ledger
+ * already shows a Peer-terminal outcome since this run's latest spawn,
+ * respawn, or in-place re-contract — a green gate, `needs_human`, an accepted
+ * attempt, or a closed task. `idle` alone is not an outcome: the Owner's Esc
+ * (a canceled turn) and a turn the model ended without `agent_claim` both
+ * land there, and finishing them metered and archived a Peer that still owned
+ * its task — which released the Lead's handoff quiet point mid-task. Such a
+ * Peer stays open and watched; the plugin nudges a turn that ended without a
+ * Claim, and the Owner resumes a paused one. A task the ledger never spawned
+ * (a bare observe) keeps the old snapshot-only finish.
+ */
+export function idleIsFinish(events, task) {
+  let anchored = false;
+  let settled = false;
+  for (const evt of events) {
+    if (evt.task !== task) continue;
+    if (evt.event === "spawn_dispatched" || evt.event === "respawn_dispatched") {
+      anchored = true;
+      settled = false;
+    } else if (evt.event === "contract_set") {
+      settled = false;
+    } else if (
+      (evt.event === "gate_finished" && evt.verdict === "green") ||
+      evt.event === "needs_human" ||
+      evt.event === "attempt_accepted" ||
+      evt.event === "task_closed"
+    ) {
+      settled = true;
+    }
+  }
+  return !anchored || settled;
+}
+
+/**
+ * Whether this watch's run was superseded (v0.8.5): the ledger shows a newer
+ * `spawn_dispatched` / `respawn_dispatched` for the task than the one this
+ * driver created its agent under (`runSeq`). The newer run owns the task; the
+ * old watch ends without a respawn. Entries without a recorded `runSeq`
+ * (a bare observe) are never superseded.
+ */
+export function supersededRun(events, task, runSeq) {
+  if (!Number.isInteger(runSeq)) return false;
+  return events.some((evt) => evt.task === task && (evt.event === "spawn_dispatched" || evt.event === "respawn_dispatched") && evt.seq > runSeq);
+}
+
+/**
  * The Lead's one spend: one `repoke` request through the spool (the plugin
  * holds the one-per-task law and appends the line — dispatched or refused),
  * and only on ok the fixed message over the daemon's own session socket.
@@ -884,6 +930,11 @@ export function agentFate(agent) {
   }
   if (agent.status === "closed") {
     return { terminal: true, fate: "closed", reason: "the agent was closed" };
+  }
+  if (typeof agent.archivedAt === "string" && agent.archivedAt !== "") {
+    // v0.8.5: a held idle Peer that a re-spawn, reset re-contract or close
+    // retired — nothing left to watch.
+    return { terminal: true, fate: "closed", reason: "the agent was archived" };
   }
   const pending = Array.isArray(agent.pendingPermissions) ? agent.pendingPermissions.length : 0;
   if (agent.status === "idle" && (agent.attentionReason === "finished" || (agent.lastUserMessageAt !== null && agent.lastUserMessageAt !== undefined && pending === 0))) {
@@ -989,6 +1040,13 @@ export async function observeTasks(
       return;
     }
     const events = readDriverLedger(stateDir, ledgerOptions);
+    if (supersededRun(events, entry.task, entry.runSeq)) {
+      // v0.8.5: a newer run owns the task — never respawn over it.
+      entry.terminal = { fate: "closed", reason: "superseded by a newer spawn of the task" };
+      await onTerminal(entry);
+      await archiveTaskAgentBestEffort(rpc, entry.agentId);
+      return;
+    }
     let lastSpawn;
     let lastGate;
     let lastRespawn;
@@ -1069,6 +1127,7 @@ export async function observeTasks(
             ...(projectSlug === undefined ? {} : { projectSlug }),
           });
           entry.agentId = newAgentId;
+          if (respawnSeq !== undefined) entry.runSeq = respawnSeq;
           if (leadAgentId !== undefined) entry.leadAgentId = leadAgentId;
           if (workspaceId !== undefined) entry.workspaceId = workspaceId;
           if (projectSlug !== undefined) entry.projectSlug = projectSlug;
@@ -1180,6 +1239,7 @@ export async function observeTasks(
         continue;
       }
       const fate = agentFate(snapshot);
+      if (snapshot.status !== "idle") entry.holdingIdle = false;
       if (snapshot.status !== entry.printedStatus) {
         entry.printedStatus = snapshot.status;
         log(`factory: ${entry.task} agent ${snapshot.status}${snapshot.attentionReason === undefined ? "" : ` (${snapshot.attentionReason})`}`);
@@ -1193,8 +1253,23 @@ export async function observeTasks(
           // The Lead's second insertion (v0.0.10 §1): idle-without-Claim is
           // only a finish when the ledger agrees — a denial-stall matching
           // this classifier's own shape must not end in its silent swallow.
-          const outcome = await runLead(entry, readDriverLedger(stateDir, ledgerOptions), snapshot);
+          const events = readDriverLedger(stateDir, ledgerOptions);
+          const outcome = await runLead(entry, events, snapshot);
           if (outcome !== "clear") continue; // the poke's outcome is pending, or the named end already committed
+          if (!idleIsFinish(events, entry.task)) {
+            if (supersededRun(events, entry.task, entry.runSeq)) {
+              await commitTerminal(entry, { terminal: true, fate: "closed", reason: "superseded by a newer spawn of the task" }, snapshot);
+              continue;
+            }
+            // v0.8.5: idle with no Peer outcome on the ledger — an Owner pause
+            // (Esc) or a turn that ended without a Claim. The task stays the
+            // Peer's: no meter, no archive; keep watching.
+            if (entry.holdingIdle !== true) {
+              entry.holdingIdle = true;
+              log(`factory: ${entry.task} agent idle with no Claim or verdict on the ledger — the task stays open (paused, or waiting for a nudge); not metering or archiving`);
+            }
+            continue;
+          }
         }
         await commitTerminal(entry, fate, snapshot);
         continue;
@@ -1518,6 +1593,7 @@ export async function runDriver({ home, stateDir, spoolRoot, tasks, provider, th
       entries.push({
         task,
         agentId,
+        ...(spawnSeq === undefined ? {} : { runSeq: spawnSeq }),
         workspace: prep?.cwd ?? contract.workspace,
         branch,
         brief,

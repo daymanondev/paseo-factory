@@ -656,11 +656,13 @@ test("a smaller Peer window clips the handoff mark to eighty percent", async t =
   const f = fixture(t);
   f.peer.lastUsage = { contextWindowUsedTokens: 102_399, contextWindowMaxTokens: 128_000 };
   await f.runtime.onLeadTurnEnded(ended(f.peer.id));
-  assert.equal(f.sent.length, 0, "below the clipped mark the Peer continues");
+  // v0.8.5: an unclaimed completed turn below the mark earns the one no-Claim nudge — not an extraction.
+  const extractions = () => f.sent.filter(s => !/ended without a Claim/.test(s.text));
+  assert.equal(extractions().length, 0, "below the clipped mark the Peer continues");
   f.peer.lastUsage.contextWindowUsedTokens = 102_400;
   await f.runtime.onLeadTurnEnded(ended(f.peer.id));
-  assert.equal(f.sent.length, 1, "the clipped mark starts extraction before the 200k mark");
-  assert.match(f.sent[0]!.text, /102,400/);
+  assert.equal(extractions().length, 1, "the clipped mark starts extraction before the 200k mark");
+  assert.match(extractions()[0]!.text, /102,400/);
   const snap = await f.surface.snapshot({ projectRoot: f.root });
   assert.ok(snap.ok);
   assert.equal(snap.view.panel.seats!.peers[0]!.context!.markTokens, 102_400);

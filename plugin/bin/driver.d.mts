@@ -140,6 +140,10 @@ export declare function leadDecision(
   windows?: { graceMs?: number; reStallMs?: number },
 ): LeadDecision;
 /** Post-spawn evidence of life — defense-in-depth on the fast door only (ADR 0007 §4): any task event after this run's spawn that is not the driver's or the Lead's own writing. */
+export declare function idleIsFinish(events: readonly Record<string, unknown>[], task: string): boolean;
+
+export declare function supersededRun(events: readonly Record<string, unknown>[], task: string, runSeq: unknown): boolean;
+
 export declare function postSpawnLife(events: readonly Record<string, unknown>[], task: string): boolean;
 /** This run's `gate_finished`, if the ledger already holds one — the null lane's finish signal. */
 export declare function verdictOfThisRun(events: readonly Record<string, unknown>[], task: string): Record<string, unknown> | undefined;
@@ -172,6 +176,10 @@ export interface ObserveEntry {
   timelineSeq?: number;
   /** True when the current agent's terminal meter was already submitted inside `observeTasks` (e.g., on `died-after-respawn`). */
   metered?: boolean;
+  /** The ledger seq of the spawn/respawn this watch's agent was created under (v0.8.5) — a newer one supersedes the watch. */
+  runSeq?: number;
+  /** True while an idle Peer with no ledger outcome is held open (v0.8.5) — logs the hold once. */
+  holdingIdle?: boolean;
 }
 export declare function observeTasks(
   rpc: DaemonRpc | {

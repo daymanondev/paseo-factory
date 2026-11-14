@@ -86,6 +86,7 @@ import {
   deliverLeadMail as appendMailDelivered,
   enqueueLeadMail as appendMailQueued,
   readLeadMailbox,
+  readMailboxEvents,
   recoverLeadMailbox,
   requeueLeadMail as appendMailRequeued,
 } from "./core/mailbox.ts";
@@ -370,10 +371,6 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
   const failedFirstTurnAgentIds = new Set<string>();
   const pendingHandoffByAgentId = new Map<string, string>();
   const inFlightHandoffByAgentId = new Map<string, string>();
-  // v0.2.1 hold marker, v0.2.2 (ADR 0050 §1): accelerator only — the durable
-  // in-flight arm of `projectPeerInFlight` carries quiet-point correctness
-  // across daemon restarts and plugin updates; this Set dissolves with them.
-  const interruptedPeerIds = new Set<string>();
   const clearHandoffTimer = (slug: string): void => {
     const timer = handoffTimers.get(slug);
     if (timer !== undefined) {
@@ -903,11 +900,10 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
   const observePeers = async (project: { slug: string; root: string }, input?: LeadTurnEndedInput): Promise<void> => {
     await projectLane(project.slug, async () => {
       try {
-        if (input !== undefined) {
-          if (input.outcome.kind === "completed") interruptedPeerIds.delete(input.agentId);
-          else interruptedPeerIds.add(input.agentId);
-        }
         await peerHandoff.observeProject(project.slug, project.root, input);
+        if (input !== undefined && (await answerUnclaimedPeerTurn(project.slug, project.root, input))) {
+          await drainLeadMailbox(project.slug);
+        }
         if (await tryBeginPendingHandoff(project.slug)) {
           if (peerBlockersQueued.delete(project.slug)) {
             await drainSupervisorMailbox(project.slug);
@@ -1477,7 +1473,8 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
    * plugin updates, and reboots cannot dissolve the hold. Tasks whose
    * folded status is Peer-terminal or that carry queued `from: "peer"` mail
    * (verdict or blocker — the work is back in the Lead's court) never hold.
-   * The `interruptedPeerIds` turn-event marker remains an accelerator only.
+   * v0.8.5: the second arm holds on any live, non-`error` bound Peer of an
+   * unsettled Task — the in-process `interruptedPeerIds` marker is gone.
    */
   const projectPeerInFlight = async (slug: string): Promise<boolean> => {
     const reg = readProjectRegistration(deps.stateDir, slug);
@@ -1508,13 +1505,95 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
         )
       : events;
     if (driverWaveInFlight(activeWaveEvents, live, slug, "live")) return true;
-    return tasks.some(
+    // v0.8.5: a dispatched, unsettled Task (`running`, or `red` below the
+    // ceiling) whose bound Peer is live and not `error` holds, whatever the
+    // Peer's status — `idle` after the Owner's Esc, between
+    // turns, or after a red Attempt. Only an outcome (verdict, needs-human,
+    // close, any queued Peer mail) or a dead/archived Peer releases it.
+    return tasks.some((task) => {
+      if (settledTasks.has(task.task)) return false;
+      const dispatchedAndOpen =
+        (task.status === "running" || task.status === "red") && !(queuedPeerMailTasks?.has(task.task) ?? false);
+      return boundTaskPeers({ stateDir: deps.stateDir, slug, task: task.task, events, live }).some(
+        (peer) => peerIsRunning(peer) || (dispatchedAndOpen && peer.status !== "error"),
+      );
+    });
+  };
+
+  /**
+   * v0.8.5 — a Peer turn that ended `completed` (never `canceled`: that is
+   * the Owner's Esc) while its Task is still open and unclaimed. The first
+   * such turn per ledger state gets one nudge back into the Peer: continue and
+   * claim, or escalate. A second one with no new ledger fact goes to the Lead
+   * as one report — the Peer is idle and still holds the Task (and the Lead's
+   * quiet point), so the Lead must rule, respawn, re-contract or close.
+   * Skipped while a gate runs, after a permit denial (the driver's re-poke
+   * owns that), and while a Peer escalation newer than the Task's last ledger
+   * fact waits for the Lead. Returns true when Lead mail was queued.
+   */
+  const nudgedPeerTurns = new Set<string>();
+  const answerUnclaimedPeerTurn = async (slug: string, root: string, input: LeadTurnEndedInput): Promise<boolean> => {
+    if (input.outcome.kind !== "completed") return false;
+    const live = [...(await liveAgentsById()).values()];
+    if (!live.some((agent) => agent.id === input.agentId)) return false;
+    const events = projectEventsOf(slug, root);
+    let queuedPeerBlockerTasks: Set<string> | undefined;
+    try {
+      const mailbox = readLeadMailbox(mailboxPath(slug));
+      queuedPeerBlockerTasks = new Set(mailbox.queued.filter((item) => item.from === "peer" && typeof item.task === "string").map((item) => item.task!));
+    } catch {
+      queuedPeerBlockerTasks = undefined;
+    }
+    const view = foldTasks(events).find(
       (task) =>
-        !settledTasks.has(task.task) &&
-        boundTaskPeers({ stateDir: deps.stateDir, slug, task: task.task, events, live }).some(
-          (peer) => peerIsRunning(peer) || (peer.status === "idle" && interruptedPeerIds.has(peer.id)),
-        ),
+        (task.status === "running" || task.status === "red") &&
+        !taskHasSettledPeerOutcome(task, queuedPeerBlockerTasks) &&
+        boundTaskPeers({ stateDir: deps.stateDir, slug, task: task.task, events, live }).some((peer) => peer.id === input.agentId),
     );
+    if (view === undefined) return false;
+    const task = view.task;
+    // A Peer context handoff owns this turn boundary (its extraction prompt or successor).
+    const peerHandoffState = readHandoffProgress(deps.stateDir, slug, `peer:${task}`)?.state;
+    if (peerHandoffState !== undefined && peerHandoffState !== "done" && peerHandoffState !== "failed") return false;
+    const last =events.findLast((evt) => "task" in evt && evt.task === task);
+    if (last === undefined || last.event === "permit_denied" || last.event === "gate_started" || last.event === "claim_reported") return false;
+    let escalated = false;
+    try {
+      escalated = readMailboxEvents(mailboxPath(slug)).some(
+        (evt) => evt.type === "mail_queued" && evt.from === "peer" && evt.task === task && evt.ts >= last.ts,
+      );
+    } catch {
+      escalated = false;
+    }
+    if (escalated) return false;
+    const key = `${input.agentId}|${task}|${last.seq}`;
+    if (!nudgedPeerTurns.has(key)) {
+      nudgedPeerTurns.add(key);
+      const text = [
+        `Factory: your turn on task ${task} ended without a Claim, and the task is still yours.`,
+        last.event === "gate_finished" && last.verdict === "red"
+          ? "Your last gate was red — fix what it reported, then finish with `agent_claim`."
+          : "Continue the work and finish with `agent_claim`.",
+        "If you cannot finish, call `agent_escalate_blocker` and say what you need from the Lead.",
+      ].join(" ");
+      try {
+        await resolveDaemon().agents.ref(input.agentId).send(text);
+        log(`lead-mailbox: ${slug} Peer ${input.agentId.slice(0, 12)} ended a turn on ${task} without a Claim — nudged once`);
+      } catch (error) {
+        log(`lead-mailbox: ${slug} nudge to Peer ${input.agentId.slice(0, 12)} on ${task} failed — ${messageOf(error)}`);
+      }
+      return false;
+    }
+    appendMailQueued(mailboxPath(slug), {
+      requestId: `peer-unclaimed:${key}`,
+      to: "lead",
+      from: "system",
+      kind: "report",
+      task,
+      text: `Peer ${input.agentId} ended its turn on task ${task} again without a Claim after a nudge. It is idle and still holds the task (and your handoff quiet point). Rule it (lead repoke with a message), respawn, re-contract, or close the task.`,
+    });
+    log(`lead-mailbox: ${slug} Peer ${input.agentId.slice(0, 12)} on ${task} stayed unclaimed after a nudge — reported to the Lead`);
+    return true;
   };
 
   /** Resolves `--workspace` or `--project` to `{ root, slug }` or a structured `unknown-project` refusal. */

@@ -467,7 +467,7 @@ function appendMailboxEvent<T extends PendingMailboxEvent>(path: string, pending
 }
 
 /** Loads and validates every line, quarantining an unterminated tail (a torn append was never an event). */
-function readMailboxEvents(path: string): LeadMailboxEvent[] {
+export function readMailboxEvents(path: string): LeadMailboxEvent[] {
   let raw: string;
   try {
     raw = readFileSync(path, "utf8");

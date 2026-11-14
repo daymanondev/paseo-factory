@@ -2118,6 +2118,86 @@ test("the paused-Peer hold survives a runtime restart — a fresh runtime over t
   assert.equal(fake.created.length, 0, "no successor Lead was spawned after the restart");
 });
 
+test("v0.8.5: the Owner's Esc on a Peer while the Lead waits for its handoff — the Lead holds, the Peer is neither nudged nor archived, and a red Attempt does not release the hold", async (t) => {
+  const lead: FakeAgent = { id: "lead-esc", status: "idle", lastUsage: { contextWindowUsedTokens: LEAD_ROTATE_TOKENS + 5_000 } };
+  const { stateDir, slug, projectRoot, factory, surface, leadMail, fake } = makeSpooledRuntime(t, [lead]);
+  lead.labels = { seat: "lead", project: slug };
+  lead.cwd = projectRoot;
+  await surface.leadEnsure({ projectRoot });
+
+  const root = readProjectRegistration(stateDir, slug)!.root!;
+  factory.setContract({ task: "T-ESC", workspace: root, gate: "true" });
+  const worktree = taskWorktreePath(stateDir, slug, "T-ESC");
+  factory.requestSpawn({ task: "T-ESC", provider: "pi/model", arity: 1, worktree });
+  const peer: FakeAgent = { id: "peer-esc", status: "running", cwd: worktree, labels: { seat: "agent", project: slug, task: "T-ESC" } };
+  fake.agents.unshift(peer);
+
+  await leadMail.onLeadTurnEnded({ agentId: lead.id, outcome: { kind: "completed" }, timeline: [] });
+  assert.equal(readProjectRegistration(stateDir, slug)?.rotationState, "rotation_pending");
+
+  // The Owner presses Esc on the Peer: its turn ends `canceled`, it goes idle.
+  peer.status = "idle";
+  await leadMail.onLeadTurnEnded({ agentId: peer.id, outcome: { kind: "canceled" }, timeline: [] });
+  await leadMail.pumpProjectLead(slug);
+  assert.equal(readProjectRegistration(stateDir, slug)?.rotationState, "rotation_pending", "a paused Peer holds the Lead's handoff");
+  assert.equal(fake.sent.filter((s) => s.agentId === lead.id).length, 0, "no extraction prompt reached the Lead");
+  assert.equal(fake.sent.filter((s) => s.agentId === peer.id).length, 0, "a canceled turn is the Owner's pause — never nudged");
+
+  // A red Attempt closes the spawn round in the ledger, but the Task is not
+  // settled below the ceiling: the idle Peer still owns it — durably, with
+  // no in-process marker (a fresh runtime over the same state holds too).
+  factory.ledger.append({ event: "claim_reported", task: "T-ESC", attempt: 1, sha: "a1b2c3d", agent: peer.id });
+  factory.ledger.append({ event: "gate_finished", task: "T-ESC", attempt: 1, exit: 1, verdict: "red", note: "", sha: "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0" });
+  leadMail.stop();
+  const restarted = createLeadMailRuntime({
+    factory,
+    stateDir,
+    daemon: fake.daemon,
+    ensureLead: (input) => surface.leadEnsure(input),
+    retireLead: (input) => surface.leadRotate(input),
+  });
+  t.after(() => restarted.stop());
+  await restarted.pumpProjectLead(slug);
+  assert.equal(readProjectRegistration(stateDir, slug)?.rotationState, "rotation_pending", "red below the ceiling with a live Peer still holds");
+  assert.equal(fake.created.length, 0, "no successor Lead was spawned");
+});
+
+test("v0.8.5: a Peer turn that completes without a Claim is nudged once; a second unclaimed turn is reported to the Lead", async (t) => {
+  const lead: FakeAgent = { id: "lead-nudge", status: "idle", lastUsage: { contextWindowUsedTokens: 10_000 } };
+  const { stateDir, slug, projectRoot, factory, surface, leadMail, fake } = makeSpooledRuntime(t, [lead]);
+  lead.labels = { seat: "lead", project: slug };
+  lead.cwd = projectRoot;
+  await surface.leadEnsure({ projectRoot });
+
+  const root = readProjectRegistration(stateDir, slug)!.root!;
+  factory.setContract({ task: "T-NUDGE", workspace: root, gate: "true" });
+  const worktree = taskWorktreePath(stateDir, slug, "T-NUDGE");
+  factory.requestSpawn({ task: "T-NUDGE", provider: "pi/model", arity: 1, worktree });
+  const peer: FakeAgent = { id: "peer-nudge", status: "idle", cwd: worktree, labels: { seat: "agent", project: slug, task: "T-NUDGE" } };
+  fake.agents.unshift(peer);
+  const leadSendsBefore = fake.sent.filter((s) => s.agentId === lead.id).length;
+
+  await leadMail.onLeadTurnEnded({ agentId: peer.id, outcome: { kind: "completed" }, timeline: [] });
+  const nudges = fake.sent.filter((s) => s.agentId === peer.id);
+  assert.equal(nudges.length, 1, "one nudge back into the Peer");
+  assert.match(nudges[0]!.text, /T-NUDGE ended without a Claim/);
+  assert.match(nudges[0]!.text, /agent_claim/);
+  assert.equal(fake.sent.filter((s) => s.agentId === lead.id).length, leadSendsBefore, "the Lead hears nothing yet");
+
+  await leadMail.onLeadTurnEnded({ agentId: peer.id, outcome: { kind: "completed" }, timeline: [] });
+  assert.equal(fake.sent.filter((s) => s.agentId === peer.id).length, 1, "never a second nudge for the same ledger state");
+  const leadMailTexts = fake.sent.filter((s) => s.agentId === lead.id).slice(leadSendsBefore).map((s) => s.text).join("\n");
+  assert.match(leadMailTexts, /peer-nudge ended its turn on task T-NUDGE again without a Claim/, "the Lead gets one report");
+
+  // A gate that lands is new ledger state: a later unclaimed turn earns a fresh nudge (red Attempt wording).
+  factory.ledger.append({ event: "claim_reported", task: "T-NUDGE", attempt: 1, sha: "a1b2c3d", agent: peer.id });
+  factory.ledger.append({ event: "gate_finished", task: "T-NUDGE", attempt: 1, exit: 1, verdict: "red", note: "", sha: "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0" });
+  await leadMail.onLeadTurnEnded({ agentId: peer.id, outcome: { kind: "completed" }, timeline: [] });
+  const after = fake.sent.filter((s) => s.agentId === peer.id);
+  assert.equal(after.length, 2);
+  assert.match(after[1]!.text, /last gate was red/);
+});
+
 test("a queued from-peer verdict mail releases the paused-Peer hold — the wave is back in the Lead's court (v0.2.2, ADR 0050 §1)", async (t) => {
   const lead: FakeAgent = { id: "lead-verdict-release", status: "idle", lastUsage: { contextWindowUsedTokens: LEAD_ROTATE_TOKENS + 5_000 } };
   const { stateDir, slug, projectRoot, factory, surface, leadMail, fake } = makeSpooledRuntime(t, [lead]);

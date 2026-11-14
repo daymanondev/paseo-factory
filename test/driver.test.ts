@@ -23,6 +23,8 @@ import {
   splitProvider,
   taskOutcome,
   verdictOfThisRun,
+  idleIsFinish,
+  supersededRun,
 } from "../plugin/bin/driver.mjs";
 import { prepareTaskWorkspace, prepareTaskWorktree, parseTaskWorktreePath } from "../plugin/bin/task-worktree.mjs";
 import { resolveProject } from "../plugin/bin/project.mjs";
@@ -839,6 +841,80 @@ test("the amended finished-pin: idle + prompt-consumed + no-pending with a ledge
   } finally {
     harness.stop();
   }
+});
+
+test("v0.8.5: an idle Peer with no Claim on the ledger (the Owner's Esc) is not finished — no meter, no archive — until its verdict lands", async (t) => {
+  const harness = await leadHarness(t, () => ({ status: "idle", attentionReason: "finished", lastUserMessageAt: "2026-11-14T03:00:00.000Z", pendingPermissions: [] }));
+  try {
+    const terminals: { fate?: string }[] = [];
+    const logs: string[] = [];
+    const run = observeTasks(harness.rpc, [{ task: "LEAD1", agentId: "ag-lead1" }], {
+      pollMs: 10,
+      stateDir: harness.stateDir,
+      spoolRoot: harness.spoolRoot,
+      log: (line: string) => logs.push(line),
+      onTerminal: (entry) => {
+        terminals.push({ ...(entry.terminal as { fate?: string }) });
+      },
+    });
+    await until_(() => assert.ok(harness.fetches >= 5), 5000);
+    assert.equal(terminals.length, 0, "idle without a Claim holds the task open");
+    assert.equal(harness.sent.filter((m) => m.type === "archive_agent_request").length, 0, "the paused Peer is never archived");
+    assert.equal(logs.filter((line) => /idle with no Claim or verdict/.test(line)).length, 1, "the hold is logged once, not every poll");
+
+    // The Owner resumes; the Peer claims and its gate lands green.
+    harness.claimGreen();
+    await run;
+    assert.deepEqual(terminals.map((x) => x.fate), ["finished"]);
+    assert.equal(harness.sent.filter((m) => m.type === "archive_agent_request").length, 1, "archived once, after the verdict");
+  } finally {
+    harness.stop();
+  }
+});
+
+test("v0.8.5: a held idle Peer whose task was re-spawned ends its watch as superseded — never a respawn over the newer run", async (t) => {
+  const harness = await leadHarness(t, () => ({ status: "idle", attentionReason: "finished", lastUserMessageAt: "2026-11-14T03:00:00.000Z", pendingPermissions: [] }));
+  try {
+    const runSeq = harness.factory.ledger.events.findLast((e) => e.event === "spawn_dispatched")!.seq;
+    const terminals: { fate?: string; reason?: string }[] = [];
+    const run = observeTasks(harness.rpc, [{ task: "LEAD1", agentId: "ag-lead1", runSeq }], {
+      pollMs: 10,
+      stateDir: harness.stateDir,
+      spoolRoot: harness.spoolRoot,
+      provider: "claude",
+      log: () => {},
+      onTerminal: (entry) => {
+        terminals.push({ ...(entry.terminal as { fate?: string; reason?: string }) });
+      },
+    });
+    await until_(() => assert.ok(harness.fetches >= 3), 5000);
+    assert.equal(terminals.length, 0, "held while it is still the task's run");
+    harness.factory.ledger.append({ event: "spawn_dispatched", task: "LEAD1", provider: "claude", arity: 1 });
+    await run;
+    assert.deepEqual(terminals, [{ terminal: true, fate: "closed", reason: "superseded by a newer spawn of the task" }]);
+    assert.equal(harness.sent.filter((m) => m.type === "agent.create.request").length, 0, "no respawn");
+  } finally {
+    harness.stop();
+  }
+});
+
+test("v0.8.5 agentFate: an archived agent is closed, not idle", () => {
+  assert.deepEqual(agentFate({ status: "idle", archivedAt: "2026-11-14T03:00:00.000Z", lastUserMessageAt: "x", pendingPermissions: [] }), { terminal: true, fate: "closed", reason: "the agent was archived" });
+  assert.equal(supersededRun([{ task: "T", event: "spawn_dispatched", seq: 4 }], "T", 4), false);
+  assert.equal(supersededRun([{ task: "T", event: "respawn_dispatched", seq: 9 }], "T", 4), true);
+  assert.equal(supersededRun([{ task: "T", event: "spawn_dispatched", seq: 9 }], "T", undefined), false, "a bare observe is never superseded");
+});
+
+test("v0.8.5 idleIsFinish: only a Peer-terminal ledger fact since the latest spawn lets idle finish", () => {
+  const ev = (seq: number, event: string, extra: Record<string, unknown> = {}) => ({ seq, task: "T", event, ts: "2026-11-14T00:00:00.000Z", ...extra });
+  assert.equal(idleIsFinish([], "T"), true, "never spawned: the snapshot alone decides (bare observe)");
+  assert.equal(idleIsFinish([ev(1, "contract_set"), ev(2, "spawn_dispatched")], "T"), false, "spawned, nothing since");
+  assert.equal(idleIsFinish([ev(2, "spawn_dispatched"), ev(3, "claim_reported"), ev(4, "gate_finished", { verdict: "red" })], "T"), false, "a red Attempt below the ceiling is not an outcome");
+  assert.equal(idleIsFinish([ev(2, "spawn_dispatched"), ev(4, "gate_finished", { verdict: "green" })], "T"), true);
+  assert.equal(idleIsFinish([ev(2, "spawn_dispatched"), ev(4, "needs_human")], "T"), true);
+  assert.equal(idleIsFinish([ev(2, "spawn_dispatched"), ev(4, "task_closed")], "T"), true);
+  assert.equal(idleIsFinish([ev(2, "spawn_dispatched"), ev(4, "gate_finished", { verdict: "green" }), ev(5, "contract_set")], "T"), false, "an in-place re-contract reopens the preserved Peer's work");
+  assert.equal(idleIsFinish([ev(2, "spawn_dispatched"), ev(4, "gate_finished", { verdict: "green" }), ev(5, "respawn_dispatched")], "T"), false, "a respawn starts a new run");
 });
 
 test("the needs-human terminal (null lane, denied-again): a second denial after the spent poke ends the watch with its evidence on the ledger", async (t) => {
