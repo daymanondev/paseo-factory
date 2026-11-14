@@ -2593,14 +2593,15 @@ function readOpenDesignLink(root) {
 }
 
 // src/linked-design.ts
-function linkedDesignSpecification(root, recorded) {
+function linkedDesignSpecification(root, recorded, role) {
   const link = (root ? readOpenDesignLink(root) : void 0) ?? recorded;
   if (!link) return "";
+  const visualBoundary = role === "lead" ? "Visual-Evidence & Screenshot Boundary: The Lead accepts work from text artifacts only: report-<task>-<n>.md (6-Field Handoff), git show --stat, git diff, and Gate results. The Lead NEVER loads screenshot, storyboard, or simulator images (*.png/*.jpg/*.webp, e.g. evidence-*/) into its long-lived session: inline images persist across turns and hit provider image caps (e.g. 10). For multi-screen visual parity or subjective UI checks, delegate to a fresh read-only Peer (reviewer or scout) in the Task worktree; decide from its text handoff (claim + file:line, blocking vs non-blocking).\n" : "";
   return `Open Design Linked Specification (design/)
 ${link.projectName} \xB7 ${link.screenCount} screens. The Owner's linked design is the authoritative UI/UX specification, read in two halves.
 Design catalog (the ONLY design/ files a Lead reads): design/design-manifest.json (tokens), design/screens-data.js (the full screen inventory \u2014 ids, titles, descriptions, per-group flows), design/app-data.js (seed/configuration data), design/screens.html (Flow Board). The catalog is a decomposition input, not a build spec: contracts name screens by id and flow from design/screens-data.js.
 Design source (a Lead NEVER reads; bind it by reference in Peer contracts): design/index.html (interactive prototype), design/app.js (interaction logic), design/styles.css, design/screens.css. Peers read the full design/ bundle inside their Task worktree, so implementation fidelity is unchanged.
-`;
+${visualBoundary}`;
 }
 
 // src/roles-contract.ts
@@ -2690,7 +2691,7 @@ function renderSeatCommandBlock(seat, cmdPrefix) {
 }
 function renderRoleContract(role, options = {}) {
   const cmdPrefix = formatCmdPrefix(options.factoryCmd, options.home);
-  const linkedDesign = linkedDesignSpecification(options.project?.root);
+  const linkedDesign = linkedDesignSpecification(options.project?.root, void 0, role);
   const projectSuffix = options.project !== void 0 && options.project.slug !== "" ? options.project.root !== "" ? ` for this project (${options.project.slug}, rooted at ${options.project.root})` : ` (project ${options.project.slug})` : "";
   if (role === "supervisor") {
     return [

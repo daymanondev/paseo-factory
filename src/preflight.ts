@@ -248,7 +248,7 @@ export function buildSeatKickoffPacket(input: SeatKickoffPacketInput): string {
     // drops the duplicated static blocks — design spec, helper-MCP roster,
     // and wave laws — keeping only the Fire-and-End-Turn law and the
     // dynamic repository preflight lines above.
-    ...(omitDuplicates ? [] : [linkedDesignSpecification(input.projectRoot)]),
+    ...(omitDuplicates ? [] : [linkedDesignSpecification(input.projectRoot, undefined, input.role)]),
     ...(input.role === "lead" && !omitDuplicates ? [renderHelperMcpRoster(input.helperMcps ?? [])] : []),
     `- Role MCP tools (paseo_factory): ${roleTools}`,
     `- Law: ${fireAndEndTurn}`,

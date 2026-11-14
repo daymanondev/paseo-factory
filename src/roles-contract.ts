@@ -153,7 +153,7 @@ function renderSeatCommandBlock(seat: SeatName, cmdPrefix: string): string[] {
  */
 export function renderRoleContract(role: RoleName, options: RoleContractOptions = {}): string {
   const cmdPrefix = formatCmdPrefix(options.factoryCmd, options.home);
-  const linkedDesign = linkedDesignSpecification(options.project?.root);
+  const linkedDesign = linkedDesignSpecification(options.project?.root, undefined, role);
   const projectSuffix =
     options.project !== undefined && options.project.slug !== ""
       ? options.project.root !== ""
@@ -246,7 +246,7 @@ export function renderSeatBootstrapPrompt(input: SeatBootstrapInput): string {
         ]
       : [
           "You are this project's standing Lead: orient from bounded metadata (`notebook.md`, design catalog, <= 3 boundary files), delegate deep reconnaissance to read-only `scout` / `architect` Peers, and progress through bounded waves — reviewing the diff and accepting every clean green wave before reporting completion to Supervisor.",
-          linkedDesignSpecification(input.project.root),
+          linkedDesignSpecification(input.project.root, undefined, "lead"),
           ...LEAD_WAVE_LAWS,
           "",
           "Seat write fence: Never write or commit product source code directly on `<project-root>`; all product source code is written by spawned working Agents inside isolated Task worktrees.",
