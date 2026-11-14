@@ -1,8 +1,9 @@
 /**
  * The global `/factory` skill (v0.0.20, ADR 0013 Decision 3; v0.0.23, ADR 0015
- * Decision 5): the managed `SKILL.md` reconciled across both
+ * Decision 5): the managed `SKILL.md` reconciled across all three roots:
  * `~/.agents/skills/factory/SKILL.md` (`pi` / `opencode`) and
- * `~/.claude/skills/factory/SKILL.md` (`claude`) that lets the Owner type
+ * `~/.claude/skills/factory/SKILL.md` (`claude`) and
+ * `~/.pi/agent/skills/factory/SKILL.md` (pi agent dir, ADR 0036) that lets the Owner type
  * `/factory <directive>` in any session and have that session bootstrap or
  * dispatch deterministically into the Project's SLP loop —
  * `factory supervisor dispatch` for the directive arm (seat-aware routing into
@@ -36,6 +37,18 @@ export interface FactorySkillInput {
    * `--home` override instead of pinning one daemon's home.
    */
   factoryCmd: string;
+}
+
+/**
+ * The harness skill roots the managed skill lives under for one home — the
+ * three places a session discovers `/factory`: `~/.agents/skills` (`pi` /
+ * `opencode`), `~/.claude/skills` (`claude`), and `~/.pi/agent/skills` (the pi
+ * agent dir, ADR 0036 §2 — the precedent that already mirrors skills there).
+ * Every root is plugin-managed: a drifted or hand-edited copy in any of them
+ * reconciles back to the canonical render.
+ */
+export function factorySkillRoots(userHome: string): string[] {
+  return [join(userHome, ".agents", "skills"), join(userHome, ".claude", "skills"), join(userHome, ".pi", "agent", "skills")];
 }
 
 /** Where the skill lives under a skills root — `<agentsSkillsDir>/factory/SKILL.md`. */
@@ -116,4 +129,21 @@ export function ensureFactorySkillSafe(agentsSkillsDir: string, input: FactorySk
     );
     return null;
   }
+}
+
+/**
+ * Reconciles the skill into EVERY harness root of `userHome` through the safe
+ * door — one failing root warns once on its own and never blocks the others.
+ * Both boot paths (initial boot and the re-sync after an install refresh) call
+ * this, so a plugin update's next sync re-renders every root with the current
+ * install's door and no baked checkout UUID survives. Returns the paths written
+ * (or already in sync); unusable roots are omitted.
+ */
+export function ensureFactorySkillRootsSafe(userHome: string, input: FactorySkillInput, onWarn: (message: string) => void): string[] {
+  const reconciled: string[] = [];
+  for (const root of factorySkillRoots(userHome)) {
+    const path = ensureFactorySkillSafe(root, input, onWarn);
+    if (path !== null) reconciled.push(path);
+  }
+  return reconciled;
 }

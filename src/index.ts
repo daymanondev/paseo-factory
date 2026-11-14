@@ -69,7 +69,7 @@ export {
   skillFooter,
 } from "./roles-contract.ts";
 export type { ProjectIdentity, RoleContractOptions, RoleName, SeatBootstrapInput, SeatName } from "./roles-contract.ts";
-export { ensureFactorySkill, ensureFactorySkillSafe, factorySkillPath, renderFactorySkill } from "./skill.ts";
+export { ensureFactorySkill, ensureFactorySkillRootsSafe, ensureFactorySkillSafe, factorySkillPath, factorySkillRoots, renderFactorySkill } from "./skill.ts";
 export type { FactorySkillInput } from "./skill.ts";
 export {
   ackLeadMail,
