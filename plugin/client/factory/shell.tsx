@@ -9,7 +9,7 @@ import { useRpc } from "@getpaseo/plugin/client";
 import { Modal, ScrollView, useToast } from "@getpaseo/plugin/client/ui";
 import { useEffect, useRef, useState } from "react";
 import { Text, View } from "react-native";
-import { skillsImport, skillsPackSave, skillsPackDelete, skillsTogglePack, lanesSet, lanesSetBatch, handoffStart, handoffReplaceNow, handoffCancel, handoffRetry, handoffHandover, onboardingCommit, onboardingInspect, openDesignCatalog, openDesignSync, helperMcpsSyncAndProbe, helperMcpsSetEnabled, pluginsInstall, pluginsManage, pluginsCheckUpdates, selfUpdateApply, selfUpdateStatus, profilesApply, profilesDelete, profilesSave, projectDelete, projectReset, projectRotate, snapshot, supervisorAdopt, supervisorStart, vaultConfigure, vaultHydrate, vaultImport, vaultSync } from "../../shared/rpc.ts";
+import { skillsImport, skillsPackSave, skillsPackDelete, skillsPackReset, skillsTogglePack, lanesSet, lanesReset, lanesSetBatch, handoffStart, handoffReplaceNow, handoffCancel, handoffRetry, handoffHandover, onboardingCommit, onboardingInspect, openDesignCatalog, openDesignSync, helperMcpsSyncAndProbe, helperMcpsSetEnabled, pluginsInstall, pluginsManage, pluginsCheckUpdates, selfUpdateApply, selfUpdateStatus, profilesApply, profilesDelete, profilesSave, projectDelete, projectReset, projectRotate, snapshot, supervisorAdopt, supervisorStart, vaultConfigure, vaultHydrate, vaultImport, vaultSync } from "../../shared/rpc.ts";
 import type { ManageablePluginId } from "../../shared/companions.ts";
 import type { FactoryView, LaneName } from "../../shared/view.ts";
 import { SPACING, text } from "../kit/theme.ts";
@@ -84,6 +84,7 @@ export function FactoryShell({
   // dispatch through act() — the SeatsPane stays a pure render of the view
   // plus action callbacks (the panes' law).
   const lanesSetBatchCall = useRpc(lanesSetBatch);
+  const lanesResetCall = useRpc(lanesReset);
   const profilesSaveCall = useRpc(profilesSave);
   const profilesApplyCall = useRpc(profilesApply);
   const profilesDeleteCall = useRpc(profilesDelete);
@@ -93,6 +94,7 @@ export function FactoryShell({
   const pluginsInstallCall = useRpc(pluginsInstall);
   const skillsImportCall = useRpc(skillsImport);
   const skillsTogglePackCall = useRpc(skillsTogglePack);
+  const skillsPackResetCall = useRpc(skillsPackReset);
   const skillsPackSaveCall = useRpc(skillsPackSave);
   const skillsPackDeleteCall = useRpc(skillsPackDelete);
   const pluginsManageCall = useRpc(pluginsManage);
@@ -286,10 +288,21 @@ export function FactoryShell({
     if (projectRoot === undefined || mobile) return;
     void act("Apply Lane profile", () => profilesApplyCall({ projectRoot, profileId }));
   };
+  const saveProjectProfile = async (input: { id?: string; name: string; description?: string }): Promise<boolean> => {
+    if (projectRoot === undefined || mobile) return false;
+    return act(input.id ? "Update Lane profile" : "Save Lane profile", () => profilesSaveCall({ ...input, projectRoot }));
+  };
+  const resetProjectLanes = (): void => {
+    if (projectRoot === undefined || mobile) return;
+    void act("Reset Project models", () => lanesResetCall({ projectRoot }));
+  };
   const toggleProjectSkillPack = (pack: string, enabled: boolean): void => {
     if (projectRoot === undefined || mobile) return;
-    if (pack !== "expo" && pack !== "firebase" && pack !== "zcode-3d" && pack !== "science") return;
     void act("Project Skill Pack", () => skillsTogglePackCall({ projectRoot, pack, enabled }));
+  };
+  const resetProjectSkillPacks = (): void => {
+    if (projectRoot === undefined || mobile) return;
+    void act("Reset Project skill packs", () => skillsPackResetCall({ projectRoot }));
   };
   /** A Needs-you item's primary action: a bare navigation jump to the agent's conversation. */
   const openAgent = (agentId: string): void => {
@@ -718,10 +731,13 @@ export function FactoryShell({
             width={containerWidth}
             selfUpdate={selfUpdate}
             skillPacks={view.skillHub?.projectPacks ?? []}
+            skillPacksExplicit={view.skillHub?.skillPacksExplicit === true}
+            hasProjectLaneOverride={view.hasProjectLaneOverride}
+            machineLanes={view.machineLanes}
             mobile={mobile}
             now={now}
             daemonError={view.daemonError}
-            actions={{ openAgent, installPrerequisites, handoffStart: startHandoff, handoffReplaceNow: replaceHandoff, handoffCancel: cancelHandoff, handoffRetry: retryHandoff, viewHandover, startSupervisor, syncOpenDesign, adoptSupervisor, saveSeatModel, setMachineDefault, applyProfile: applyProjectProfile, toggleSkillPack: toggleProjectSkillPack, busy: busy || activePluginAct !== null }}
+            actions={{ openAgent, installPrerequisites, handoffStart: startHandoff, handoffReplaceNow: replaceHandoff, handoffCancel: cancelHandoff, handoffRetry: retryHandoff, viewHandover, startSupervisor, syncOpenDesign, adoptSupervisor, saveSeatModel, setMachineDefault, applyProfile: applyProjectProfile, toggleSkillPack: toggleProjectSkillPack, resetSkillPacks: resetProjectSkillPacks, saveProfile: saveProjectProfile, resetProjectLanes, manageSkillPacks: () => { if (!mobile) openSettings?.(); }, busy: busy || activePluginAct !== null }}
             openDesignActions={
               !mobile && view.project !== null && view.project.missingRoot !== true ? (
                 <>

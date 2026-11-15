@@ -1094,3 +1094,134 @@ test("10: the pill popover drops the status table, hides the current model, labe
     });
   } finally { stop(); }
 });
+
+test('Project pack writes accept dynamic IDs, reset explicit selection and navigate to Settings; mobile expands read-only', async () => {
+  const { ProjectPanel } = await load('plugin/client/factory/project-panel.tsx');
+  const { testTheme } = await import('./client-markup.ts');
+  const { createElement } = await import('react');
+  const writes: unknown[] = [];
+  const packs = [{ id: 'custom-owner', label: 'Owner pack', enabled: false, autoDetected: false, installedCount: 1, skills: ['asc-iap'] }];
+  await mountUnderNativeWindow(async (createRoot, container, act) => {
+    const root = createRoot(container);
+    const render = (mobile: boolean, explicit = true) => root.render(createElement(ProjectPanel, { key: String(mobile) + explicit, theme: testTheme, panel: modelPanelFixture(), mobile, now: Date.now(), daemonError: null, initialUi: { tab: 'project' }, skillPacks: packs, skillPacksExplicit: explicit, actions: { ...modelPanelActions, toggleSkillPack: (id: string, enabled: boolean) => writes.push([id, enabled]), resetSkillPacks: () => writes.push('reset'), manageSkillPacks: () => writes.push('settings') } }));
+    const byId = (id: string) => container.querySelector(`[data-testid="${id}"]`) as HTMLElement | null;
+    try {
+      await act(() => render(false));
+      assert.ok(byId('factory-skill-packs-reset'));
+      await act(() => byId('factory-skill-pack-custom-owner')!.click());
+      await act(() => byId('factory-skill-packs-reset')!.click());
+      await act(() => byId('factory-skill-packs-manage')!.click());
+      assert.deepEqual(writes, [['custom-owner', true], 'reset', 'settings']);
+      await act(() => render(false, false));
+      assert.equal(byId('factory-skill-packs-reset'), null);
+      await act(() => render(true));
+      for (const id of ['factory-skill-pack-custom-owner', 'factory-skill-packs-reset', 'factory-skill-packs-manage']) assert.equal(byId(id), null);
+      await act(() => byId('factory-skill-pack-expand-custom-owner')!.click());
+      assert.match(byId('factory-skill-pack-skills-custom-owner')!.textContent!, /asc-iap/);
+      assert.equal(writes.length, 3);
+    } finally { await act(() => root.unmount()); }
+  });
+});
+
+test('Project profile authoring saves name and description, updates active profile and confirms reset only for changed live seats', async () => {
+  const { ProjectPanel } = await load('plugin/client/factory/project-panel.tsx');
+  const { testTheme } = await import('./client-markup.ts');
+  const { createElement } = await import('react');
+  const writes: any[] = [];
+  const panel = modelPanelFixture();
+  panel.profile = { active: { id: 'fast', name: 'Fast', description: 'Keep description' }, list: [], modified: true };
+  const props = { theme: testTheme, panel, modelView: modelPickerFixture, hasProjectLaneOverride: true, machineLanes: { ...modelPickerFixture.lanes, lead: 'pi/opus' }, now: Date.now(), daemonError: null, initialUi: { tab: 'models' }, actions: { ...modelPanelActions, saveProfile: async (input: any) => { writes.push(input); return true; }, resetProjectLanes: () => writes.push('reset') } };
+  await mountUnderNativeWindow(async (createRoot, container, act) => {
+    const root = createRoot(container);
+    const byId = (id: string) => container.querySelector(`[data-testid="${id}"]`) as HTMLElement | null;
+    const click = (id: string) => act(() => byId(id)!.click());
+    const type = async (id: string, value: string) => {
+      const input = byId(id) as HTMLInputElement;
+      const setter = Object.getOwnPropertyDescriptor(input.ownerDocument.defaultView!.HTMLInputElement.prototype, 'value')!.set!;
+      await act(() => { setter.call(input, value); input.dispatchEvent(new input.ownerDocument.defaultView!.Event('input', { bubbles: true })); });
+    };
+    try {
+      await act(() => root.render(createElement(ProjectPanel, { ...props, mobile: false })));
+      await click('factory-profile-save');
+      assert.ok(byId('factory-profile-save-modal'));
+      assert.equal((byId('factory-profile-save-confirm') as HTMLButtonElement).disabled, true);
+      await type('factory-profile-name', '  New profile  ');
+      await type('factory-profile-description', '  Project settings  ');
+      await click('factory-profile-save-confirm');
+      assert.deepEqual(writes, [{ name: 'New profile', description: 'Project settings' }]);
+      assert.equal(byId('factory-profile-save-modal'), null);
+      await click('factory-profile-update');
+      assert.deepEqual(writes.at(-1), { id: 'fast', name: 'Fast', description: 'Keep description' });
+      await click('factory-lanes-reset-project');
+      assert.ok(byId('factory-lanes-reset-confirmation'));
+      assert.match(byId('factory-lanes-reset-confirmation')!.textContent!, /Lead.*Handoff/);
+      assert.equal(writes.length, 2);
+      await click('factory-lanes-reset-cancel');
+      assert.equal(byId('factory-lanes-reset-confirmation'), null);
+      await click('factory-lanes-reset-project');
+      await click('factory-lanes-reset-confirm');
+      assert.equal(writes.at(-1), 'reset');
+      await act(() => root.render(createElement(ProjectPanel, { ...props, key: 'unchanged', mobile: false, machineLanes: modelPickerFixture.lanes })));
+      await click('factory-lanes-reset-project');
+      assert.equal(byId('factory-lanes-reset-confirmation'), null);
+      assert.equal(writes.length, 4);
+      await act(() => root.render(createElement(ProjectPanel, { ...props, key: 'same-provider', mobile: false, machineLanes: { ...modelPickerFixture.lanes, lead: 'claude/another' } })));
+      await click('factory-lanes-reset-project');
+      assert.match(byId('factory-lanes-reset-confirmation')!.textContent!, /Lead.*Model switch in place/);
+      assert.equal(writes.length, 4);
+      await act(() => root.render(createElement(ProjectPanel, { ...props, key: 'inherited', mobile: false, hasProjectLaneOverride: false, panel: { ...panel, profile: { ...panel.profile, modified: false } } })));
+      assert.equal(byId('factory-profile-update'), null);
+      assert.equal(byId('factory-lanes-reset-project'), null);
+      await act(() => root.render(createElement(ProjectPanel, { ...props, key: 'mobile', mobile: true })));
+      for (const id of ['factory-profile-save', 'factory-profile-update', 'factory-lanes-reset-project', 'factory-profile-save-modal']) assert.equal(byId(id), null);
+    } finally { await act(() => root.unmount()); }
+  });
+});
+
+test('Project Shell scopes dynamic pack and profile writes to the snapshot Project without supplying lane overrides', async () => {
+  const { FactoryShell } = await load('plugin/client/factory/shell.tsx');
+  const { testTheme } = await import('./client-markup.ts');
+  const { createElement } = await import('react');
+  const panel = modelPanelFixture();
+  panel.profile = { active: { id: 'fast', name: 'Fast', description: 'Reuse me' }, list: [], modified: true };
+  const view = { ...modelPickerFixture, machineLanes: modelPickerFixture.lanes, hasProjectLaneOverride: true, panel, project: { root: '/snapshot-project', slug: 'my-app', missingRoot: false }, kpis: { running: 0, needsHuman: 0 }, companionTools: [], corePlugin: {}, vault: {}, skillHub: { skillPacksExplicit: true, projectPacks: [{ id: 'source-owner', label: 'Owner', enabled: false }] }, daemonError: null };
+  const calls: { method: string; input: any }[] = [];
+  let settings = 0;
+  const g = globalThis as Record<string, any>, prior = g.__factoryClientRpc;
+  g.__factoryClientRpc = async (method: string, input: any) => {
+    if (method === 'factory.snapshot') return { ok: true, view };
+    if (method === 'factory.self.update.status') return { ok: true, current: '0.10.3', latest: '0.10.3', updateAvailable: false };
+    calls.push({ method, input });
+    return { ok: true };
+  };
+  try {
+    await mountUnderNativeWindow(async (createRoot, container, act) => {
+      const root = createRoot(container);
+      const byId = (id: string) => container.querySelector(`[data-testid="${id}"]`) as HTMLElement;
+      const click = (id: string) => act(() => byId(id).click());
+      try {
+        await act(() => root.render(createElement(FactoryShell, { theme: testTheme, dir: '/requested-project', layout: { compact: false, platform: 'web' }, openSettings: () => { settings++; } })));
+        await click('factory-tab-project');
+        await click('factory-skill-pack-source-owner');
+        await click('factory-skill-packs-reset');
+        await click('factory-skill-packs-manage');
+        await click('factory-tab-models');
+        await click('factory-profile-update');
+        await click('factory-profile-save');
+        const input = byId('factory-profile-name') as HTMLInputElement;
+        const setter = Object.getOwnPropertyDescriptor(input.ownerDocument.defaultView!.HTMLInputElement.prototype, 'value')!.set!;
+        await act(() => { setter.call(input, 'From Project'); input.dispatchEvent(new input.ownerDocument.defaultView!.Event('input', { bubbles: true })); });
+        await click('factory-profile-save-confirm');
+        await click('factory-lanes-reset-project');
+        assert.deepEqual(calls, [
+          { method: 'factory.skills.toggle_pack', input: { projectRoot: '/snapshot-project', pack: 'source-owner', enabled: true } },
+          { method: 'factory.skills.pack.reset', input: { projectRoot: '/snapshot-project' } },
+          { method: 'factory.profiles.save', input: { id: 'fast', name: 'Fast', description: 'Reuse me', projectRoot: '/snapshot-project' } },
+          { method: 'factory.profiles.save', input: { name: 'From Project', projectRoot: '/snapshot-project' } },
+          { method: 'factory.lanes.reset', input: { projectRoot: '/snapshot-project' } },
+        ]);
+        assert.equal(settings, 1);
+      } finally { await act(() => root.unmount()); }
+    });
+  } finally { g.__factoryClientRpc = prior; }
+});

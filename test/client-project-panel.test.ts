@@ -42,6 +42,9 @@ async function loadModule(entry: string): Promise<Exports> {
                 React.createElement(name, { disabled, onClick: onPress, 'data-testid': testID, 'data-role': accessibilityRole, 'aria-label': accessibilityLabel, 'data-checked': accessibilityState && accessibilityState.checked !== undefined ? String(accessibilityState.checked) : undefined, 'data-selected': accessibilityState && accessibilityState.selected !== undefined ? String(accessibilityState.selected) : undefined, 'data-style': typeof style === 'object' && style !== null ? JSON.stringify(style) : undefined }, typeof children === 'function' ? children({ pressed: false }) : children);
               exports.View = tag('div'); exports.Text = tag('span'); exports.Pressable = tag('button');
               exports.Icon = () => null;
+              const Modal = ({ children, open }) => open ? React.createElement('div', {}, children) : null;
+              Modal.Content = tag('div');
+              exports.Modal = Modal;
               exports.TextInput = ({ value, placeholder, testID }) => React.createElement('input', { value: value ?? '', placeholder, readOnly: true, 'data-testid': testID });
               exports.Platform = { OS: 'ios', select: (spec) => (spec.ios !== undefined ? spec.ios : spec.default) };
             `,
@@ -616,7 +619,7 @@ test("06: the Lane profile section names the active profile as modified and list
   assert.equal(hasHook(desktop, "factory-profile-apply-balanced"), false, "the active one shows Active instead");
   assert.match(desktop, />Active</);
   const empty = await render(makePanel(), { initialUi: { tab: "models" }, actions: { applyProfile() {} } });
-  assert.match(empty, /Save a Lane profile in Settings to use it here\./);
+  assert.match(empty, /Save a Lane profile to reuse this Project’s models\./);
   const mobile = await render(modelsPanel(), { mobile: true, initialUi: { tab: "models" }, actions: { applyProfile() {} } });
   assert.match(mobile, /Balanced/);
   assert.equal(hasHook(mobile, "factory-profile-apply-fast"), false, "mobile writes no profile");

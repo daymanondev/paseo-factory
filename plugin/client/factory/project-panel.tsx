@@ -10,7 +10,7 @@ import { Modal, TextInput } from "@getpaseo/plugin/client/ui";
 import { createContext, useContext, useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { Pressable, Text, View } from "react-native";
-import type { PanelNeedsYouItem, PanelOpenDesign, PanelPeerRow, PanelSeatRow, PanelSupervisorCandidateRow, PanelTone, PanelView } from "../../shared/view.ts";
+import type { PanelNeedsYouItem, PanelOpenDesign, PanelPeerRow, PanelSeatRow, PanelSupervisorCandidateRow, PanelTone, PanelView, Lanes } from "../../shared/view.ts";
 import { Btn } from "../kit/pill.tsx";
 import { Tabs } from "../kit/tabs.tsx";
 import { CONTROL_H, RADIUS, SPACING, factoryPalette, hoveredOf, text, thinkingColour, tint } from "../kit/theme.ts";
@@ -49,6 +49,10 @@ export interface ProjectPanelActions {
   setMachineDefault?(seat: string, value: string): Promise<boolean> | void;
   applyProfile?(profileId: string): void;
   toggleSkillPack?(pack: string, enabled: boolean): void;
+  saveProfile?(input: { id?: string; name: string; description?: string }): Promise<boolean> | void;
+  resetProjectLanes?(): void;
+  resetSkillPacks?(): void;
+  manageSkillPacks?(): void;
   busy: boolean;
 }
 
@@ -662,10 +666,14 @@ function Switch({ theme, testID, label, checked, disabled, onToggle }: { theme: 
   );
 }
 
-export function SkillPacks({ theme, packs, onToggle, busy = false, initiallyExpanded = [] }: { theme: PluginTheme; packs: readonly MenuSkillPack[]; onToggle?: (pack: string, enabled: boolean) => void; busy?: boolean; initiallyExpanded?: readonly string[] }) {
+export function SkillPacks({ theme, packs, onToggle, onReset, onManage, explicit = false, busy = false, initiallyExpanded = [] }: { theme: PluginTheme; packs: readonly MenuSkillPack[]; onToggle?: (pack: string, enabled: boolean) => void; onReset?: () => void; onManage?: () => void; explicit?: boolean; busy?: boolean; initiallyExpanded?: readonly string[] }) {
   const [expanded, setExpanded] = useState<readonly string[]>(initiallyExpanded);
   return <Section theme={theme} testID="factory-skill-packs" divider={false}>
     <SectionTitle theme={theme} label="Skill packs" />
+    <View style={{ flexDirection: "row", flexWrap: "wrap", gap: SPACING[2] }}>
+      {explicit && onReset ? <Btn theme={theme} small testID="factory-skill-packs-reset" label="Reset to auto-detect" disabled={busy} onPress={onReset} /> : null}
+      {onManage ? <Btn theme={theme} small testID="factory-skill-packs-manage" label="Manage in Settings" onPress={onManage} /> : null}
+    </View>
     <View style={{ gap: SPACING[1] }}>
       <Text style={text(theme, "rowTitle")}>Core · Always on</Text>
       <Text style={text(theme, "meta")}>Every Peer keeps the Core skills, including tdd, diagnosing-bugs, code-review, codebase-design, domain-modeling, research.</Text>
@@ -709,7 +717,17 @@ function ModelRow({ theme, testID, name, scope, divider, children }: { theme: Pl
 }
 
 /** Seat models (Supervisor, Lead, Default worker), then the Lane profile. Every chip opens the same modal as the Team tab. */
-function ModelsTab({ theme, panel, mobile, actions }: { theme: PluginTheme; panel: PanelView; mobile: boolean; actions: ProjectPanelActions }) {
+function ModelsTab({ theme, panel, mobile, actions, modelView, machineLanes, hasProjectLaneOverride }: { theme: PluginTheme; panel: PanelView; mobile: boolean; actions: ProjectPanelActions; modelView?: LanePickerView; machineLanes?: Lanes; hasProjectLaneOverride: boolean }) {
+  const [naming, setNaming] = useState(false);
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [confirmingReset, setConfirmingReset] = useState(false);
+  const resetChanges = (["supervisor", "lead"] as const).filter(seat => panel.seats !== null && seatIsLive(panel.seats[seat]) && modelView !== undefined && machineLanes !== undefined && modelView.lanes[seat] !== machineLanes[seat]);
+  const reset = () => resetChanges.length > 0 ? setConfirmingReset(true) : actions.resetProjectLanes?.();
+  const save = async () => {
+    const ok = await actions.saveProfile?.({ name: name.trim(), ...(description.trim() ? { description: description.trim() } : {}) });
+    if (ok !== false) setNaming(false);
+  };
   const { seats, defaultWorker, profile } = panel;
   const standing = seats === null ? [] : ([["supervisor", "Supervisor", seats.supervisor], ["lead", "Lead", seats.lead]] as const);
   const canApply = !mobile && actions.applyProfile !== undefined;
@@ -740,7 +758,7 @@ function ModelsTab({ theme, panel, mobile, actions }: { theme: PluginTheme; pane
         {profile.modified ? <Text style={{ ...text(theme, "label"), color: factoryPalette(theme).wait }}> modified</Text> : null}
       </Text>
       {canApply ? (
-        profile.list.length === 0 ? <Text style={text(theme, "meta")}>Save a Lane profile in Settings to use it here.</Text> : (
+        profile.list.length === 0 ? <Text style={text(theme, "meta")}>Save a Lane profile to reuse this Project’s models.</Text> : (
           <View>
             {profile.list.map((item, index) => (
               <View key={item.id} style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: SPACING[3], paddingVertical: SPACING[2], borderTopWidth: index === 0 ? 0 : 1, borderTopColor: theme.colors.border }}>
@@ -751,7 +769,35 @@ function ModelsTab({ theme, panel, mobile, actions }: { theme: PluginTheme; pane
           </View>
         )
       ) : null}
+      {!mobile ? <View style={{ flexDirection: "row", flexWrap: "wrap", gap: SPACING[2] }}>
+        {actions.saveProfile ? <Btn theme={theme} small testID="factory-profile-save" label="+ Save as Profile…" disabled={actions.busy} onPress={() => { setName(""); setDescription(""); setNaming(true); }} /> : null}
+        {actions.saveProfile && profile.active !== null && profile.modified ? <Btn theme={theme} small testID="factory-profile-update" label={`Update "${profile.active.name}"`} disabled={actions.busy} onPress={() => { const active = profile.active!; void actions.saveProfile?.({ id: active.id, name: active.name, ...(active.description == null ? {} : { description: active.description }) }); }} /> : null}
+        {hasProjectLaneOverride && actions.resetProjectLanes ? <Btn theme={theme} small testID="factory-lanes-reset-project" label="Reset to Machine Default" disabled={actions.busy || modelView === undefined || machineLanes === undefined} onPress={reset} /> : null}
+      </View> : null}
     </Section>
+    {!mobile && actions.saveProfile ? <Modal open={naming} onOpenChange={setNaming} title="Save Lane profile">
+      <Modal.Content><View testID="factory-profile-save-modal" style={{ gap: SPACING[3] }}>
+        <Text style={text(theme, "label")}>Profile name</Text>
+        <TextInput testID="factory-profile-name" value={name} onChangeText={setName} placeholder="e.g. Fast & Cheap" style={{ color: theme.colors.foreground }} />
+        <Text style={text(theme, "label")}>Description (optional)</Text>
+        <TextInput testID="factory-profile-description" value={description} onChangeText={setDescription} placeholder="What this setup is for" style={{ color: theme.colors.foreground }} />
+        <Text style={text(theme, "meta")}>Saves this Project’s effective models, including Watch. Running seats keep their models.</Text>
+        <View style={{ flexDirection: "row", gap: SPACING[2] }}>
+          <Btn theme={theme} label="Cancel" disabled={actions.busy} onPress={() => setNaming(false)} />
+          <Btn theme={theme} testID="factory-profile-save-confirm" label="Save Profile" disabled={actions.busy || !name.trim()} onPress={() => { void save(); }} />
+        </View>
+      </View></Modal.Content>
+    </Modal> : null}
+    {!mobile ? <Modal open={confirmingReset} onOpenChange={setConfirmingReset} title="Reset to Machine Default">
+      <Modal.Content><View testID="factory-lanes-reset-confirmation" style={{ gap: SPACING[3] }}>
+        <Text style={text(theme, "label")}>Resetting changes these live seats:</Text>
+        {resetChanges.map(seat => <Text key={seat} style={text(theme, "meta")}>{seat === "lead" ? "Lead" : "Supervisor"} · {splitLaneParts(modelView!.lanes[seat]).provider === splitLaneParts(machineLanes![seat]).provider ? "Model switch in place" : "Handoff to a new provider"} · {modelView!.lanes[seat]} → {machineLanes![seat]}</Text>)}
+        <View style={{ flexDirection: "row", gap: SPACING[2] }}>
+          <Btn theme={theme} testID="factory-lanes-reset-cancel" label="Cancel" disabled={actions.busy} onPress={() => setConfirmingReset(false)} />
+          <Btn theme={theme} testID="factory-lanes-reset-confirm" label="Confirm & Apply" disabled={actions.busy} onPress={() => { setConfirmingReset(false); actions.resetProjectLanes?.(); }} />
+        </View>
+      </View></Modal.Content>
+    </Modal> : null}
   </>;
 }
 
@@ -770,6 +816,9 @@ export function ProjectPanel({
   onEditorRequestHandled,
   width = 0,
   skillPacks = [],
+  skillPacksExplicit = false,
+  hasProjectLaneOverride = false,
+  machineLanes,
   modelView,
   selfUpdate,
 }: {
@@ -780,6 +829,9 @@ export function ProjectPanel({
   onEditorRequestHandled?: () => void;
   width?: number;
   skillPacks?: readonly MenuSkillPack[];
+  skillPacksExplicit?: boolean;
+  hasProjectLaneOverride?: boolean;
+  machineLanes?: Lanes;
   theme: PluginTheme;
   panel: PanelView;
   /** True on Paseo mobile (iOS/Android) — hides desktop-only affordances. */
@@ -813,8 +865,8 @@ export function ProjectPanel({
   const needsYou = <NeedsYou theme={theme} items={needsYouItems} mobile={mobile} wide={wide} actions={actions} />;
   const handoff = <HandoffBlock theme={theme} handoffs={panel.handoffs} mobile={mobile} wide={wide} actions={actions} />;
   const seats = panel.seats === null ? null : <Seats theme={theme} seats={panel.seats} mobile={mobile} wide={wide} actions={actions} {...(initialUi === undefined ? {} : { initialUi })} />;
-  const models = <ModelsTab theme={theme} panel={panel} mobile={mobile} actions={actions} />;
-  const packs = <SkillPacks theme={theme} packs={skillPacks} initiallyExpanded={initialUi?.expandedSkillPacks ?? []} busy={actions.busy} {...(!mobile && actions.toggleSkillPack !== undefined ? { onToggle: actions.toggleSkillPack } : {})} />;
+  const models = <ModelsTab theme={theme} panel={panel} mobile={mobile} actions={actions} modelView={modelView} machineLanes={machineLanes} hasProjectLaneOverride={hasProjectLaneOverride} />;
+  const packs = <SkillPacks theme={theme} packs={skillPacks} explicit={skillPacksExplicit} {...(!mobile ? { onReset: actions.resetSkillPacks, onManage: actions.manageSkillPacks } : {})} initiallyExpanded={initialUi?.expandedSkillPacks ?? []} busy={actions.busy} {...(!mobile && actions.toggleSkillPack !== undefined ? { onToggle: actions.toggleSkillPack } : {})} />;
   const design = panel.openDesign === null ? null : <OpenDesign theme={theme} openDesign={panel.openDesign} now={now} desktopActions={mobile ? null : openDesignActions} />;
   // The header chip names the active profile and jumps to the Models tab, where profiles are applied.
   const profileLabel = `${panel.profile.active?.name ?? "No Lane profile"}${panel.profile.modified ? " (modified)" : ""}`;
