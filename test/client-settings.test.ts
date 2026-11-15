@@ -124,3 +124,40 @@ test("the Project panel shell carries no machine-wide panes — they live on the
   assert.match(shell, /<SettingsScreen/, "the settings host renders the Settings screen");
   assert.doesNotMatch(shell, /TabBar|FactoryTabStateSchema|useTabState/, "the interim tab bar and its persisted state are gone");
 });
+
+const packHub = () => ({
+  ...healthyView().skillHub!, totalInstalled: 2,
+  installedSkills: [
+    { name: "tdd", pack: "core", packs: ["core"], source: "mattpocock/skills", revision: null, freshness: "local", harnesses: [], roles: ["peer"] },
+    { name: "deploy", pack: "workflow", packs: ["source-acme", "custom-release"], source: "acme/tools", revision: null, freshness: "local", harnesses: [], roles: ["peer"] },
+  ],
+  projectPacks: [
+    { id: "source-acme", label: "Acme tools", kind: "source", installedCount: 1, skills: ["deploy"], enabled: false, autoDetected: false },
+    { id: "custom-release", label: "Release kit", description: "Ship releases reliably", kind: "custom", installedCount: 1, skills: ["deploy", "missing-skill"], enabled: true, autoDetected: false },
+  ],
+});
+
+test("Settings Skill Hub shows source and custom pack details and every installed skill membership", async () => {
+  const { SkillHubCard } = await loadClientModule("plugin/client/factory/skill-hub.tsx");
+  const html = renderToStaticMarkup(createElement(SkillHubCard, { theme, hub: packHub(), busy: false, defaultOpen: true }));
+  assert.match(html, /data-testid="skill-hub-custom-packs"/);
+  assert.match(html, /Ship releases reliably/);
+  assert.match(html, /missing-skill/, "pack membership includes skills not installed on this machine");
+  assert.match(html, /1 installed/);
+  assert.match(html, /Source/);
+  assert.match(html, /Custom/);
+  assert.match(html, /Core.*always on/i);
+  const skill = html.slice(html.indexOf('data-testid="skill-hub-skill-deploy"'));
+  assert.match(skill, /Acme tools/);
+  assert.match(skill, /Release kit/, "one installed skill can show multiple pack badges");
+  assert.doesNotMatch(html, /data-testid="skill-hub-pack-(create|edit|delete)/);
+});
+
+test("mobile Settings can inspect pack membership while mounting no settings writes", async () => {
+  const { SettingsReadOnly } = await loadClientModule("plugin/client/factory/settings.tsx");
+  const html = renderToStaticMarkup(createElement(SettingsReadOnly, { theme, view: healthyView({ skillHub: packHub() }), section: "skills-tools" }));
+  assert.match(html, /data-testid="skill-hub-custom-packs"/);
+  for (const value of ["Acme tools", "Release kit", "Ship releases reliably", "deploy", "missing-skill", "1 installed"]) assert.ok(html.includes(value), value);
+  assert.match(html, /Core.*always on/i);
+  assert.doesNotMatch(html, /<button|<input/, "inspection mounts no write controls");
+});
