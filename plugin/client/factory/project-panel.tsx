@@ -660,8 +660,8 @@ function Switch({ theme, testID, label, checked, disabled, onToggle }: { theme: 
   );
 }
 
-export function SkillPacks({ theme, packs, onToggle, busy = false }: { theme: PluginTheme; packs: readonly MenuSkillPack[]; onToggle?: (pack: string, enabled: boolean) => void; busy?: boolean }) {
-  return <Section theme={theme} testID="factory-skill-packs" divider={false}>
+export function SkillPacks({ theme, packs, onToggle, busy = false, divider = false }: { divider?: boolean; theme: PluginTheme; packs: readonly MenuSkillPack[]; onToggle?: (pack: string, enabled: boolean) => void; busy?: boolean }) {
+  return <Section theme={theme} testID="factory-skill-packs" divider={divider}>
     <SectionTitle theme={theme} label="Skill packs" />
     {packs.length === 0 ? <Text style={text(theme, "meta")}>No skill packs available.</Text> : packs.map((pack, index) => (
       <View key={pack.id} testID={`factory-panel-skill-${pack.id}`} style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: SPACING[3], paddingVertical: SPACING[2], borderTopWidth: index === 0 ? 0 : 1, borderTopColor: theme.colors.border }}>
@@ -684,6 +684,32 @@ function ModelRow({ theme, testID, name, scope, divider, children }: { theme: Pl
       <Text style={text(theme, "meta")}>{scope === "project" ? "Project override" : "Machine default"}</Text>
     </View>
   );
+}
+
+/** Compact lifetime Project token count; the server owns totals and model shares. */
+function formatTokenCount(value: number): string {
+  if (value >= 1_000_000_000) return `${(value / 1_000_000_000).toFixed(1)}B`;
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+  if (value >= 1_000) return `${Math.round(value / 1_000)}k`;
+  return String(value);
+}
+
+function ProjectUsage({ theme, usage, mobile }: { theme: PluginTheme; mobile: boolean; usage: NonNullable<PanelView["usage"]> }) {
+  const [expanded, setExpanded] = useState(false);
+  return <Section theme={theme} testID="project-usage-card" divider={false}>
+    <SectionTitle theme={theme} label="Project usage" />
+    {usage.state === "empty" ? <Text testID="project-usage-empty" style={text(theme, "meta")}>No usage recorded yet</Text> : <>
+      <Text testID="project-usage-summary" style={text(theme, "label")}>
+        {`${formatTokenCount(usage.totalTokens)} tok · cache-hit ${usage.cacheHitPercent === null ? "–" : `${Math.round(usage.cacheHitPercent)}%`} · in ${formatTokenCount(usage.inputUncachedTokens)} · out ${formatTokenCount(usage.outputTokens)} · ${usage.sessionCount} sessions`}
+      </Text>
+      {mobile ? null : <Btn theme={theme} small variant="ghost" testID="project-usage-toggle" label={`${expanded ? "▾" : "▸"} By model`} onPress={() => setExpanded(!expanded)} />}
+      {!mobile && expanded ? <View testID="project-usage-models" style={{ gap: SPACING[1.5] }}>
+        {usage.models.map(row => <Text key={`${row.provider}/${row.model}`} testID="project-usage-model-row" style={text(theme, "code")}>
+          {`${row.provider}/${row.model} · ${formatTokenCount(row.totalTokens)} tok · ${Math.round(row.sharePercent)}%`}
+        </Text>)}
+      </View> : null}
+    </>}
+  </Section>;
 }
 
 /** Seat models (Supervisor, Lead, Default worker), then the Lane profile. Every chip opens the same modal as the Team tab. */
@@ -792,7 +818,7 @@ export function ProjectPanel({
   const handoff = <HandoffBlock theme={theme} handoffs={panel.handoffs} mobile={mobile} wide={wide} actions={actions} />;
   const seats = panel.seats === null ? null : <Seats theme={theme} seats={panel.seats} mobile={mobile} wide={wide} actions={actions} {...(initialUi === undefined ? {} : { initialUi })} />;
   const models = <ModelsTab theme={theme} panel={panel} mobile={mobile} actions={actions} />;
-  const packs = <SkillPacks theme={theme} packs={skillPacks} busy={actions.busy} {...(!mobile && actions.toggleSkillPack !== undefined ? { onToggle: actions.toggleSkillPack } : {})} />;
+  const packs = <SkillPacks theme={theme} divider={panel.usage != null} packs={skillPacks} busy={actions.busy} {...(!mobile && actions.toggleSkillPack !== undefined ? { onToggle: actions.toggleSkillPack } : {})} />;
   const design = panel.openDesign === null ? null : <OpenDesign theme={theme} openDesign={panel.openDesign} now={now} desktopActions={mobile ? null : openDesignActions} />;
   // The header chip names the active profile and jumps to the Models tab, where profiles are applied.
   const profileLabel = `${panel.profile.active?.name ?? "No Lane profile"}${panel.profile.modified ? " (modified)" : ""}`;
@@ -823,7 +849,7 @@ export function ProjectPanel({
           {needsYouItems.length > 0 || panel.handoffs.length > 0 ? <View testID="factory-alert-stack" style={{ gap: SPACING[1.5] }}>{boundary("Needs you", needsYou)}{boundary("Handoff", handoff)}</View> : null}
           <Tabs theme={theme} tabs={PANEL_TABS} value={tab} onChange={setTab} testID="factory-tab" />
           <View testID={`factory-tab-body-${tab}`}>
-            {tab === "team" ? boundary("Seats", seats) : tab === "models" ? boundary("Models", models) : <>{boundary("Skill packs", packs)}{boundary("Open Design", design)}</>}
+            {tab === "team" ? boundary("Seats", seats) : tab === "models" ? boundary("Models", models) : <>{boundary("Project usage", panel.usage == null ? null : <ProjectUsage theme={theme} usage={panel.usage} mobile={mobile} />)}{boundary("Skill packs", packs)}{boundary("Open Design", design)}</>}
           </View>
         </>
       ) : (

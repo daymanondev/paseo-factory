@@ -934,14 +934,12 @@ test('SkillsToolsPane SSR renders Skill Hub inventory and Project pack controls'
   } finally { rmSync(home, { recursive: true, force: true }); }
 });
 
-test("v0.0.87 (ADR 0043 §4): SeatsPane renders the Project Token & Model Usage card", () => {
-  const seats = readFileSync(join(repoRoot, "plugin/client/factory/seats.tsx"), "utf8");
-  assert.match(seats, /export function ProjectUsageCard/, "the card is its own component");
-  assert.match(seats, /Project Token Usage/, "the card's section title");
-  assert.match(seats, /BY SEAT \/ ROLE/, "the seat breakdown rows render");
-  assert.match(seats, /BY MODEL \/ PROVIDER/, "the model breakdown rows render");
-  assert.match(seats, /cache-hit/, "the cache-hit ratio renders");
-  assert.match(seats, /<ProjectUsageCard theme=\{theme\} usage=\{view\.projectUsage \?\? null\} \/>/, "the pane mounts the card from the view's usage half");
+test("Project usage has one client location in the Project panel; CLI status retains usage", () => {
+  const clientDir = join(repoRoot, "plugin/client");
+  const clientSources = (dir: string): string[] => readdirSync(dir, { withFileTypes: true }).flatMap(entry => entry.isDirectory() ? clientSources(join(dir, entry.name)) : /\.tsx?$/.test(entry.name) ? [join(dir, entry.name)] : []);
+  for (const file of clientSources(clientDir)) {
+    assert.doesNotMatch(readFileSync(file, "utf8"), /projectUsage/, `${file} must render the scoped panel usage instead`);
+  }
 
   const status = readFileSync(join(repoRoot, "plugin/bin/factory.mjs"), "utf8");
   assert.match(status, /usage-status\.mjs/, "factory status reads the generated usage-status mirror");
