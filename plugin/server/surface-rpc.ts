@@ -2890,14 +2890,14 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
      * before anything is written.
      */
     async profilesSave(input: { id?: string; name: string; description?: string; lanes?: Lanes; projectRoot?: string }, _context?: SurfaceCallContext) {
+      let projectSlug: string | undefined;
+      if (input.projectRoot !== undefined) {
+        const project = projectOrRefusal(input.projectRoot);
+        if (!project.ok) return project;
+        projectSlug = project.slug;
+      }
       let lanes = input.lanes;
-      if (lanes === undefined) {
-        let projectSlug: string | undefined;
-        if (input.projectRoot !== undefined) {
-          const project = projectOrRefusal(input.projectRoot);
-          if (!project.ok) return project;
-          projectSlug = project.slug;
-        }
+      if (lanes === undefined || projectSlug !== undefined) {
         const current = loadLanes(deps.stateDir, projectSlug);
         if (!current.ok) return failure("lanes-unreadable", current.reason);
         lanes = current.lanes;
@@ -2907,6 +2907,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           ...(input.id === undefined ? {} : { id: input.id }),
           name: input.name,
           ...(input.description === undefined ? {} : { description: input.description }),
+          ...(projectSlug === undefined ? {} : { projectSlug }),
           lanes,
         });
         const summary = `Saved Lane profile "${profile.name}" (${profile.id}).`;

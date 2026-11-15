@@ -75,3 +75,9 @@ An audit of the host machine (`research/skills-inventory-role-matrix-and-expo-sk
 
 - The Owner can see every skill on the machine, its Git freshness (`skillFolderHash` / `repoCommitSha`), its 5-harness symlink state, and its exact Role assignment in one unified `Skill Hub` card on the `Plugins` tab.
 - All 24 official `expo/skills` (`v1.14.3`), `asc-iap`, and updated `mattpocock/skills` live in `~/.agents/skills/`, replicate automatically to `andrews-mac-mini` via `Private vault`, and are automatically provisioned to `Lead`, `SLP Peer`, and `Agile Scrum` specialists (`UX`, `Architect`, `Dev`, `QA`) on Expo projects without bloating unrelated projects.
+
+## Amendment — dynamic Project packs and Peer enforcement
+
+Project settings use open, safe pack IDs: an absent `skillPacks` follows stack detection; an explicit array (including an empty array) persists the Owner's selection. Reset removes the override. Skill Hub combines built-in domains, source-derived groups from installed skill provenance, and custom packs in `<stateDir>/skill-packs.json`. Custom definitions synchronize through Private vault with timestamp conflict resolution and deletion tombstones.
+
+Peers receive Core ∪ enabled pack skills ∪ `Contract.skills`. Pi uses a Project-specific harness home at `<projectStateDir>/pi-agent/agent/`; OpenCode receives the matching skill permissions and other providers receive prompt scoping. Supervisor retains the full host inventory and Lead stays pinned to `codebase-design`, `domain-modeling`, and `tdd`. Project pack changes configure future Peers. Project displays pack membership and counts; custom pack management remains in Settings. Mobile can inspect without writing.
