@@ -38,3 +38,7 @@ When running multiple Projects concurrently where each Project assigns different
 
 4. **`Private vault` Synchronization (`config/profiles.json` & Per-App `lanes.json`).**
    - `collectLocalStateIntoRuntime` and `applyVaultHydration` (`src/vault-materialization.ts`) synchronize `<stateDir>/profiles.json` ↔ `config/profiles.json` using a key-level merge by `profileId` where the newer `updatedAt` timestamp wins (preserving profiles authored on different machines), and synchronize per-Project `<projectStateDir>/lanes.json` ↔ `config/apps/<canonicalAppKey>/lanes.json` alongside store manifests.
+
+## Amendment — saving from Project Models
+
+Saving or updating a Lane profile with `projectRoot` snapshots the Project's full effective Lane config, including `watch`, and writes its active-profile association with the profile in the same atomic `profiles.json` replacement. This authoring operation does not rewrite lanes or transition live seats. Project Models exposes save and update on desktop; reset removes the Project override through the existing live-seat transition law. Machine authoring and two-step deletion remain in Settings.

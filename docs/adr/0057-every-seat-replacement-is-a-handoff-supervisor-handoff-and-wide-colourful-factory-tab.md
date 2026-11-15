@@ -79,3 +79,7 @@ The Owner replaces seats for two reasons: a provider running out of quota, and a
 - `CONTEXT.md` gains Model switch, Handoff (reason, progress), Supervisor handoff, Substitute handover and Handoff mark. It also rewrites the Lead, Lead handoff, Peer handoff, Lead mailbox and Factory surface entries. Each entry changes in the release that ships its behaviour, and never ahead of it.
 - Handoff is a per-seat progress record visible to the surface. Its states are scheduled, handing over, creating successor, done, substitute handover and failed. The record carries a reason (`context-mark` / `provider-change` / `owner`), the source and target lane, and the waiting-Peer count.
 - The plugin registers per-workspace header buttons and per-agent composer pills from an all-Projects seat directory. These are the first app-wide contributions since the v0.6.0 slim-down.
+
+## Amendment — Project configuration authoring
+
+Desktop Project Models restores `+ Save as Profile…`, update for a modified active profile, and `Reset to Machine Default` when a Project override exists. Saving a preset leaves seats untouched; resetting uses the existing confirmation for changed live Supervisor or Lead lanes. Profile deletion stays in Settings. The Project tab shows dynamic skill pack counts and expandable membership, with reset to automatic detection and a Settings navigation action. Mobile retains inspection and hides settings writes.

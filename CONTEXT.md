@@ -146,7 +146,7 @@ Owner-only spool actions (`seat-cannot-rotate` / `seat-cannot-reset` for seats):
 _Avoid_: manual `rm -rf`, cross-Project blast radius, confusing rotate with reset or delete, rotating with live unsettled Peers
 
 **Pi harness home** & **Helper MCP catalog**:
-**Pi harness home** (`<stateDir>/pi-agent/<role>`) provisions compaction-proof `APPEND_SYSTEM.md`, read-only `defaultTools` for `supervisor`/`lead`, `600s` `paseo_factory` MCP, and role-scoped skills. **Helper MCP catalog** (`<stateDir>/helper-mcps.json`) discovers host MCPs read-only and provisions Owner-synced servers + OAuth strictly to `Peer`s, never `Supervisor`/`Lead` (`docs/adr/0013-*`, `0016-*`, `0039-*`, `0042-*`).
+**Pi harness home** (`<stateDir>/pi-agent/<role>` for standing seats; `<projectStateDir>/pi-agent/agent/` for Peers, selected by `PI_CODING_AGENT_DIR`) isolates each Project's Peer skill settings and provisions compaction-proof `APPEND_SYSTEM.md`, read-only `defaultTools` for `supervisor`/`lead`, `600s` `paseo_factory` MCP, and role-scoped skills. **Helper MCP catalog** (`<stateDir>/helper-mcps.json`) discovers host MCPs read-only and provisions Owner-synced servers + OAuth strictly to `Peer`s, never `Supervisor`/`Lead` (`docs/adr/0013-*`, `0016-*`, `0039-*`, `0042-*`).
 _Avoid_: shadow home, auto-syncing host MCPs, mutating host configs, Helper MCPs on `Supervisor`/`Lead`
 
 **Role-scoped MCP bridge**, **Correlation token**, & **Seat kickoff packet**:
@@ -154,7 +154,7 @@ Self-contained stdio MCP server (`paseo_factory`, `600s` timeout, zero relative 
 _Avoid_: cross-role omnibus MCP, direct Paseo lifecycle tools, cold/duplicated Turn-1 prompts
 
 **Companion plugin**, **Companion tool**, **Skill hub**, **Project skill pack**, & **Private vault**:
-Settings surfaces for Paseo **Companion plugin**s (`factory-burn-lab`, private `factory-release-lab`), GitHub-cloned **Companion tool** packs (`~/.agents/skills` + `.skill-lock.json`), cross-harness **Skill hub** matrix, per-Project **Project skill pack**s (`expo`, `firebase`), and **Private vault** (`git:<owner>/factory-vault` syncing credentials, OAuth, lanes/profiles, Helper MCPs, skills, and Ledger snapshots — never UI mockups; `docs/adr/0012-*`..`0042-*`).
+Settings surfaces for Paseo **Companion plugin**s (`factory-burn-lab`, private `factory-release-lab`), GitHub-cloned **Companion tool** packs (`~/.agents/skills` + `.skill-lock.json`), cross-harness **Skill hub** matrix, per-Project **Project skill pack**s (built-in domains, source-derived groups, and Owner-authored custom packs in `skill-packs.json`; Core is always on), and **Private vault** (`git:<owner>/factory-vault` syncing credentials, OAuth, lanes/profiles, custom skill packs, Helper MCPs, skills, and Ledger snapshots — never UI mockups; `docs/adr/0012-*`..`0042-*`).
 _Avoid_: vendoring third-party skills in repo, dumping all domain skills into every Project, UI bundles in `factory-vault`
 
 ### Retired terms (do not treat as live features)
