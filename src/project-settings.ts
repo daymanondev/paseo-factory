@@ -78,9 +78,17 @@ export function writeProjectSettings(state: string, slug: string, settings: Proj
 export function setProjectSkillPacks(state: string, slug: string, skillPacks: string[]): ProjectSettings {
   return stateMutation(state, () => {
     const current = readProjectSettings(state, slug);
-    if (skillPacks.some((pack) => !(PROJECT_SKILL_PACKS as readonly string[]).includes(pack)))
-      throw new FactoryError("invalid-skill-pack", "Unknown Project skill pack");
+    skillPacks = skillPacks.map(pack => pack.trim());
+    if (skillPacks.some((pack) => !safeId(pack)))
+      throw new FactoryError("invalid-skill-pack", "Invalid Project skill pack id");
     return writeProjectSettings(state, slug, { ...current, revision: current.revision + 1, skillPacks: [...new Set(skillPacks)] });
+  });
+}
+
+export function resetProjectSkillPacks(state: string, slug: string): ProjectSettings {
+  return stateMutation(state, () => {
+    const { skillPacks: _removed, ...current } = readProjectSettings(state, slug);
+    return writeProjectSettings(state, slug, { ...current, revision: current.revision + 1 });
   });
 }
 

@@ -6404,8 +6404,8 @@ test('Skill Hub RPC imports host skills and persists explicit Project pack overr
   assert.equal(after.view.skillHub?.hostCatalog.find(e => e.id === 'zcode:asc-iap')?.status, 'linked');
   assert.equal(after.view.skillHub?.projectPacks.find(p => p.id === 'expo')?.enabled, false);
   assert.deepEqual(after.view.skillHub?.roleMatrix.map(r => r.role), ['supervisor', 'lead', 'peer']);
-  assert.ok(after.view.skillHub?.roleMatrix.find(r => r.role === 'peer')?.skills.includes('asc-iap'));
-  assert.ok(after.view.skillHub?.installedSkills.find(s => s.name === 'asc-iap')?.roles.includes('peer'));
+  assert.ok(!after.view.skillHub?.roleMatrix.find(r => r.role === 'peer')?.skills.includes('asc-iap'));
+  assert.ok(!after.view.skillHub?.installedSkills.find(s => s.name === 'asc-iap')?.roles.includes('peer')); // Contract skills are scoped to an active Task, not the Project inventory.
 });
 
 // ---- Seam 1 (v0.0.89, ADR 0045 §1): the Per-Project Factory registry behind the surface RPCs ----
@@ -7869,4 +7869,57 @@ test("snapshot and global directory expose the same per-role lane, pending lane,
   assert.equal(rows.peers[0]!.lane.scope, "project");
   assert.equal(snapshot.view.panel.needsYou.some(i => i.kind === "supervisor-near-mark"), false, "an active handoff supersedes the near-mark suggestion");
   assert.equal(directory.projects.find(p => p.slug === f.slugA)!.needsYouCount, snapshot.view.panel.needsYou.length);
+});
+
+test('custom skill pack RPC round trip projects membership and resets to auto detect', async (t) => {
+  const { handlers, stateDir } = makeSurface(t);
+  const repo = makeTempDir(); disposeDir(t, repo);
+  writeFileSync(join(repo, 'package.json'), JSON.stringify({ dependencies: { expo: '*' } })); gitCommitAll(repo);
+  const saved = await handlers.skillsPackSave({ name: 'Release tools', skills: ['asc-iap'] });
+  assert.ok(saved.ok, JSON.stringify(saved)); if (!saved.ok) return;
+  assert.equal(saved.pack.id, 'release-tools');
+  const duplicate = await handlers.skillsPackSave({name: 'Release tools', skills: []});
+  assert.ok(duplicate.ok); if (!duplicate.ok) return;
+  assert.equal(duplicate.pack.id, 'release-tools-2');
+  const updated = await handlers.skillsPackSave({id: saved.pack.id, name: 'Shipping tools', description: 'Ship safely', skills: ['research']});
+  assert.ok(updated.ok); if (!updated.ok) return;
+  assert.deepEqual(updated.pack.skills, ['research']);
+  assert.ok((await handlers.skillsTogglePack({ projectRoot: repo, pack: saved.pack.id, enabled: true })).ok);
+  let snapshot = await handlers.snapshot({ projectRoot: repo }); assert.ok(snapshot.ok); if (!snapshot.ok) return;
+  assert.equal(snapshot.view.skillHub?.projectPacks.find(p => p.id === saved.pack.id)?.kind, 'custom');
+  assert.ok(snapshot.view.skillHub?.projectPacks.find(p => p.id === saved.pack.id)?.enabled);
+  assert.ok((await handlers.skillsPackReset({ projectRoot: repo })).ok);
+  const project = resolveProject(repo); assert.ok(project.ok); if (!project.ok) return;
+  assert.equal(readProjectSettings(stateDir, project.slug).skillPacks, undefined);
+  assert.ok((await handlers.skillsPackDelete({ id: saved.pack.id })).ok);
+  snapshot = await handlers.snapshot({ projectRoot: repo }); assert.ok(snapshot.ok); if (!snapshot.ok) return;
+  assert.ok(!snapshot.view.skillHub?.projectPacks.some(p => p.id === saved.pack.id));
+});
+
+test('Skill Hub groups source skills and custom memberships with installed counts', async (t) => {
+  const userHome = makeTempDir(); disposeDir(t, userHome);
+  const stateDir = makeTempDir(); disposeDir(t, stateDir);
+  const repo = makeTempDir(); disposeDir(t, repo); writeFileSync(join(repo, 'README.md'), '# App'); gitCommitAll(repo);
+  for (const name of ['tdd', 'deploy', 'audit', 'expo-router']) {
+    mkdirSync(join(userHome, '.agents/skills', name), {recursive:true});
+    writeFileSync(join(userHome, '.agents/skills', name, 'SKILL.md'), '# Skill');
+  }
+  writeFileSync(join(userHome, '.agents/.skill-lock.json'), JSON.stringify({ version: 3, skills: {
+    deploy: {source:'owner/release', sourceUrl:'https://github.com/owner/release'},
+    audit: {source:'owner/release', sourceUrl:'https://github.com/owner/release'},
+  }}));
+  const factory = createFactory({stateDir, eyeCliProbe: () => false});
+  const handlers = createSurfaceHandlers({factory, stateDir, home:join(userHome,'.paseo'), userHome, daemon:fakeDaemon([]).daemon, listPlugins:async()=>({ok:true,plugins:[]})});
+  const initial = await handlers.snapshot({projectRoot:repo}); assert.ok(initial.ok); if (!initial.ok) return;
+  const source = initial.view.skillHub?.projectPacks.find(p => p.label === 'owner/release');
+  assert.ok(source); assert.deepEqual(source.skills, ['audit','deploy']); assert.equal(source.installedCount, 2);
+  const saved = await handlers.skillsPackSave({name:'Release bundle', skills:['deploy','missing']}); assert.ok(saved.ok); if (!saved.ok) return;
+  assert.ok((await handlers.skillsTogglePack({projectRoot:repo, pack: saved.pack.id, enabled:true})).ok);
+  const active = await handlers.snapshot({projectRoot:repo}); assert.ok(active.ok); if (!active.ok) return;
+  const custom = active.view.skillHub?.projectPacks.find(p => p.id === saved.pack.id);
+  assert.equal(custom?.installedCount, 1); assert.deepEqual(custom?.skills, ['deploy','missing']);
+  assert.deepEqual(active.view.skillHub?.installedSkills.find(p => p.name === 'deploy')?.packs, [source.id, saved.pack.id]);
+  const peer = active.view.skillHub?.roleMatrix.find(r => r.role === 'peer')?.skills ?? [];
+  assert.ok(peer.includes('deploy')); assert.ok(!peer.includes('audit')); assert.ok(!peer.includes('expo-router'));
+  const invalid = await handlers.skillsTogglePack({projectRoot:repo, pack:'../escape', enabled:true}); assert.equal(invalid.ok,false);
 });

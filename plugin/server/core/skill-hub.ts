@@ -1,3 +1,6 @@
+import { listSkillPacks } from './skill-packs.ts';
+import { readProjectSettings } from './project-settings.ts';
+import { resolveProject } from './project.ts';
 /** Local capability inventory and the shared Project role-skill policy. Discovery never executes host code. */
 import { createHash } from "node:crypto";
 import {
@@ -84,18 +87,25 @@ function skillPack(name: string, source = ""): string {
   return source ? "workflow" : "custom";
 }
 export function resolveProjectSkillPacks(options: {
+  stateDir?: string;
   projectRoot?: string;
   configuredPacks?: string[];
 }): string[] {
+  if (options.configuredPacks === undefined && options.stateDir && options.projectRoot) {
+    const project = resolveProject(options.projectRoot);
+    if (project.ok) options = { ...options, configuredPacks: readProjectSettings(options.stateDir, project.slug).skillPacks };
+  }
   return (
     options.configuredPacks ?? detectProjectSkillPacks(options.projectRoot)
   );
 }
 
 export interface ProjectSkillContext {
+  stateDir?: string;
   projectRoot?: string;
   userHome?: string;
   configuredPacks?: string[];
+  contractSkills?: string[];
   slpLanes?: { supervisor: string; lead: string; worker: string };
 }
 export interface RoleSkillOptions extends ProjectSkillContext {
@@ -116,23 +126,10 @@ export function resolveRoleSkillsForProject(
   options: RoleSkillOptions,
 ): string[] {
   const { role } = options;
-  const baseline =
-    role === "supervisor"
-      ? SLP_ROLE_SKILLS.supervisor
-      : role === "lead"
-        ? SLP_ROLE_SKILLS.lead
-        : [...CORE_FACTORY_SKILLS];
-  const packs = resolveProjectSkillPacks(options);
-  const home = options.userHome ?? homedir();
-  const lock = readSkillLockFile(home);
-  const installed = inspectFactorySkillPack(home).installedSkills;
-  const candidates = [
-    ...new Set([...installed, ...(packs.includes("expo") ? EXPO_SKILLS : [])]),
-  ];
-  const domain =
-    role === "supervisor" || role === "lead"
-      ? []
-      : candidates.filter((name) => packs.includes(skillPack(name, lock.skills[name]?.source)));
+  if (role === "lead") return [...SLP_ROLE_SKILLS.lead];
+  if (role === "supervisor") return inspectFactorySkillPack(options.userHome).installedSkills;
+  const baseline = [...CORE_FACTORY_SKILLS];
+  const domain = role === 'peer' ? projectSkillPackInventory(options).filter(p => p.enabled).flatMap(p => p.skills) : [];
   return [
     ...new Set([...baseline, ...domain, ...(options.contractSkills ?? [])]),
   ].filter((name) => /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name));
@@ -410,17 +407,36 @@ export function buildRoleSkillMatrix(options: ProjectSkillContext = {}) {
       role === "supervisor" && isPi
         ? [...installed]
         : role === "peer"
-          ? installed.filter((s) => s !== "factory")
+          ? resolveRoleSkillsForProject({ ...options, role }).filter(s => installed.includes(s))
           : resolveRoleSkillsForProject({ ...options, role });
     return { role, skills };
   });
 }
+/** One registry powers both the inventory and the runtime allowlist. */
+export function projectSkillPackInventory(options: ProjectSkillContext = {}) {
+  const home = options.userHome ?? homedir(), lock = readSkillLockFile(home);
+  const installed = inspectFactorySkillPack(home).installedSkills;
+  const active = resolveProjectSkillPacks(options), detected = detectProjectSkillPacks(options.projectRoot);
+  const packs: { id: string; label: string; kind: 'builtin' | 'source' | 'custom'; skills: string[]; description?: string }[] = PROJECT_SKILL_PACKS.map((id, i) => ({ id, label: PACK_LABELS[i]!, kind: 'builtin', skills: installed.filter(name => skillPack(name, lock.skills[name]?.source) === id) }));
+  const sources = new Map<string, string[]>();
+  for (const name of installed) {
+    const source = lock.skills[name]?.source ?? 'Local/Custom';
+    if (['core', ...PROJECT_SKILL_PACKS].includes(skillPack(name, lock.skills[name]?.source))) continue;
+    const members = sources.get(source) ?? []; members.push(name); sources.set(source, members);
+  }
+  for (const [source, skills] of [...sources].sort(([a], [b]) => a.localeCompare(b))) {
+    const id = 'source-' + source.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 48) + '-' + createHash('sha256').update(source).digest('hex').slice(0, 8);
+    packs.push({ id, label: source, kind: 'source', skills });
+  }
+  if (options.stateDir) for (const pack of listSkillPacks(options.stateDir)) packs.push({ id: pack.id, label: pack.name, kind: 'custom', description: pack.description, skills: pack.skills });
+  return packs.map(pack => ({ ...pack, installedCount: pack.skills.filter(s => installed.includes(s)).length, enabled: active.includes(pack.id), autoDetected: detected.includes(pack.id) }));
+}
+
 export function inspectSkillHub(options: ProjectSkillContext = {}) {
   const home = options.userHome ?? homedir(),
     lock = readSkillLockFile(home);
   const installed = inspectFactorySkillPack(home).installedSkills;
-  const detected = detectProjectSkillPacks(options.projectRoot),
-    active = options.configuredPacks ?? detected;
+  const projectPacks = projectSkillPackInventory(options);
   const cache =
     json(join(home, ".agents/.skill-updates-cache.json")).remoteCommits ?? {};
   const roleMatrix = buildRoleSkillMatrix(options);
@@ -452,6 +468,7 @@ export function inspectSkillHub(options: ProjectSkillContext = {}) {
     return {
       name,
       pack: skillPack(name, entry?.source),
+      packs: projectPacks.filter(p => p.skills.includes(name)).map(p => p.id),
       source: entry?.source ?? "Local/Custom",
       revision: entry?.repoCommitSha ?? null,
       freshness,
@@ -474,12 +491,8 @@ export function inspectSkillHub(options: ProjectSkillContext = {}) {
       s.harnesses.some((h) => h.available && !h.healthy),
     ).length,
     installedSkills,
-    projectPacks: PROJECT_SKILL_PACKS.map((id, i) => ({
-      id,
-      label: PACK_LABELS[i]!,
-      enabled: active.includes(id),
-      autoDetected: detected.includes(id),
-    })),
+    projectPacks,
+    skillPacksExplicit: options.configuredPacks !== undefined || !!(options.stateDir && options.projectRoot && (() => { const project = resolveProject(options.projectRoot); return project.ok && readProjectSettings(options.stateDir!, project.slug).skillPacks !== undefined; })()),
     hostCatalog: discoverHostEcosystems(home),
     roleMatrix,
   };
