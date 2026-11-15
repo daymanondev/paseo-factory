@@ -1,4 +1,4 @@
-import { SkillHubCard } from "./skill-hub.tsx";
+import { SkillHubCard, type SkillPackInput } from "./skill-hub.tsx";
 import type { HelperMcpConfigUpdate } from "../../shared/view.ts";
 /**
  * Tab 4 — Plugins, the Core + `Companion plugin` catalog (v0.0.17, ADR 0012;
@@ -61,6 +61,8 @@ export interface PluginsActions {
   checkUpdates(): void;
   importSkill?(id: string): void;
   togglePack?(pack: string, enabled: boolean): void;
+  savePack?(input: SkillPackInput): Promise<boolean>;
+  deletePack?(id: string): Promise<boolean>;
   syncHelpers?(): void;
   setHelperConfig?(name: string, config: HelperMcpConfigUpdate): void;
   /** True while an on-demand update check is in flight. */
@@ -754,7 +756,7 @@ export function SkillsToolsPane({
         </View>
       ) : null}
 
-      <SkillHubCard theme={theme} hub={view.skillHub} busy={actions.busy} projectRoot={view.project?.root} importSkill={actions.importSkill} togglePack={actions.togglePack} healSkills={() => actions.manage("factory-skills-pack", "reload")} updateSkills={() => actions.manage("factory-skills-pack", "update")} />
+      <SkillHubCard theme={theme} hub={view.skillHub} busy={actions.busy} projectRoot={view.project?.root} importSkill={actions.importSkill} togglePack={actions.togglePack} savePack={actions.savePack} deletePack={actions.deletePack} healSkills={() => actions.manage("factory-skills-pack", "reload")} updateSkills={() => actions.manage("factory-skills-pack", "update")} />
       <HelperMcpsCard theme={theme} servers={view.helperMcps ?? []} actions={actions} />
     </View>
   );
