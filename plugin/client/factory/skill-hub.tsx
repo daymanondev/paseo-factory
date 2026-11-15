@@ -108,7 +108,6 @@ export function SkillHubCard({
   const trimmedSearch = search.trim().toLowerCase();
   const expoEntry = hub.hostCatalog.find((e) => e.id === "expo:official-pack");
   const expoLinked = expoEntry?.status === "linked";
-  const enabledPackCount = hub.projectPacks.filter((p) => p.enabled).length;
   const availableHostCount = hub.hostCatalog.filter((e) => e.status === "available" && e.skills.length > 0).length;
 
   const packCounts: Record<string, number> = {
@@ -227,105 +226,7 @@ export function SkillHubCard({
         </View>
       </View>
 
-      {/* Row 2 (Always-visible 2×2 Project Skill Packs Grid): Clean domain pack cards with auto-detection & per-Project toggle */}
-      <View style={{ gap: SPACING[1.5] }}>
-        <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: SPACING[1.5] }}>
-          <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[1.5] }}>
-            <Text style={text(theme, "label")}>Project Skill Packs</Text>
-            <Pill
-              theme={theme}
-              label={enabledPackCount > 0 ? `${enabledPackCount} active for Project` : "Baseline only"}
-              tone={enabledPackCount > 0 ? "statusSuccess" : "foregroundMuted"}
-            />
-          </View>
-          <Text style={text(theme, "meta", "foregroundMuted")}>
-            {!projectRoot
-              ? "Select a Project to enable skill packs."
-              : "Auto-detected from package.json / app.json or toggled per Project"}
-          </Text>
-        </View>
-
-        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: SPACING[1.5] }}>
-          {hub.projectPacks.map((pack) => {
-            const meta = PACK_META[pack.id];
-            const installedInPack = hub.installedSkills.filter((s) => s.pack === pack.id).length;
-            return (
-              <View
-                key={pack.id}
-                style={{
-                  flexGrow: 1,
-                  flexShrink: 1,
-                  flexBasis: 260,
-                  minWidth: 0,
-                  borderWidth: 1,
-                  borderColor: pack.enabled ? tint(theme.colors.accent, "66") : theme.colors.border,
-                  borderRadius: RADIUS.md,
-                  backgroundColor: pack.enabled ? tint(theme.colors.accent, "0c") : theme.colors.surface0,
-                  paddingHorizontal: SPACING[2.5],
-                  paddingVertical: SPACING[1.5],
-                  gap: SPACING[1],
-                }}
-              >
-                <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: SPACING[1.5] }}>
-                  <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[1.5], flexShrink: 1 }}>
-                    <View
-                      style={{
-                        width: DOT,
-                        height: DOT,
-                        borderRadius: DOT / 2,
-                        backgroundColor: pack.enabled
-                          ? theme.colors.statusSuccess
-                          : installedInPack > 0
-                            ? theme.colors.accent
-                            : theme.colors.foregroundMuted,
-                      }}
-                    />
-                    <Text style={text(theme, "section")} numberOfLines={1}>
-                      {pack.label}
-                    </Text>
-                    {pack.autoDetected ? (
-                      <Pill theme={theme} label="Auto-detected" tone="accent" lit />
-                    ) : null}
-                    <Pill
-                      theme={theme}
-                      label={meta ? `${installedInPack}/${meta.totalHint} installed` : `${installedInPack} installed`}
-                      mono
-                      tone={installedInPack > 0 ? "statusSuccess" : "foregroundMuted"}
-                    />
-                  </View>
-
-                  <View style={{ flexDirection: "row", alignItems: "center", gap: SPACING[1] }}>
-                    {installedInPack === 0 && meta?.hostId && importSkill ? (
-                      <Btn
-                        theme={theme}
-                        small
-                        tone="accent"
-                        label="Install Pack"
-                        disabled={busy}
-                        onPress={() => importSkill(meta.hostId)}
-                      />
-                    ) : null}
-                    <Btn
-                      theme={theme}
-                      small
-                      tone={pack.enabled ? "foregroundMuted" : "accent"}
-                      label={pack.enabled ? "Enabled — disable" : "Enable for Project"}
-                      disabled={busy || !projectRoot || !togglePack}
-                      onPress={() => togglePack?.(pack.id, !pack.enabled)}
-                    />
-                  </View>
-                </View>
-
-                {meta ? (
-                  <Text style={text(theme, "meta", "foregroundMuted")} numberOfLines={1}>
-                    {meta.tagline}
-                  </Text>
-                ) : null}
-              </View>
-            );
-          })}
-        </View>
-      </View>
+      <SkillPackInventory theme={theme} hub={hub} projectRoot={projectRoot} busy={busy} importSkill={importSkill} togglePack={togglePack} />
 
       {/* Row 3 (Quick-Jump Sub-View Bar): Clicking any chip opens/switches the collapsible drawer */}
       <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: SPACING[1.5] }}>
@@ -464,6 +365,7 @@ export function SkillHubCard({
                     return (
                       <View
                         key={skill.name}
+                        testID={`skill-hub-skill-${skill.name}`}
                         style={{
                           flexGrow: 1,
                           flexShrink: 1,
@@ -488,7 +390,9 @@ export function SkillHubCard({
                             <Text style={{ ...text(theme, "code"), flexShrink: 1 }} numberOfLines={1}>
                               {skill.name}
                             </Text>
-                            <Pill theme={theme} label={PACK_BADGE[skill.pack] ?? skill.pack.toUpperCase()} mono />
+                            {(skill.packs ?? [skill.pack]).map((id) => (
+                              <Pill key={id} theme={theme} label={hub.projectPacks.find((p) => p.id === id)?.label ?? PACK_BADGE[id] ?? id} mono />
+                            ))}
                           </View>
 
                           <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[1] }}>
@@ -703,5 +607,121 @@ export function SkillHubCard({
         </View>
       ) : null}
     </Card>
+  );
+}
+
+/** Pack details remain inspectable on mobile without mounting mutation controls. */
+export function SkillPackInventory({ theme, hub, projectRoot, busy = false, importSkill, togglePack }: {
+  theme: PluginTheme;
+  hub: SkillHubView;
+  projectRoot?: string;
+  busy?: boolean;
+  importSkill?: (id: string) => void;
+  togglePack?: (pack: string, enabled: boolean) => void;
+}) {
+  const enabledPackCount = hub.projectPacks.filter((p) => p.enabled).length;
+  return (
+      <View testID="skill-hub-custom-packs" style={{ gap: SPACING[1.5] }}>
+        <Text style={text(theme, "meta")}>Core — always on for Peers</Text>
+        <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: SPACING[1.5] }}>
+          <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[1.5] }}>
+            <Text style={text(theme, "label")}>Project Skill Packs</Text>
+            <Pill
+              theme={theme}
+              label={enabledPackCount > 0 ? `${enabledPackCount} active for Project` : "Baseline only"}
+              tone={enabledPackCount > 0 ? "statusSuccess" : "foregroundMuted"}
+            />
+          </View>
+          <Text style={text(theme, "meta", "foregroundMuted")}>
+            {!projectRoot
+              ? "Select a Project to enable skill packs."
+              : "Auto-detected from package.json / app.json or toggled per Project"}
+          </Text>
+        </View>
+
+        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: SPACING[1.5] }}>
+          {hub.projectPacks.map((pack) => {
+            const meta = PACK_META[pack.id];
+            const members = pack.skills ?? hub.installedSkills.filter((s) => (s.packs ?? [s.pack]).includes(pack.id)).map((s) => s.name);
+            const installedInPack = pack.installedCount ?? hub.installedSkills.filter((s) => (s.packs ?? [s.pack]).includes(pack.id)).length;
+            return (
+              <View
+                key={pack.id}
+                style={{
+                  flexGrow: 1,
+                  flexShrink: 1,
+                  flexBasis: 260,
+                  minWidth: 0,
+                  borderWidth: 1,
+                  borderColor: pack.enabled ? tint(theme.colors.accent, "66") : theme.colors.border,
+                  borderRadius: RADIUS.md,
+                  backgroundColor: pack.enabled ? tint(theme.colors.accent, "0c") : theme.colors.surface0,
+                  paddingHorizontal: SPACING[2.5],
+                  paddingVertical: SPACING[1.5],
+                  gap: SPACING[1],
+                }}
+              >
+                <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: SPACING[1.5] }}>
+                  <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[1.5], flexShrink: 1 }}>
+                    <View
+                      style={{
+                        width: DOT,
+                        height: DOT,
+                        borderRadius: DOT / 2,
+                        backgroundColor: pack.enabled
+                          ? theme.colors.statusSuccess
+                          : installedInPack > 0
+                            ? theme.colors.accent
+                            : theme.colors.foregroundMuted,
+                      }}
+                    />
+                    <Text style={text(theme, "section")} numberOfLines={1}>
+                      {pack.label}
+                    </Text>
+                    <Pill theme={theme} label={pack.kind === "custom" ? "Custom" : pack.kind === "source" ? "Source" : "Built-in"} />
+                    {pack.autoDetected ? (
+                      <Pill theme={theme} label="Auto-detected" tone="accent" lit />
+                    ) : null}
+                    <Pill
+                      theme={theme}
+                      label={meta ? `${installedInPack}/${meta.totalHint} installed` : `${installedInPack} installed`}
+                      mono
+                      tone={installedInPack > 0 ? "statusSuccess" : "foregroundMuted"}
+                    />
+                  </View>
+
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: SPACING[1] }}>
+                    {installedInPack === 0 && meta?.hostId && importSkill ? (
+                      <Btn
+                        theme={theme}
+                        small
+                        tone="accent"
+                        label="Install Pack"
+                        disabled={busy}
+                        onPress={() => importSkill(meta.hostId)}
+                      />
+                    ) : null}
+                    {togglePack ? <Btn
+                      theme={theme}
+                      small
+                      tone={pack.enabled ? "foregroundMuted" : "accent"}
+                      label={pack.enabled ? "Enabled — disable" : "Enable for Project"}
+                      disabled={busy || !projectRoot || !togglePack}
+                      onPress={() => togglePack?.(pack.id, !pack.enabled)}
+                    /> : null}
+                  </View>
+                </View>
+
+                {pack.description || meta ? (
+                  <Text style={text(theme, "meta", "foregroundMuted")} numberOfLines={1}>
+                    {pack.description ?? meta?.tagline}
+                  </Text>
+                ) : null}
+                <Text style={text(theme, "code")}>{members.length > 0 ? members.join(", ") : "No skills in this pack"}</Text>
+              </View>
+            );
+          })}
+        </View>
+      </View>
   );
 }

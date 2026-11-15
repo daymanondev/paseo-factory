@@ -15,6 +15,7 @@ import { Pressable, Text, View } from "react-native";
 import type { CompanionPluginView, FactoryView } from "../../shared/view.ts";
 import { Btn, Card, Pill } from "../kit/pill.tsx";
 import { RADIUS, SPACING, text, tint } from "../kit/theme.ts";
+import { SkillPackInventory } from "./skill-hub.tsx";
 import { SETTINGS_SECTION_ORDER } from "./settings-state.ts";
 import type { SettingsSectionId, SettingsWarnings } from "./settings-state.ts";
 
@@ -84,7 +85,7 @@ export function SettingsReadOnly({ theme, view, section }: { theme: PluginTheme;
       rows = [
         ...(view.companionTools ?? []).map((t) => <Row key={t.id} theme={theme} label={t.title} value={t.error ?? t.status.replace("_", " ")} />),
         ...(view.helperMcps ?? []).map((s) => <Row key={`mcp-${s.name}`} theme={theme} label={`${s.name} (Helper MCP)`} value={s.enabled ? s.status.replace("_", " ") : "local on host"} />),
-        ...(view.skillHub === undefined ? [] : [<Row key="skills" theme={theme} label="Skills installed" value={String(view.skillHub.totalInstalled)} />]),
+        ...(view.skillHub === undefined ? [] : [<Row key="skills" theme={theme} label="Skills installed" value={String(view.skillHub.totalInstalled)} />, <SkillPackInventory key="packs" theme={theme} hub={view.skillHub} />]),
       ];
       break;
     case "plugins":
