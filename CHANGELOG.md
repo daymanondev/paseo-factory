@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-11-15
+
+**Dynamic Project skill packs, enforced Peer skills, and profile authoring from Project Models.**
+
+### Added
+
+- **Dynamic Project skill packs.** Inspect installed counts and expandable membership for built-in, source-derived, and custom packs. Create, rename, edit membership, and delete custom packs in Settings → Skills & Tools. Custom definitions synchronize through Private vault with timestamp conflict resolution and deletion tombstones.
+- **Project pack controls.** Toggle packs per Project, reset to auto-detection, and open Settings to manage packs or import skills. Core stays enabled. Mobile retains read-only inspection.
+- **Project Lane profile authoring.** Save or update profiles directly from Project → Models using the Project's full effective lane config, including Watch. The saved profile becomes active immediately without changing running seats. Reset to Machine Default confirms changes to live standing seats; profile deletion remains in Settings.
+
+### Fixed
+
+- **Peer skill scope now follows Project settings.** Pi Peers use isolated per-Task homes beneath each Project, with Core plus enabled packs plus the active Contract's skills. Concurrent Projects and Tasks cannot overwrite each other's filters. OpenCode permissions and other-provider kickoff prompts use the same scope; Supervisor retains the host catalog and Lead retains its three core skills.
+- **Whitespace around pack IDs is normalized consistently**, including when disabling a pack.
+
 ## [0.10.4] - 2026-11-15
 
 **Project usage is back in the Factory tab's Project tab.**
