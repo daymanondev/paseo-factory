@@ -716,7 +716,7 @@ function ModelRow({ theme, testID, name, scope, divider, children }: { theme: Pl
   );
 }
 
-/** Compact lifetime Project token count; the server owns totals and model shares. */
+/** Compact lifetime Project token count; the server owns totals and breakdown shares. */
 function formatTokenCount(value: number): string {
   if (value >= 1_000_000_000) return `${(value / 1_000_000_000).toFixed(1)}B`;
   if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
@@ -730,13 +730,22 @@ function ProjectUsage({ theme, usage, mobile }: { theme: PluginTheme; mobile: bo
     <SectionTitle theme={theme} label="Project usage" />
     {usage.state === "empty" ? <Text testID="project-usage-empty" style={text(theme, "meta")}>No usage recorded yet</Text> : <>
       <Text testID="project-usage-summary" style={text(theme, "label")}>
-        {`${formatTokenCount(usage.totalTokens)} tok · cache-hit ${usage.cacheHitPercent === null ? "–" : `${Math.round(usage.cacheHitPercent)}%`} · in ${formatTokenCount(usage.inputUncachedTokens)} · out ${formatTokenCount(usage.outputTokens)} · ${usage.sessionCount} sessions`}
+        {`${formatTokenCount(usage.newTokens)} new (${formatTokenCount(usage.inputUncachedTokens)} in · ${formatTokenCount(usage.outputTokens)} out) · ${usage.cacheHitPercent === null ? "–" : `${Math.round(usage.cacheHitPercent)}%`} cache (${formatTokenCount(usage.cachedTokens)}) · ${formatTokenCount(usage.totalTokens)} total · ${usage.sessionCount} ${usage.sessionCount === 1 ? "session" : "sessions"}`}
       </Text>
-      {mobile ? null : <Btn theme={theme} small variant="ghost" testID="project-usage-toggle" label={`${expanded ? "▾" : "▸"} By model`} onPress={() => setExpanded(!expanded)} />}
-      {!mobile && expanded ? <View testID="project-usage-models" style={{ gap: SPACING[1.5] }}>
-        {usage.models.map(row => <Text key={`${row.provider}/${row.model}`} testID="project-usage-model-row" style={text(theme, "code")}>
-          {`${row.provider}/${row.model} · ${formatTokenCount(row.totalTokens)} tok · ${Math.round(row.sharePercent)}%`}
-        </Text>)}
+      {mobile ? null : <Btn theme={theme} small variant="ghost" testID="project-usage-toggle" label={`${expanded ? "▾" : "▸"} Breakdown`} onPress={() => setExpanded(!expanded)} />}
+      {!mobile && expanded ? <View testID="project-usage-breakdown" style={{ gap: SPACING[3] }}>
+        <View testID="project-usage-seats" style={{ gap: SPACING[1.5] }}>
+          <Text style={text(theme, "badge")}>BY SEAT</Text>
+          {usage.seats.map(row => <Text key={row.seat} testID="project-usage-seat-row" style={text(theme, "code")}>
+            {`${row.label} · ${formatTokenCount(row.newTokens)} new · ${formatTokenCount(row.cachedTokens)} cache · ${row.sessionCount} ses · ${Math.round(row.sharePercent)}%`}
+          </Text>)}
+        </View>
+        <View testID="project-usage-models" style={{ gap: SPACING[1.5] }}>
+          <Text style={text(theme, "badge")}>BY MODEL</Text>
+          {usage.models.map(row => <Text key={`${row.provider}/${row.model}`} testID="project-usage-model-row" style={text(theme, "code")}>
+            {`${row.provider}/${row.model} · ${formatTokenCount(row.newTokens)} new · ${formatTokenCount(row.cachedTokens)} cache · ${row.sessionCount} ses · ${Math.round(row.sharePercent)}%`}
+          </Text>)}
+        </View>
       </View> : null}
     </>}
   </Section>;

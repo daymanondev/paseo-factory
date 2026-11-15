@@ -945,25 +945,30 @@ test("Project pack membership expands for inspection on desktop and mobile witho
   }
 });
 const recordedUsage: NonNullable<PanelView["usage"]> = {
-  state: "recorded", totalTokens: 12_400_000, cacheHitPercent: 87,
+  state: "recorded", totalTokens: 12_400_000, cacheHitPercent: 87, newTokens: 1_540_000, cachedTokens: 10_860_000, cacheReadTokens: 10_800_000,
   inputUncachedTokens: 1_200_000, outputTokens: 340_000, sessionCount: 64,
+  seats: [
+    { seat: "agent", label: "Peer", newTokens: 1_000_000, inputUncachedTokens: 800_000, outputTokens: 200_000, cachedTokens: 8_300_000, cacheReadTokens: 8_260_000, totalTokens: 9_300_000, sessionCount: 50, sharePercent: 75 },
+    { seat: "lead", label: "Lead", newTokens: 540_000, inputUncachedTokens: 400_000, outputTokens: 140_000, cachedTokens: 2_560_000, cacheReadTokens: 2_540_000, totalTokens: 3_100_000, sessionCount: 14, sharePercent: 25 },
+  ],
   models: [
-    { provider: "codex", model: "gpt-6", totalTokens: 9_300_000, sharePercent: 75 },
-    { provider: "pi", model: "glm", totalTokens: 3_100_000, sharePercent: 25 },
+    { provider: "codex", model: "gpt-6", newTokens: 1_000_000, inputUncachedTokens: 800_000, outputTokens: 200_000, cachedTokens: 8_300_000, cacheReadTokens: 8_260_000, totalTokens: 9_300_000, sessionCount: 50, sharePercent: 75 },
+    { provider: "pi", model: "glm", newTokens: 540_000, inputUncachedTokens: 400_000, outputTokens: 140_000, cachedTokens: 2_560_000, cacheReadTokens: 2_540_000, totalTokens: 3_100_000, sessionCount: 14, sharePercent: 25 },
   ],
 };
 
-test("Project usage leads the Project tab with the server summary and a collapsed desktop model toggle", async () => {
+test("Project usage leads with new and cached tokens and a collapsed desktop breakdown", async () => {
   const html = await render(makePanel({ usage: recordedUsage }), { initialUi: { tab: "project" } });
   assert.ok(hasHook(html, "project-usage-card"));
-  assert.match(leafOf(html, "project-usage-summary"), /12\.4M tok · cache-hit 87% · in 1\.2M · out 340k · 64 sessions/);
+  assert.match(leafOf(html, "project-usage-summary"), /1\.5M new \(1\.2M in · 340k out\) · 87% cache \(10\.9M\) · 12\.4M total · 64 sessions/);
   assert.ok(html.indexOf('data-testid="project-usage-card"') < html.indexOf('data-testid="factory-skill-packs"'));
-  assert.ok(hasHook(html, "project-usage-toggle"));
+  assert.match(leafOf(html, "project-usage-toggle"), /▸ Breakdown/);
+  assert.equal(hasHook(html, "project-usage-breakdown"), false);
   assert.equal(hasHook(html, "project-usage-models"), false);
   assert.equal(hasHook(await render(makePanel({ usage: recordedUsage })), "project-usage-card"), false, "the Team tab has no usage card");
 });
 
-test("desktop Project usage expands and collapses server-projected model rows on press", async () => {
+test("desktop Project usage expands and collapses seat and model metrics on press", async () => {
   const { ProjectPanel } = await loadPanel();
   const { createElement, act } = await import("react");
   const { JSDOM } = await import(["jsdom"].join(""));
@@ -977,13 +982,22 @@ test("desktop Project usage expands and collapses server-projected model rows on
   try {
     await act(() => root.render(createElement(ProjectPanel, { theme, panel: makePanel({ usage: recordedUsage }), mobile: false, now: Date.now(), daemonError: null, actions: noopActions(), initialUi: { tab: "project" } })));
     const toggle = () => container.querySelector('[data-testid="project-usage-toggle"]') as HTMLButtonElement;
-    assert.equal(container.querySelector('[data-testid="project-usage-models"]'), null);
+    assert.equal(container.querySelector('[data-testid="project-usage-breakdown"]'), null);
     await act(() => toggle().click());
+    assert.equal(toggle().textContent, "▾ Breakdown");
+    const breakdown = container.querySelector('[data-testid="project-usage-breakdown"]');
+    assert.ok(breakdown);
+    assert.match(breakdown.textContent!, /BY SEAT.*BY MODEL/);
+    const seats = breakdown.querySelector('[data-testid="project-usage-seats"]');
+    assert.ok(seats);
+    assert.deepEqual([...seats.querySelectorAll('[data-testid="project-usage-seat-row"]')].map(row => row.textContent), ["Peer · 1.0M new · 8.3M cache · 50 ses · 75%", "Lead · 540k new · 2.6M cache · 14 ses · 25%"]);
     const models = container.querySelector('[data-testid="project-usage-models"]');
     assert.ok(models);
-    assert.deepEqual([...models.querySelectorAll('[data-testid="project-usage-model-row"]')].map(row => row.textContent), ["codex/gpt-6 · 9.3M tok · 75%", "pi/glm · 3.1M tok · 25%"]);
+    assert.deepEqual([...models.querySelectorAll('[data-testid="project-usage-model-row"]')].map(row => row.textContent), ["codex/gpt-6 · 1.0M new · 8.3M cache · 50 ses · 75%", "pi/glm · 540k new · 2.6M cache · 14 ses · 25%"]);
+    assert.doesNotMatch(breakdown.textContent!, /\$|USD|cost/i);
     await act(() => toggle().click());
-    assert.equal(container.querySelector('[data-testid="project-usage-models"]'), null);
+    assert.equal(toggle().textContent, "▸ Breakdown");
+    assert.equal(container.querySelector('[data-testid="project-usage-breakdown"]'), null);
   } finally {
     await act(() => root.unmount());
     Object.assign(g, saved);
@@ -991,17 +1005,20 @@ test("desktop Project usage expands and collapses server-projected model rows on
   }
 });
 
-test("mobile Project usage shows the lifetime summary without model expansion or writes", async () => {
+test("mobile Project usage shows new and cached totals without breakdown or writes", async () => {
   const html = await render(makePanel({ usage: recordedUsage }), { mobile: true, initialUi: { tab: "project" } });
-  assert.match(leafOf(html, "project-usage-summary"), /12\.4M tok · cache-hit 87% · in 1\.2M · out 340k · 64 sessions/);
+  assert.match(leafOf(html, "project-usage-summary"), /1\.5M new \(1\.2M in · 340k out\) · 87% cache \(10\.9M\) · 12\.4M total · 64 sessions/);
   const card = elementOf(html, "project-usage-card");
   assert.equal(hasHook(card, "project-usage-toggle"), false);
   assert.equal(hasHook(card, "project-usage-models"), false);
+  assert.equal(hasHook(card, "project-usage-breakdown"), false);
+  assert.equal(hasHook(card, "project-usage-seats"), false);
+  assert.doesNotMatch(card, /\$|USD|cost/i);
   assert.doesNotMatch(card, /<button/);
 });
 
 test("empty Project usage keeps a muted card on desktop and mobile", async () => {
-  const usage: NonNullable<PanelView["usage"]> = { state: "empty", totalTokens: 0, cacheHitPercent: null, inputUncachedTokens: 0, outputTokens: 0, sessionCount: 0, models: [] };
+  const usage: NonNullable<PanelView["usage"]> = { state: "empty", newTokens: 0, cachedTokens: 0, cacheReadTokens: 0, seats: [], totalTokens: 0, cacheHitPercent: null, inputUncachedTokens: 0, outputTokens: 0, sessionCount: 0, models: [] };
   for (const mobile of [false, true]) {
     const html = await render(makePanel({ usage }), { mobile, initialUi: { tab: "project" } });
     assert.ok(hasHook(html, "project-usage-card"));
@@ -1016,6 +1033,6 @@ test("unscoped or older panels omit Project usage, and an unknown cache-hit rati
   for (const usage of [null, undefined]) {
     assert.equal(hasHook(await render(makePanel({ usage }), { initialUi: { tab: "project" } }), "project-usage-card"), false);
   }
-  const html = await render(makePanel({ usage: { ...recordedUsage, cacheHitPercent: null } }), { initialUi: { tab: "project" } });
-  assert.match(leafOf(html, "project-usage-summary"), /cache-hit –/);
+  const html = await render(makePanel({ usage: { ...recordedUsage, newTokens: 0, cachedTokens: 0, cacheReadTokens: 0, totalTokens: 0, inputUncachedTokens: 0, outputTokens: 0, sessionCount: 1, cacheHitPercent: null, seats: [], models: [] } }), { initialUi: { tab: "project" } });
+  assert.match(leafOf(html, "project-usage-summary"), /0 new \(0 in · 0 out\) · – cache \(0\) · 0 total · 1 session<\/span>/);
 });
