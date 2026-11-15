@@ -26,7 +26,7 @@
  * daemon census door, and the one Factory instance — none of which belong
  * in the vendored pure core.
  */
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { Factory } from "./core/factory.ts";
 import type { MeterUsage } from "./core/events.ts";
@@ -185,6 +185,24 @@ function buildRecordFor(
 export function createUsageRuntime(deps: UsageRuntimeDeps): UsageRuntime {
   const log = deps.onLog ?? (() => {});
   const extractor = createUsageExtractor({ ...(deps.userHome === undefined ? {} : { userHome: deps.userHome }), stateDir: deps.stateDir });
+  const cachedUsage = new Map<string, { mtimeMs: number; size: number; file: ProjectUsageFile | undefined }>();
+  const readCachedUsage = (slug: string): ProjectUsageFile | undefined => {
+    try {
+      const { mtimeMs, size } = statSync(usageFilePath(deps.stateDir, slug));
+      const cached = cachedUsage.get(slug);
+      if (cached !== undefined && cached.mtimeMs === mtimeMs && cached.size === size) return cached.file;
+      const file = readProjectUsage(deps.stateDir, slug);
+      cachedUsage.set(slug, { mtimeMs, size, file });
+      return file;
+    } catch {
+      cachedUsage.delete(slug);
+      return undefined;
+    }
+  };
+  const flushSession = (slug: string, record: SessionUsageRecord): void => {
+    cachedUsage.delete(slug);
+    upsertSession(deps.stateDir, slug, record);
+  };
   const pending = new Map<string, SessionUsageRecord>();
   const timers = new Map<string, ReturnType<typeof setTimeout>>();
 
@@ -208,7 +226,7 @@ export function createUsageRuntime(deps: UsageRuntimeDeps): UsageRuntime {
     for (const record of records) {
       pending.delete(record.agentId);
       try {
-        upsertSession(deps.stateDir, slug, record);
+        flushSession(slug, record);
       } catch (error) {
         log(`usage: flush of ${record.agentId} deferred — ${String(error)}`);
       }
@@ -267,7 +285,7 @@ export function createUsageRuntime(deps: UsageRuntimeDeps): UsageRuntime {
     if (usage === undefined) return; // no store answered — the honest absence, no meter line
     const record = buildRecord(agent, usage, { ...(slug === undefined ? {} : { slug }), task, ...(attempt === undefined ? {} : { attempt }) });
     if (record === undefined) return;
-    upsertSession(deps.stateDir, record.projectSlug, record);
+    flushSession(record.projectSlug, record);
     const owner = taskFactory(task, slug);
     const implied = lastMeterImpliedTotal(owner, task, agent.id);
     if (record.totalTokens > implied) {
@@ -299,7 +317,7 @@ export function createUsageRuntime(deps: UsageRuntimeDeps): UsageRuntime {
         if (usage === undefined) return undefined;
         const record = buildRecord(agent, usage, meta);
         if (record === undefined) return undefined;
-        upsertSession(deps.stateDir, record.projectSlug, record);
+        flushSession(record.projectSlug, record);
         return record;
       } catch (error) {
         log(`usage: seat flush of ${agent.id} deferred — ${String(error)}`);
@@ -332,10 +350,11 @@ export function createUsageRuntime(deps: UsageRuntimeDeps): UsageRuntime {
     },
 
     async loadOrBackfillProjectUsage(slug) {
-      const existing = readProjectUsage(deps.stateDir, slug);
+      const existing = readCachedUsage(slug);
       if (existing !== undefined && existing.backfilledAt !== undefined) return existing;
       if (deps.paseoHome === undefined) return existing;
       try {
+        cachedUsage.delete(slug);
         const backfilled = await backfillProject(deps, extractor, slug, existing);
         return backfilled ?? existing;
       } catch (error) {
@@ -346,6 +365,7 @@ export function createUsageRuntime(deps: UsageRuntimeDeps): UsageRuntime {
 
     pruneForReset(slug, keepAgentIds) {
       flushPendingFor(slug);
+      cachedUsage.delete(slug);
       const file = readProjectUsage(deps.stateDir, slug);
       if (file === undefined) return;
       const keep = new Set(keepAgentIds);
@@ -357,6 +377,7 @@ export function createUsageRuntime(deps: UsageRuntimeDeps): UsageRuntime {
 
     forget(slug) {
       flushPendingFor(slug);
+      cachedUsage.delete(slug);
     },
 
     stop() {
