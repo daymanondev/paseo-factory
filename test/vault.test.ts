@@ -2135,3 +2135,26 @@ test('Private vault excludes repository design bundles on push and hydration', a
   const hydrated = await hydrateVaultDirect(home, { repo: 'owner/factory-vault', runner: fakeTarballRunner(archive).runner });
   assert.ok(!hydrated.hydratedFiles.some(p => p.includes('/design/')));
 });
+
+test('custom skill packs vault merges newer edits and deletion tombstones across machines', async (t) => {
+  const { saveSkillPack, deleteSkillPack, readSkillPackStore } = await import('../src/skill-packs.ts');
+  const dir = makeTempDir(); disposeDir(t, dir);
+  const home = join(dir, 'paseo'), state = join(home, 'plugin-state/paseo-factory');
+  saveSkillPack(state, { name: 'Release', skills: ['asc-iap'], updatedAt: '2026-01-01T00:00:00Z' });
+  collectLocalStateIntoRuntime(home, { userHome: dir });
+  const staged = join(home, 'vault-runtime/config/skill-packs.json');
+  assert.ok(existsSync(staged));
+  rmSync(join(state, 'skill-packs.json'));
+  applyVaultHydration(home, false, { userHome: dir });
+  assert.deepEqual(readSkillPackStore(state).packs.release?.skills, ['asc-iap']);
+  saveSkillPack(state, { id: 'release', name: 'Release', skills: ['research'], updatedAt: '2026-02-01T00:00:00Z' });
+  applyVaultHydration(home, true, { userHome: dir });
+  assert.deepEqual(readSkillPackStore(state).packs.release?.skills, ['research']);
+  deleteSkillPack(state, 'release');
+  collectLocalStateIntoRuntime(home, { userHome: dir });
+  const deleted = JSON.parse(readFileSync(staged, 'utf8'));
+  assert.equal(deleted.packs.release.deleted, true);
+  saveSkillPack(state, { id: 'release', name: 'Release', skills: ['asc-iap'], updatedAt: '2026-01-01T00:00:00Z' });
+  applyVaultHydration(home, false, { userHome: dir });
+  assert.equal(readSkillPackStore(state).packs.release?.deleted, true);
+});

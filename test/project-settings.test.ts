@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { disposeDir, makeTempDir } from "./helpers.ts";
-import { migrateLegacyExecutionState, projectSettingsPath, readProjectSettings, setProjectSkillPacks } from "../src/project-settings.ts";
+import { migrateLegacyExecutionState, projectSettingsPath, readProjectSettings, setProjectSkillPacks, resetProjectSkillPacks } from "../src/project-settings.ts";
 
 /** Per-Project settings (ADR 0056): defaults, skill-pack writes, and the unreadable-legacy-record safety rule. */
 
@@ -13,8 +13,12 @@ test("a Project with no settings record has the defaults; skill packs are valida
   assert.deepEqual(readProjectSettings(state, "alpha"), { schemaVersion: 1, revision: 0 });
   setProjectSkillPacks(state, "alpha", ["expo", "expo", "science"]);
   assert.deepEqual(readProjectSettings(state, "alpha").skillPacks, ["expo", "science"]);
-  assert.throws(() => setProjectSkillPacks(state, "alpha", ["nonsense"]), /Unknown Project skill pack/);
+  assert.throws(() => setProjectSkillPacks(state, "alpha", ["../escape"]), /Invalid Project skill pack/);
   assert.deepEqual(readProjectSettings(state, "alpha").skillPacks, ["expo", "science"], "a refused write changes nothing");
+  setProjectSkillPacks(state, "alpha", [" release-tools ", "release-tools", "source-team-123"]);
+  assert.deepEqual(readProjectSettings(state, "alpha").skillPacks, ["release-tools", "source-team-123"]);
+  resetProjectSkillPacks(state, "alpha");
+  assert.equal(readProjectSettings(state, "alpha").skillPacks, undefined);
 });
 
 test("a damaged settings record is refused by name, never read as defaults", (t) => {

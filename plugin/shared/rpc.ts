@@ -645,6 +645,10 @@ export const skillsImport = defineRpc({
   output: z.union([z.object({ ok: z.literal(true), summary: z.string() }), Failure]),
 });
 export const skillsTogglePack = defineRpc({
-  name: 'factory.skills.toggle_pack', input: z.object({ projectRoot: z.string(), pack: z.enum(['expo', 'firebase', 'zcode-3d', 'science']), enabled: z.boolean() }),
+  name: 'factory.skills.toggle_pack', input: z.object({ projectRoot: z.string(), pack: z.string().min(1), enabled: z.boolean() }),
   output: z.union([z.object({ ok: z.literal(true), summary: z.string() }), Failure]),
 });
+
+export const skillsPackSave = defineRpc({ name: 'factory.skills.pack.save', input: z.object({ id: z.string().optional(), name: z.string().min(1), description: z.string().optional(), skills: z.array(z.string()) }), output: z.union([z.object({ok: z.literal(true), pack: z.object({ id: z.string(), name: z.string(), description: z.string().optional(), skills: z.array(z.string()), updatedAt: z.string() })}), Failure]) });
+export const skillsPackDelete = defineRpc({ name: 'factory.skills.pack.delete', input: z.object({id: z.string()}), output: z.union([z.object({ok: z.literal(true), summary: z.string()}), Failure]) });
+export const skillsPackReset = defineRpc({ name: 'factory.skills.pack.reset', input: z.object({projectRoot: z.string()}), output: z.union([z.object({ok: z.literal(true), summary: z.string()}), Failure]) });

@@ -1,3 +1,5 @@
+import { readSkillPackStore, mergeSkillPackStores } from './skill-packs.ts';
+import { atomicJson } from './json-store.ts';
 import { collectHelperMcpVault, hydrateHelperMcpVault } from "./helper-mcp-vault.ts";
 import { ensureProviderSkillSymlinks } from "./companion-tools.ts";
 import { FactoryError } from "./errors.ts";
@@ -596,6 +598,15 @@ export function collectLocalStateIntoRuntime(paseoHome: string, options?: { user
     writeRuntimeFile(paseoHome, "config/profiles.json", Buffer.from(`${JSON.stringify(merged, null, 2)}\n`, "utf8"));
   }
 
+  if (existsSync(join(stateDir, 'skill-packs.json'))) {
+    const local = readSkillPackStore(stateDir);
+    const runtimeDir = join(paseoHome, 'vault-runtime', 'config');
+    let existing = { packs: {} };
+    try { existing = readSkillPackStore(runtimeDir); } catch { /* rebuild damaged cache from durable local state */ }
+    const merged = mergeSkillPackStores(existing, local, true);
+    writeRuntimeFile(paseoHome, 'config/skill-packs.json', Buffer.from(JSON.stringify(merged, null, 2) + '\n'));
+  }
+
   const localEye = join(stateDir, "eye.json");
   if (existsSync(localEye) && !sharedSecretExists(paseoHome, SHARED_SECRET_FILES.eyeConfig)) {
     writeRuntimeFile(paseoHome, `secrets/shared/${SHARED_SECRET_FILES.eyeConfig}`, readFileSync(localEye));
@@ -739,6 +750,17 @@ export function materializeConfigsFromRuntime(
       const merged = mergeLaneProfilesFiles(local, remote, { preferRemote: overwriteConfigs });
       mkdirSync(dirname(join(stateDir, "profiles.json")), { recursive: true });
       writeFileSync(join(stateDir, "profiles.json"), `${JSON.stringify(merged, null, 2)}\n`);
+    }
+  }
+
+  if (existsSync(join(runtimeConfigDir, 'skill-packs.json'))) {
+    const local = readSkillPackStore(stateDir);
+    try {
+      const remote = readSkillPackStore(runtimeConfigDir);
+      atomicJson(join(stateDir, 'skill-packs.json'), mergeSkillPackStores(local, remote, overwriteConfigs));
+    } catch (error) {
+      if (!(error instanceof FactoryError) || error.code !== 'skill-packs-invalid') throw error;
+      // A damaged remote cache cannot erase the local registry.
     }
   }
 

@@ -1,10 +1,11 @@
+import { saveSkillPack, deleteSkillPack } from './core/skill-packs.ts';
 import { recentSeatModels } from "./seat-model-history.ts";
 import { readPeerHandover } from "./peer-handoff.ts";
 import { parseHandoffFile } from "./handoff-text.ts";
 import { readHandoffProgress, laneRef } from "./handoff-progress.ts";
 import type { PanelView, ScopedLaneRef, TaskView } from "../shared/view.ts";
 import type { HandoffProgress, HandoffAction, HandoffRequest, HandoffReply } from "../shared/handoff.ts";
-import { readProjectSettings, setProjectSkillPacks } from "./core/project-settings.ts";
+import { readProjectSettings, setProjectSkillPacks, resetProjectSkillPacks } from "./core/project-settings.ts";
 import { linkedPreviewBundle } from "./core/open-design/preview-bundle.ts";
 import { serveLinkedPreview } from "./core/open-design/preview-server.ts";
 import { discoverOpenDesignProjects, exportOpenDesignProject, syncOpenDesignLink, readOpenDesignLink, unlinkOpenDesign, prepareOpenDesignDispatch } from "./core/open-design/open-design-link.ts";
@@ -95,7 +96,7 @@ import {
   helperMcpsSyncAndProbe,
   helperMcpsSetEnabled,
   pluginsCheckUpdates,
-  skillsImport, skillsTogglePack,
+  skillsImport, skillsTogglePack, skillsPackSave, skillsPackDelete, skillsPackReset,
   pluginsInstall,
   pluginsManage,
   selfUpdateApply,
@@ -2584,7 +2585,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         view: {
           ...view,
           machineLanes: machineLanes.lanes,
-          skillHub: inspectSkillHub({ slpLanes: lanes.lanes, userHome: resolveSurfaceUserHome(), projectRoot: enrichedProject?.root, configuredPacks }),
+          skillHub: inspectSkillHub({ stateDir: deps.stateDir, slpLanes: lanes.lanes, userHome: resolveSurfaceUserHome(), projectRoot: enrichedProject?.root, configuredPacks }),
           companionTools: buildCompanionToolsView(),
           helperMcps: helperMcpRoster(discoverHelperMcps({ stateDir: deps.stateDir, userHome: resolveSurfaceUserHome() }).servers),
           ...profileInfo,
@@ -3834,6 +3835,20 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         return reply.ok ? { ok: true as const, summary: reply.summary } : failure('skill-import-failed', reply.reason);
       } catch (error) { return failure(codeOf(error), messageOf(error)); }
     },
+    async skillsPackSave(input: { id?: string; name: string; description?: string; skills: string[] }) {
+      try { return { ok: true as const, pack: saveSkillPack(deps.stateDir, input) }; }
+      catch (error) { return failure(codeOf(error), messageOf(error)); }
+    },
+    async skillsPackDelete(input: { id: string }) {
+      try { deleteSkillPack(deps.stateDir, input.id); return { ok: true as const, summary: 'Custom pack deleted' }; }
+      catch (error) { return failure(codeOf(error), messageOf(error)); }
+    },
+    async skillsPackReset(input: { projectRoot: string }) {
+      try {
+        const project = projectOrRefusal(input.projectRoot); if (!project.ok) return project;
+        resetProjectSkillPacks(deps.stateDir, project.slug); return { ok: true as const, summary: 'Project packs follow auto-detection' };
+      } catch (error) { return failure(codeOf(error), messageOf(error)); }
+    },
     async skillsTogglePack(input: { projectRoot: string; pack: string; enabled: boolean }) {
       try {
         const project = projectOrRefusal(input.projectRoot); if (!project.ok) return project;
@@ -4324,6 +4339,9 @@ export function registerSurfaceRpc(
   server.handle(projectRotate, (input, context) => handlers.projectRotate(input, pass(context)));
   server.handle(leadDispatch, (input, context) => handlers.leadDispatch(input, pass(context)));
   server.handle(skillsImport, input => handlers.skillsImport(input));
+  server.handle(skillsPackSave, input => handlers.skillsPackSave(input));
+  server.handle(skillsPackDelete, input => handlers.skillsPackDelete(input));
+  server.handle(skillsPackReset, input => handlers.skillsPackReset(input));
   server.handle(skillsTogglePack, input => handlers.skillsTogglePack(input));
   server.handle(pluginsInstall, (input, context) => handlers.pluginsInstall(input, pass(context)));
   server.handle(pluginsManage, (input, context) => handlers.pluginsManage(input, pass(context)));
