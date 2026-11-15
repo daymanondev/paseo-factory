@@ -15,6 +15,10 @@ export interface MenuSkillPack {
   label: string;
   enabled: boolean;
   autoDetected: boolean;
+  kind?: "builtin" | "source" | "custom";
+  installedCount?: number;
+  skills?: readonly string[];
+  description?: string;
 }
 
 export type MenuConfirming = "reset" | "rotate" | "delete" | null;

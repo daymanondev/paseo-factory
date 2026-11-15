@@ -66,6 +66,8 @@ export interface ProjectPanelInitialUi {
   editingSeat?: string;
   /** Which tab opens first (default `team`) — static markup cannot click a tab. */
   tab?: ProjectPanelTab;
+  /** Pack membership drawers opened initially — useful for static rendering. */
+  expandedSkillPacks?: readonly string[];
 }
 
 export type ProjectPanelTab = "team" | "models" | "project";
@@ -660,16 +662,36 @@ function Switch({ theme, testID, label, checked, disabled, onToggle }: { theme: 
   );
 }
 
-export function SkillPacks({ theme, packs, onToggle, busy = false }: { theme: PluginTheme; packs: readonly MenuSkillPack[]; onToggle?: (pack: string, enabled: boolean) => void; busy?: boolean }) {
+export function SkillPacks({ theme, packs, onToggle, busy = false, initiallyExpanded = [] }: { theme: PluginTheme; packs: readonly MenuSkillPack[]; onToggle?: (pack: string, enabled: boolean) => void; busy?: boolean; initiallyExpanded?: readonly string[] }) {
+  const [expanded, setExpanded] = useState<readonly string[]>(initiallyExpanded);
   return <Section theme={theme} testID="factory-skill-packs" divider={false}>
     <SectionTitle theme={theme} label="Skill packs" />
-    {packs.length === 0 ? <Text style={text(theme, "meta")}>No skill packs available.</Text> : packs.map((pack, index) => (
-      <View key={pack.id} testID={`factory-panel-skill-${pack.id}`} style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: SPACING[3], paddingVertical: SPACING[2], borderTopWidth: index === 0 ? 0 : 1, borderTopColor: theme.colors.border }}>
-        <View style={{ flex: 1, minWidth: 0 }}>
-          <Text style={text(theme, "rowTitle")}>{pack.label}</Text>
-          {pack.autoDetected ? <Text style={text(theme, "meta")}>Auto-detected</Text> : null}
+    <View style={{ gap: SPACING[1] }}>
+      <Text style={text(theme, "rowTitle")}>Core · Always on</Text>
+      <Text style={text(theme, "meta")}>Every Peer keeps the Core skills, including tdd, diagnosing-bugs, code-review, codebase-design, domain-modeling, research.</Text>
+    </View>
+    {packs.length === 0 ? <Text style={text(theme, "meta")}>No skill packs available.</Text> : packs.map((pack) => (
+      <View key={pack.id} testID={`factory-panel-skill-${pack.id}`} style={{ gap: SPACING[2], paddingVertical: SPACING[2], borderTopWidth: 1, borderTopColor: theme.colors.border }}>
+        <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: SPACING[3] }}>
+          <Pressable
+            testID={`factory-skill-pack-expand-${pack.id}`}
+            accessibilityRole="button"
+            accessibilityLabel={`${expanded.includes(pack.id) ? "Collapse" : "Expand"} ${pack.label} skills`}
+            accessibilityState={{ expanded: expanded.includes(pack.id) }}
+            onPress={() => setExpanded(current => current.includes(pack.id) ? current.filter(id => id !== pack.id) : [...current, pack.id])}
+            style={{ flex: 1, minWidth: 0, gap: SPACING[1] }}
+          >
+            <Text style={text(theme, "rowTitle")}>{pack.label}</Text>
+            <Text style={text(theme, "meta")}>{pack.installedCount === undefined ? "Installed count unavailable" : `${pack.installedCount} installed`}{pack.kind === undefined ? "" : ` · ${{ builtin: "Built-in", source: "Source", custom: "Custom" }[pack.kind]}`}</Text>
+            {pack.autoDetected ? <Text style={text(theme, "meta")}>Auto-detected</Text> : null}
+            <Text style={text(theme, "meta")}>{expanded.includes(pack.id) ? "Hide skills ▴" : "Show skills ▾"}</Text>
+          </Pressable>
+          {onToggle === undefined ? <Text style={text(theme, "label", pack.enabled ? undefined : "foregroundMuted")}>{pack.enabled ? "On" : "Off"}</Text> : <Switch theme={theme} testID={`factory-skill-pack-${pack.id}`} label={`${pack.enabled ? "Disable" : "Enable"} ${pack.label}`} checked={pack.enabled} disabled={busy} onToggle={() => onToggle(pack.id, !pack.enabled)} />}
         </View>
-        {onToggle === undefined ? <Text style={text(theme, "label", pack.enabled ? undefined : "foregroundMuted")}>{pack.enabled ? "On" : "Off"}</Text> : <Switch theme={theme} testID={`factory-skill-pack-${pack.id}`} label={`${pack.enabled ? "Disable" : "Enable"} ${pack.label}`} checked={pack.enabled} disabled={busy} onToggle={() => onToggle(pack.id, !pack.enabled)} />}
+        {expanded.includes(pack.id) ? <View testID={`factory-skill-pack-skills-${pack.id}`} style={{ gap: SPACING[1] }}>
+          {pack.description ? <Text style={text(theme, "meta")}>{pack.description}</Text> : null}
+          {pack.skills === undefined ? <Text style={text(theme, "meta")}>Skill membership unavailable.</Text> : pack.skills.length === 0 ? <Text style={text(theme, "meta")}>No skills in this pack.</Text> : pack.skills.map(skill => <Text key={skill} style={text(theme, "meta")}>{skill}</Text>)}
+        </View> : null}
       </View>
     ))}
   </Section>;
@@ -792,7 +814,7 @@ export function ProjectPanel({
   const handoff = <HandoffBlock theme={theme} handoffs={panel.handoffs} mobile={mobile} wide={wide} actions={actions} />;
   const seats = panel.seats === null ? null : <Seats theme={theme} seats={panel.seats} mobile={mobile} wide={wide} actions={actions} {...(initialUi === undefined ? {} : { initialUi })} />;
   const models = <ModelsTab theme={theme} panel={panel} mobile={mobile} actions={actions} />;
-  const packs = <SkillPacks theme={theme} packs={skillPacks} busy={actions.busy} {...(!mobile && actions.toggleSkillPack !== undefined ? { onToggle: actions.toggleSkillPack } : {})} />;
+  const packs = <SkillPacks theme={theme} packs={skillPacks} initiallyExpanded={initialUi?.expandedSkillPacks ?? []} busy={actions.busy} {...(!mobile && actions.toggleSkillPack !== undefined ? { onToggle: actions.toggleSkillPack } : {})} />;
   const design = panel.openDesign === null ? null : <OpenDesign theme={theme} openDesign={panel.openDesign} now={now} desktopActions={mobile ? null : openDesignActions} />;
   // The header chip names the active profile and jumps to the Models tab, where profiles are applied.
   const profileLabel = `${panel.profile.active?.name ?? "No Lane profile"}${panel.profile.modified ? " (modified)" : ""}`;

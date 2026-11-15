@@ -897,3 +897,47 @@ test("11: the Shell mounts the self-update hook for the panel and hands it to th
   assert.match(shell, /useSelfUpdate\(\{[^}]*enabled: surface === "panel"/);
   assert.match(shell, /selfUpdate=\{selfUpdate\}/);
 });
+
+
+test("Project skill packs show dynamic kinds, installed counts and the always-on Core baseline", async () => {
+  const html = await render(makePanel(), {
+    initialUi: { tab: "project" },
+    skillPacks: [
+      { id: "source-acme", label: "Acme tools", kind: "source", installedCount: 2, skills: ["acme-a", "acme-b"], enabled: true, autoDetected: false },
+      { id: "my-pack", label: "My workflow", kind: "custom", installedCount: 0, skills: ["missing-skill"], enabled: false, autoDetected: false },
+      { id: "expo", label: "Expo", kind: "builtin", installedCount: 1, skills: ["expo-router"], enabled: true, autoDetected: true },
+    ], actions: { toggleSkillPack() {} },
+  });
+  assert.match(html, /Acme tools[\s\S]*2 installed[\s\S]*Source/);
+  assert.match(html, /My workflow[\s\S]*0 installed[\s\S]*Custom/);
+  assert.match(html, /Expo[\s\S]*1 installed[\s\S]*Built-in[\s\S]*Auto-detected/);
+  assert.ok(hasHook(html, "factory-skill-pack-expand-source-acme"));
+  assert.equal(hasHook(html, "factory-skill-pack-skills-source-acme"), false, "membership starts collapsed");
+  assert.match(html, /Core[\s\S]*Always on/);
+  assert.match(html, /tdd[\s\S]*diagnosing-bugs[\s\S]*code-review[\s\S]*codebase-design[\s\S]*domain-modeling[\s\S]*research/);
+  assert.equal(hasHook(html, "factory-skill-pack-core"), false, "Core has no toggle");
+});
+
+test("Project pack membership expands for inspection on desktop and mobile without mobile writes", async () => {
+  for (const mobile of [false, true]) {
+    const html = await render(makePanel(), {
+      mobile,
+      initialUi: { tab: "project", expandedSkillPacks: ["source-acme", "empty"] },
+      skillPacks: [
+        { id: "source-acme", label: "Acme tools", kind: "source", installedCount: 1, skills: ["acme-build", "acme-review"], description: "Acme shared workflow", enabled: false, autoDetected: false },
+        { id: "empty", label: "Empty", kind: "custom", installedCount: 0, skills: [], enabled: true, autoDetected: false },
+      ], actions: { toggleSkillPack() {} },
+    });
+    assert.ok(hasHook(html, "factory-skill-pack-skills-source-acme"));
+    assert.match(html, /Acme shared workflow[\s\S]*acme-build[\s\S]*acme-review/);
+    assert.match(html, /No skills in this pack/);
+    assert.match(html, /aria-label="Collapse Acme tools skills"/);
+    assert.ok(hasHook(html, "factory-skill-pack-expand-source-acme"), "mobile can inspect disabled packs too");
+    assert.equal(hasHook(html, "factory-skill-pack-source-acme"), !mobile);
+    if (mobile) {
+      assert.doesNotMatch(html, /data-role="switch"/);
+      assert.equal(hasHook(html, "factory-skill-packs-reset"), false);
+      assert.equal(hasHook(html, "factory-skill-packs-manage"), false);
+    }
+  }
+});
