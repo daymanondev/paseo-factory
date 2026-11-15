@@ -2557,6 +2557,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         vault: await vaultStatusOf(),
         project: enrichedProject,
         panel: {
+          usage: deps.usage === undefined ? undefined : usageFile ?? null,
           ...handoffPanelFacts(enrichedProject?.slug, foldTasks(events), lanes.lanes),
           seatLanes: seatLanesOf(enrichedProject?.slug, lanes.lanes),
           profile: { active: profileInfo.profiles.find(p => p.id === profileInfo.activeProfileId) ?? null, list: profileInfo.profiles, modified: profileInfo.activeProfileModified },

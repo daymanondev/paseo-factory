@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.4] - 2026-11-15
+
+**Project usage is back in the Factory tab's Project tab.**
+
+### Fixed
+
+- **Restored cumulative Project usage as the first card of the Project tab on desktop and mobile.** The server projects the Meter rollup into `PanelView.usage`; the summary shows total tokens, cache-hit rate, input/output tokens, and session count. Desktop adds an expandable model/provider breakdown sorted by total tokens. Projects without usage show `No usage recorded yet`. Client cost is hidden because native cost coverage is incomplete; cost and per-seat/per-task detail remain available in the CLI.
+
+### Changed
+
+- **Cached parsed Project usage by file modification time and size.** Snapshots reuse the parsed `usage.json` rollup until the file changes.
+- **Removed the orphaned Project usage card from Settings → Models.** Project usage has one display location in the Project tab.
+
 ## [0.10.3] - 2026-11-14
 
 **Updated Peer handoffs and repokes at the same SHA wake the Lead instead of replaying.**
