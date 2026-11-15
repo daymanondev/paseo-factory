@@ -724,6 +724,10 @@ function formatTokenCount(value: number): string {
   return String(value);
 }
 
+function formatUsageRowMetrics(row: { newTokens: number; cachedTokens: number; sessionCount: number; sharePercent: number }): string {
+  return `${formatTokenCount(row.newTokens)} new · ${formatTokenCount(row.cachedTokens)} cache · ${row.sessionCount} ses · ${Math.round(row.sharePercent)}%`;
+}
+
 function ProjectUsage({ theme, usage, mobile }: { theme: PluginTheme; mobile: boolean; usage: NonNullable<PanelView["usage"]> }) {
   const [expanded, setExpanded] = useState(false);
   return <Section theme={theme} testID="project-usage-card" divider={false}>
@@ -737,13 +741,13 @@ function ProjectUsage({ theme, usage, mobile }: { theme: PluginTheme; mobile: bo
         <View testID="project-usage-seats" style={{ gap: SPACING[1.5] }}>
           <Text style={text(theme, "badge")}>BY SEAT</Text>
           {usage.seats.map(row => <Text key={row.seat} testID="project-usage-seat-row" style={text(theme, "code")}>
-            {`${row.label} · ${formatTokenCount(row.newTokens)} new · ${formatTokenCount(row.cachedTokens)} cache · ${row.sessionCount} ses · ${Math.round(row.sharePercent)}%`}
+            {`${row.label} · ${formatUsageRowMetrics(row)}`}
           </Text>)}
         </View>
         <View testID="project-usage-models" style={{ gap: SPACING[1.5] }}>
           <Text style={text(theme, "badge")}>BY MODEL</Text>
           {usage.models.map(row => <Text key={`${row.provider}/${row.model}`} testID="project-usage-model-row" style={text(theme, "code")}>
-            {`${row.provider}/${row.model} · ${formatTokenCount(row.newTokens)} new · ${formatTokenCount(row.cachedTokens)} cache · ${row.sessionCount} ses · ${Math.round(row.sharePercent)}%`}
+            {`${row.provider}/${row.model} · ${formatUsageRowMetrics(row)}`}
           </Text>)}
         </View>
       </View> : null}
