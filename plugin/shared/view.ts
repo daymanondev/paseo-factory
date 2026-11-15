@@ -537,14 +537,21 @@ export const PanelOnboardingSchema = z.object({
 export type PanelOnboarding = z.infer<typeof PanelOnboardingSchema>;
 
 /** Cumulative Meter usage for the scoped Project; the panel deliberately omits cost. */
-export const PanelUsageSchema = z.object({
-  state: z.enum(["recorded", "empty"]),
-  totalTokens: z.number(),
-  cacheHitPercent: z.number().nullable(),
+const PanelUsageMetricsSchema = z.object({
+  newTokens: z.number(),
   inputUncachedTokens: z.number(),
+  cachedTokens: z.number(),
+  cacheReadTokens: z.number(),
   outputTokens: z.number(),
+  totalTokens: z.number(),
   sessionCount: z.number(),
-  models: z.array(z.object({ provider: z.string(), model: z.string(), totalTokens: z.number(), sharePercent: z.number() })),
+});
+const PanelUsageBreakdownSchema = PanelUsageMetricsSchema.extend({ sharePercent: z.number() });
+export const PanelUsageSchema = PanelUsageMetricsSchema.extend({
+  state: z.enum(["recorded", "empty"]),
+  cacheHitPercent: z.number().nullable(),
+  seats: z.array(PanelUsageBreakdownSchema.extend({ seat: z.string(), label: z.string() })),
+  models: z.array(PanelUsageBreakdownSchema.extend({ provider: z.string(), model: z.string() })),
 });
 export type PanelUsage = z.infer<typeof PanelUsageSchema>;
 
