@@ -16,9 +16,10 @@
  * the profile, and clears any `activeProfileByScope` entry naming it — the
  * same hygiene `resetProjectLanes` applies per Project.
  */
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync, readFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
 import { FactoryError } from "./errors.ts";
+import { atomicJson } from "./json-store.ts";
 import { LANE_NAMES, laneError, lanesPath, loadLanes, migrateLegacyZcodeLane, projectLanesPath, saveLanes } from "./lanes.ts";
 import type { LaneName, Lanes } from "./lanes.ts";
 
@@ -125,8 +126,7 @@ function writeLaneProfilesFile(stateDir: string, file: LaneProfilesFile): void {
   if (file.activeProfileByScope !== undefined && Object.keys(file.activeProfileByScope).length > 0) {
     record.activeProfileByScope = file.activeProfileByScope;
   }
-  mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, `${JSON.stringify(record, null, 2)}\n`);
+  atomicJson(path, record);
 }
 
 /** Every live profile with its id re-attached, sorted by name then id — the list view's order. */
@@ -169,11 +169,13 @@ function validatedProfileLanes(lanes: Lanes): Lanes {
  * `name` when omitted (`[a-z0-9][a-z0-9-_]{0,63}`); saving an existing id
  * updates it in place with a fresh `updatedAt` and clears any deletion
  * tombstone (a re-created profile is live again). Every lane is validated
- * through `laneError` before anything is written.
+ * through `laneError` before anything is written. A Project-scoped save
+ * records the active profile in the same atomic file replacement; it never
+ * rewrites lanes or transitions live seats.
  */
 export function saveLaneProfile(
   stateDir: string,
-  input: { id?: string; name: string; description?: string; lanes: Lanes; updatedAt?: string },
+  input: { id?: string; name: string; description?: string; lanes: Lanes; updatedAt?: string; projectSlug?: string },
 ): LaneProfile {
   if (typeof input.name !== "string" || input.name.trim() === "") {
     throw new FactoryError("invalid-profile", "profile name must be a non-empty string");
@@ -196,6 +198,9 @@ export function saveLaneProfile(
     updatedAt,
   };
   if (file.deleted !== undefined) delete file.deleted[id];
+  if (input.projectSlug !== undefined) {
+    file.activeProfileByScope = { ...(file.activeProfileByScope ?? {}), [profileScope(input.projectSlug)]: id };
+  }
   writeLaneProfilesFile(stateDir, file);
   return { id, ...file.profiles[id]! };
 }
