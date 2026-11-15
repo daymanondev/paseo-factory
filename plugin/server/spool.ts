@@ -1,7 +1,9 @@
 import { spoolRequestSemanticKey } from "./core/mcp/transport.ts";
 export { spoolRequestSemanticKey } from "./core/mcp/transport.ts";
 import { withProjectIngressLock } from "./core/project-ingress-lock.ts";
-import { detectProjectSkillPacks } from "./core/skill-hub.ts";
+import { resolveProjectSkillPacks, resolveRoleSkillsForProject } from "./core/skill-hub.ts";
+import { renderPeerSkillScope } from "./core/roles-contract.ts";
+import { readProjectSettings } from "./core/project-settings.ts";
 import { safeId } from "./core/safe-id.ts";
 import { recordUpgradeControlReceipt } from "./core/history-upgrade.ts";
 import { pendingUpgradeFor } from "./core/upgrade-state.ts";
@@ -1351,7 +1353,7 @@ export async function createTaskPeer(input: {
   spawnMeta: { leadAgentId?: string; workspaceId?: string; projectSlug?: string };
   extraLabels?: Record<string, string>;
 }): Promise<string | undefined> {
-  const { factory, daemon: resolvedDaemon, home, spawnMeta, prompt: effectivePrompt, provider: peerProvider, extraLabels } = input;
+  const { factory, daemon: resolvedDaemon, home, spawnMeta, prompt: requestedPrompt, provider: peerProvider, extraLabels } = input;
   const request = { task: input.task, worktree: input.worktree };
   const contract = factory.contractFor(request.task);
   let spawnedAgentId: string | undefined;
@@ -1362,6 +1364,8 @@ export async function createTaskPeer(input: {
       : { provider: peerProvider };
   const targetCwd = request.worktree ?? contract?.workspace ?? "";
   const proj = contract !== undefined ? resolveProject(contract.workspace) : undefined;
+  const peerSkills = resolveRoleSkillsForProject({ stateDir: factory.stateDir, role: "peer", projectRoot: contract?.workspace, configuredPacks: proj?.ok ? readProjectSettings(factory.stateDir, proj.slug).skillPacks : undefined, contractSkills: contract?.skills });
+  const effectivePrompt = `${requestedPrompt}\n\n${renderPeerSkillScope(peerSkills)}`;
   const peerTitle = formatPeerAgentTitle(request.task);
   const labels: Record<string, string> = {
     ...extraLabels,
@@ -2136,7 +2140,8 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
             // gets a 1-line discipline reminder naming the detected pack(s) —
             // the Lead never curates skills by hand, and never bulk-reads
             // SKILL.md files meant for the working Agent.
-            const packs = detectProjectSkillPacks(contract.workspace);
+            const project = resolveProject(contract.workspace);
+            const packs = resolveProjectSkillPacks({ stateDir: factory.stateDir, projectRoot: contract.workspace, configuredPacks: project.ok ? readProjectSettings(factory.stateDir, project.slug).skillPacks : undefined });
             enriched.push(
               packs.length > 0
                 ? `Skill discipline (${packs.join(", ")} pack active): apply tdd and open only the specific skill(s) in <available_skills> relevant to this task's slice — never bulk-read unrelated SKILL.md files.`

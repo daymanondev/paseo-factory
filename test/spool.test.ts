@@ -1737,18 +1737,30 @@ test("spawn prepends the Skill discipline hint on a skills-less Contract (expo p
   // (1) expo workspace, no skills: the hint is the prompt's very first line,
   // naming the detected expo pack — the Lead never curates skills by hand.
   const expoHint = "Skill discipline (expo pack active): apply tdd and open only the specific skill(s) in <available_skills> relevant to this task's slice — never bulk-read unrelated SKILL.md files.";
-  assert.equal(prompts[0], `${expoHint}\n\nExecute task T-HINT-EXPO: make it green.`, "the expo pack hint is prepended and the original prompt rides after it");
+  assert.ok(prompts[0]!.startsWith(`${expoHint}\n\nExecute task T-HINT-EXPO: make it green.`), "the expo pack hint is prepended and the original prompt rides after it");
   assert.ok(!prompts[0]!.includes("Required skills to open first"), "no Required-skills line on a skills-less Contract");
 
   // (2) bare workspace, no skills: the same hint without the pack clause.
   const bareHint = "Skill discipline: apply tdd and open only the specific skill(s) in <available_skills> relevant to this task's slice — never bulk-read unrelated SKILL.md files.";
-  assert.equal(prompts[1], `${bareHint}\n\nExecute task T-HINT-BARE: make it green.`, "the pack-less hint is prepended verbatim");
+  assert.ok(prompts[1]!.startsWith(`${bareHint}\n\nExecute task T-HINT-BARE: make it green.`), "the pack-less hint is prepended verbatim");
   assert.ok(!prompts[1]!.includes("pack active"), "no pack clause when detectProjectSkillPacks finds none");
+
+  const expoProject = resolveProject(expoWs);
+  assert.ok(expoProject.ok);
+  mkdirSync(join(stateDir, "projects", expoProject.slug), { recursive: true });
+  writeFileSync(join(stateDir, "projects", expoProject.slug, "project-settings.json"), JSON.stringify({ schemaVersion: 1, revision: 1, skillPacks: [] }));
+  factory.setContract({ task: "T-HINT-DISABLED", workspace: expoWs, gate: "true", artifact: "README.md" });
+  const disabled = await handleSpoolRequest(factory,
+    { id: "hint-disabled", kind: "spawn", task: "T-HINT-DISABLED", provider: "pi/zai/glm-5.3", arity: 1, prompt: "Execute task T-HINT-DISABLED: honor settings.", submitter: "agent-lead-1", seat: "lead" }, deps);
+  assert.ok(disabled.ok);
+  assert.ok(prompts[3]!.startsWith(bareHint), "Spool kickoff follows the explicit empty pack selection");
+  assert.match(prompts[3]!, /Project Peer skills allowed:/);
+  assert.ok(!prompts[3]!.includes("expo-router"), "explicit Off overrides filesystem auto-detection");
 
   // (3) explicit skills (User Story 9): the unchanged Required-skills line,
   // and no Skill-discipline hint.
   assert.equal(
-    prompts[2],
+    prompts[2]!.split("\n\nProject Peer skills allowed:")[0],
     "Required skills to open first: tdd (read ~/.agents/skills/<skill>/SKILL.md or .agents/skills/<skill>/SKILL.md before starting)\n\nExecute task T-HINT-EXPLICIT: make it green.",
     "explicit contract.skills preserves the Required-skills line unchanged",
   );

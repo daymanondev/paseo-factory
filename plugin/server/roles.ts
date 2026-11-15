@@ -1,6 +1,6 @@
-import { SLP_ROLE_SKILLS } from "./core/skill-hub.ts";
+import { resolveRoleSkillsForProject, SLP_ROLE_SKILLS } from "./core/skill-hub.ts";
 import { discoverHelperMcps, resolveRoleScopedMcpServers, syncHelperMcps } from "./core/helper-mcp-sync.ts";
-import { buildRoleKickoffPrompt } from "./core/roles-contract.ts";
+import { buildRoleKickoffPrompt, renderPeerSkillScope } from "./core/roles-contract.ts";
 import { restoreLegacyUiEnvironment } from "./core/companion-tools.ts";
 import { resolveRoleLane } from "./provider-lanes.ts";
 /**
@@ -12,13 +12,16 @@ import { resolveRoleLane } from "./provider-lanes.ts";
  * `antigravity`), and deterministic seat recognition by native role provider
  * id (`factory-supervisor`, `factory-lead`, `factory-peer`).
  */
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { provisionAgyPlugin, ensureFactoryBinScripts } from "./core/agy-home.ts";
 import { CorrelationRegistry } from "./core/correlations.ts";
 import { parseLane } from "./core/lanes.ts";
 import { resolveOrBootstrapProject, resolveProject } from "./core/project.ts";
+import { parseLedgerJsonl } from "./core/ledger-validation.ts";
+import { projectTask } from "./core/task-state.ts";
+import { readProjectSettings } from "./core/project-settings.ts";
 import { provisionPiAgentHome } from "./core/pi-home.ts";
 import {
   FOOTER_MARK,
@@ -112,13 +115,25 @@ export function formatPeerWorkspaceTitle(task: string, description?: string): st
   return summary === "" ? formatPeerAgentTitle(task) : `${formatPeerAgentTitle(task)} — ${summary}`;
 }
 
+/** Read acknowledged Contracts without opening a second writable ledger. */
+function peerSkillContext(stateDir: string, projectSlug: string, task?: string, userHome?: string, projectRoot?: string) {
+  const root = readProjectRegistration(stateDir, projectSlug)?.root ?? projectRoot;
+  const path = join(stateDir, "projects", projectSlug, "ledger.jsonl");
+  const read = existsSync(path) ? parseLedgerJsonl(readFileSync(path, "utf8")) : undefined;
+  if (read?.corrupt !== undefined) throw new Error(`cannot resolve Peer skills: ${read.corrupt}`);
+  const contract = task && read?.events ? projectTask(read.events, task).contract : undefined;
+  const configuredPacks = readProjectSettings(stateDir, projectSlug).skillPacks;
+  const context = { stateDir, projectRoot: root, userHome, configuredPacks, contractSkills: contract?.skills };
+  return { ...context, skills: resolveRoleSkillsForProject({ ...context, role: "peer" }) };
+}
+
 // ---- the PASEO_FACTORY_* env channel -------------------------------------------------------
 
 /**
  * The env vars one role's shells carry (the session_open channel — re-applied
  * on every launch). Since v0.0.16 (ADR 0011) this is also the provisioning
  * seam for the role's isolated Pi harness home: the call materializes
- * `<stateDir>/pi-agent/<role>` on demand (idempotently — the provisioner's
+ * shared role home (or Project Peer home) on demand (idempotently — the provisioner's
  * law) and returns it as `PI_CODING_AGENT_DIR`, so every pi-lane seat and
  * working agent runs inside the clean room instead of the operator's global
  * `~/.pi/agent`. `userHome` overrides the operator home the shared-state
@@ -130,9 +145,14 @@ export function factoryEnvFor(
 ): Record<string, string> {
   ensureFactoryBinScripts(input.stateDir);
   const environment = restoreLegacyUiEnvironment({ ...process.env, ...input.environment });
+  const peerContext = role === "agent" ? peerSkillContext(input.stateDir, input.project.slug, input.task, input.userHome, input.project.root) : undefined;
   const roleHome = provisionPiAgentHome({
     stateDir: input.stateDir,
     role,
+    ...(peerContext ? {
+      project: { root: peerContext.projectRoot ?? input.project.root, slug: input.project.slug },
+      configuredPacks: peerContext.configuredPacks, contractSkills: peerContext.contractSkills,
+    } : {}),
     sourceAgentDir: join(input.userHome ?? homedir(), ".pi", "agent"),
     helperMcpSources: { userHome: input.userHome ?? homedir() },
   });
@@ -353,6 +373,8 @@ export function applyProviderExecutionFence<T extends AgentCreateRequest["config
 
   const { bridgeBinPath } = ensureFactoryBinScripts(stateDir);
   const nextConfig: Record<string, unknown> = { ...config };
+  const peerSkills = role === "agent" ? peerSkillContext(stateDir, projectSlug, task, userHome, config.cwd).skills : undefined;
+  if (peerSkills) nextConfig.systemPrompt = `${config.systemPrompt ?? ""}\n\n${renderPeerSkillScope(peerSkills)}`.trim();
   // Never pass `labels` inside `config` to Paseo's strict `agent.create` validator
   delete nextConfig.labels;
 
@@ -416,7 +438,7 @@ export function applyProviderExecutionFence<T extends AgentCreateRequest["config
       };
       nextConfig.toolPolicy = { preapproved: [] };
       nextConfig.modeId = "build";
-      const skillPerm = { '*': 'deny', ...Object.fromEntries(SLP_ROLE_SKILLS[role].map(skill => [skill, 'allow'])) };
+      const skillPerm = role === 'supervisor' ? { '*': 'allow' } : { '*': 'deny', ...Object.fromEntries(SLP_ROLE_SKILLS.lead.map(skill => [skill, 'allow'])) };
       nextConfig.providerOptions = {
         ...existingProviderOpts,
         permission: {
@@ -438,6 +460,7 @@ export function applyProviderExecutionFence<T extends AgentCreateRequest["config
         permission: {
           ...existingPerm,
           task: "deny",
+          skill: { "*": "deny", ...Object.fromEntries((peerSkills ?? []).map(skill => [skill, "allow"])) },
         },
       };
     }
