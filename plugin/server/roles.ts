@@ -133,7 +133,7 @@ function peerSkillContext(stateDir: string, projectSlug: string, task?: string, 
  * The env vars one role's shells carry (the session_open channel — re-applied
  * on every launch). Since v0.0.16 (ADR 0011) this is also the provisioning
  * seam for the role's isolated Pi harness home: the call materializes
- * shared role home (or Project Peer home) on demand (idempotently — the provisioner's
+ * shared role home (or Task Peer home beneath its Project) on demand (idempotently — the provisioner's
  * law) and returns it as `PI_CODING_AGENT_DIR`, so every pi-lane seat and
  * working agent runs inside the clean room instead of the operator's global
  * `~/.pi/agent`. `userHome` overrides the operator home the shared-state
@@ -151,7 +151,7 @@ export function factoryEnvFor(
     role,
     ...(peerContext ? {
       project: { root: peerContext.projectRoot ?? input.project.root, slug: input.project.slug },
-      configuredPacks: peerContext.configuredPacks, contractSkills: peerContext.contractSkills,
+      task: input.task, configuredPacks: peerContext.configuredPacks, contractSkills: peerContext.contractSkills,
     } : {}),
     sourceAgentDir: join(input.userHome ?? homedir(), ".pi", "agent"),
     helperMcpSources: { userHome: input.userHome ?? homedir() },

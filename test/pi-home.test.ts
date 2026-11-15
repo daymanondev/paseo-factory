@@ -1055,3 +1055,28 @@ test("Project Peer Pi homes isolate enabled packs and include one-off Contract s
   assert.ok(!skills(b).includes(`+${join(catalog, "owner-special")}`));
   assert.ok(!skills(a).some(skill => skill.includes("*" ) && skill !== "!*"));
 });
+
+
+test("same-Project Tasks retain independent one-off Contract skills after provisioning and reopening", (t) => {
+  const dir = makeTempDir("pi-task-skills-");
+  disposeDir(t, dir);
+  const stateDir = join(dir, "state");
+  const sourceAgentDir = makeFakePiAgent(dir);
+  const project = { root: join(dir, "repo"), slug: "repo" };
+  const provision = (task: string, skill: string) => provisionPiAgentHome({
+    stateDir, role: "agent", project, task, sourceAgentDir, configuredPacks: [], contractSkills: [skill],
+    helperMcpSources: { userHome: join(dir, "owner") },
+  });
+  const a = provision("task-a", "task-a-only");
+  const original = readFileSync(join(a, "settings.json"), "utf8");
+  const b = provision("task-b", "task-b-only");
+  assert.equal(a, join(stateDir, "projects", "repo", "pi-agent", "agent", "tasks", "task-a"));
+  assert.notEqual(a, b);
+  provision("task-b", "task-b-only");
+  assert.equal(readFileSync(join(a, "settings.json"), "utf8"), original);
+  assert.ok(JSON.parse(original).skills.includes("+~/.agents/skills/task-a-only"));
+  assert.ok(!JSON.parse(original).skills.includes("+~/.agents/skills/task-b-only"));
+  const bSkills = JSON.parse(readFileSync(join(b, "settings.json"), "utf8")).skills;
+  assert.ok(bSkills.includes("+~/.agents/skills/task-b-only"));
+  assert.ok(!bSkills.includes("+~/.agents/skills/task-a-only"));
+});

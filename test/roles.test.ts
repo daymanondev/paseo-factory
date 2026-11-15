@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { buildRoleKickoffPrompt, LEAD_WAVE_LAWS, renderRoleAppendSystem, renderRoleContract, renderSeatBootstrapPrompt, SUPERVISOR_OUTCOME_BOUNDARY } from "../src/roles-contract.ts";
@@ -761,7 +761,7 @@ test("legacy zcode/* lanes in lanes.json migrate to pi/zcode/* so seats and Peer
     userHome,
   );
   assert.ok(peer !== undefined, "the managed-worktree branch fires for the peer create");
-  assert.equal(peer.env?.PI_CODING_AGENT_DIR, join(stateDir, "projects", slug, "pi-agent", "agent"));
+  assert.equal(peer.env?.PI_CODING_AGENT_DIR, join(stateDir, "projects", slug, "pi-agent", "agent", "tasks", "T-08"));
   assert.equal(existsSync(join(worktreeDir, ".zcode", "config.json")), false, "no .zcode/config.json is written in the Task worktree");
 });
 
@@ -2048,7 +2048,7 @@ test("Lead contracts enforce Scout-First Context Discipline (<= 3 targeted bound
 });
 
 
-test("Peer launch and reopen use Project Pi home and Contract skills in matching OpenCode permissions", (t) => {
+test("Peer launch and reopen isolate Task Pi homes and Contract skills with matching OpenCode permissions", (t) => {
   const dir = makeTempDir("role-project-skills-");
   disposeDir(t, dir);
   const stateDir = join(dir, "state");
@@ -2062,7 +2062,7 @@ test("Peer launch and reopen use Project Pi home and Contract skills in matching
   writeFileSync(join(dataDir, "ledger.jsonl"), JSON.stringify({ event: "contract_set", seq: 1, ts: new Date().toISOString(), task: "slice", workspace: root, gate: "true", skills: ["owner-special"] }) + "\n");
   const correlation = new CorrelationRegistry(stateDir).issue({ role: "agent", projectSlug: project.slug, projectRoot: root, task: "slice" });
   const env = factoryEnvFor("agent", { stateDir, project, task: "slice", userHome, correlationId: correlation.correlationId });
-  const expectedHome = join(dataDir, "pi-agent", "agent");
+  const expectedHome = join(dataDir, "pi-agent", "agent", "tasks", "slice");
   assert.equal(env.PI_CODING_AGENT_DIR, expectedHome);
   const settings = JSON.parse(readFileSync(join(expectedHome, "settings.json"), "utf8"));
   assert.ok(settings.skills.includes("+~/.agents/skills/owner-special"));
@@ -2074,6 +2074,18 @@ test("Peer launch and reopen use Project Pi home and Contract skills in matching
   assert.equal(config.providerOptions.permission.skill.tdd, "allow");
   assert.match(config.systemPrompt, /Project Peer skills allowed:/);
   assert.match(config.systemPrompt, /owner-special/);
+  const originalSettings = readFileSync(join(expectedHome, "settings.json"), "utf8");
+  const second = { event: "contract_set", seq: 2, ts: new Date().toISOString(), task: "other", workspace: root, gate: "true", skills: ["other-only"] };
+  appendFileSync(join(dataDir, "ledger.jsonl"), JSON.stringify(second) + "\n");
+  const otherCorrelation = new CorrelationRegistry(stateDir).issue({ role: "agent", projectSlug: project.slug, projectRoot: root, task: "other" });
+  const otherEnv = factoryEnvFor("agent", { stateDir, project, task: "other", userHome, correlationId: otherCorrelation.correlationId });
+  assert.notEqual(otherEnv.PI_CODING_AGENT_DIR, expectedHome);
+  const otherSettings = JSON.parse(readFileSync(join(otherEnv.PI_CODING_AGENT_DIR, "settings.json"), "utf8"));
+  assert.ok(otherSettings.skills.includes("+~/.agents/skills/other-only"));
+  assert.ok(!otherSettings.skills.includes("+~/.agents/skills/owner-special"));
+  const otherReopened = injectSessionEnv({ agentId: "peer-2", cwd: root, env: { ...otherEnv }, provider: "pi" }, stateDir, userHome);
+  assert.equal(otherReopened?.env?.PI_CODING_AGENT_DIR, otherEnv.PI_CODING_AGENT_DIR);
+  assert.equal(readFileSync(join(expectedHome, "settings.json"), "utf8"), originalSettings);
   const reopened = injectSessionEnv({ agentId: "peer-1", cwd: root, env: { ...env }, provider: "pi" }, stateDir, userHome);
   assert.equal(reopened?.env?.PI_CODING_AGENT_DIR, expectedHome);
 });

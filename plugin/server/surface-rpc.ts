@@ -3854,8 +3854,9 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       try {
         const project = projectOrRefusal(input.projectRoot); if (!project.ok) return project;
         const current = readProjectSettings(deps.stateDir, project.slug).skillPacks ?? detectProjectSkillPacks(project.root);
-        setProjectSkillPacks(deps.stateDir, project.slug, input.enabled ? [...new Set([...current, input.pack])] : current.filter(p => p !== input.pack));
-        return { ok: true as const, summary: `${input.pack} ${input.enabled ? 'enabled' : 'disabled'} for Project; applies to new seats` };
+        const pack = input.pack.trim();
+        setProjectSkillPacks(deps.stateDir, project.slug, input.enabled ? [...new Set([...current, pack])] : current.filter(p => p !== pack));
+        return { ok: true as const, summary: `${pack} ${input.enabled ? 'enabled' : 'disabled'} for Project; applies to new seats` };
       } catch (error) { return failure(codeOf(error), messageOf(error)); }
     },
     async pluginsInstall(

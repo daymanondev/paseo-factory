@@ -146,7 +146,7 @@ Owner-only spool actions (`seat-cannot-rotate` / `seat-cannot-reset` for seats):
 _Avoid_: manual `rm -rf`, cross-Project blast radius, confusing rotate with reset or delete, rotating with live unsettled Peers
 
 **Pi harness home** & **Helper MCP catalog**:
-**Pi harness home** (`<stateDir>/pi-agent/<role>` for standing seats; `<projectStateDir>/pi-agent/agent/` for Peers, selected by `PI_CODING_AGENT_DIR`) isolates each Project's Peer skill settings and provisions compaction-proof `APPEND_SYSTEM.md`, read-only `defaultTools` for `supervisor`/`lead`, `600s` `paseo_factory` MCP, and role-scoped skills. **Helper MCP catalog** (`<stateDir>/helper-mcps.json`) discovers host MCPs read-only and provisions Owner-synced servers + OAuth strictly to `Peer`s, never `Supervisor`/`Lead` (`docs/adr/0013-*`, `0016-*`, `0039-*`, `0042-*`).
+**Pi harness home** (`<stateDir>/pi-agent/<role>` for standing seats; `<projectStateDir>/pi-agent/agent/tasks/<task>/` for Task-bound Peers, with `<projectStateDir>/pi-agent/agent/` as the base for callers without a Task, selected by `PI_CODING_AGENT_DIR`) isolates each Task's one-off Contract skills within its Project's Peer skill settings and provisions compaction-proof `APPEND_SYSTEM.md`, read-only `defaultTools` for `supervisor`/`lead`, `600s` `paseo_factory` MCP, and role-scoped skills. **Helper MCP catalog** (`<stateDir>/helper-mcps.json`) discovers host MCPs read-only and provisions Owner-synced servers + OAuth strictly to `Peer`s, never `Supervisor`/`Lead` (`docs/adr/0013-*`, `0016-*`, `0039-*`, `0042-*`).
 _Avoid_: shadow home, auto-syncing host MCPs, mutating host configs, Helper MCPs on `Supervisor`/`Lead`
 
 **Role-scoped MCP bridge**, **Correlation token**, & **Seat kickoff packet**:
