@@ -1369,7 +1369,7 @@ test("roles: factoryEnvFor provisions the role's Pi harness home on demand and c
 
   // The working agent's synthetic identity: no project root, its task rides along.
   const agentEnv = factoryEnvFor("agent", { stateDir, project: { root: "", slug: project.slug }, task: "T9", userHome });
-  assert.equal(agentEnv.PI_CODING_AGENT_DIR, join(stateDir, "pi-agent", "agent"));
+  assert.equal(agentEnv.PI_CODING_AGENT_DIR, join(stateDir, "projects", project.slug, "pi-agent", "agent", "tasks", "T9"));
   assert.equal(agentEnv.PASEO_FACTORY_TASK, "T9");
   assert.ok(!("PASEO_FACTORY_PROJECT_ROOT" in agentEnv), "no known root, no PASEO_FACTORY_PROJECT_ROOT");
 });
@@ -1398,7 +1398,7 @@ test("roles: agent.create injection launches every seat and working agent in its
   const agentCreate: AgentCreateRequest = { config: { provider: "pi/zai/glm-5.3", cwd: worktree, title: "T5" } };
   const agentRequest = injectRoleOnCreate(agentCreate, stateDir, userHome);
   assert.ok(agentRequest !== undefined);
-  assert.equal(agentRequest.env?.PI_CODING_AGENT_DIR, join(stateDir, "pi-agent", "agent"));
+  assert.equal(agentRequest.env?.PI_CODING_AGENT_DIR, join(stateDir, "projects", project.slug, "pi-agent", "agent", "tasks", "T5"));
 
   // The materialized homes are clean rooms built from the FAKE operator home:
   // zero packages, the llama.cpp-only extension denylist, quiet startup,
@@ -1414,13 +1414,11 @@ test("roles: agent.create injection launches every seat and working agent in its
       skills: ["!*", "+~/.agents/skills/codebase-design", "+~/.agents/skills/domain-modeling", "+~/.agents/skills/tdd"],
     }),
   );
-  // Skills policy per role: supervisor stays unfiltered (all of
-  // ~/.agents/skills auto-discovers); lead and working agent are filtered down
-  // to their three core role skills in Pi's `~` form.
+  // Supervisor stays unfiltered; Lead gets its three skills and the Peer gets Core.
   assert.ok(!("skills" in JSON.parse(readFileSync(join(stateDir, "pi-agent", "supervisor", "settings.json"), "utf8"))), "supervisor skills unfiltered");
   assert.deepEqual(
-    JSON.parse(readFileSync(join(stateDir, "pi-agent", "agent", "settings.json"), "utf8")),
-    cleanRoomSettings({ skills: ["!*", "+~/.agents/skills/*", "-~/.agents/skills/factory"] }),
+    JSON.parse(readFileSync(join(stateDir, "projects", project.slug, "pi-agent", "agent", "tasks", "T5", "settings.json"), "utf8")),
+    cleanRoomSettings({ skills: ["!*", "+~/.agents/skills/tdd", "+~/.agents/skills/diagnosing-bugs", "+~/.agents/skills/codebase-design", "+~/.agents/skills/frontend-design", "+~/.agents/skills/web-design-guidelines", "+~/.agents/skills/code-review", "+~/.agents/skills/grilling", "+~/.agents/skills/domain-modeling", "+~/.agents/skills/grill-with-docs", "+~/.agents/skills/research", "+~/.agents/skills/factory"] }),
   );
 });
 
@@ -1443,7 +1441,7 @@ test("roles: session_open re-carries PI_CODING_AGENT_DIR and keeps the harness h
   const worktree = join(stateDir, "projects", project.slug, "worktrees", "T3");
   const agentSession = injectSessionEnv({ agentId: "agent-worker-3", cwd: worktree, env: {} } as { agentId: string; cwd: string; env: Record<string, string> }, stateDir, userHome);
   assert.ok(agentSession !== undefined);
-  assert.equal(agentSession.env.PI_CODING_AGENT_DIR, join(stateDir, "pi-agent", "agent"));
+  assert.equal(agentSession.env.PI_CODING_AGENT_DIR, join(stateDir, "projects", project.slug, "pi-agent", "agent", "tasks", "T3"));
 
   // The operator's prompt contamination never lands in a harness home; the
   // supervisor home's APPEND_SYSTEM.md is the MANAGED role contract
@@ -7921,5 +7919,8 @@ test('Skill Hub groups source skills and custom memberships with installed count
   assert.deepEqual(active.view.skillHub?.installedSkills.find(p => p.name === 'deploy')?.packs, [source.id, saved.pack.id]);
   const peer = active.view.skillHub?.roleMatrix.find(r => r.role === 'peer')?.skills ?? [];
   assert.ok(peer.includes('deploy')); assert.ok(!peer.includes('audit')); assert.ok(!peer.includes('expo-router'));
+  assert.ok((await handlers.skillsTogglePack({projectRoot:repo, pack: `  ${saved.pack.id}  `, enabled:false})).ok);
+  const disabled = await handlers.snapshot({projectRoot:repo}); assert.ok(disabled.ok); if (!disabled.ok) return;
+  assert.equal(disabled.view.skillHub?.projectPacks.find(p => p.id === saved.pack.id)?.enabled, false);
   const invalid = await handlers.skillsTogglePack({projectRoot:repo, pack:'../escape', enabled:true}); assert.equal(invalid.ok,false);
 });

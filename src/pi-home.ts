@@ -56,11 +56,13 @@ export type PiAgentRole = "supervisor" | "lead" | "agent" | "headless";
 export type InteractivePiAgentRole = Exclude<PiAgentRole, "headless">;
 
 export interface ProvisionPiHomeOptions {
-  /** Shared role homes live here; Project Peer homes use `<stateDir>/projects/<slug>/pi-agent/agent`. */
+  /** Shared role homes live here; Project Peers use `projects/<slug>/pi-agent/agent/tasks/<task>` when Task-bound. */
   stateDir: string;
   role: PiAgentRole;
   /** Identity for per-Project Peer isolation and skill-pack resolution. */
   project?: { root: string; slug: string };
+  /** Task identity isolates one-off Contract skills beneath the Project Peer home. */
+  task?: string;
   configuredPacks?: string[];
   contractSkills?: string[];
   /** Explicit isolated destination for opt-in execution adapters. */
@@ -144,7 +146,10 @@ export function isElectronNodeBinary(execPath: string): boolean {
  */
 export function provisionPiAgentHome(input: ProvisionPiHomeOptions): string {
   const sourceAgentDir = input.sourceAgentDir ?? join(homedir(), ".pi", "agent");
-  const roleHome = input.roleHome ?? join(input.role === "agent" && input.project ? projectStateDir(input.stateDir, input.project.slug) : input.stateDir, "pi-agent", input.role);
+  const baseHome = join(input.role === "agent" && input.project ? projectStateDir(input.stateDir, input.project.slug) : input.stateDir, "pi-agent", input.role);
+  const task = input.role === "agent" && input.project ? input.task : undefined;
+  if (task !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(task)) throw new Error(`invalid Task identity: ${task}`);
+  const roleHome = input.roleHome ?? (task === undefined ? baseHome : join(baseHome, "tasks", task));
   mkdirSync(roleHome, { recursive: true });
   for (const forbidden of FORBIDDEN_NAMES) {
     // v0.0.38, ADR 0026 §1 — the sweep must never churn a symlink the same
