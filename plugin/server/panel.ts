@@ -384,17 +384,25 @@ function handoffsOf(input: PanelInput): HandoffProgress[] {
 function usageOf(file: PanelInput["usage"]): PanelView["usage"] {
   if (file === undefined) return null;
   const summary = foldProjectUsageSummary(file ?? undefined);
-  if (summary === null) return { state: "empty", totalTokens: 0, cacheHitPercent: null, inputUncachedTokens: 0, outputTokens: 0, sessionCount: 0, models: [] };
-  const { totals, byModel } = summary;
+  if (summary === null) return { state: "empty", newTokens: 0, cachedTokens: 0, cacheReadTokens: 0, totalTokens: 0, cacheHitPercent: null, inputUncachedTokens: 0, outputTokens: 0, sessionCount: 0, seats: [], models: [] };
+  const { totals, byModel, bySeat } = summary;
+  const metrics = (row: typeof totals) => ({
+    newTokens: row.inputUncachedTokens + row.outputTokens,
+    inputUncachedTokens: row.inputUncachedTokens,
+    cachedTokens: row.cacheReadTokens + row.cacheWriteTokens,
+    cacheReadTokens: row.cacheReadTokens,
+    outputTokens: row.outputTokens,
+    totalTokens: row.totalTokens,
+    sessionCount: row.sessionCount,
+  });
+  const share = (totalTokens: number) => totals.totalTokens > 0 ? totalTokens / totals.totalTokens * 100 : 0;
   const input = totals.inputUncachedTokens + totals.cacheReadTokens + totals.cacheWriteTokens;
   return {
     state: "recorded",
-    totalTokens: totals.totalTokens,
+    ...metrics(totals),
     cacheHitPercent: input > 0 ? Math.round(totals.cacheReadTokens / input * 100) : null,
-    inputUncachedTokens: totals.inputUncachedTokens,
-    outputTokens: totals.outputTokens,
-    sessionCount: totals.sessionCount,
-    models: byModel.map(({ provider, model, totalTokens }) => ({ provider, model, totalTokens, sharePercent: totals.totalTokens > 0 ? totalTokens / totals.totalTokens * 100 : 0 })),
+    seats: bySeat.sort((a, b) => b.totalTokens - a.totalTokens || a.label.localeCompare(b.label)).map(row => ({ seat: row.seat, label: row.label, ...metrics(row), sharePercent: share(row.totalTokens) })),
+    models: byModel.sort((a, b) => b.totalTokens - a.totalTokens || a.provider.localeCompare(b.provider) || a.model.localeCompare(b.model)).map(row => ({ provider: row.provider, model: row.model, ...metrics(row), sharePercent: share(row.totalTokens) })),
   };
 }
 
