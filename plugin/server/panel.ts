@@ -12,6 +12,7 @@ import type { HandoffProgress } from "../shared/handoff.ts";
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import type { AgentView, PanelNeedsYouItem, PanelOpenDesign, PanelPeerRow, PanelSeatRow, PanelSupervisorCandidateRow, PanelTone, PanelView, PanelProfile, ScopedLaneRef, SeatAllowedAction, ProjectView, TaskView } from "../shared/view.ts";
+import { foldProjectUsageSummary, type ProjectUsageFile } from "./core/usage-status.ts";
 import { MAX_ATTEMPTS } from "./core/events.ts";
 import { openDesignBundleReady, readOpenDesignLink } from "./core/open-design/open-design-link-state.ts";
 import { readProjectSettings } from "./core/project-settings.ts";
@@ -42,6 +43,8 @@ export interface PanelOpenDesignProbe {
 }
 
 export interface PanelInput {
+  /** Rollup gathered for this Project: null when absent, undefined when usage is unwired. */
+  usage?: ProjectUsageFile | null;
   /** The enriched Project the workspace resolved to, or null when no Project owns the scope. */
   project: ProjectView | null;
   /** Whether the Project has a registration — a git folder alone is not a Project. */
@@ -378,6 +381,23 @@ function handoffsOf(input: PanelInput): HandoffProgress[] {
   return [...handoffs.values()].filter(progress => !closed.has(progress.seat)).sort((a, b) => a.seat.localeCompare(b.seat));
 }
 
+function usageOf(file: PanelInput["usage"]): PanelView["usage"] {
+  if (file === undefined) return null;
+  const summary = foldProjectUsageSummary(file ?? undefined);
+  if (summary === null) return { state: "empty", totalTokens: 0, cacheHitPercent: null, inputUncachedTokens: 0, outputTokens: 0, sessionCount: 0, models: [] };
+  const { totals, byModel } = summary;
+  const input = totals.inputUncachedTokens + totals.cacheReadTokens + totals.cacheWriteTokens;
+  return {
+    state: "recorded",
+    totalTokens: totals.totalTokens,
+    cacheHitPercent: input > 0 ? Math.round(totals.cacheReadTokens / input * 100) : null,
+    inputUncachedTokens: totals.inputUncachedTokens,
+    outputTokens: totals.outputTokens,
+    sessionCount: totals.sessionCount,
+    models: byModel.map(({ provider, model, totalTokens }) => ({ provider, model, totalTokens, sharePercent: totals.totalTokens > 0 ? totalTokens / totals.totalTokens * 100 : 0 })),
+  };
+}
+
 /** Projects the whole panel — pure over `input`. */
 export function foldPanel(input: PanelInput): PanelView {
   if (input.project === null || !input.registered) {
@@ -385,6 +405,7 @@ export function foldPanel(input: PanelInput): PanelView {
       profile: input.profile ?? { active: null, list: [], modified: false },
       defaultWorker: null,
       handoffs: [],
+      usage: null,
       isProject: false,
       name: null,
       summary: "Not a Factory Project yet",
@@ -400,6 +421,7 @@ export function foldPanel(input: PanelInput): PanelView {
     profile: input.profile ?? { active: null, list: [], modified: false },
     defaultWorker: { role: "worker", title: "Default worker", lane: input.seatLanes?.worker ?? fallbackLane },
     handoffs: handoffsOf(input).map(handoff => ({ ...handoff, allowedActions: handoffActions(handoff, input.handovers?.includes(handoff.seat) === true) })),
+    usage: usageOf(input.usage),
     isProject: true,
     name: input.project.name ?? input.project.slug,
     summary: summaryOf(input, items.length, peers.length),

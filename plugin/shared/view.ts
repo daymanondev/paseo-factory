@@ -534,8 +534,21 @@ export const PanelOnboardingSchema = z.object({
 });
 export type PanelOnboarding = z.infer<typeof PanelOnboardingSchema>;
 
+/** Cumulative Meter usage for the scoped Project; the panel deliberately omits cost. */
+export const PanelUsageSchema = z.object({
+  state: z.enum(["recorded", "empty"]),
+  totalTokens: z.number(),
+  cacheHitPercent: z.number().nullable(),
+  inputUncachedTokens: z.number(),
+  outputTokens: z.number(),
+  sessionCount: z.number(),
+  models: z.array(z.object({ provider: z.string(), model: z.string(), totalTokens: z.number(), sharePercent: z.number() })),
+});
+export type PanelUsage = z.infer<typeof PanelUsageSchema>;
+
 /** The workspace panel's whole world: header, Needs you, Seats, Open Design — or the not-a-Project readiness. */
 export const PanelViewSchema = z.object({
+  usage: PanelUsageSchema.nullable().optional(),
   /** Includes failures whose outgoing agent is gone; seat is the stable recovery key. */
   handoffs: z.array(HandoffProgressSchema.extend({ allowedActions: z.array(SeatAllowedActionSchema) })),
   profile: PanelProfileSchema,

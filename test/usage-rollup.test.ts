@@ -2,6 +2,8 @@ import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { createFactory } from "../plugin/server/core/factory.ts";
 import { ensureProjectRegistered, resolveProject, writeProjectRegistration } from "../plugin/server/core/project.ts";
 import { usageFilePath, type ProjectUsageFile, type SessionUsageRecord } from "../plugin/server/core/usage-status.ts";
@@ -580,6 +582,8 @@ test("surface.snapshot populates projectUsage (totals, byModel, bySeat, byTask) 
   const snap = await handlers.snapshot({ projectRoot: root });
   assert.equal(snap.ok, true);
   if (!snap.ok) return;
+  assert.equal(snap.view.panel.usage?.state, "recorded");
+  assert.equal(snap.view.panel.usage?.sessionCount, 3);
   const usageView = snap.view.projectUsage;
   assert.ok(usageView, "the scoped snapshot carries projectUsage");
   assert.equal(usageView!.totals.totalTokens, (220_762 + 362_626 + 23_981) + (1_647_431 + 24_718_592 + 123_619) + (2_077_529 + 136_075_392 + 983_447));
@@ -594,5 +598,79 @@ test("surface.snapshot populates projectUsage (totals, byModel, bySeat, byTask) 
   // The unscoped global view carries no usage half.
   const globalSnap = await handlers.snapshot({});
   assert.equal(globalSnap.ok, true);
-  if (globalSnap.ok) assert.equal(globalSnap.view.projectUsage ?? null, null, "unscoped view: null usage half");
+  if (globalSnap.ok) {
+    assert.equal(globalSnap.view.projectUsage ?? null, null, "unscoped view: null usage half");
+    assert.equal(globalSnap.view.panel.usage, null);
+  }
+});
+
+
+test("usage snapshots reuse the parsed rollup while its file is unchanged", async t => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const stateDir = join(dir, "state");
+  const slug = "cached-project";
+  const path = usageFilePath(stateDir, slug);
+  mkdirSync(join(path, ".."), { recursive: true });
+  writeFileSync(path, JSON.stringify({ version: 1, projectSlug: slug, backfilledAt: "2026-11-15", updatedAt: "", sessions: {} }));
+  const runtime = createUsageRuntime({ factory: createFactory({ stateDir }), stateDir, daemon: () => undefined });
+  t.after(() => runtime.stop());
+  let reads = 0;
+  const original = fs.readFileSync;
+  t.mock.method(fs, "readFileSync", (...args: Parameters<typeof fs.readFileSync>) => {
+    if (String(args[0]) === path) reads++;
+    return Reflect.apply(original, fs, args);
+  });
+  syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  await runtime.loadOrBackfillProjectUsage(slug);
+  await runtime.loadOrBackfillProjectUsage(slug);
+  assert.equal(reads, 1, "unchanged usage.json is only read and parsed once");
+});
+
+test("a runtime flush invalidates cached usage even when file metadata is unchanged", async t => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const stateDir = join(dir, "state");
+  const slug = "flushed-project";
+  const path = usageFilePath(stateDir, slug);
+  const session = join(dir, "session.jsonl");
+  writeLines(session, [piAssistant(100, 200, 50)]);
+  const runtime = createUsageRuntime({ factory: createFactory({ stateDir }), stateDir, userHome: dir, daemon: () => undefined });
+  t.after(() => runtime.stop());
+  const agent = { id: "peer-cache", provider: "pi/zai/glm-5.3", labels: { project: slug }, persistence: { nativeHandle: session } };
+  await runtime.flushAgent(agent);
+  const original = fs.statSync;
+  t.mock.method(fs, "statSync", (...args: Parameters<typeof fs.statSync>) => {
+    if (String(args[0]) === path) return { mtimeMs: 1, size: 1 };
+    return Reflect.apply(original, fs, args);
+  });
+  syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  assert.equal((await runtime.loadOrBackfillProjectUsage(slug))?.sessions[agent.id]?.totalTokens, 350);
+  appendLine(session, piAssistant(10, 20, 5));
+  await runtime.flushAgent(agent);
+  assert.equal((await runtime.loadOrBackfillProjectUsage(slug))?.sessions[agent.id]?.totalTokens, 385);
+});
+
+test("cached usage follows changed files and forget/reset hygiene", async t => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const stateDir = join(dir, "state");
+  const slug = "changed-project";
+  const path = usageFilePath(stateDir, slug);
+  mkdirSync(join(path, ".."), { recursive: true });
+  const runtime = createUsageRuntime({ factory: createFactory({ stateDir }), stateDir, daemon: () => undefined });
+  t.after(() => runtime.stop());
+  const record: SessionUsageRecord = { agentId: "peer", projectSlug: slug, seat: "agent", provider: "zai", harness: "pi", model: "glm-5.3", turns: 1, inputUncachedTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: 10, reasoningTokens: 0, totalTokens: 20, updatedAt: "" };
+  const write = (totalTokens: number): void => writeFileSync(path, JSON.stringify({ version: 1, projectSlug: slug, backfilledAt: "2026-11-15", updatedAt: "", sessions: { peer: { ...record, totalTokens } } }));
+  write(20);
+  assert.equal((await runtime.loadOrBackfillProjectUsage(slug))?.sessions.peer?.totalTokens, 20);
+  write(300);
+  assert.equal((await runtime.loadOrBackfillProjectUsage(slug))?.sessions.peer?.totalTokens, 300, "size/mtime changes replace the cached parse");
+  runtime.pruneForReset(slug, []);
+  assert.deepEqual((await runtime.loadOrBackfillProjectUsage(slug))?.sessions, {});
+  runtime.forget(slug);
+  write(45);
+  assert.equal((await runtime.loadOrBackfillProjectUsage(slug))?.sessions.peer?.totalTokens, 45);
 });
