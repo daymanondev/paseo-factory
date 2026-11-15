@@ -34,7 +34,7 @@ export async function loadClientModule(entry: string): Promise<Exports> {
                 React.createElement(name, { disabled, onClick: onPress, 'data-testid': testID, 'data-role': accessibilityRole, 'aria-label': accessibilityLabel, 'data-checked': accessibilityState && accessibilityState.checked !== undefined ? String(accessibilityState.checked) : undefined, 'data-selected': accessibilityState && accessibilityState.selected !== undefined ? String(accessibilityState.selected) : undefined, 'data-style': typeof style === 'object' && style !== null ? JSON.stringify(style) : undefined, 'data-idle-style': typeof style === 'function' ? JSON.stringify(style({ pressed: false })) : undefined }, typeof children === 'function' ? children({ pressed: false }) : children);
               exports.View = tag('div'); exports.Text = tag('span'); exports.Pressable = tag('button');
               exports.Icon = () => null;
-              exports.TextInput = ({ value, placeholder, testID }) => React.createElement('input', { value: value ?? '', placeholder, readOnly: true, 'data-testid': testID });
+              exports.TextInput = ({ value, placeholder, testID, onChangeText, editable }) => React.createElement('input', { value: value ?? '', placeholder, readOnly: !onChangeText || editable === false, onInput: (event) => onChangeText?.(event.currentTarget.value), 'data-testid': testID });
               exports.Platform = { OS: 'ios', select: (spec) => (spec.ios !== undefined ? spec.ios : spec.default) };
             `,
           }));

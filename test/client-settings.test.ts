@@ -161,3 +161,91 @@ test("mobile Settings can inspect pack membership while mounting no settings wri
   assert.match(html, /Core.*always on/i);
   assert.doesNotMatch(html, /<button|<input/, "inspection mounts no write controls");
 });
+
+async function mountUnderNativeWindow<T>(run: (render: typeof import("react-dom/client").createRoot, container: HTMLElement, act: (fn: () => void | Promise<void>) => Promise<void>) => Promise<T>): Promise<T> {
+  // jsdom ships no types in this repo; it only stands in for the DOM React's renderer needs.
+  const { JSDOM } = (await import(["jsdom"].join(""))) as { JSDOM: new (html: string) => { window: any } };
+  const dom = new JSDOM("<!doctype html><div id=root></div>");
+  const g = globalThis as Record<string, unknown>;
+  const saved = { window: g.window, document: g.document, IS_REACT_ACT_ENVIRONMENT: g.IS_REACT_ACT_ENVIRONMENT };
+  g.window = dom.window; g.document = dom.window.document; g.IS_REACT_ACT_ENVIRONMENT = true;
+  const { createRoot } = await import("react-dom/client");
+  const { act } = await import("react");
+  try {
+    return await run(createRoot, dom.window.document.getElementById("root")!, (fn) => act(async () => { await fn(); }));
+  } finally {
+    g.window = saved.window; g.document = saved.document; g.IS_REACT_ACT_ENVIRONMENT = saved.IS_REACT_ACT_ENVIRONMENT;
+    dom.window.close();
+  }
+}
+
+
+test("Settings creates a custom pack from installed skill selection", async () => {
+  const { SkillHubCard } = await loadClientModule("plugin/client/factory/skill-hub.tsx");
+  await mountUnderNativeWindow(async (createRoot, container, act) => {
+    const saved: unknown[] = [];
+    const root = createRoot(container);
+    await act(() => root.render(createElement(SkillHubCard, { theme, hub: packHub(), busy: false, savePack: (input: unknown) => { saved.push(input); return Promise.resolve(true); }, deletePack: async () => true })));
+    const click = async (id: string) => { const button = container.querySelector(`[data-testid="${id}"]`) as HTMLElement; assert.ok(button, id); await act(() => button.click()); };
+    const fill = async (id: string, value: string) => { const input = container.querySelector(`[data-testid="${id}"]`) as HTMLInputElement; assert.ok(input, id); await act(() => { input.value = value; input.dispatchEvent(new (input.ownerDocument.defaultView!.Event)("input", { bubbles: true })); }); };
+    try {
+      await click("skill-hub-pack-create");
+      assert.equal((container.querySelector('[data-testid="skill-hub-pack-save"]') as HTMLButtonElement).disabled, true);
+      await fill("skill-hub-pack-name", "Release tools");
+      await fill("skill-hub-pack-description", "Ship safely");
+      await click("skill-hub-pack-skill-deploy");
+      await click("skill-hub-pack-save");
+      assert.deepEqual(saved, [{ name: "Release tools", description: "Ship safely", skills: ["deploy"] }]);
+    } finally { await act(() => root.unmount()); }
+  });
+});
+
+test("Settings edits a custom pack's name, description and membership, then confirms deletion", async () => {
+  const { SkillHubCard } = await loadClientModule("plugin/client/factory/skill-hub.tsx");
+  await mountUnderNativeWindow(async (createRoot, container, act) => {
+    const saved: unknown[] = [];
+    const deleted: string[] = [];
+    const root = createRoot(container);
+    await act(() => root.render(createElement(SkillHubCard, { theme, hub: packHub(), busy: false,
+      savePack: async (input: unknown) => { saved.push(input); return true; },
+      deletePack: async (id: string) => { deleted.push(id); return true; },
+    })));
+    const click = async (id: string) => { const button = container.querySelector(`[data-testid="${id}"]`) as HTMLElement; assert.ok(button, id); await act(() => button.click()); };
+    const fill = async (id: string, value: string) => { const input = container.querySelector(`[data-testid="${id}"]`) as HTMLInputElement; await act(() => { input.value = value; input.dispatchEvent(new (input.ownerDocument.defaultView!.Event)("input", { bubbles: true })); }); };
+    try {
+      assert.equal(container.querySelector('[data-testid="skill-hub-pack-edit-source-acme"]'), null, "source packs cannot be edited");
+      await click("skill-hub-pack-edit-custom-release");
+      assert.equal((container.querySelector('[data-testid="skill-hub-pack-name"]') as HTMLInputElement).value, "Release kit");
+      await fill("skill-hub-pack-name", "Release and verify");
+      await fill("skill-hub-pack-description", "");
+      await click("skill-hub-pack-skill-deploy");
+      await click("skill-hub-pack-skill-tdd");
+      await click("skill-hub-pack-save");
+      assert.deepEqual(saved, [{ id: "custom-release", name: "Release and verify", skills: ["missing-skill", "tdd"] }], "editing retains unavailable members until explicitly removed");
+      assert.equal(container.querySelector('[data-testid="skill-hub-pack-editor"]'), null);
+      await click("skill-hub-pack-delete-custom-release");
+      assert.deepEqual(deleted, [], "first press asks for confirmation");
+      await click("skill-hub-pack-delete-custom-release");
+      assert.deepEqual(deleted, ["custom-release"]);
+    } finally { await act(() => root.unmount()); }
+  });
+});
+
+test("Settings keeps an unsaved pack open after failure and fences writes while busy", async () => {
+  const { SkillHubCard } = await loadClientModule("plugin/client/factory/skill-hub.tsx");
+  await mountUnderNativeWindow(async (createRoot, container, act) => {
+    const root = createRoot(container);
+    const props = { theme, hub: packHub(), busy: false, savePack: async () => false, deletePack: async () => false };
+    const click = async (id: string) => { await act(() => (container.querySelector(`[data-testid="${id}"]`) as HTMLElement).click()); };
+    try {
+      await act(() => root.render(createElement(SkillHubCard, props)));
+      await click("skill-hub-pack-edit-custom-release");
+      await click("skill-hub-pack-save");
+      assert.ok(container.querySelector('[data-testid="skill-hub-pack-editor"]'), "failure preserves the draft for retry");
+      await act(() => root.render(createElement(SkillHubCard, { ...props, busy: true })));
+      for (const id of ["skill-hub-pack-create", "skill-hub-pack-save", "skill-hub-pack-edit-custom-release", "skill-hub-pack-delete-custom-release"]) {
+        assert.equal((container.querySelector(`[data-testid="${id}"]`) as HTMLButtonElement).disabled, true, id);
+      }
+    } finally { await act(() => root.unmount()); }
+  });
+});

@@ -6,6 +6,8 @@ import type { SkillHubView } from "../../shared/view.ts";
 import { Btn, Card, Chip, Pill } from "../kit/pill.tsx";
 import { CONTROL_SM, DOT, RADIUS, SPACING, text, tint } from "../kit/theme.ts";
 
+export type SkillPackInput = { id?: string; name: string; description?: string; skills: string[] };
+
 type HubTab = "installed" | "hosts" | "matrix";
 
 const FILTERS: ReadonlyArray< readonly [string, string] > = [
@@ -85,7 +87,11 @@ export function SkillHubCard({
   togglePack,
   healSkills,
   updateSkills,
+  savePack,
+  deletePack,
 }: {
+  savePack?: (input: SkillPackInput) => Promise<boolean>;
+  deletePack?: (id: string) => Promise<boolean>;
   theme: PluginTheme;
   hub?: SkillHubView;
   busy: boolean;
@@ -227,6 +233,8 @@ export function SkillHubCard({
       </View>
 
       <SkillPackInventory theme={theme} hub={hub} projectRoot={projectRoot} busy={busy} importSkill={importSkill} togglePack={togglePack} />
+
+      {savePack && deletePack ? <CustomPackEditor theme={theme} hub={hub} busy={busy} savePack={savePack} deletePack={deletePack} /> : null}
 
       {/* Row 3 (Quick-Jump Sub-View Bar): Clicking any chip opens/switches the collapsible drawer */}
       <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: SPACING[1.5] }}>
@@ -724,4 +732,53 @@ export function SkillPackInventory({ theme, hub, projectRoot, busy = false, impo
         </View>
       </View>
   );
+}
+
+
+function CustomPackEditor({ theme, hub, busy, savePack, deletePack }: {
+  theme: PluginTheme;
+  hub: SkillHubView;
+  busy: boolean;
+  savePack: (input: SkillPackInput) => Promise<boolean>;
+  deletePack: (id: string) => Promise<boolean>;
+}) {
+  const [draft, setDraft] = useState<SkillPackInput | null>(null);
+  const [deleting, setDeleting] = useState<string | null>(null);
+  const [pending, setPending] = useState(false);
+  const disabled = busy || pending;
+  const customPacks = hub.projectPacks.filter(pack => pack.kind === "custom");
+  const installed = hub.installedSkills.map(skill => skill.name);
+  const choices = [...new Set([...installed, ...(draft?.skills ?? [])])].sort();
+  return <View style={{ gap: SPACING[1.5] }}>
+    <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: SPACING[1.5] }}>
+      <Text style={text(theme, "section")}>Manage custom packs</Text>
+      <Btn theme={theme} small label="+ Create custom pack" testID="skill-hub-pack-create" disabled={disabled} onPress={() => { setDeleting(null); setDraft({ name: "", skills: [] }); }} />
+    </View>
+    {customPacks.map(pack => <View key={pack.id} style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: SPACING[1.5] }}>
+      <Text style={text(theme, "label")}>{pack.label}</Text>
+      <Btn theme={theme} small label="Edit" testID={`skill-hub-pack-edit-${pack.id}`} disabled={disabled} onPress={() => { setDeleting(null); setDraft({ id: pack.id, name: pack.label, description: pack.description, skills: [...(pack.skills ?? [])] }); }} />
+      <Btn theme={theme} small label={deleting === pack.id ? "Confirm delete" : "Delete"} tone="statusDanger" testID={`skill-hub-pack-delete-${pack.id}`} disabled={disabled} onPress={async () => {
+        if (deleting !== pack.id) { setDeleting(pack.id); return; }
+        setPending(true);
+        try { if (await deletePack(pack.id)) { setDeleting(null); if (draft?.id === pack.id) setDraft(null); } } finally { setPending(false); }
+      }} />
+      {deleting === pack.id ? <Btn theme={theme} small label="Cancel delete" disabled={disabled} onPress={() => setDeleting(null)} /> : null}
+    </View>)}
+    {draft ? <View testID="skill-hub-pack-editor" style={{ gap: SPACING[1.5], padding: SPACING[2], borderWidth: 1, borderColor: theme.colors.border, borderRadius: RADIUS.md }}>
+      <Text style={text(theme, "label")}>{draft.id ? "Edit custom pack" : "Create custom pack"}</Text>
+      <TextInput testID="skill-hub-pack-name" accessibilityLabel="Pack name" placeholder="Pack name" value={draft.name} editable={!disabled} onChangeText={name => setDraft({ ...draft, name })} style={{ color: theme.colors.foreground }} />
+      <TextInput testID="skill-hub-pack-description" accessibilityLabel="Pack description (optional)" placeholder="Description (optional)" value={draft.description ?? ""} editable={!disabled} onChangeText={description => setDraft({ ...draft, description })} style={{ color: theme.colors.foreground }} />
+      <Text style={text(theme, "meta", "foregroundMuted")}>Select installed skills for this pack.</Text>
+      <View style={{ flexDirection: "row", flexWrap: "wrap", gap: SPACING[1] }}>
+        {choices.map(name => <Btn key={name} theme={theme} small testID={`skill-hub-pack-skill-${name}`} label={`${draft.skills.includes(name) ? "✓ " : "+ "}${name}${installed.includes(name) ? "" : " (not installed)"}`} disabled={disabled} onPress={() => setDraft({ ...draft, skills: draft.skills.includes(name) ? draft.skills.filter(skill => skill !== name) : [...draft.skills, name] })} />)}
+      </View>
+      <View style={{ flexDirection: "row", gap: SPACING[1.5] }}>
+        <Btn theme={theme} small label="Save pack" testID="skill-hub-pack-save" disabled={disabled || !draft.name.trim()} onPress={async () => {
+          setPending(true);
+          try { if (await savePack({ ...(draft.id ? { id: draft.id } : {}), name: draft.name.trim(), ...(draft.description?.trim() ? { description: draft.description.trim() } : {}), skills: draft.skills })) setDraft(null); } finally { setPending(false); }
+        }} />
+        <Btn theme={theme} small label="Cancel" testID="skill-hub-pack-cancel" disabled={disabled} onPress={() => setDraft(null)} />
+      </View>
+    </View> : null}
+  </View>;
 }
