@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-11-16
+
+**Project usage separates new tokens from cached tokens and attributes usage by seat.**
+
+### Changed
+
+- **Project usage leads with new tokens (`in + out`)**, followed by cached volume and cache-hit percentage, gross total, and session count on desktop and mobile.
+- **Desktop Project usage expands into By seat and By model breakdowns.** Rows show new tokens, cached tokens, sessions, and share of gross usage, sorted by total tokens. The breakdown starts collapsed; mobile keeps the summary only.
+- **Expanded the existing cached Meter projection** without adding provider reads or disk I/O. Cost remains omitted from the Project panel because provider coverage is incomplete.
+
 ## [0.11.0] - 2026-11-15
 
 **Dynamic Project skill packs, enforced Peer skills, and profile authoring from Project Models.**
