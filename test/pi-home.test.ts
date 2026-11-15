@@ -243,11 +243,7 @@ test("each role gets its skills policy: lead and agent filtered to role skills, 
     agentsSkillsDir: catalogRoot,
   });
   const agentSettings = JSON.parse(readFileSync(join(agentHome, "settings.json"), "utf8"));
-  assert.deepEqual(agentSettings.skills, [
-    "!*",
-    `+${join(catalogRoot, "*")}`,
-    `-${join(catalogRoot, "factory")}`,
-  ]);
+  assert.deepEqual(agentSettings.skills, ["!*", `+${join(catalogRoot, "tdd")}`, `+${join(catalogRoot, "diagnosing-bugs")}`, `+${join(catalogRoot, "codebase-design")}`, `+${join(catalogRoot, "frontend-design")}`, `+${join(catalogRoot, "web-design-guidelines")}`, `+${join(catalogRoot, "code-review")}`, `+${join(catalogRoot, "grilling")}`, `+${join(catalogRoot, "domain-modeling")}`, `+${join(catalogRoot, "grill-with-docs")}`, `+${join(catalogRoot, "research")}`, `+${join(catalogRoot, "factory")}`]);
   assert.deepEqual(agentSettings.extensions, ["-builtin:llama.cpp"]);
   assert.ok(existsSync(join(agentHome, "mcp.json")), "the agent still gets the sanitized mcp.json");
   assert.ok(lstatSync(join(agentHome, "auth.json")).isSymbolicLink(), "the agent still shares auth");
@@ -466,11 +462,7 @@ test("defaults resolve against the runtime home: <home>/.pi/agent and <home>/.ag
     assert.ok(lstatSync(join(roleHome, "auth.json")).isSymbolicLink(), "auth links from <home>/.pi/agent");
     assert.equal(realpathSync(join(roleHome, "auth.json")), realpathSync(join(fakeHome, ".pi", "agent", "auth.json")));
     const settings = JSON.parse(readFileSync(join(roleHome, "settings.json"), "utf8"));
-    assert.deepEqual(settings.skills, [
-      "!*",
-      "+~/.agents/skills/*",
-      "-~/.agents/skills/factory",
-    ]);
+    assert.deepEqual(settings.skills, ["!*", "+~/.agents/skills/tdd", "+~/.agents/skills/diagnosing-bugs", "+~/.agents/skills/codebase-design", "+~/.agents/skills/frontend-design", "+~/.agents/skills/web-design-guidelines", "+~/.agents/skills/code-review", "+~/.agents/skills/grilling", "+~/.agents/skills/domain-modeling", "+~/.agents/skills/grill-with-docs", "+~/.agents/skills/research", "+~/.agents/skills/factory"]);
   } finally {
     process.env.HOME = previousHome;
   }
@@ -666,7 +658,7 @@ test("Peer merges harness MCP aliases, honors disabled sources and starts helper
   assert.equal(servers["chrome-devtools-mcp"].lifecycle, "lazy");
   assert.equal(servers.paseo_factory.lifecycle, undefined);
   assert.deepEqual(JSON.parse(readFileSync(join(home, "settings.json"), "utf8")).skills,
-    ["!*", "+~/.agents/skills/*", "-~/.agents/skills/factory"]);
+    ["!*", "+~/.agents/skills/tdd", "+~/.agents/skills/diagnosing-bugs", "+~/.agents/skills/codebase-design", "+~/.agents/skills/frontend-design", "+~/.agents/skills/web-design-guidelines", "+~/.agents/skills/code-review", "+~/.agents/skills/grilling", "+~/.agents/skills/domain-modeling", "+~/.agents/skills/grill-with-docs", "+~/.agents/skills/research", "+~/.agents/skills/factory"]);
   for (const role of ["supervisor", "lead"] as const) {
     const seatHome = provisionPiAgentHome({ stateDir, role, sourceAgentDir: source, helperMcpSources: { userHome } });
     assert.deepEqual(Object.keys(JSON.parse(readFileSync(join(seatHome, "mcp.json"), "utf8")).mcpServers), ["paseo_factory"]);
@@ -1031,4 +1023,35 @@ test('configured Expo endpoint always carries its OAuth requirement', async (t) 
   writeFileSync(join(home, '.pi/agent/mcp.json'), JSON.stringify({ mcpServers: { expo: { url: 'https://mcp.expo.dev/mcp' } } }));
   const expo = discoverHelperMcps({ userHome: home, stateDir: join(home, 'state') }).servers.find(s => s.name === 'expo-mcp');
   assert.equal(expo?.oauthRequired, true);
+});
+
+test("Project Peer Pi homes isolate enabled packs and include one-off Contract skills", (t) => {
+  const dir = makeTempDir("pi-project-skills-");
+  disposeDir(t, dir);
+  const source = makeFakePiAgent(dir);
+  const stateDir = join(dir, "state");
+  const userHome = join(dir, "owner");
+  const catalog = join(userHome, ".agents", "skills");
+  for (const name of ["expo-router", "firebase-admin", "owner-special"]) {
+    mkdirSync(join(catalog, name), { recursive: true });
+    writeFileSync(join(catalog, name, "SKILL.md"), `---\nname: ${name}\ndescription: test\n---\n`);
+  }
+  const provision = (slug: string, packs: string[], contractSkills: string[] = []) => provisionPiAgentHome({
+    stateDir, role: "agent", sourceAgentDir: source, agentsSkillsDir: catalog,
+    project: { root: join(dir, slug), slug }, configuredPacks: packs, contractSkills,
+    helperMcpSources: { userHome },
+  });
+  const a = provision("app-a", ["expo"], ["owner-special"]);
+  const b = provision("app-b", ["firebase"]);
+  assert.equal(a, join(stateDir, "projects", "app-a", "pi-agent", "agent"));
+  assert.equal(b, join(stateDir, "projects", "app-b", "pi-agent", "agent"));
+  const skills = (home: string): string[] => JSON.parse(readFileSync(join(home, "settings.json"), "utf8")).skills;
+  assert.ok(skills(a).includes(`+${join(catalog, "tdd")}`));
+  assert.ok(skills(a).includes(`+${join(catalog, "expo-router")}`));
+  assert.ok(skills(a).includes(`+${join(catalog, "owner-special")}`));
+  assert.ok(!skills(a).includes(`+${join(catalog, "firebase-admin")}`));
+  assert.ok(skills(b).includes(`+${join(catalog, "firebase-admin")}`));
+  assert.ok(!skills(b).includes(`+${join(catalog, "expo-router")}`));
+  assert.ok(!skills(b).includes(`+${join(catalog, "owner-special")}`));
+  assert.ok(!skills(a).some(skill => skill.includes("*" ) && skill !== "!*"));
 });

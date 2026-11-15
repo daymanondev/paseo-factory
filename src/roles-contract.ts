@@ -298,3 +298,9 @@ export function buildRoleKickoffPrompt(role: RoleName, options: RoleContractOpti
   const linkedDesignPrefix = role === "lead" ? [] : [linkedDesignSpecification(options.project?.root)];
   return [...linkedDesignPrefix, renderRoleContract(role, options), ...(role === "lead" || role === "agent" ? [renderHelperMcpRoster(options.helperMcps ?? [])] : [])].join("\n\n");
 }
+
+
+/** Resolved Project capability scope for providers without native skill filtering. */
+export function renderPeerSkillScope(skills: string[]): string {
+  return `Project Peer skills allowed: ${skills.join(", ")}. Use only these skills from the host catalog for this Task; open a skill only when relevant to the current slice.`;
+}

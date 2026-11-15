@@ -11,6 +11,7 @@ import { CorrelationRegistry } from "../src/correlations.ts";
 import { ensureGitRepository, readProjectRegistration, resolveOrBootstrapProject, resolveProject } from "../plugin/server/core/project.ts";
 import { writeProjectRegistration } from "../plugin/server/projects.ts";
 import {
+  factoryEnvFor,
   applyProviderExecutionFence,
   formatPeerAgentTitle,
   formatPeerWorkspaceTitle,
@@ -234,7 +235,7 @@ test("injectRoleOnCreate wires Layer-1 provider fence, paseo_factory MCP, and co
         edit: "deny",
         task: "deny",
         bash: "ask",
-        skill: { "*": "deny", grilling: "allow", "domain-modeling": "allow", "grill-with-docs": "allow", research: "allow", factory: "allow" },
+        skill: { "*": "allow" },
       });
       const hyphenMcp = (res.config.mcpServers as Record<string, { command: string; args: string[] }>)?.["paseo-factory"];
       assert.ok(hyphenMcp !== undefined, "opencode also receives config.mcpServers['paseo-factory'] to survive bridge-plugin.mjs");
@@ -603,7 +604,7 @@ test("injectRoleOnCreate recognizes factory-supervisor by provider id alone — 
     edit: "deny",
     task: "deny",
     bash: "ask",
-    skill: { "*": "deny", grilling: "allow", "domain-modeling": "allow", "grill-with-docs": "allow", research: "allow", factory: "allow" },
+    skill: { "*": "allow" },
   });
   // paseo_factory MCP (plus paseo-factory alias for OpenCode v2 bridge-plugin.mjs) with Node mode and the correlation token.
   const mcp = (res.config.mcpServers as Record<string, { env: Record<string, string>; args: string[] }>).paseo_factory;
@@ -691,8 +692,8 @@ test("injectRoleOnCreate fences a factory-peer Task-worktree spawn under the wor
   assert.equal(res.env?.PASEO_FACTORY_SEAT, "agent");
   assert.equal(res.config.modeId, undefined, "the agent fence never sets a seat modeId");
   assert.deepEqual(
-    (res.config.providerOptions as { permission: Record<string, string> }).permission,
-    { task: "deny" },
+    (res.config.providerOptions as { permission: Record<string, string> }).permission.task,
+    "deny",
     "the opencode worker-lane Layer-1 agent fence applies by provider family resolution",
   );
   const mcp = (res.config.mcpServers as Record<string, { env: Record<string, string> }>).paseo_factory;
@@ -760,7 +761,7 @@ test("legacy zcode/* lanes in lanes.json migrate to pi/zcode/* so seats and Peer
     userHome,
   );
   assert.ok(peer !== undefined, "the managed-worktree branch fires for the peer create");
-  assert.equal(peer.env?.PI_CODING_AGENT_DIR, join(stateDir, "pi-agent", "agent"));
+  assert.equal(peer.env?.PI_CODING_AGENT_DIR, join(stateDir, "projects", slug, "pi-agent", "agent"));
   assert.equal(existsSync(join(worktreeDir, ".zcode", "config.json")), false, "no .zcode/config.json is written in the Task worktree");
 });
 
@@ -1980,7 +1981,7 @@ test("Peer create refreshes selected OAuth before provider fencing; coordination
     assert.equal(servers.stray, undefined);
     if (role === "agent" && ["pi", "claude"].includes(provider)) assert.equal(servers.supabase.headers.Authorization, "Bearer valid-test-token");
     else assert.equal(servers.supabase, undefined);
-    if (role === "supervisor" && provider === "opencode") assert.equal((result as any).providerOptions.permission.skill["domain-modeling"], "allow");
+    if (role === "supervisor" && provider === "opencode") assert.equal((result as any).providerOptions.permission.skill["*"], "allow");
   }
   assert.ok(catalog.roles.supervisor.includes("supervisor_accept_task"));
   assert.ok(catalog.roles.lead.includes("lead_repoke_agent"));
@@ -2044,4 +2045,35 @@ test("Lead contracts enforce Scout-First Context Discipline (<= 3 targeted bound
     assert.match(surface, /disposition: "architect"/);
     assert.match(surface, /lead_read_ledger/);
   }
+});
+
+
+test("Peer launch and reopen use Project Pi home and Contract skills in matching OpenCode permissions", (t) => {
+  const dir = makeTempDir("role-project-skills-");
+  disposeDir(t, dir);
+  const stateDir = join(dir, "state");
+  const userHome = join(dir, "owner");
+  const root = makeGitRepo(dir);
+  const project = resolveProject(root);
+  assert.ok(project.ok);
+  const dataDir = join(stateDir, "projects", project.slug);
+  mkdirSync(dataDir, { recursive: true });
+  writeFileSync(join(dataDir, "project-settings.json"), JSON.stringify({ schemaVersion: 1, revision: 1, skillPacks: [] }));
+  writeFileSync(join(dataDir, "ledger.jsonl"), JSON.stringify({ event: "contract_set", seq: 1, ts: new Date().toISOString(), task: "slice", workspace: root, gate: "true", skills: ["owner-special"] }) + "\n");
+  const correlation = new CorrelationRegistry(stateDir).issue({ role: "agent", projectSlug: project.slug, projectRoot: root, task: "slice" });
+  const env = factoryEnvFor("agent", { stateDir, project, task: "slice", userHome, correlationId: correlation.correlationId });
+  const expectedHome = join(dataDir, "pi-agent", "agent");
+  assert.equal(env.PI_CODING_AGENT_DIR, expectedHome);
+  const settings = JSON.parse(readFileSync(join(expectedHome, "settings.json"), "utf8"));
+  assert.ok(settings.skills.includes("+~/.agents/skills/owner-special"));
+  const config = applyProviderExecutionFence({ provider: "opencode/model", cwd: root }, {
+    role: "agent", stateDir, projectSlug: project.slug, task: "slice", correlationId: "cor-test", userHome,
+  }) as any;
+  assert.equal(config.providerOptions.permission.skill["*"], "deny");
+  assert.equal(config.providerOptions.permission.skill["owner-special"], "allow");
+  assert.equal(config.providerOptions.permission.skill.tdd, "allow");
+  assert.match(config.systemPrompt, /Project Peer skills allowed:/);
+  assert.match(config.systemPrompt, /owner-special/);
+  const reopened = injectSessionEnv({ agentId: "peer-1", cwd: root, env: { ...env }, provider: "pi" }, stateDir, userHome);
+  assert.equal(reopened?.env?.PI_CODING_AGENT_DIR, expectedHome);
 });

@@ -2,7 +2,7 @@
  * The Pi harness home provisioner (v0.0.16, ADR 0011): every factory role —
  * `supervisor`, `lead`, working `agent`, and the tool-less `headless` pass —
  * runs pi inside an isolated `PI_CODING_AGENT_DIR` materialized on demand at
- * `<stateDir>/pi-agent/<role>`. Each harness home carries a GENERATED
+ * `<stateDir>/pi-agent/<role>` (Peer homes live under their Project state). Each harness home carries a GENERATED
  * clean-room `settings.json` (zero user packages, zero user extensions —
  * only the operator's model/thinking defaults ride along) and a SANITIZED
  * `mcp.json` (legacy `pi-mcp-adapter` `"auth": "oauth"` strings stripped for
@@ -43,6 +43,8 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { discoverHelperMcps, materializeHelperOAuth, readHelperOAuth, resolveRoleScopedMcpServers } from "./helper-mcp-sync.ts";
 import type { HelperMcpOptions } from "./helper-mcp-sync.ts";
+import { resolveRoleSkillsForProject } from "./skill-hub.ts";
+import { projectStateDir } from "./project.ts";
 import { renderRoleAppendSystem } from "./roles-contract.ts";
 
 export { renderRoleAppendSystem } from "./roles-contract.ts";
@@ -54,9 +56,13 @@ export type PiAgentRole = "supervisor" | "lead" | "agent" | "headless";
 export type InteractivePiAgentRole = Exclude<PiAgentRole, "headless">;
 
 export interface ProvisionPiHomeOptions {
-  /** The factory state directory — the harness home is materialized at `<stateDir>/pi-agent/<role>`. */
+  /** Shared role homes live here; Project Peer homes use `<stateDir>/projects/<slug>/pi-agent/agent`. */
   stateDir: string;
   role: PiAgentRole;
+  /** Identity for per-Project Peer isolation and skill-pack resolution. */
+  project?: { root: string; slug: string };
+  configuredPacks?: string[];
+  contractSkills?: string[];
   /** Explicit isolated destination for opt-in execution adapters. */
   roleHome?: string;
   /**
@@ -138,7 +144,7 @@ export function isElectronNodeBinary(execPath: string): boolean {
  */
 export function provisionPiAgentHome(input: ProvisionPiHomeOptions): string {
   const sourceAgentDir = input.sourceAgentDir ?? join(homedir(), ".pi", "agent");
-  const roleHome = input.roleHome ?? join(input.stateDir, "pi-agent", input.role);
+  const roleHome = input.roleHome ?? join(input.role === "agent" && input.project ? projectStateDir(input.stateDir, input.project.slug) : input.stateDir, "pi-agent", input.role);
   mkdirSync(roleHome, { recursive: true });
   for (const forbidden of FORBIDDEN_NAMES) {
     // v0.0.38, ADR 0026 §1 — the sweep must never churn a symlink the same
@@ -154,7 +160,12 @@ export function provisionPiAgentHome(input: ProvisionPiHomeOptions): string {
   // Strictly after the sweep — anything written or linked before it would
   // be deleted as contamination (the sweep's ordering is load-bearing).
   writeAppendSystemMd(roleHome, input.role, input.appendSystemPrompt);
-  writeSettingsJson(sourceAgentDir, roleHome, input.role, input.agentsSkillsDir ?? "~/.agents/skills");
+  const peerSkills = input.role === "agent" ? resolveRoleSkillsForProject({
+    stateDir: input.stateDir, role: "peer", projectRoot: input.project?.root,
+    userHome: input.helperMcpSources?.userHome, configuredPacks: input.configuredPacks,
+    contractSkills: input.contractSkills,
+  }) : undefined;
+  writeSettingsJson(sourceAgentDir, roleHome, input.role, input.agentsSkillsDir ?? "~/.agents/skills", peerSkills);
   syncMcpJson(sourceAgentDir, roleHome, input.role, input.stateDir, input);
   for (const name of SHARED_STATE_NAMES) {
     const source = join(sourceAgentDir, name);
@@ -204,13 +215,13 @@ function writeAppendSystemMd(roleHome: string, role: PiAgentRole, appendSystemPr
  * `extensions: ["-builtin:llama.cpp"]` (keeping `builtin:mcp`,
  * `builtin:codemode`, and `builtin:tool-search` enabled), `quietStartup`,
  * and `defaultProjectTrust: "always"` so `<project-root>/.pi/mcp.json`
- * overrides work. Lead receives its three core skills; Peer receives all installed
- * skills except `factory` under `agentsSkillsDir` (ADR 0039);
+ * overrides work. Lead receives its three core skills; Peer receives Core,
+ * enabled Project packs, and explicit Contract skills under `agentsSkillsDir`;
  * `supervisor` leaves `"skills"` out so pi auto-discovers all of
  * `~/.agents/skills`; `headless` denies every skill and every interactive
  * builtin extension on top of the CLI's own `--no-*` flags.
  */
-function writeSettingsJson(sourceAgentDir: string, roleHome: string, role: PiAgentRole, agentsSkillsDir: string): void {
+function writeSettingsJson(sourceAgentDir: string, roleHome: string, role: PiAgentRole, agentsSkillsDir: string, peerSkills?: string[]): void {
   const settings: Record<string, unknown> = {};
   const source = readJsonObject(join(sourceAgentDir, "settings.json"));
   if (source !== undefined) {
@@ -232,7 +243,7 @@ function writeSettingsJson(sourceAgentDir: string, roleHome: string, role: PiAge
   if (role === "lead") {
     settings.skills = ["!*", ...CORE_LEAD_SKILLS.map((skill) => `+${join(agentsSkillsDir, skill)}`)];
   } else if (role === "agent") {
-    settings.skills = ["!*", `+${join(agentsSkillsDir, "*")}`, `-${join(agentsSkillsDir, "factory")}`];
+    settings.skills = ["!*", ...(peerSkills ?? []).map(skill => `+${join(agentsSkillsDir, skill)}`)];
   } else if (role === "headless") {
     settings.skills = ["!*"];
     settings.defaultThinkingLevel = "off";
