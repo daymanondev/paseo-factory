@@ -7728,6 +7728,55 @@ test("panel Default worker inherits the individual role scope and header profile
   assert.equal(preset.view.panel.profile.modified, false);
 });
 
+test("Project profile save captures inherited lanes and activates the new profile without changing live seats", async (t) => {
+  const { handlers, stateDir, project, fake, factory, home } = makePanelSurface(t, p => [
+    { id: "profile-supervisor", labels: seatLabels(p, "supervisor"), provider: "pi", model: "running-supervisor", cwd: p.root },
+    { id: "profile-lead", labels: seatLabels(p, "lead"), provider: "codex", model: "running-lead", cwd: p.root },
+  ]);
+  const { applyLaneProfile } = await import("../src/lanes.ts");
+  const old = await handlers.profilesSave({ name: "Previous preset", projectRoot: project.root });
+  assert.ok(old.ok);
+  applyLaneProfile(stateDir, old.profile.id, project.slug);
+  // The next save must replace recorded active metadata, not rely on a matching-profile fallback.
+  const lanesPath = join(stateDir, "projects", project.slug, "lanes.json");
+  writeFileSync(lanesPath, JSON.stringify({ worker: "codex/project-worker:high", watch: "pi/project-watch" }));
+  const before = await handlers.snapshot({ projectRoot: project.root });
+  assert.ok(before.ok);
+  assert.equal(before.view.panel.profile.modified, true);
+  const lanesBefore = readFileSync(lanesPath, "utf8");
+  const saved = await handlers.profilesSave({ name: "Project tuning", projectRoot: project.root });
+  assert.ok(saved.ok);
+  assert.deepEqual(saved.profile.lanes, {
+    supervisor: "pi/zcode/glm-5.3", lead: "pi/zcode/glm-5.3", worker: "codex/project-worker:high",
+    watch: "pi/project-watch", freshEyes: "pi/zcode/glm-5.3",
+  });
+  const restarted = createSurfaceHandlers({ factory, stateDir, home, daemon: fake.daemon });
+  const snapshot = await restarted.snapshot({ projectRoot: project.root });
+  assert.ok(snapshot.ok);
+  assert.equal(snapshot.view.panel.profile.active?.id, saved.profile.id);
+  assert.equal(snapshot.view.panel.profile.modified, false);
+  assert.equal(readFileSync(lanesPath, "utf8"), lanesBefore);
+  assert.deepEqual(snapshot.view.panel.seats, before.view.panel.seats);
+  assert.deepEqual(fake.created, []);
+  assert.deepEqual(fake.archived, []);
+
+  assert.ok(saveLanes(stateDir, { watch: "codex/updated-watch" }, project.slug).ok);
+  const modified = await handlers.snapshot({ projectRoot: project.root });
+  assert.ok(modified.ok);
+  assert.equal(modified.view.panel.profile.modified, true);
+  const updated = await handlers.profilesSave({ id: saved.profile.id, name: "Project tuning", projectRoot: project.root });
+  assert.ok(updated.ok);
+  assert.equal(updated.profile.lanes.watch, "codex/updated-watch");
+  const afterUpdate = await handlers.snapshot({ projectRoot: project.root });
+  assert.ok(afterUpdate.ok);
+  assert.equal(afterUpdate.view.panel.profile.active?.id, saved.profile.id);
+  assert.equal(afterUpdate.view.panel.profile.modified, false);
+  assert.equal(afterUpdate.view.panel.profile.list.length, 2, "updating preserves the same profile id");
+  assert.deepEqual(afterUpdate.view.panel.seats, before.view.panel.seats);
+  assert.deepEqual(fake.created, []);
+  assert.deepEqual(fake.archived, []);
+});
+
 test("panel retains a failed standing handoff when the outgoing seat is absent", async (t) => {
   const { handlers, stateDir, project } = makePanelSurface(t);
   const dir = join(stateDir, "projects", project.slug);
