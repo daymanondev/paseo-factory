@@ -897,3 +897,79 @@ test("11: the Shell mounts the self-update hook for the panel and hands it to th
   assert.match(shell, /useSelfUpdate\(\{[^}]*enabled: surface === "panel"/);
   assert.match(shell, /selfUpdate=\{selfUpdate\}/);
 });
+
+const recordedUsage: NonNullable<PanelView["usage"]> = {
+  state: "recorded", totalTokens: 12_400_000, cacheHitPercent: 87,
+  inputUncachedTokens: 1_200_000, outputTokens: 340_000, sessionCount: 64,
+  models: [
+    { provider: "codex", model: "gpt-6", totalTokens: 9_300_000, sharePercent: 75 },
+    { provider: "pi", model: "glm", totalTokens: 3_100_000, sharePercent: 25 },
+  ],
+};
+
+test("Project usage leads the Project tab with the server summary and a collapsed desktop model toggle", async () => {
+  const html = await render(makePanel({ usage: recordedUsage }), { initialUi: { tab: "project" } });
+  assert.ok(hasHook(html, "project-usage-card"));
+  assert.match(leafOf(html, "project-usage-summary"), /12\.4M tok · cache-hit 87% · in 1\.2M · out 340k · 64 sessions/);
+  assert.ok(html.indexOf('data-testid="project-usage-card"') < html.indexOf('data-testid="factory-skill-packs"'));
+  assert.ok(hasHook(html, "project-usage-toggle"));
+  assert.equal(hasHook(html, "project-usage-models"), false);
+  assert.equal(hasHook(await render(makePanel({ usage: recordedUsage })), "project-usage-card"), false, "the Team tab has no usage card");
+});
+
+test("desktop Project usage expands and collapses server-projected model rows on press", async () => {
+  const { ProjectPanel } = await loadPanel();
+  const { createElement, act } = await import("react");
+  const { JSDOM } = await import(["jsdom"].join(""));
+  const dom = new JSDOM("<!doctype html><div id=root></div>");
+  const g = globalThis as Record<string, any>;
+  const saved = { window: g.window, document: g.document, IS_REACT_ACT_ENVIRONMENT: g.IS_REACT_ACT_ENVIRONMENT };
+  g.window = dom.window; g.document = dom.window.document; g.IS_REACT_ACT_ENVIRONMENT = true;
+  const { createRoot } = await import("react-dom/client");
+  const container = dom.window.document.getElementById("root")!;
+  const root = createRoot(container);
+  try {
+    await act(() => root.render(createElement(ProjectPanel, { theme, panel: makePanel({ usage: recordedUsage }), mobile: false, now: Date.now(), daemonError: null, actions: noopActions(), initialUi: { tab: "project" } })));
+    const toggle = () => container.querySelector('[data-testid="project-usage-toggle"]') as HTMLButtonElement;
+    assert.equal(container.querySelector('[data-testid="project-usage-models"]'), null);
+    await act(() => toggle().click());
+    const models = container.querySelector('[data-testid="project-usage-models"]');
+    assert.ok(models);
+    assert.deepEqual([...models.querySelectorAll('[data-testid="project-usage-model-row"]')].map(row => row.textContent), ["codex/gpt-6 · 9.3M tok · 75%", "pi/glm · 3.1M tok · 25%"]);
+    await act(() => toggle().click());
+    assert.equal(container.querySelector('[data-testid="project-usage-models"]'), null);
+  } finally {
+    await act(() => root.unmount());
+    Object.assign(g, saved);
+    dom.window.close();
+  }
+});
+
+test("mobile Project usage shows the lifetime summary without model expansion or writes", async () => {
+  const html = await render(makePanel({ usage: recordedUsage }), { mobile: true, initialUi: { tab: "project" } });
+  assert.match(leafOf(html, "project-usage-summary"), /12\.4M tok · cache-hit 87% · in 1\.2M · out 340k · 64 sessions/);
+  const card = elementOf(html, "project-usage-card");
+  assert.equal(hasHook(card, "project-usage-toggle"), false);
+  assert.equal(hasHook(card, "project-usage-models"), false);
+  assert.doesNotMatch(card, /<button/);
+});
+
+test("empty Project usage keeps a muted card on desktop and mobile", async () => {
+  const usage: NonNullable<PanelView["usage"]> = { state: "empty", totalTokens: 0, cacheHitPercent: null, inputUncachedTokens: 0, outputTokens: 0, sessionCount: 0, models: [] };
+  for (const mobile of [false, true]) {
+    const html = await render(makePanel({ usage }), { mobile, initialUi: { tab: "project" } });
+    assert.ok(hasHook(html, "project-usage-card"));
+    assert.match(leafOf(html, "project-usage-empty"), /No usage recorded yet/);
+    assert.ok(leafOf(html, "project-usage-empty").includes(theme.colors.foregroundMuted));
+    assert.equal(hasHook(html, "project-usage-summary"), false);
+    assert.equal(hasHook(html, "project-usage-toggle"), false);
+  }
+});
+
+test("unscoped or older panels omit Project usage, and an unknown cache-hit ratio stays a dash", async () => {
+  for (const usage of [null, undefined]) {
+    assert.equal(hasHook(await render(makePanel({ usage }), { initialUi: { tab: "project" } }), "project-usage-card"), false);
+  }
+  const html = await render(makePanel({ usage: { ...recordedUsage, cacheHitPercent: null } }), { initialUi: { tab: "project" } });
+  assert.match(leafOf(html, "project-usage-summary"), /cache-hit –/);
+});
