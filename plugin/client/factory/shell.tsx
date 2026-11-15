@@ -9,7 +9,7 @@ import { useRpc } from "@getpaseo/plugin/client";
 import { Modal, ScrollView, useToast } from "@getpaseo/plugin/client/ui";
 import { useEffect, useRef, useState } from "react";
 import { Text, View } from "react-native";
-import { skillsImport, skillsTogglePack, lanesSet, lanesSetBatch, handoffStart, handoffReplaceNow, handoffCancel, handoffRetry, handoffHandover, onboardingCommit, onboardingInspect, openDesignCatalog, openDesignSync, helperMcpsSyncAndProbe, helperMcpsSetEnabled, pluginsInstall, pluginsManage, pluginsCheckUpdates, selfUpdateApply, selfUpdateStatus, profilesApply, profilesDelete, profilesSave, projectDelete, projectReset, projectRotate, snapshot, supervisorAdopt, supervisorStart, vaultConfigure, vaultHydrate, vaultImport, vaultSync } from "../../shared/rpc.ts";
+import { skillsImport, skillsPackSave, skillsPackDelete, skillsTogglePack, lanesSet, lanesSetBatch, handoffStart, handoffReplaceNow, handoffCancel, handoffRetry, handoffHandover, onboardingCommit, onboardingInspect, openDesignCatalog, openDesignSync, helperMcpsSyncAndProbe, helperMcpsSetEnabled, pluginsInstall, pluginsManage, pluginsCheckUpdates, selfUpdateApply, selfUpdateStatus, profilesApply, profilesDelete, profilesSave, projectDelete, projectReset, projectRotate, snapshot, supervisorAdopt, supervisorStart, vaultConfigure, vaultHydrate, vaultImport, vaultSync } from "../../shared/rpc.ts";
 import type { ManageablePluginId } from "../../shared/companions.ts";
 import type { FactoryView, LaneName } from "../../shared/view.ts";
 import { SPACING, text } from "../kit/theme.ts";
@@ -93,6 +93,8 @@ export function FactoryShell({
   const pluginsInstallCall = useRpc(pluginsInstall);
   const skillsImportCall = useRpc(skillsImport);
   const skillsTogglePackCall = useRpc(skillsTogglePack);
+  const skillsPackSaveCall = useRpc(skillsPackSave);
+  const skillsPackDeleteCall = useRpc(skillsPackDelete);
   const pluginsManageCall = useRpc(pluginsManage);
   const pluginsCheckUpdatesCall = useRpc(pluginsCheckUpdates);
   // The header's version + self-update (ticket 11): one status on mount, Check forces it, Update applies (the plugin reloads under us).
@@ -393,8 +395,10 @@ export function FactoryShell({
   const pluginActions: PluginsActions = {
     busy: busy || activePluginAct !== null,
     checkingUpdates,
+    savePack: input => act("Save custom skill pack", () => skillsPackSaveCall(input)),
+    deletePack: id => act("Delete custom skill pack", () => skillsPackDeleteCall({ id })),
     importSkill: id => { void act('Import Skill', () => skillsImportCall({ id })); },
-    togglePack: (pack, enabled) => { if (view.project) void act('Project Skill Pack', () => skillsTogglePackCall({ projectRoot: view.project!.root, pack: pack as 'expo' | 'firebase' | 'zcode-3d' | 'science', enabled })); },
+    togglePack: (pack, enabled) => { if (view.project) void act('Project Skill Pack', () => skillsTogglePackCall({ projectRoot: view.project!.root, pack, enabled })); },
     syncHelpers: () => { void act("Check Connectivity", async () => {
       const reply = await helperMcpsSyncCall({});
       if (reply.ok) setPluginsNote({ text: "Connectivity checks completed for synced Peer MCPs.", tone: "statusSuccess", pluginId: "all" });
