@@ -1990,8 +1990,8 @@ test("Paseo 0.13.0 compatibility: completeHandoff refetches tail timeline via da
 
   // Turn 1 ends at 135k -> enters handing_over
   await leadMail.onLeadTurnEnded({ agentId: "agent-lead-013", outcome: { kind: "completed" }, timeline: [] });
-  // Extraction turn ends with Paseo 0.13.0's always-empty timeline: []
-  await leadMail.onLeadTurnEnded({ agentId: "agent-lead-013", outcome: { kind: "completed" }, timeline: [] });
+  // Newer hook adapters may omit the timeline; legacy refetch still works.
+  await leadMail.onLeadTurnEnded({ agentId: "agent-lead-013", outcome: { kind: "completed" } });
 
   assert.equal(refetchCalls.length, 1);
   assert.deepEqual(refetchCalls[0], { id: "agent-lead-013", opts: { direction: "tail", limit: 20 } });

@@ -9,6 +9,7 @@ import { projectTask } from "./core/task-state.ts";
 import { atomicJson, readOptionalJson } from "./core/json-store.ts";
 import { taskWorktreeBranch } from "./core/workspace.ts";
 import type { LeadTurnEndedInput } from "./lead-mailbox.ts";
+import { refetchTurnTimeline } from "./turn-timeline.ts";
 import type { SurfaceAgentSnapshot, SurfaceDaemonApi } from "./surface-rpc.ts";
 import { stopAgentViaCli, type DaemonReply } from "./daemon-cli.ts";
 import { boundTaskPeers, peerIsRunning } from "./task-peers.ts";
@@ -119,12 +120,12 @@ export function createPeerHandoffRuntime(deps: PeerHandoffDeps) {
     if (state.phase === "extracting") {
       let summary: string | undefined;
       if (!state.forceSubstitute && input?.outcome.kind === "completed") {
-        const reply = input.timeline.filter(item => item.type === "assistant_message").at(-1)?.text;
+        const reply = (input.timeline ?? []).filter(item => item.type === "assistant_message").at(-1)?.text;
         if (validHandoffText(reply)) summary = reply;
         if (summary === undefined) {
           try {
-            const timeline = await bounded(daemon.agents.ref(state.outgoingId!).timeline.refetch({ direction: "tail", limit: 20 }));
-            const reply = timeline.entries?.filter(entry => entry.item?.type === "assistant_message").at(-1)?.item?.text;
+            const timeline = await bounded(refetchTurnTimeline(daemon.agents.ref(state.outgoingId!).timeline, input.turnId ?? null));
+            const reply = timeline.map(entry => entry.item ?? entry).filter(item => item.type === "assistant_message").at(-1)?.text;
             if (validHandoffText(reply)) summary = reply;
           } catch { /* Fuse fallback also covers unreadable native timelines. */ }
         }
@@ -144,7 +145,7 @@ export function createPeerHandoffRuntime(deps: PeerHandoffDeps) {
       if (summary === undefined) {
         progress(slug, task, state, "substitute");
         let timeline = INTERRUPTED;
-        try { const tail = await bounded(daemon.agents.ref(state.outgoingId!).timeline.refetch({ direction: "tail", limit: 10 })); timeline += "\n" + (tail.entries ?? []).map(entry => entry.item?.text ?? "").filter(Boolean).join("\n"); } catch { /* Substitute remains useful without native timeline. */ }
+        try { const tail = await bounded(refetchTurnTimeline(daemon.agents.ref(state.outgoingId!).timeline, input?.turnId ?? null)); timeline += "\n" + tail.map(entry => (entry.item ?? entry).text ?? "").filter(Boolean).join("\n"); } catch { /* Substitute remains useful without native timeline. */ }
         const events = eventsOf(slug);
         summary = buildSubstituteHandover({ digest: events.slice(-20).map(renderLedgerLine).join("\n"), notebook: readNotebook(projectNotebookPath(deps.stateDir, slug)), git: readHandoverGit(state.worktree!), tasks: renderOpenTaskEvidence(foldTasks(events)), timeline, maxBytes: SUMMARY_BYTES });
       }

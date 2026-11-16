@@ -30,7 +30,7 @@ import type { TimelineSourceApi } from "./server/timeline.ts";
 import { spoolRootFor, startSpool } from "./server/spool.ts";
 import { createUsageRuntime } from "./server/usage-rollup.ts";
 import { createSurfaceHandlers, registerSurfaceRpc } from "./server/surface-rpc.ts";
-import { createLeadMailRuntime } from "./server/lead-mailbox.ts";
+import { createLeadMailRuntime, type LeadTurnEndedInput } from "./server/lead-mailbox.ts";
 import { syncPeerHelpersBeforeCreate, injectRoleOnCreate, injectSessionEnv, sanitizeAgentCreateHookResult } from "./server/roles.ts";
 import { factoryRegistryFor } from "./server/projects.ts";
 import { listProjectRegistrations } from "./server/core/project.ts";
@@ -414,18 +414,24 @@ export default function contribute(server: PluginServerContext) {
   // for both registered Lead and registered Supervisor seats and drives the
   // Lead-mark (160k) rotation state machine for the Project whose registered Lead ended
   // the turn.
-  const offTurnEnded = registerLifecycleHook<PluginHookEvents["agent.turn.after"], void>(
-    (handler) => server.addHook("agent.turn.after", handler),
-    (handler) => server.on("agent.turn_ended", handler),
-    (event, context) => {
-      capturePaseo(context);
-      // The debounced usage capture (v0.0.87, ADR 0043 §3): every Supervisor,
-      // Lead, and Peer turn incrementally extracts its session usage and
-      // schedules the atomic rollup flush — zero Ledger lines per turn.
-      usage.recordTurnEnd(event.agent.id).catch((error) => log(`usage: turn capture deferred — ${String(error)}`));
-      void leadMail.onLeadTurnEnded({ agentId: event.agent.id, outcome: event.outcome, timeline: event.timeline }).catch((error) => log(`lead-mailbox: turn settle deferred — ${String(error)}`));
-    },
-  );
+  const settleTurn = (input: LeadTurnEndedInput, context: PluginHookContext): void => {
+    capturePaseo(context);
+    // The debounced usage capture (v0.0.87, ADR 0043 §3): every Supervisor,
+    // Lead, and Peer turn incrementally extracts its session usage and
+    // schedules the atomic rollup flush — zero Ledger lines per turn.
+    usage.recordTurnEnd(input.agentId).catch((error) => log(`usage: turn capture deferred — ${String(error)}`));
+    void leadMail.onLeadTurnEnded(input).catch((error) => log(`lead-mailbox: turn settle deferred — ${String(error)}`));
+  };
+  // The unified hook removed timeline in 0.16. Legacy on() hosts may still
+  // supply it and may have no turn identity at all.
+  type TurnEndedEvent = Omit<LeadTurnEndedInput, "agentId"> & { agent: { id: string } };
+  const offTurnEnded = supportsAddHook
+    ? server.addHook("agent.turn.after", async (event: TurnEndedEvent, context) => {
+      settleTurn({ agentId: event.agent.id, outcome: event.outcome, turnId: event.turnId ?? null, timeline: [] }, context);
+    })
+    : server.on("agent.turn_ended", (event: TurnEndedEvent, context) => {
+      settleTurn({ agentId: event.agent.id, outcome: event.outcome, turnId: event.turnId ?? null, timeline: event.timeline ?? [] }, context);
+    });
   // The lost-Lead door (v0.6.1, ADR 0057 §4): every daemon archive event hands
   // the Lead-mailbox runtime the archived agent id. The runtime tells plugin
   // archives (marked beforehand through `markPluginArchive` by the surface's

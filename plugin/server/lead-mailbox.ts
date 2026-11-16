@@ -109,6 +109,7 @@ import { readHandoffProgress, writeHandoffProgress, laneRef, laneValue } from ".
 import { buildSubstituteHandover, readNotebook, readHandoverGit, renderOpenTaskEvidence } from "./substitute-handover.ts";
 import type { HandoffProgress, HandoffRequest, HandoffReply } from "../shared/handoff.ts";
 import { createSupervisorHandoffRuntime } from "./supervisor-handoff.ts";
+import { refetchTurnTimeline } from "./turn-timeline.ts";
 import { stopAgentViaCli } from "./daemon-cli.ts";
 import { createPeerHandoffRuntime } from "./peer-handoff.ts";
 import type { DaemonReply } from "./daemon-cli.ts";
@@ -338,7 +339,8 @@ export interface LeadTurnEndedInput {
    * through unexamined for the caller's benefit.
    */
   outcome: { kind: "completed" | "failed" | "canceled"; error?: { message: string; code?: string }; reason?: string };
-  timeline: readonly { type: string; text?: string }[];
+  timeline?: readonly { type: string; text?: string }[];
+  turnId?: string | null;
 }
 
 export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntime {
@@ -985,7 +987,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       const { slug } = ownedSupervisor;
       await projectLane(slug, async () => {
         try {
-          if (await supervisorHandoff.turnEnded(slug, input.agentId, lastAssistantText(input.timeline), input.outcome.kind)) return;
+          if (await supervisorHandoff.turnEnded(slug, input.agentId, lastAssistantText(input.timeline), input.outcome.kind, input.turnId ?? null)) return;
           const path = mailboxPath(slug);
           const state = readLeadMailbox(path);
           let retryingFailedSupervisorBatch = false;
@@ -1236,8 +1238,8 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       handoffText = lastAssistantText(input.timeline);
       if (handoffText === null && input.agentId !== "") {
         try {
-          const page = await resolveDaemon().agents.ref(input.agentId).timeline.refetch({ direction: "tail", limit: 20 });
-          const timeline = (page.entries ?? []).flatMap(entry => {
+          const entries = await refetchTurnTimeline(resolveDaemon().agents.ref(input.agentId).timeline, input.turnId ?? null);
+          const timeline = entries.flatMap(entry => {
             const item = entry.item ?? entry as { type?: string; text?: string };
             return typeof item.type === "string" ? [{ type: item.type, text: item.text }] : [];
           });
@@ -1269,10 +1271,10 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     const stale = false;
     if (substitute) {
       updateProgress(slug, { state: "substitute", handover: "substitute" });
-      let timeline = input.timeline.map(item => item.text ?? "").filter(Boolean).slice(-6).join("\n\n");
+      let timeline = (input.timeline ?? []).map(item => item.text ?? "").filter(Boolean).slice(-6).join("\n\n");
       if (!timeline && input.agentId) try {
-        const page = await resolveDaemon().agents.ref(input.agentId).timeline.refetch({ direction: "tail", limit: 6 });
-        timeline = (page.entries ?? []).map(entry => { const item = entry.item ?? entry as { text?: string }; return item.text ?? ""; }).join("\n\n");
+        const entries = await refetchTurnTimeline(resolveDaemon().agents.ref(input.agentId).timeline, input.turnId ?? null);
+        timeline = entries.map(entry => { const item = entry.item ?? entry as { text?: string }; return item.text ?? ""; }).join("\n\n");
       } catch { /* timeline is best effort */ }
       if (!stillCurrent(slug, "handoff completion")) return;
       const events = projectEventsOf(slug, root);
@@ -2468,7 +2470,7 @@ function agentOfTask(
 }
 
 /** The timeline's last assistant text — the handoff-file fallback's source. */
-function lastAssistantText(timeline: readonly { type: string; text?: string }[]): string | null {
+function lastAssistantText(timeline: readonly { type: string; text?: string }[] = []): string | null {
   for (let i = timeline.length - 1; i >= 0; i -= 1) {
     const item = timeline[i]!;
     if (item.type === "assistant_message") return validHandoffText(item.text) ? item.text : null;

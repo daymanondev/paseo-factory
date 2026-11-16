@@ -6,7 +6,7 @@ import { join } from "node:path";
 import contribute from "../../plugin/index.server.ts";
 import { createFactory } from "../../plugin/server/core/factory.ts";
 import { upgradeFactory } from "../../plugin/server/core/history-upgrade.ts";
-import { listProjectRegistrations, writeProjectRegistration } from "../../plugin/server/core/project.ts";
+import { listProjectRegistrations, writeProjectRegistration, resolveProject } from "../../plugin/server/core/project.ts";
 import { enqueueLeadMail, deliverLeadMail, readLeadMailbox } from "../../plugin/server/core/mailbox.ts";
 import { planLegacyIdentity } from "../../plugin/server/core/history-identity.ts";
 
@@ -86,15 +86,17 @@ try {
   stop = contribute(server);
   const sent: string[] = [];
   const daemon = { agents: { list: async ({filter}: any) => ({ entries: filter?.labels?.seat === "supervisor" ? [] : [{ agent: { id: "lead", archivedAt: null, status: "idle", labels: { seat: "lead", project: "project" }, cwd: workspace } }] }), ref: () => ({ send: async (text: string) => { sent.push(text); } }) } };
-  // Hook payloads are shape-identical across arms: event hooks take the
-  // event object, request hooks take { request } — only the lookup map and
-  // key differ between the addHook and legacy registrations.
+  // Modern turn.after omits timeline; reading it must never be necessary.
+  // Legacy hosts may still send a timeline and omit turnId.
   const permissionHook = legacyServer ? events.get("agent.permission_requested")! : hooks.get("agent.permission.before")!;
   const turnEndedHook = legacyServer ? events.get("agent.turn_ended")! : hooks.get("agent.turn.after")!;
   const agentCreateHook = legacyServer ? beforeHooks.get("agent.create")! : hooks.get("agent.create.before")!;
   const sessionOpenHook = legacyServer ? beforeHooks.get("agent.session_open")! : hooks.get("agent.open.before")!;
   permissionHook({ agent: { id: "peer" }, request: {} }, { paseo: daemon });
-  turnEndedHook({ agent: { id: "lead" }, outcome: { kind: "completed" }, timeline: [] }, { paseo: daemon });
+  const turnEvent = legacyServer
+    ? { agent: { id: "lead" }, outcome: { kind: "completed" }, timeline: [] }
+    : { agent: { id: "lead" }, outcome: { kind: "completed" }, turnId: "completed-turn", get timeline(): never { throw new Error("modern hook read removed timeline"); } };
+  await turnEndedHook(turnEvent, { paseo: daemon });
   await assert.rejects(agentCreateHook({ request: {} }, { paseo: daemon }), /incomplete/);
   await assert.rejects(sessionOpenHook({ request: {} }, { paseo: daemon }), /incomplete/);
   await new Promise(setImmediate);
@@ -160,6 +162,43 @@ try {
     const source = planLegacyIdentity(JSON.stringify({ seq: 1, ts: "2026-10-23T00:00:00Z", event: "contract_set", task: "REMOTE", workspace, gate: "true", artifact: "out", scope: ["remote"] }) + "\n", { writerId: "remote" });
     const imported = await handlers.get("factory.history.import")!({ project: projectSlug, sources: [{ nodeId: "holder", lines: source.events.map((event) => JSON.stringify(event) + "\n").join("") }] }, {});
     assert.ok(imported.imports.some((item: any) => item.status === "applied"), JSON.stringify(imported));
+  }
+  if (process.env.TURN_HOOK_HANDOFF_TEST === "yes") {
+    const reads: unknown[] = [];
+    const project = resolveProject(workspace); assert.ok(project.ok);
+    writeProjectRegistration(stateDir, project.slug, { root: workspace, lead: "hook-lead" });
+    const live = [{ id: "hook-lead", provider: "pi/model", archivedAt: null as string | null, status: "idle", labels: { seat: "lead", project: project.slug }, cwd: workspace }];
+    const handoffDaemon = { agents: {
+      list: async () => ({ entries: live.filter(agent => !agent.archivedAt).map(agent => ({ agent })) }),
+      create: async () => { live.push({ ...live[0]!, id: "successor", archivedAt: null }); return { id: "successor" }; },
+      ref: (id: string) => ({
+        send: async (text: string) => { sent.push(text); },
+        archive: async () => { const agent = live.find(agent => agent.id === id); if (agent) agent.archivedAt = "archived"; return { archivedAt: "archived" }; },
+        timeline: { refetch: async (options: unknown) => {
+          reads.push(options);
+          return { entries: [
+            { turnId: "handoff-turn", item: { type: "user_message", text: "Extract handoff" } },
+            { turnId: "handoff-turn", item: { type: "assistant_message", text: "# Hook handoff\nCarry the correct turn forward." } },
+            { turnId: "later-turn", item: { type: "assistant_message", text: "# Wrong turn\nUnrelated work." } },
+          ] };
+        } },
+      }),
+    } };
+    // The runtime retains the first API object. Extend that fake, then start
+    // extraction through the real RPC for a separately bound fixture Lead.
+    Object.assign(daemon.agents, handoffDaemon.agents);
+    const started = await handlers.get("factory.handoff.start")!({ projectRoot: workspace, seat: "lead" }, { paseo: daemon });
+    assert.ok(started.ok, JSON.stringify(started));
+    await turnEndedHook(legacyServer
+      ? { agent: { id: "hook-lead" }, outcome: { kind: "completed" }, timeline: [{ type: "assistant_message", text: "# Legacy hook handoff\nCarry the inline reply forward." }] }
+      : { agent: { id: "hook-lead" }, outcome: { kind: "completed" }, turnId: "handoff-turn", get timeline(): never { throw new Error("modern hook read removed timeline"); } }, { paseo: daemon });
+    const handoffPath = join(stateDir, "projects", project.slug, "lead-handoff.md");
+    await until(() => existsSync(handoffPath) && sent.some(text => text.includes(legacyServer ? "Carry the inline reply" : "Carry the correct turn")));
+    const handoff = readFileSync(handoffPath, "utf8");
+    assert.match(handoff, legacyServer ? /Legacy hook handoff/ : /Hook handoff/);
+    assert.doesNotMatch(handoff, /Wrong turn/);
+    assert.deepEqual(reads, legacyServer ? [] : [{ direction: "tail", limit: 1, wholeTurns: true }]);
+    console.log("TURN_HOOK_HANDOFF_OK");
   }
   console.log("RECOVERY_OK");
 } finally { stop(); }
