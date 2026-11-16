@@ -14,6 +14,7 @@
  *   `<stateDir>/git-blocked.log`).
  * - `paseo`: refuses `paseo agent ...` and `paseo plugin ...` subcommands
  *   (`seat-paseo-tool-fence`), directing the seat to `paseo_factory` MCP tools.
+ * - `paseo workspace`: permits only known read verbs (list/ls/inspect/show/status).
  * - `gh`: refuses `gh pr merge`, `gh repo delete`, and `gh release` subcommands
  *   (`seat-write-fence`).
  * - All other invocations pass through transparently to the real binary on PATH.
@@ -202,6 +203,15 @@ if (inFactorySeat) {
       positional.push(tok);
     }
     const sub = positional[0];
+    // Workspace ownership belongs to the Factory. Unknown verbs fail closed.
+    // Paseo 0.16 exposes ls plus setup/create/rename/archive; the latter mutate.
+    const workspaceReads = new Set(["list", "ls", "inspect", "show", "status"]);
+    if (sub === "workspace" && !workspaceReads.has(positional[1])) {
+      recordAndRefuse(
+        "seat-paseo-workspace-fence",
+        "workspace mutations and unknown workspace commands are forbidden inside a factory seat",
+      );
+    }
     if (sub === "agent" || sub === "agents" || sub === "plugin" || sub === "plugins") {
       recordAndRefuse(
         "seat-paseo-tool-fence",
