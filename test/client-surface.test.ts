@@ -310,9 +310,9 @@ test("v0.0.34 Seam 2.1a: isCoreSelfRestartError recognizes Plugin stopped: paseo
   );
   assert.equal(
     isCoreSelfRestartError({
-      target: "factory-burn-lab",
+      target: "factory-release-lab",
       action: "update",
-      errorMessage: "Plugin stopped: factory-burn-lab",
+      errorMessage: "Plugin stopped: factory-release-lab",
       coreTargeted: false,
     }),
     false,
@@ -487,9 +487,9 @@ test("v0.0.34 Seam 2.2: formatPluginCardProgressPill and formatToolbarProgressPi
     latestRevision: "383385c",
     updateAvailable: true,
   });
-  const burnLabNotInstalled = makeCorePluginFixture({
-    id: "factory-burn-lab",
-    title: "Burn Lab",
+  const releaseLabNotInstalled = makeCorePluginFixture({
+    id: "factory-release-lab",
+    title: "Release Lab",
     status: "not_installed",
     enabled: false,
     installKind: null,
@@ -533,10 +533,10 @@ test("v0.0.34 Seam 2.2: formatPluginCardProgressPill and formatToolbarProgressPi
 
   assert.equal(
     formatPluginCardProgressPill(
-      burnLabNotInstalled,
+      releaseLabNotInstalled,
       {
         kind: "install",
-        target: "factory-burn-lab",
+        target: "factory-release-lab",
         startedAt: 1000,
       },
       5,
@@ -560,7 +560,7 @@ test("v0.0.34 Seam 2.2: formatPluginCardProgressPill and formatToolbarProgressPi
 
   assert.equal(
     formatPluginCardProgressPill(
-      burnLabNotInstalled,
+      releaseLabNotInstalled,
       {
         kind: "manage",
         target: "paseo-factory",
@@ -605,8 +605,8 @@ test("v0.0.34 Seam 2.2: formatPluginCardProgressPill and formatToolbarProgressPi
     "Updating All… · 6s",
   );
   assert.equal(
-    formatToolbarProgressPill({ kind: "install", target: "factory-burn-lab", startedAt: 1000 }, false, 2),
-    "Installing factory-burn-lab… · 2s",
+    formatToolbarProgressPill({ kind: "install", target: "factory-release-lab", startedAt: 1000 }, false, 2),
+    "Installing factory-release-lab… · 2s",
   );
   assert.equal(formatToolbarProgressPill(null, false, 0), null);
 });

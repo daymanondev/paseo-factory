@@ -154,10 +154,12 @@ Self-contained stdio MCP server (`paseo_factory`, `600s` timeout, zero relative 
 _Avoid_: cross-role omnibus MCP, direct Paseo lifecycle tools, cold/duplicated Turn-1 prompts
 
 **Companion plugin**, **Companion tool**, **Skill hub**, **Project skill pack**, & **Private vault**:
-Settings surfaces for Paseo **Companion plugin**s (`factory-burn-lab`, private `factory-release-lab`), GitHub-cloned **Companion tool** packs (`~/.agents/skills` + `.skill-lock.json`), cross-harness **Skill hub** matrix, per-Project **Project skill pack**s (built-in domains, source-derived groups, and Owner-authored custom packs in `skill-packs.json`; Core is always on), and **Private vault** (`git:<owner>/factory-vault` syncing credentials, OAuth, lanes/profiles, custom skill packs, Helper MCPs, skills, and Ledger snapshots — never UI mockups; `docs/adr/0012-*`..`0042-*`).
+Settings surfaces for Paseo **Companion plugin** (`factory-release-lab`, private), GitHub-cloned **Companion tool** packs (`~/.agents/skills` + `.skill-lock.json`), cross-harness **Skill hub** matrix, per-Project **Project skill pack**s (built-in domains, source-derived groups, and Owner-authored custom packs in `skill-packs.json`; Core is always on), and **Private vault** (`git:<owner>/factory-vault` syncing credentials, OAuth, lanes/profiles, custom skill packs, Helper MCPs, skills, and Ledger snapshots — never UI mockups; `docs/adr/0012-*`..`0042-*`).
 _Avoid_: vendoring third-party skills in repo, dumping all domain skills into every Project, UI bundles in `factory-vault`
 
 ### Retired terms (do not treat as live features)
+
+- **Burn lab** & **Fleet connector** — retired companion plugins (`factory-burn-lab`, `factory-connector`); removed from `COMPANION_CATALOG` and Paseo runtime.
 
 - **Scrum mode** _(ADR 0056)_ — Agile Scrum (`Execution mode`, `Scrum role`, `Owner wait`, `Task allowance`, `UI Design Approval Checkpoint`, Scrum lanes/tools) deleted; SLP is the sole runtime.
 - **Retro** _(ADR 0056)_ — Daily Retro CLI/pass and `retro` lane deleted; `Recurrence Guard` → `Wave Hardening` is the live loop.

@@ -373,32 +373,23 @@ test("snapshot: providersLoading is true while the first provider listing is slo
   assert.equal(loaded.view.providersLoading, undefined, "the flag is omitted once a list is cached");
 });
 
-test("snapshot: the companion catalog rides the view — three cards, not_installed when the daemon lists only paseo-factory", async (t) => {
+test("snapshot: the companion catalog rides the view — not_installed when the daemon lists only paseo-factory", async (t) => {
   const { handlers } = makeSurface(t, [], [{ id: "paseo-factory", path: "/plugins/paseo-factory", enabled: true, status: "running" }]);
   const snap = await handlers.snapshot({});
   assert.ok(snap.ok, snap.ok ? "" : snap.error);
   const view = snap.view;
-  // Exactly the two official companions, catalog order — the spec's own literals;
+  // Exactly the live official companions, catalog order — the spec's own literals;
   // the daemon's own paseo-factory entry is a stranger to the catalog, never a card.
-  assert.deepEqual(view.companions.map((companion) => companion.id), ["factory-burn-lab", "factory-release-lab"]);
+  assert.deepEqual(view.companions.map((companion) => companion.id), ["factory-release-lab"]);
 
-  const burn = view.companions[0]!;
-  assert.equal(burn.title, "Burn Lab");
-  assert.equal(burn.canonicalSource, "git:daymanondev/factory-burn-lab:plugin");
-  assert.equal(burn.sidebarLabel, "Burn Lab");
-  assert.equal(burn.sidebarIcon, "Flame");
-  assert.deepEqual(burn.capabilities, ["Scout Pool", "OSS Lab", "Proto Arena", "Night Shift", "Self-Evolve"]);
-  assert.ok(burn.tagline.length > 0, "the card's tagline is prose, not a blank");
-  assert.ok(burn.description.length > 0, "the card's description is prose, not a blank");
-
-  const lab = view.companions[1]!;
+  const lab = view.companions[0]!;
   assert.equal(lab.title, "Release Lab");
   assert.equal(lab.canonicalSource, "git:daymanondev/factory-release-lab:plugin");
   assert.equal(lab.sidebarLabel, "Release Lab");
   assert.equal(lab.sidebarIcon, "Rocket");
   assert.deepEqual(lab.capabilities, ["7-Phase Release Pipeline", "ASC & Google Play IAP Sync", "Signing & Firebase SHA Bridge", "Screenshot Studio"]);
-  assert.ok(lab.tagline.length > 0);
-  assert.ok(lab.description.length > 0);
+  assert.ok(lab.tagline.length > 0, "the card's tagline is prose, not a blank");
+  assert.ok(lab.description.length > 0, "the card's description is prose, not a blank");
 
   // The degraded arm: no daemon plugin list → every card is not_installed with
   // null install identity (spec §Implementation Decisions 2's unavailable default).
@@ -424,11 +415,24 @@ test("companion fold: listed daemon plugins map onto the cards with install iden
     // A non-companion plugin on the same daemon — never a card.
     { id: "paseo-factory", enabled: true, status: "running" },
     {
-      id: "factory-burn-lab",
+      id: "factory-release-lab",
       enabled: true,
       status: "running",
-      installation: { identity: { kind: "git", remote: "https://github.com/daymanondev/factory-burn-lab", pluginPath: "plugin" }, currentRevision: "abc1234def5678" },
+      installation: { identity: { kind: "git", remote: "https://github.com/daymanondev/factory-release-lab", pluginPath: "plugin" }, currentRevision: "abc1234def5678" },
     },
+  ]);
+  assert.equal(folded.length, 1, "the catalog fixes the card count");
+
+  const lab = folded[0]!;
+  assert.equal(lab.title, "Release Lab");
+  assert.equal(lab.status, "running");
+  assert.equal(lab.enabled, true);
+  assert.equal(lab.installKind, "git");
+  assert.equal(lab.installedSource, "https://github.com/daymanondev/factory-release-lab");
+  assert.equal(lab.currentRevision, "abc1234def5678");
+  assert.equal(lab.error, null);
+
+  const dirFolded = foldCompanions([
     {
       id: "factory-release-lab",
       enabled: false,
@@ -436,53 +440,42 @@ test("companion fold: listed daemon plugins map onto the cards with install iden
       installation: { identity: { kind: "directory", path: "/Users/dev/code/factory-release-lab" } },
     },
   ]);
-  assert.equal(folded.length, 2, "the catalog fixes the card count");
-
-  const burn = folded[0]!;
-  assert.equal(burn.title, "Burn Lab");
-  assert.equal(burn.status, "running");
-  assert.equal(burn.enabled, true);
-  assert.equal(burn.installKind, "git");
-  assert.equal(burn.installedSource, "https://github.com/daymanondev/factory-burn-lab");
-  assert.equal(burn.currentRevision, "abc1234def5678");
-  assert.equal(burn.error, null);
-
-  const lab = folded[1]!;
-  assert.equal(lab.title, "Release Lab");
-  assert.equal(lab.status, "disabled");
-  assert.equal(lab.enabled, false);
-  assert.equal(lab.installKind, "directory");
-  assert.equal(lab.installedSource, "/Users/dev/code/factory-release-lab");
-  assert.equal(lab.currentRevision, null, "no revision anywhere on the entry → null, never a fabricated sha");
-  assert.equal(lab.error, null);
+  const dirLab = dirFolded[0]!;
+  assert.equal(dirLab.status, "disabled");
+  assert.equal(dirLab.enabled, false);
+  assert.equal(dirLab.installKind, "directory");
+  assert.equal(dirLab.installedSource, "/Users/dev/code/factory-release-lab");
+  assert.equal(dirLab.currentRevision, null, "no revision anywhere on the entry → null, never a fabricated sha");
+  assert.equal(dirLab.error, null);
 });
 
 test("companion fold: failed carries the daemon error, npm names its package, revision falls back to the legacy commit", () => {
   const folded = foldCompanions([
     {
-      id: "factory-burn-lab",
+      id: "factory-release-lab",
       enabled: true,
       status: "failed",
       error: "entry point factory.mjs missing",
       commit: "deadbee",
-      installation: { identity: { kind: "npm", packageName: "@daymanondev/factory-burn-lab", pluginPath: "." } },
+      installation: { identity: { kind: "npm", packageName: "@daymanondev/factory-release-lab", pluginPath: "." } },
     },
   ]);
-  const burn = folded[0]!;
-  assert.equal(burn.status, "failed");
-  assert.equal(burn.installKind, "npm", "the install identity's kind is the truth — the legacy source enum has no npm arm");
-  assert.equal(burn.installedSource, "@daymanondev/factory-burn-lab");
-  assert.equal(burn.currentRevision, "deadbee", "installation.currentRevision wins; the legacy commit fills when absent");
-  assert.equal(burn.error, "entry point factory.mjs missing");
+  const lab = folded[0]!;
+  assert.equal(lab.status, "failed");
+  assert.equal(lab.installKind, "npm", "the install identity's kind is the truth — the legacy source enum has no npm arm");
+  assert.equal(lab.installedSource, "@daymanondev/factory-release-lab");
+  assert.equal(lab.currentRevision, "deadbee", "installation.currentRevision wins; the legacy commit fills when absent");
+  assert.equal(lab.error, "entry point factory.mjs missing");
 
   // An absent catalog entry degrades to not_installed even when the list itself answered.
-  const lab = folded[1]!;
-  assert.equal(lab.status, "not_installed");
-  assert.equal(lab.enabled, false);
-  assert.equal(lab.installKind, null);
-  assert.equal(lab.installedSource, null);
-  assert.equal(lab.currentRevision, null);
-  assert.equal(lab.error, null);
+  const emptyFolded = foldCompanions([]);
+  const missingLab = emptyFolded[0]!;
+  assert.equal(missingLab.status, "not_installed");
+  assert.equal(missingLab.enabled, false);
+  assert.equal(missingLab.installKind, null);
+  assert.equal(missingLab.installedSource, null);
+  assert.equal(missingLab.currentRevision, null);
+  assert.equal(missingLab.error, null);
 });
 
 test("snapshot: the companions fold joins the live daemon plugin list — running and disabled carry their install identity", async (t) => {
@@ -492,13 +485,6 @@ test("snapshot: the companions fold joins the live daemon plugin list — runnin
     [
       // A non-companion plugin on the same daemon — never a card.
       { id: "paseo-factory", path: "/plugins/paseo-factory", enabled: true, status: "running" },
-      {
-        id: "factory-burn-lab",
-        path: "/plugins/factory-burn-lab",
-        enabled: true,
-        status: "running",
-        installation: { identity: { kind: "git", remote: "https://github.com/daymanondev/factory-burn-lab", pluginPath: "plugin" }, currentRevision: "abc1234def5678" },
-      },
       {
         id: "factory-release-lab",
         path: "/plugins/factory-release-lab",
@@ -511,14 +497,6 @@ test("snapshot: the companions fold joins the live daemon plugin list — runnin
   const snap = await handlers.snapshot({});
   assert.ok(snap.ok, snap.ok ? "" : snap.error);
   assert.deepEqual(pluginListHomes, [home], "the list call targets strictly the surface's home — trial and production never cross-contaminate");
-
-  const burn = snap.view.companions.find((companion) => companion.id === "factory-burn-lab")!;
-  assert.equal(burn.status, "running");
-  assert.equal(burn.enabled, true);
-  assert.equal(burn.installKind, "git");
-  assert.equal(burn.installedSource, "https://github.com/daymanondev/factory-burn-lab");
-  assert.equal(burn.currentRevision, "abc1234def5678");
-  assert.equal(burn.error, null);
 
   const lab = snap.view.companions.find((companion) => companion.id === "factory-release-lab")!;
   assert.equal(lab.status, "disabled");
@@ -550,14 +528,6 @@ test("snapshot: a failed companion carries the daemon's error and npm identity; 
   assert.equal(lab.installKind, "npm", "the install identity's kind is the truth — the legacy source enum has no npm arm");
   assert.equal(lab.installedSource, "@daymanondev/factory-release-lab");
   assert.equal(lab.currentRevision, "legacy0001", "installation.currentRevision wins; the legacy commit fills when absent");
-
-  const burn = snap.view.companions.find((companion) => companion.id === "factory-burn-lab")!;
-  assert.equal(burn.status, "not_installed");
-  assert.equal(burn.enabled, false);
-  assert.equal(burn.installKind, null);
-  assert.equal(burn.installedSource, null);
-  assert.equal(burn.currentRevision, null);
-  assert.equal(burn.error, null);
 });
 
 test("snapshot: an unavailable daemon plugin list degrades to the all-not_installed default — never a refusal", async (t) => {
@@ -578,7 +548,6 @@ test("snapshot: an unavailable daemon plugin list degrades to the all-not_instal
   assert.deepEqual(
     snap.view.companions.map((companion) => [companion.id, companion.status]),
     [
-      ["factory-burn-lab", "not_installed"],
       ["factory-release-lab", "not_installed"],
     ],
     "the degrade law — an unavailable list folds every catalog entry to not_installed (spec §Implementation Decisions 2)",
@@ -2176,28 +2145,27 @@ test("daemon plugin bridge: with no paseo.pid the manage actions fall back to th
 // ---- the companion lifecycle handlers (v0.0.17, ADR 0012 §3) --------------------------------
 
 test("pluginsInstall: a named target installs from the catalog's canonical source — never a probed sibling path", async (t) => {
-  const { handlers, home, pluginInstalls } = makeSurface(t);
-  const reply = await handlers.pluginsInstall({ target: "factory-burn-lab" });
+  const { runner } = fakeVaultRunner((call) => {
+    if (call.command === "gh" && call.args[0] === "auth" && call.args[1] === "status") {
+      return Buffer.from(JSON.stringify({ hosts: { "github.com": { login: "daymanondev", state: "success" } } }));
+    }
+    return Buffer.alloc(0);
+  });
+  const { handlers, home, pluginInstalls } = makeSurface(t, [], [], runner);
+  const reply = await handlers.pluginsInstall({ target: "factory-release-lab" });
   assert.ok(reply.ok, reply.ok ? "" : reply.error);
-  assert.deepEqual(reply.installed, ["factory-burn-lab"]);
-  assert.equal(reply.summary, "installed factory-burn-lab from git:daymanondev/factory-burn-lab:plugin");
+  assert.deepEqual(reply.installed, ["factory-release-lab"]);
+  assert.equal(reply.summary, "installed factory-release-lab from git:daymanondev/factory-release-lab:plugin");
   assert.deepEqual(
     pluginInstalls,
-    [{ home, input: { id: "factory-burn-lab", source: "git:daymanondev/factory-burn-lab:plugin" } }],
-    "the install rides the canonical GitHub source (spec §User Story 4) — no ../factory-burn-lab probing, no ref when none was given",
+    [{ home, input: { id: "factory-release-lab", source: "git:daymanondev/factory-release-lab:plugin" } }],
+    "the install rides the canonical GitHub source (spec §User Story 4) — no ../factory-release-lab probing, no ref when none was given",
   );
 });
 
-test("pluginsInstall: v0.0.30 target all covers only the public companions — all public installed (lab still not_installed) is nothing to do", async (t) => {
+test("pluginsInstall: v0.0.30 target all covers only the public companions — with only private companions in catalog it is nothing to do", async (t) => {
   const { handlers, pluginInstalls } = makeSurface(t, [], [
     { id: "paseo-factory", path: "/plugins/paseo-factory", enabled: true, status: "running" },
-    {
-      id: "factory-burn-lab",
-      path: "/plugins/factory-burn-lab",
-      enabled: true,
-      status: "running",
-      installation: { identity: { kind: "git", remote: "https://github.com/daymanondev/factory-burn-lab", pluginPath: "plugin" } },
-    },
   ]);
   // factory-release-lab is deliberately absent — it is access: "private", so a
   // fully-public batch is complete without it (spec §Testing Decisions 2).
@@ -2208,48 +2176,40 @@ test("pluginsInstall: v0.0.30 target all covers only the public companions — a
   assert.deepEqual(pluginInstalls, [], "nothing dispatches — not even the not_installed private lab");
 });
 
-test("pluginsInstall: target all with nothing installed installs only the public companions in catalog order — factory-release-lab is never dispatched", async (t) => {
+test("pluginsInstall: target all with nothing installed never dispatches private factory-release-lab", async (t) => {
   const { handlers, pluginInstalls } = makeSurface(t);
   const reply = await handlers.pluginsInstall({ target: "all" });
   assert.ok(reply.ok, reply.ok ? "" : reply.error);
-  assert.deepEqual(reply.installed, ["factory-burn-lab"]);
-  assert.deepEqual(
-    pluginInstalls.map((call) => [call.input.id, call.input.source]),
-    [
-      ["factory-burn-lab", "git:daymanondev/factory-burn-lab:plugin"],
-    ],
-    "catalog order, canonical sources — the private factory-release-lab is never dispatched (spec §User Story 1)",
-  );
+  assert.deepEqual(reply.installed, []);
+  assert.equal(reply.summary, "every companion is already installed — nothing to do");
   assert.ok(
     pluginInstalls.every((call) => call.input.id !== "factory-release-lab"),
     "no machine without pull access ever hits a private-repo clone failure mid-batch",
   );
-
-  // A second call with burn installed (the faithful fake daemon joined
-  // it to the list) is nothing to do — even though the lab is still not_installed.
-  const again = await handlers.pluginsInstall({ target: "all" });
-  assert.ok(again.ok, again.ok ? "" : again.error);
-  assert.deepEqual(again.installed, []);
-  assert.equal(again.summary, "every companion is already installed — nothing to do");
-  assert.equal(pluginInstalls.length, 1, "the second batch dispatches nothing further");
 });
 
 test("pluginsInstall: a custom source and ref forward verbatim to the bridge", async (t) => {
-  const { handlers, pluginInstalls } = makeSurface(t);
-  const reply = await handlers.pluginsInstall({ target: "factory-burn-lab", source: "git:myfork/factory-burn-lab:plugin", ref: "feat/x" });
+  const { runner } = fakeVaultRunner((call) => {
+    if (call.command === "gh" && call.args[0] === "auth" && call.args[1] === "status") {
+      return Buffer.from(JSON.stringify({ hosts: { "github.com": { login: "daymanondev", state: "success" } } }));
+    }
+    return Buffer.alloc(0);
+  });
+  const { handlers, pluginInstalls } = makeSurface(t, [], [], runner);
+  const reply = await handlers.pluginsInstall({ target: "factory-release-lab", source: "git:myfork/factory-release-lab:plugin", ref: "feat/x" });
   assert.ok(reply.ok, reply.ok ? "" : reply.error);
-  assert.deepEqual(reply.installed, ["factory-burn-lab"]);
-  assert.equal(reply.summary, "installed factory-burn-lab from git:myfork/factory-burn-lab:plugin at ref feat/x");
+  assert.deepEqual(reply.installed, ["factory-release-lab"]);
+  assert.equal(reply.summary, "installed factory-release-lab from git:myfork/factory-release-lab:plugin at ref feat/x");
   assert.deepEqual(
     pluginInstalls.map((call) => call.input),
-    [{ id: "factory-burn-lab", source: "git:myfork/factory-burn-lab:plugin", ref: "feat/x" }],
+    [{ id: "factory-release-lab", source: "git:myfork/factory-release-lab:plugin", ref: "feat/x" }],
     "the custom Git URL/branch forwards untouched (spec §User Story 7) — the bridge's local-path routing does the rest",
   );
 });
 
 test("pluginsInstall: a custom source with target all refuses — one custom source cannot name every companion", async (t) => {
   const { handlers, pluginInstalls } = makeSurface(t);
-  const reply = await handlers.pluginsInstall({ target: "all", source: "git:myfork/factory-burn-lab:plugin" });
+  const reply = await handlers.pluginsInstall({ target: "all", source: "git:myfork/factory-release-lab:plugin" });
   assert.ok(!reply.ok);
   assert.equal(reply.code, "invalid-target");
   assert.deepEqual(pluginInstalls, [], "nothing dispatches");
@@ -2267,7 +2227,7 @@ function unauthenticatedGhRunner(): { runner: VaultRunner; calls: VaultRunnerCal
   });
 }
 
-test("v0.0.30 seam 1 — catalog fold: the access tier rides every card (corePlugin public, burn public, lab private)", async (t) => {
+test("v0.0.30 seam 1 — catalog fold: the access tier rides every card (corePlugin public, lab private)", async (t) => {
   const { handlers } = makeSurface(t, [], [], unauthenticatedGhRunner().runner);
   const snap = await withVaultPassphrase(undefined, () => handlers.snapshot({}));
   assert.ok(snap.ok, snap.ok ? "" : snap.error);
@@ -2275,7 +2235,6 @@ test("v0.0.30 seam 1 — catalog fold: the access tier rides every card (corePlu
   assert.deepEqual(
     snap.view.companions.map((companion) => [companion.id, companion.access]),
     [
-      ["factory-burn-lab", "public"],
       ["factory-release-lab", "private"],
     ],
     "foldCompanions populates access straight from COMPANION_CATALOG (spec §Testing Decisions 1)",
@@ -2445,7 +2404,7 @@ test("pluginsInstall: a daemon failure refuses as data — { ok: false, code: 'd
     daemon: fakeDaemon([]).daemon,
     installPlugin: async () => ({ ok: false, reason: "clone failed: repository not found" }),
   });
-  const reply = await handlers.pluginsInstall({ target: "factory-burn-lab" });
+  const reply = await handlers.pluginsInstall({ target: "factory-release-lab", source: "/tmp/local-release-lab" });
   assert.ok(!reply.ok);
   assert.equal(reply.code, "daemon_failed");
   assert.equal(reply.error, "clone failed: repository not found");
@@ -2455,9 +2414,8 @@ test("pluginsManage: dispatches enable, disable, reload, update, and remove over
   const { handlers, home, pluginManages } = makeSurface(t);
   const actions = ["enable", "disable", "reload", "update", "remove"] as const;
   const expected: { home: string; pluginId: string; action: string }[] = [];
-  // Every catalog companion rides the same five acts — burn lab and the
-  // release lab (v0.0.21, ADR 0014 §1) alike.
-  for (const pluginId of ["factory-burn-lab", "factory-release-lab"] as const) {
+  // Every catalog companion rides the same five acts (v0.0.21, ADR 0014 §1).
+  for (const pluginId of ["factory-release-lab"] as const) {
     for (const action of actions) {
       const reply = await handlers.pluginsManage({ pluginId, action });
       assert.ok(reply.ok, `${pluginId} ${action}: ${reply.ok ? "" : reply.error}`);
@@ -2485,12 +2443,12 @@ test("pluginsManage: a daemon error refuses as data — { ok: false, code: 'daem
     stateDir,
     home,
     daemon: fakeDaemon([]).daemon,
-    managePlugin: async () => ({ ok: false, reason: "plugin factory-burn-lab is not installed" }),
+    managePlugin: async () => ({ ok: false, reason: "plugin factory-release-lab is not installed" }),
   });
-  const reply = await handlers.pluginsManage({ pluginId: "factory-burn-lab", action: "enable" });
+  const reply = await handlers.pluginsManage({ pluginId: "factory-release-lab", action: "enable" });
   assert.ok(!reply.ok);
   assert.equal(reply.code, "daemon_failed");
-  assert.equal(reply.error, "plugin factory-burn-lab is not installed");
+  assert.equal(reply.error, "plugin factory-release-lab is not installed");
 });
 
 test("companion lifecycle over the wire: the handlers bind the daemon bridge by default — list, directory install, and enable speak the exact frames", async (t) => {
@@ -2502,11 +2460,11 @@ test("companion lifecycle over the wire: the handlers bind the daemon bridge by 
           requestId: message.requestId,
           plugins: [
             {
-              id: "factory-burn-lab",
-              path: "/plugins/factory-burn-lab",
+              id: "factory-release-lab",
+              path: "/plugins/factory-release-lab",
               enabled: true,
               status: "running",
-              installation: { identity: { kind: "git", remote: "https://github.com/daymanondev/factory-burn-lab", pluginPath: "plugin" }, currentRevision: "abc1234def5678" },
+              installation: { identity: { kind: "git", remote: "https://github.com/daymanondev/factory-release-lab", pluginPath: "plugin" }, currentRevision: "abc1234def5678" },
             },
           ],
         },
@@ -2521,8 +2479,8 @@ test("companion lifecycle over the wire: the handlers bind the daemon bridge by 
           ...(type === "plugin.remove.response"
             ? {}
             : type === "plugin.directory.install.response"
-              ? { plugin: { id: message.id, path: "/plugins/factory-burn-lab", enabled: true, status: "running" } }
-              : { plugin: { id: message.pluginId, path: "/plugins/factory-burn-lab", enabled: true, status: "running" } }),
+              ? { plugin: { id: message.id, path: "/plugins/factory-release-lab", enabled: true, status: "running" } }
+              : { plugin: { id: message.pluginId, path: "/plugins/factory-release-lab", enabled: true, status: "running" } }),
         },
       };
     }
@@ -2536,14 +2494,13 @@ test("companion lifecycle over the wire: the handlers bind the daemon bridge by 
 
   const snap = await handlers.snapshot({});
   assert.ok(snap.ok, snap.ok ? "" : snap.error);
-  assert.equal(snap.view.companions.find((companion) => companion.id === "factory-burn-lab")!.status, "running", "the live fold rides the wire answer");
-  assert.equal(snap.view.companions.find((companion) => companion.id === "factory-release-lab")!.status, "not_installed");
+  assert.equal(snap.view.companions.find((companion) => companion.id === "factory-release-lab")!.status, "running", "the live fold rides the wire answer");
 
-  const install = await handlers.pluginsInstall({ target: "factory-burn-lab", source: "/tmp/custom-plugin" });
+  const install = await handlers.pluginsInstall({ target: "factory-release-lab", source: "/tmp/custom-plugin" });
   assert.ok(install.ok, install.ok ? "" : install.error);
-  assert.deepEqual(install.installed, ["factory-burn-lab"]);
+  assert.deepEqual(install.installed, ["factory-release-lab"]);
 
-  const enable = await handlers.pluginsManage({ pluginId: "factory-burn-lab", action: "enable" });
+  const enable = await handlers.pluginsManage({ pluginId: "factory-release-lab", action: "enable" });
   assert.ok(enable.ok, enable.ok ? "" : enable.error);
 
   assert.deepEqual(
@@ -2553,7 +2510,7 @@ test("companion lifecycle over the wire: the handlers bind the daemon bridge by 
   );
   const directory = daemon.frames[1]!;
   assert.equal(directory.message.path, "/tmp/custom-plugin", "an explicit local path routes to plugin.directory.install.request (ticket-02's classification)");
-  assert.equal(directory.message.id, "factory-burn-lab");
+  assert.equal(directory.message.id, "factory-release-lab");
 });
 
 test("surface deps: the plugin bridge overrides ride createSurfaceHandlers like the seat bridges", async (t) => {
@@ -2669,7 +2626,7 @@ test("vault snapshot: view.vault rides the factory view — a fresh home's hones
   // The snapshot carries the vault half beside the companion half — one view, both surfaces (spec §Testing Decisions 2).
   assert.deepEqual(
     snap.view.companions.map((companion) => companion.id),
-    ["factory-burn-lab", "factory-release-lab"],
+    ["factory-release-lab"],
   );
   const vault = snap.view.vault;
   assert.equal(vault.configured, false, "no vault-config.json yet — the card says so, never guesses");
@@ -4287,17 +4244,17 @@ test("v0.0.25 (ADR 0012 §2–§3): readPluginVersionFromDisk, foldCorePlugin, a
   const dir = makeTempDir("plugin-version-fold-");
   disposeDir(t, dir);
 
-  const burnCheckout = join(dir, "factory-burn-lab", "checkout");
-  const burnPluginDir = join(burnCheckout, "plugin");
-  mkdirSync(burnPluginDir, { recursive: true });
-  writeFileSync(join(burnCheckout, "package.json"), JSON.stringify({ name: "factory-burn-lab", version: "0.0.5" }));
+  const labCheckout = join(dir, "factory-release-lab", "checkout");
+  const labPluginDir = join(labCheckout, "plugin");
+  mkdirSync(labPluginDir, { recursive: true });
+  writeFileSync(join(labCheckout, "package.json"), JSON.stringify({ name: "factory-release-lab", version: "0.0.5" }));
 
   const coreCheckout = join(dir, "paseo-factory");
   const corePluginDir = join(coreCheckout, "plugin");
   mkdirSync(corePluginDir, { recursive: true });
   writeFileSync(join(coreCheckout, "package.json"), JSON.stringify({ name: "paseo-factory", version: "0.0.25" }));
 
-  assert.equal(readPluginVersionFromDisk(burnPluginDir), "0.0.5", "resolves version from <pluginPath>/../package.json");
+  assert.equal(readPluginVersionFromDisk(labPluginDir), "0.0.5", "resolves version from <pluginPath>/../package.json");
   assert.equal(readPluginVersionFromDisk(corePluginDir), "0.0.25");
   assert.equal(readPluginVersionFromDisk(join(dir, "nonexistent")), undefined);
 
@@ -4307,23 +4264,13 @@ test("v0.0.25 (ADR 0012 §2–§3): readPluginVersionFromDisk, foldCorePlugin, a
       { id: "paseo-factory", currentRevision: null, latestRevision: null, commitsBehind: null, updateAvailable: null },
     ],
     [
-      "factory-burn-lab",
+      "factory-release-lab",
       {
-        id: "factory-burn-lab",
+        id: "factory-release-lab",
         currentRevision: "7f8a5cc000",
         latestRevision: "a91c3f2999",
         commitsBehind: 2,
         updateAvailable: true,
-      },
-    ],
-    [
-      "factory-release-lab",
-      {
-        id: "factory-release-lab",
-        currentRevision: "1122334455",
-        latestRevision: "1122334455",
-        commitsBehind: 0,
-        updateAvailable: false,
       },
     ],
   ]);
@@ -4337,23 +4284,13 @@ test("v0.0.25 (ADR 0012 §2–§3): readPluginVersionFromDisk, foldCorePlugin, a
       installation: { identity: { kind: "directory" as const, path: corePluginDir } },
     },
     {
-      id: "factory-burn-lab",
-      path: burnPluginDir,
-      enabled: true,
-      status: "running" as const,
-      installation: {
-        identity: { kind: "git" as const, remote: "https://github.com/daymanondev/factory-burn-lab", pluginPath: "plugin" },
-        currentRevision: "7f8a5cc000",
-      },
-    },
-    {
       id: "factory-release-lab",
+      path: labPluginDir,
       enabled: true,
       status: "running" as const,
-      version: "0.0.3",
       installation: {
         identity: { kind: "git" as const, remote: "https://github.com/daymanondev/factory-release-lab", pluginPath: "plugin" },
-        currentRevision: "1122334455",
+        currentRevision: "7f8a5cc000",
       },
     },
   ];
@@ -4366,17 +4303,12 @@ test("v0.0.25 (ADR 0012 §2–§3): readPluginVersionFromDisk, foldCorePlugin, a
   assert.equal(core.updateAvailable, null, "directory installs never report remote updateAvailable");
 
   const folded = foldCompanions(plugins, updates);
-  const burn = folded.find((c) => c.id === "factory-burn-lab")!;
-  assert.equal(burn.version, "0.0.5");
-  assert.equal(burn.currentRevision, "7f8a5cc000");
-  assert.equal(burn.latestRevision, "a91c3f2999");
-  assert.equal(burn.commitsBehind, 2);
-  assert.equal(burn.updateAvailable, true);
-
   const lab = folded.find((c) => c.id === "factory-release-lab")!;
-  assert.equal(lab.version, "0.0.3");
-  assert.equal(lab.updateAvailable, false);
-  assert.equal(lab.commitsBehind, 0);
+  assert.equal(lab.version, "0.0.5");
+  assert.equal(lab.currentRevision, "7f8a5cc000");
+  assert.equal(lab.latestRevision, "a91c3f2999");
+  assert.equal(lab.commitsBehind, 2);
+  assert.equal(lab.updateAvailable, true);
 });
 
 test("v0.0.25 (ADR 0012 §4): checkDaemonPluginUpdates speaks plugin.source.status.request over WebSocket, caches per home, falls back to CLI, and invalidates on install/manage", async (t) => {
@@ -4480,17 +4412,6 @@ test("v0.0.25 (ADR 0012 §2/§4): pluginsCheckUpdates populates snapshot update 
           installation: { identity: { kind: "directory", path: "/plugins/paseo-factory" } },
         },
         {
-          id: "factory-burn-lab",
-          path: "/plugins/factory-burn-lab",
-          enabled: true,
-          status: "running",
-          version: "0.0.5",
-          installation: {
-            identity: { kind: "git", remote: "https://github.com/daymanondev/factory-burn-lab", pluginPath: "plugin" },
-            currentRevision: "7f8a5cc111",
-          },
-        },
-        {
           id: "factory-release-lab",
           path: "/plugins/factory-release-lab",
           enabled: true,
@@ -4498,7 +4419,7 @@ test("v0.0.25 (ADR 0012 §2/§4): pluginsCheckUpdates populates snapshot update 
           version: "0.0.3",
           installation: {
             identity: { kind: "git", remote: "https://github.com/daymanondev/factory-release-lab", pluginPath: "plugin" },
-            currentRevision: "1122334455",
+            currentRevision: "7f8a5cc111",
           },
         },
       ],
@@ -4508,33 +4429,20 @@ test("v0.0.25 (ADR 0012 §2/§4): pluginsCheckUpdates populates snapshot update 
       checkedAt: "2026-10-20T15:30:00.000Z",
       statuses: [
         {
-          id: "factory-burn-lab",
+          id: "factory-release-lab",
           currentRevision: "7f8a5cc111",
           latestRevision: "a91c3f2222",
           commitsBehind: 2,
           updateAvailable: true,
         },
-        {
-          id: "factory-release-lab",
-          currentRevision: "1122334455",
-          latestRevision: "1122334455",
-          commitsBehind: 0,
-          updateAvailable: false,
-        },
       ],
     }),
     managePlugin: async (_home, pluginId, action) => {
       manageCalls.push({ pluginId, action });
-      if (action === "update" && pluginId === "factory-burn-lab") {
-        return {
-          ok: true,
-          update: { id: "factory-burn-lab", previousCommit: "7f8a5cc111", currentCommit: "a91c3f2222", commits: 2, updated: true },
-        };
-      }
       if (action === "update" && pluginId === "factory-release-lab") {
         return {
           ok: true,
-          update: { id: "factory-release-lab", previousCommit: "1122334455", currentCommit: "1122334455", commits: 0, updated: false },
+          update: { id: "factory-release-lab", previousCommit: "7f8a5cc111", currentCommit: "a91c3f2222", commits: 2, updated: true },
         };
       }
       return { ok: true };
@@ -4547,23 +4455,21 @@ test("v0.0.25 (ADR 0012 §2/§4): pluginsCheckUpdates populates snapshot update 
   assert.equal(snapBefore.view.pluginsCheckedAt, null);
   assert.equal(snapBefore.view.corePlugin.id, "paseo-factory");
   assert.equal(snapBefore.view.corePlugin.version, "0.0.25");
-  assert.equal(snapBefore.view.companions.find((c) => c.id === "factory-burn-lab")?.updateAvailable, null);
+  assert.equal(snapBefore.view.companions.find((c) => c.id === "factory-release-lab")?.updateAvailable, null);
 
   // 2. Run pluginsCheckUpdates -> populates checkedAt, updatesAvailable, and feeds the next snapshot.
   const checkRes = await handlers.pluginsCheckUpdates({});
   assert.ok(checkRes.ok, checkRes.ok ? "" : checkRes.error);
   assert.equal(checkRes.checkedAt, "2026-10-20T15:30:00.000Z");
-  assert.deepEqual(checkRes.updatesAvailable, ["factory-burn-lab"]);
-  assert.equal(checkRes.summary, "1 plugin update(s) available: factory-burn-lab");
+  assert.deepEqual(checkRes.updatesAvailable, ["factory-release-lab"]);
+  assert.equal(checkRes.summary, "1 plugin update(s) available: factory-release-lab");
 
   const snapAfter = await handlers.snapshot({});
   assert.ok(snapAfter.ok);
   assert.equal(snapAfter.view.pluginsCheckedAt, "2026-10-20T15:30:00.000Z");
-  const burnAfter = snapAfter.view.companions.find((c) => c.id === "factory-burn-lab")!;
-  assert.equal(burnAfter.updateAvailable, true);
-  assert.equal(burnAfter.latestRevision, "a91c3f2222");
   const labAfter = snapAfter.view.companions.find((c) => c.id === "factory-release-lab")!;
-  assert.equal(labAfter.updateAvailable, false);
+  assert.equal(labAfter.updateAvailable, true);
+  assert.equal(labAfter.latestRevision, "a91c3f2222");
 
   // 3. Core plugin protection: disable and remove on paseo-factory refuse with core-plugin-protected, while reload succeeds.
   const disableCore = await handlers.pluginsManage({ pluginId: "paseo-factory", action: "disable" });
@@ -4578,14 +4484,10 @@ test("v0.0.25 (ADR 0012 §2/§4): pluginsCheckUpdates populates snapshot update 
   assert.ok(reloadCore.ok);
   assert.equal(reloadCore.summary, "reloaded paseo-factory on the daemon");
 
-  // 4. Honest update summaries: updated: true vs updated: false.
-  const updateBurn = await handlers.pluginsManage({ pluginId: "factory-burn-lab", action: "update" });
-  assert.ok(updateBurn.ok);
-  assert.equal(updateBurn.summary, "updated factory-burn-lab (7f8a5cc → a91c3f2)");
-
+  // 4. Honest update summaries: updated: true.
   const updateLab = await handlers.pluginsManage({ pluginId: "factory-release-lab", action: "update" });
   assert.ok(updateLab.ok);
-  assert.equal(updateLab.summary, "factory-release-lab is already up to date (1122334)");
+  assert.equal(updateLab.summary, "updated factory-release-lab (7f8a5cc → a91c3f2)");
 
   // 5. Batch update ("all"): refuses non-update actions with invalid-target, and after re-checking updates, updates only the plugin with updateAvailable === true.
   const invalidBatch = await handlers.pluginsManage({ pluginId: "all", action: "disable" });
@@ -4596,8 +4498,8 @@ test("v0.0.25 (ADR 0012 §2/§4): pluginsCheckUpdates populates snapshot update 
   manageCalls.length = 0;
   const updateAll = await handlers.pluginsManage({ pluginId: "all", action: "update" });
   assert.ok(updateAll.ok);
-  assert.deepEqual(manageCalls, [{ pluginId: "factory-burn-lab", action: "update" }]);
-  assert.equal(updateAll.summary, "updated factory-burn-lab (7f8a5cc → a91c3f2)");
+  assert.deepEqual(manageCalls, [{ pluginId: "factory-release-lab", action: "update" }]);
+  assert.equal(updateAll.summary, "updated factory-release-lab (7f8a5cc → a91c3f2)");
 });
 
 test("v0.0.30 seam 4 — per-plugin fault isolation: a batch plugin.source.status rpc_error falls back to per-plugin queries; the private lab's failure never hides the others' updates", async (t) => {
@@ -4615,7 +4517,7 @@ test("v0.0.30 seam 4 — per-plugin fault isolation: a batch plugin.source.statu
         payload: {
           requestId: message.requestId,
           plugins: [
-            gitRow("factory-burn-lab", "/p/burn", "7f8a5cc111"),
+            gitRow("paseo-factory", "/p/core", "7f8a5cc111"),
             gitRow("factory-release-lab", "/p/lab", "99aabbcc"),
           ],
         },
@@ -4628,7 +4530,7 @@ test("v0.0.30 seam 4 — per-plugin fault isolation: a batch plugin.source.statu
       if (pluginId === undefined || pluginId === "factory-release-lab") {
         return { type: "rpc_error", payload: { requestId: message.requestId, error: "Repository not found" } };
       }
-      const row = { id: "factory-burn-lab", source: "git", path: "/p/burn", currentCommit: "7f8a5cc111", latestCommit: "a91c3f2222", commitsBehind: 2, updateAvailable: true };
+      const row = { id: "paseo-factory", source: "git", path: "/p/core", currentCommit: "7f8a5cc111", latestCommit: "a91c3f2222", commitsBehind: 2, updateAvailable: true };
       return { type: "plugin.source.status.response", payload: { requestId: message.requestId, plugins: [row] } };
     }
     return null;
@@ -4648,24 +4550,23 @@ test("v0.0.30 seam 4 — per-plugin fault isolation: a batch plugin.source.statu
 
   const check = await handlers.pluginsCheckUpdates({});
   assert.ok(check.ok, check.ok ? "" : check.error);
-  assert.deepEqual(check.updatesAvailable, ["factory-burn-lab"], "the healthy plugins' rows survive the lab's failed query (spec §Testing Decisions 4)");
+  assert.deepEqual(check.updatesAvailable, ["paseo-factory"], "the healthy plugins' rows survive the lab's failed query (spec §Testing Decisions 4)");
 
   // Wire order: the doomed batch request (no pluginId), the fallback's plugin
-  // list, then one per-plugin status request per installed companion.
+  // list, then one per-plugin status request per installed plugin.
   const statusFrames = daemon.frames.filter((frame) => frame.type === "plugin.source.status.request");
   assert.equal(statusFrames.length, 3, "one batch request plus one per installed plugin");
   assert.equal(statusFrames[0]!.message.pluginId, undefined, "the first call is the batch request without pluginId");
   assert.deepEqual(
     statusFrames.slice(1).map((frame) => frame.message.pluginId),
-    ["factory-burn-lab", "factory-release-lab"],
+    ["paseo-factory", "factory-release-lab"],
   );
 
   const snap = await handlers.snapshot({});
   assert.ok(snap.ok, snap.ok ? "" : snap.error);
-  const burn = snap.view.companions.find((companion) => companion.id === "factory-burn-lab")!;
-  assert.equal(burn.updateAvailable, true, "burn's update pill renders");
-  assert.equal(burn.latestRevision, "a91c3f2222");
-  assert.equal(burn.commitsBehind, 2);
+  assert.equal(snap.view.corePlugin.updateAvailable, true, "core's update pill renders");
+  assert.equal(snap.view.corePlugin.latestRevision, "a91c3f2222");
+  assert.equal(snap.view.corePlugin.commitsBehind, 2);
   const lab = snap.view.companions.find((companion) => companion.id === "factory-release-lab")!;
   assert.equal(lab.status, "running", "the lab stays an installed card");
   assert.equal(lab.updateAvailable, null, "its own failed status query leaves it unchecked — never a failed Check for updates");
@@ -5089,17 +4990,6 @@ test("v0.0.34 seam 1.5 — batch Update All orders paseo-factory last so Compani
           },
         },
         {
-          id: "factory-burn-lab",
-          path: "/plugins/factory-burn-lab",
-          enabled: true,
-          status: "running",
-          version: "0.0.5",
-          installation: {
-            identity: { kind: "git", remote: "https://github.com/daymanondev/factory-burn-lab", pluginPath: "plugin" },
-            currentRevision: "7f8a5cc",
-          },
-        },
-        {
           id: "factory-release-lab",
           path: "/plugins/factory-release-lab",
           enabled: true,
@@ -5124,27 +5014,20 @@ test("v0.0.34 seam 1.5 — batch Update All orders paseo-factory last so Compani
           updateAvailable: true,
         },
         {
-          id: "factory-burn-lab",
-          currentRevision: "7f8a5cc",
-          latestRevision: "a91c3f2",
-          commitsBehind: 2,
-          updateAvailable: true,
-        },
-        {
           id: "factory-release-lab",
           currentRevision: "1122334",
-          latestRevision: "1122334",
-          commitsBehind: 0,
-          updateAvailable: false,
+          latestRevision: "99aabbcc",
+          commitsBehind: 2,
+          updateAvailable: true,
         },
       ],
     }),
     managePlugin: async (_home, pluginId, action) => {
       if (action === "update") manageOrder.push(pluginId);
-      if (pluginId === "factory-burn-lab") {
+      if (pluginId === "factory-release-lab") {
         return {
           ok: true,
-          update: { id: "factory-burn-lab", previousCommit: "7f8a5cc", currentCommit: "a91c3f2", updated: true },
+          update: { id: "factory-release-lab", previousCommit: "1122334", currentCommit: "99aabbcc", updated: true },
         };
       }
       if (pluginId === "paseo-factory") {
@@ -5162,10 +5045,10 @@ test("v0.0.34 seam 1.5 — batch Update All orders paseo-factory last so Compani
   assert.ok(res.ok, res.ok ? "" : res.error);
   assert.deepEqual(
     manageOrder,
-    ["factory-burn-lab", "paseo-factory"],
+    ["factory-release-lab", "paseo-factory"],
     "Companion plugins update first and paseo-factory (Core) updates last",
   );
-  assert.equal(res.summary, "updated factory-burn-lab (7f8a5cc → a91c3f2) · updated paseo-factory (0285a1c → 383385c)");
+  assert.equal(res.summary, "updated factory-release-lab (1122334 → 99aabbc) · updated paseo-factory (0285a1c → 383385c)");
 });
 
 test("Seam 1.1: the onboarding commit bootstraps greenfield non-Git folders and discoverProjects / snapshot include live factory-supervisor & factory-lead Role-provider sessions even without labels.seat (v0.0.35, ADR 0024)", async (t) => {

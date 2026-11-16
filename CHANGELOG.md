@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-11-16
+
+**Retire `factory-burn-lab` from the Factory companion catalog and Vault config sync.**
+
+### Removed
+
+- **Burn Lab companion catalog entry (`factory-burn-lab`)**: removed `factory-burn-lab` from `COMPANION_CATALOG`, `MANAGEABLE_PLUGIN_IDS`, and the `factory.plugins.install` / `factory.plugins.manage` RPC enums so the Settings → Plugins screen no longer displays an uninstalled Burn Lab card alongside `factory-release-lab`.
+- **Vault `free-pool.json` sync**: removed `<paseoHome>/burn-lab/free-pool.json` collection and materialization from `src/vault-materialization.ts` and `plugin/bin/vault.mjs` (and updated `CONTEXT.md` + `factory` CLI help).
+
 ## [0.12.0] - 2026-11-16
 
 **Project usage separates new tokens from cached tokens and attributes usage by seat.**

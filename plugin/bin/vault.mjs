@@ -3822,8 +3822,7 @@ function collectLocalStateIntoRuntime(paseoHome, options) {
   collectHelperMcpVault({ stateDir, userHome: resolveVaultUserHome(paseoHome, options?.userHome) }, join16(paseoHome, "vault-runtime"));
   collectVaultSkillsIntoRuntime(paseoHome, options?.userHome);
   const configSources = [
-    { src: join16(stateDir, "lanes.json"), vaultRel: "config/lanes.json" },
-    { src: join16(paseoHome, "burn-lab", "free-pool.json"), vaultRel: "config/free-pool.json" }
+    { src: join16(stateDir, "lanes.json"), vaultRel: "config/lanes.json" }
   ];
   for (const { src, vaultRel } of configSources) {
     if (existsSync12(src)) {
@@ -3935,8 +3934,7 @@ function materializeConfigsFromRuntime(paseoHome, overwriteConfigs = false, opti
   hydrateHelperMcpVault({ stateDir: vaultStateDir(paseoHome), userHome: resolveVaultUserHome(paseoHome, options?.userHome) }, join16(paseoHome, "vault-runtime"), overwriteConfigs);
   materializeVaultSkillsFromRuntime(paseoHome, overwriteConfigs, options?.userHome);
   const targets = [
-    { src: join16(runtimeConfigDir, "lanes.json"), dest: join16(vaultStateDir(paseoHome), "lanes.json") },
-    { src: join16(runtimeConfigDir, "free-pool.json"), dest: join16(paseoHome, "burn-lab", "free-pool.json") }
+    { src: join16(runtimeConfigDir, "lanes.json"), dest: join16(vaultStateDir(paseoHome), "lanes.json") }
   ];
   for (const { src, dest } of targets) {
     if (!existsSync12(src)) continue;

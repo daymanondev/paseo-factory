@@ -19,7 +19,7 @@
 export type PluginAccessTier = "public" | "private";
 
 export interface CompanionCatalogEntry {
-  id: "factory-burn-lab" | "factory-release-lab";
+  id: "factory-release-lab";
   title: string;
   tagline: string;
   description: string;
@@ -82,7 +82,6 @@ export type ManageablePluginId =
 /** Set of every daemon plugin id managed by the Factory surface (Core + Companions). */
 export const MANAGEABLE_PLUGIN_IDS: ReadonlySet<string> = new Set<string>([
   "paseo-factory",
-  "factory-burn-lab",
   "factory-release-lab",
 ]);
 
@@ -114,18 +113,6 @@ export const COMPANION_TOOLS_CATALOG: readonly CompanionToolCatalogEntry[] = [
 
 /** The official Factory companion family — catalog order is the card order. */
 export const COMPANION_CATALOG: readonly CompanionCatalogEntry[] = [
-  {
-    id: "factory-burn-lab",
-    title: "Burn Lab",
-    tagline: "The autonomous OpenCode free-model burner.",
-    description:
-      "An autonomous OpenCode free-model burner supervised by each Project's Supervisor — it takes factory work through free-model burns under the standing Supervisor seat's watch.",
-    canonicalSource: "git:daymanondev/factory-burn-lab:plugin",
-    access: "public",
-    sidebarLabel: "Burn Lab",
-    sidebarIcon: "Flame",
-    capabilities: ["Scout Pool", "OSS Lab", "Proto Arena", "Night Shift", "Self-Evolve"],
-  },
   {
     id: "factory-release-lab",
     title: "Release Lab",

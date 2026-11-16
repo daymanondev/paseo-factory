@@ -395,7 +395,7 @@ commands:
                                  secrets/) plus the env.json pointer index,
                                  and materialize per-Project secrets and
                                  machine configs (--overwrite-configs replaces
-                                 existing lanes/fleet/free-pool files;
+                                 existing lanes.json / profiles.json files;
                                  --merge-ledgers reconciles multi-node ledgers)
                                  — no .git checkout is left behind. --repo
                                  defaults to the saved config's repo (and on
@@ -416,7 +416,7 @@ commands:
                                  --merge-ledgers is passed
              vault push [--include-ledger]
                                  collect local machine configs (lanes.json,
-                                 free-pool.json), registered
+                                 profiles.json), registered
                                  Project .store-release/manifest.json files,
                                  and sealed eye.json, package
                                  <paseoHome>/vault-runtime back into the vault
