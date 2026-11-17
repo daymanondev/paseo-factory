@@ -10,9 +10,11 @@ import { OpenDesignProjectLinkSchema } from "./view.ts";
  * single-writer amendment to ADR 0004: Owner acts from the UI invoke the
  * in-process handlers directly, never through the spool.
  */
-import { defineRpc } from "@getpaseo/plugin";
+import * as paseoPlugin from "@getpaseo/plugin";
 import { z } from "zod";
 import { HelperMcpViewSchema, ImportMaterializationSchema, ImportStatusSchema, FactoryViewSchema, LaneNameSchema, LaneProfileViewSchema, LanesSchema, LanesUpdateSchema, ProjectDirectoryEntrySchema, ProjectViewSchema, SeatDirectoryEntrySchema, VaultStatusViewSchema } from "./view.ts";
+
+const { defineRpc } = paseoPlugin;
 
 /** Every handler's refusal shape: a stable machine code plus the human sentence. */
 export const Failure = z.object({ ok: z.literal(false), code: z.string(), error: z.string() });
@@ -652,3 +654,39 @@ export const skillsTogglePack = defineRpc({
 export const skillsPackSave = defineRpc({ name: 'factory.skills.pack.save', input: z.object({ id: z.string().optional(), name: z.string().min(1), description: z.string().optional(), skills: z.array(z.string()) }), output: z.union([z.object({ok: z.literal(true), pack: z.object({ id: z.string(), name: z.string(), description: z.string().optional(), skills: z.array(z.string()), updatedAt: z.string() })}), Failure]) });
 export const skillsPackDelete = defineRpc({ name: 'factory.skills.pack.delete', input: z.object({id: z.string()}), output: z.union([z.object({ok: z.literal(true), summary: z.string()}), Failure]) });
 export const skillsPackReset = defineRpc({ name: 'factory.skills.pack.reset', input: z.object({projectRoot: z.string()}), output: z.union([z.object({ok: z.literal(true), summary: z.string()}), Failure]) });
+
+const defineSubscriptionFn =
+  typeof (paseoPlugin as { defineSubscription?: unknown }).defineSubscription === "function"
+    ? (paseoPlugin as { defineSubscription: typeof paseoPlugin.defineSubscription }).defineSubscription
+    : undefined;
+
+/** True when the host `@getpaseo/plugin` runtime exports `defineSubscription` (>= 0.16.0). */
+export const supportsSubscriptionContract: boolean = defineSubscriptionFn !== undefined;
+
+const StateUpdatesInputSchema = z.object({
+  projectRoot: z.string().optional(),
+});
+
+const StateUpdatesEventSchema = z.object({
+  seq: z.number().int(),
+  reasons: z.array(z.string()),
+  projectSlug: z.string().optional(),
+  projectRoot: z.string().optional(),
+  at: z.string(),
+});
+
+const stateUpdatesDefinition = {
+  name: "factory.state.updates",
+  input: StateUpdatesInputSchema,
+  event: StateUpdatesEventSchema,
+};
+
+/**
+ * Coalesced Factory state-invalidation stream (`>= 0.16.0`). Falls back to a
+ * plain contract descriptor on `< 0.16.0` hosts where `defineSubscription` is
+ * absent so module load never crashes.
+ */
+export const stateUpdates: paseoPlugin.PluginSubscriptionContract<
+  typeof StateUpdatesInputSchema,
+  typeof StateUpdatesEventSchema
+> = defineSubscriptionFn !== undefined ? defineSubscriptionFn(stateUpdatesDefinition) : stateUpdatesDefinition;

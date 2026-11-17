@@ -30,6 +30,8 @@ import type { TimelineSourceApi } from "./server/timeline.ts";
 import { spoolRootFor, startSpool } from "./server/spool.ts";
 import { createUsageRuntime } from "./server/usage-rollup.ts";
 import { createSurfaceHandlers, registerSurfaceRpc } from "./server/surface-rpc.ts";
+import { createStateHub } from "./server/state-hub.ts";
+import { stateUpdates, supportsSubscriptionContract } from "./shared/rpc.ts";
 import { createLeadMailRuntime, type LeadTurnEndedInput } from "./server/lead-mailbox.ts";
 import { syncPeerHelpersBeforeCreate, injectRoleOnCreate, injectSessionEnv, sanitizeAgentCreateHookResult } from "./server/roles.ts";
 import { factoryRegistryFor } from "./server/projects.ts";
@@ -77,6 +79,7 @@ export default function contribute(server: PluginServerContext) {
   // and the factory's watch pass can read the claiming agent's timeline at
   // verdict. One variable, written idempotently; undefined until the first
   // hook fires.
+  const stateHub = createStateHub({ stateDir, onLog: log });
   let paseoApi: TimelineSourceApi | undefined;
   let onPaseoCaptured: (() => void) | undefined;
   const capturePaseo = (context: { paseo?: unknown }): void => {
@@ -84,6 +87,9 @@ export default function contribute(server: PluginServerContext) {
       paseoApi = context.paseo as unknown as TimelineSourceApi;
       log("watch: captured the daemon API — timeline feeds are live");
       onPaseoCaptured?.();
+    }
+    if (context.paseo !== undefined) {
+      stateHub.attachDaemon(context.paseo);
     }
   };
   const fetchTimeline = createTimelineFetcher(() => paseoApi);
@@ -239,6 +245,8 @@ export default function contribute(server: PluginServerContext) {
     (handler) => server.on("agent.permission_requested", handler),
     (event, context) => {
       capturePaseo(context);
+      const cwd = typeof event?.agent?.cwd === "string" && event.agent.cwd.trim() !== "" ? event.agent.cwd : undefined;
+      stateHub.emit("hook.agent.permission.before", cwd === undefined ? undefined : { projectRoot: cwd });
       void choke.onPermissionAsked(event, context.paseo).catch((error) => log(`choke: permission recording deferred — ${String(error)}`));
     },
   );
@@ -247,6 +255,8 @@ export default function contribute(server: PluginServerContext) {
     (handler) => server.before("agent.create", handler),
     ({ request }, context) => factory.history.runOperation(async () => {
       capturePaseo(context);
+      const createCwd = typeof request?.config?.cwd === "string" && request.config.cwd.trim() !== "" ? request.config.cwd : undefined;
+      stateHub.emit("hook.agent.create.before", createCwd === undefined ? undefined : { projectRoot: createCwd });
       refreshPluginInstallation();
       let next = request;
       const normalized = normalizeAgentCreateRequest(next, { stateDir, providers: surface.cachedProviders() });
@@ -377,6 +387,30 @@ export default function contribute(server: PluginServerContext) {
       activityWatcher.on("error", error => log(`sleep activity watch unavailable: ${String(error)}`));
     } catch (error) { log(`sleep activity watch unavailable: ${String(error)}`); }
   }
+  const startStateDirWatcher = (): FSWatcher | undefined => {
+    const onFsEvent = (_event: string, file: string | Buffer | null): void => {
+      const rel = file === null ? "" : String(file).replace(/\\/g, "/");
+      if (rel !== "" && /(?:^|\/)(?:ledger-owner\.json|ledger-owner-acquire)(?:$|\/)|(?:\.lock|\.tmp)$/.test(rel)) return;
+      const projectMatch = /^projects\/([^/]+)(?:\/|$)/.exec(rel);
+      const target = projectMatch?.[1] ? { projectSlug: projectMatch[1] } : undefined;
+      stateHub.emit("state.fs", target);
+    };
+    try {
+      const watcher = watch(stateDir, { recursive: true, persistent: false }, onFsEvent);
+      watcher.on("error", (error) => log(`state-hub: stateDir watch error — ${String(error)}`));
+      return watcher;
+    } catch {
+      try {
+        const watcher = watch(stateDir, { persistent: false }, onFsEvent);
+        watcher.on("error", (error) => log(`state-hub: stateDir watch error — ${String(error)}`));
+        return watcher;
+      } catch (error) {
+        log(`state-hub: stateDir watch unavailable — ${String(error)}`);
+        return undefined;
+      }
+    }
+  };
+  const stateWatcher = startStateDirWatcher();
   const sleepSweepTimer = setInterval(() => { void refreshSleepInhibition(); }, 5_000);
   sleepSweepTimer.unref?.();
   void refreshSleepInhibition();
@@ -414,8 +448,9 @@ export default function contribute(server: PluginServerContext) {
   // for both registered Lead and registered Supervisor seats and drives the
   // Lead-mark (160k) rotation state machine for the Project whose registered Lead ended
   // the turn.
-  const settleTurn = (input: LeadTurnEndedInput, context: PluginHookContext): void => {
+  const settleTurn = (input: LeadTurnEndedInput, context: PluginHookContext, projectRoot?: string): void => {
     capturePaseo(context);
+    stateHub.emit("hook.agent.turn.after", projectRoot !== undefined && projectRoot.trim() !== "" ? { projectRoot } : undefined);
     // The debounced usage capture (v0.0.87, ADR 0043 §3): every Supervisor,
     // Lead, and Peer turn incrementally extracts its session usage and
     // schedules the atomic rollup flush — zero Ledger lines per turn.
@@ -424,13 +459,13 @@ export default function contribute(server: PluginServerContext) {
   };
   // The unified hook removed timeline in 0.16. Legacy on() hosts may still
   // supply it and may have no turn identity at all.
-  type TurnEndedEvent = Omit<LeadTurnEndedInput, "agentId"> & { agent: { id: string } };
+  type TurnEndedEvent = Omit<LeadTurnEndedInput, "agentId"> & { agent: { id: string; cwd?: string } };
   const offTurnEnded = supportsAddHook
     ? server.addHook("agent.turn.after", async (event: TurnEndedEvent, context) => {
-      settleTurn({ agentId: event.agent.id, outcome: event.outcome, turnId: event.turnId ?? null, timeline: [] }, context);
+      settleTurn({ agentId: event.agent.id, outcome: event.outcome, turnId: event.turnId ?? null, timeline: [] }, context, event.agent?.cwd);
     })
     : server.on("agent.turn_ended", (event: TurnEndedEvent, context) => {
-      settleTurn({ agentId: event.agent.id, outcome: event.outcome, turnId: event.turnId ?? null, timeline: event.timeline ?? [] }, context);
+      settleTurn({ agentId: event.agent.id, outcome: event.outcome, turnId: event.turnId ?? null, timeline: event.timeline ?? [] }, context, event.agent?.cwd);
     });
   // The lost-Lead door (v0.6.1, ADR 0057 §4): every daemon archive event hands
   // the Lead-mailbox runtime the archived agent id. The runtime tells plugin
@@ -442,6 +477,8 @@ export default function contribute(server: PluginServerContext) {
     (handler) => server.addHook("agent.archive.after", handler),
     (handler) => server.on("agent.archived", handler),
     (event) => {
+      const cwd = typeof event?.agent?.cwd === "string" && event.agent.cwd.trim() !== "" ? event.agent.cwd : undefined;
+      stateHub.emit("hook.agent.archive.after", cwd === undefined ? undefined : { projectRoot: cwd });
       void leadMail.onAgentArchived({ agentId: event.agent.id }).catch((error) => log(`lead-mailbox: archive settle deferred — ${String(error)}`));
     },
   );
@@ -594,6 +631,12 @@ export default function contribute(server: PluginServerContext) {
   registerSurfaceRpc(server, surface, (context) => {
     if (context.paseo !== undefined) capturePaseo(context);
   });
+  if (supportsSubscriptionContract && typeof server.handle === "function") {
+    server.handle(stateUpdates, (input, context) => {
+      capturePaseo(context);
+      stateHub.subscribe(input, context);
+    });
+  }
   const warmupTimer = setTimeout(() => {
     if (paseoApi === undefined) {
       warmPluginDaemonApiViaWs(home);
@@ -608,6 +651,8 @@ export default function contribute(server: PluginServerContext) {
     (handler) => server.before("agent.session_open", handler),
     ({ request }, context) => factory.history.runOperation(() => {
       capturePaseo(context);
+      const openCwd = typeof request?.cwd === "string" && request.cwd.trim() !== "" ? request.cwd : undefined;
+      stateHub.emit("hook.agent.open.before", openCwd === undefined ? undefined : { projectRoot: openCwd });
       refreshPluginInstallation();
       let next = request;
       if (pluginDir !== undefined) {
@@ -676,6 +721,8 @@ export default function contribute(server: PluginServerContext) {
 
   return () => {
     sleepStopped = true;
+    stateWatcher?.close();
+    stateHub.stop();
     activityWatcher?.close();
     clearInterval(sleepSweepTimer);
     sleepInhibitor.stop();
