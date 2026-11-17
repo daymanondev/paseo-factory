@@ -39,6 +39,7 @@ async function loadHarness(t: TestContext, opts: LoadHarnessOptions = {}): Promi
       `export * from ${JSON.stringify(join(repoRoot, "plugin/client/kit/subscription.ts"))};`,
       `export * from ${JSON.stringify(join(repoRoot, "plugin/client/kit/poll.ts"))};`,
       `export { FactoryShell } from ${JSON.stringify(join(repoRoot, "plugin/client/factory/shell.tsx"))};`,
+      `export { startSeatDirectory, DIRECTORY_POLL_MS } from ${JSON.stringify(join(repoRoot, "plugin/client/factory/directory.tsx"))};`,
       `export { stateUpdates, supportsSubscriptionContract } from ${JSON.stringify(join(repoRoot, "plugin/shared/rpc.ts"))};`,
       ...(opts.legacyClientHost ? [] : [`export { PluginRpcProvider } from "@getpaseo/plugin/client";`]),
     ].join("\n"),
@@ -249,6 +250,42 @@ function withPollTimerSpy(t: TestContext) {
       const last = active.at(-1);
       assert.ok(last, "expected an active poll timer to fire");
       last.cleared = true;
+      last.fn();
+    },
+  };
+}
+
+function withDirectoryIntervalSpy(t: TestContext) {
+  const realSetInterval = globalThis.setInterval;
+  const realClearInterval = globalThis.clearInterval;
+  let nextFakeId = 3_000_000;
+  const intervals = new Map<number, CapturedTimer>();
+
+  (globalThis as any).setInterval = (fn: (...args: any[]) => void, delay = 0, ...args: any[]) => {
+    const id = nextFakeId++;
+    intervals.set(id, { id, delay, fn: () => fn(...args), cleared: false });
+    return id as unknown as ReturnType<typeof setInterval>;
+  };
+  (globalThis as any).clearInterval = (id: any) => {
+    if (typeof id === "number" && intervals.has(id)) {
+      intervals.get(id)!.cleared = true;
+      return;
+    }
+    return realClearInterval(id);
+  };
+
+  t.after(() => {
+    globalThis.setInterval = realSetInterval;
+    globalThis.clearInterval = realClearInterval;
+  });
+
+  return {
+    activeDelays: () => [...intervals.values()].filter((timer) => !timer.cleared).map((timer) => timer.delay),
+    totalCreated: () => intervals.size,
+    fireLatest: () => {
+      const active = [...intervals.values()].filter((timer) => !timer.cleared);
+      const last = active.at(-1);
+      assert.ok(last, "expected an active directory interval to fire");
       last.fn();
     },
   };
@@ -1095,4 +1132,365 @@ test("subscribeClientUpdates & canClientSubscribe imperative helper lifecycle fo
   assert.equal(stop4.state().status, "error");
   assert.equal(stop4.state().error?.message, "boom");
   stop4();
+});
+
+function makeDirectoryHarness(opts: {
+  rpc?: (contract: { name: string }, input: unknown) => Promise<unknown>;
+  subscribe?: (...args: any[]) => any;
+} = {}) {
+  const headers = new Map<string, { label: string; updates: string[]; removed: boolean }>();
+  const pills = new Map<string, { label: string; updates: string[]; removed: boolean }>();
+  const rpcCalls: Array<{ method: string; input: unknown }> = [];
+  const defaultReply = () => ({
+    ok: true,
+    daemonError: null,
+    projects: [{ slug: "app", root: "/project", workspaceId: "ws-1", needsYouCount: 0 }],
+    seats: [
+      {
+        slug: "app",
+        workspaceId: "ws-1",
+        agentId: "lead-1",
+        role: "lead",
+        provider: "codex",
+        model: "gpt-5",
+        thinking: "high",
+        lane: { provider: "codex", model: "gpt-5", thinking: "high", scope: "project" },
+        pendingLane: null,
+        handoff: null,
+        allowedActions: ["switch-model", "hand-off-now"],
+        context: null,
+        contextUsedTokens: null,
+        markTokens: 128000,
+        handoffState: null,
+        task: null,
+        quickSwitchModels: [],
+      },
+    ],
+  });
+  let currentReply: any = defaultReply();
+  const client: Record<string, any> = {
+    rpc: async (contract: { name: string }, input: unknown) => {
+      rpcCalls.push({ method: contract.name, input });
+      if (opts.rpc) return opts.rpc(contract, input);
+      return currentReply;
+    },
+    addHeaderButton: ({ id, button }: any) => {
+      const rec = { label: button.label, updates: [] as string[], removed: false };
+      headers.set(id, rec);
+      return {
+        update: (patch: any) => {
+          if (patch.label !== undefined) {
+            rec.label = patch.label;
+            rec.updates.push(patch.label);
+          }
+        },
+        remove: () => {
+          rec.removed = true;
+        },
+      };
+    },
+    addComposerPill: ({ id, button }: any) => {
+      const rec = { label: button.label, updates: [] as string[], removed: false };
+      pills.set(id, rec);
+      return {
+        update: (patch: any) => {
+          if (patch.label !== undefined) {
+            rec.label = patch.label;
+            rec.updates.push(patch.label);
+          }
+        },
+        remove: () => {
+          rec.removed = true;
+        },
+      };
+    },
+    openPanel: () => {},
+  };
+  if (opts.subscribe !== undefined) {
+    client.subscribe = opts.subscribe;
+  }
+  return {
+    client,
+    headers,
+    pills,
+    rpcCalls,
+    setReply: (next: any) => {
+      currentReply = next;
+    },
+    makeReply: (needsYouCount: number, handoffState: string | null = null) => ({
+      ...defaultReply(),
+      projects: [{ slug: "app", root: "/project", workspaceId: "ws-1", needsYouCount }],
+      seats: [{ ...defaultReply().seats[0]!, handoffState }],
+    }),
+  };
+}
+
+const flushMicrotasks = async () => {
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+};
+
+test("T-23b-2: startSeatDirectory on >=0.16.0 host subscribes globally to stateUpdates ({}), refreshes on ready & push without 20s polling, and cleans up on stop", async (t) => {
+  const { startSeatDirectory, DIRECTORY_POLL_MS, stateUpdates } = await loadHarness(t);
+  const spy = withDirectoryIntervalSpy(t);
+
+  const subCalls: Array<{
+    contract: unknown;
+    input: unknown;
+    onEvent: (e: unknown) => void;
+    onClosed?: (c: { error?: Error }) => void;
+    ready: ReturnType<typeof deferred<void>>;
+    released: boolean;
+  }> = [];
+
+  const harness = makeDirectoryHarness({
+    subscribe: (contract: unknown, input: unknown, onEvent: (e: unknown) => void, options?: { onClosed?: (c: { error?: Error }) => void }) => {
+      const ready = deferred<void>();
+      const rec = { contract, input, onEvent, onClosed: options?.onClosed, ready, released: false };
+      subCalls.push(rec);
+      return Object.assign(
+        () => {
+          rec.released = true;
+        },
+        {
+          ready: ready.promise,
+          release: async () => {
+            rec.released = true;
+          },
+        },
+      );
+    },
+  });
+
+  const stop = startSeatDirectory(harness.client);
+  assert.equal(subCalls.length, 1);
+  assert.equal(subCalls[0]!.contract, stateUpdates);
+  assert.deepEqual(subCalls[0]!.input, {});
+  assert.deepEqual(spy.activeDelays(), [DIRECTORY_POLL_MS], "fallback interval stays armed while connecting");
+  await flushMicrotasks();
+  assert.equal(harness.rpcCalls.length, 1, "mount fetch runs immediately");
+  assert.deepEqual(harness.rpcCalls[0], { method: "factory.seats.directory", input: {} });
+  assert.equal(harness.headers.get("factory-header-ws-1")?.label, "Factory");
+  assert.equal(harness.pills.get("factory-pill-lead-1")?.label, "lead");
+
+  // Ready resolves -> transitions to live, clears 20s interval, and runs freshness tick.
+  harness.setReply(harness.makeReply(2, "handing-over"));
+  subCalls[0]!.ready.resolve();
+  await flushMicrotasks();
+  assert.deepEqual(spy.activeDelays(), [], "live subscription suppresses 20s polling");
+  assert.equal(harness.rpcCalls.length, 2, "ready triggers freshness tick");
+  assert.equal(harness.headers.get("factory-header-ws-1")?.label, "Factory · 2");
+  assert.equal(harness.pills.get("factory-pill-lead-1")?.label, "lead · handing off");
+
+  // Push event -> immediate refresh updates headers/pills while 20s polling stays suppressed.
+  harness.setReply(harness.makeReply(0, null));
+  subCalls[0]!.onEvent({ seq: 1, reasons: ["state.fs"], at: "2026-11-18T00:00:00.000Z" });
+  await flushMicrotasks();
+  assert.equal(harness.rpcCalls.length, 3, "push event triggers immediate directory refresh");
+  assert.deepEqual(spy.activeDelays(), []);
+  assert.equal(harness.headers.get("factory-header-ws-1")?.label, "Factory");
+  assert.equal(harness.pills.get("factory-pill-lead-1")?.label, "lead");
+
+  // Stop disposes subscription, removes headers/pills, and ignores late events.
+  stop();
+  assert.equal(subCalls[0]!.released, true, "stop disposes subscription");
+  assert.equal(harness.headers.get("factory-header-ws-1")?.removed, true);
+  assert.equal(harness.pills.get("factory-pill-lead-1")?.removed, true);
+  assert.deepEqual(spy.activeDelays(), []);
+  subCalls[0]!.onEvent({ seq: 2, reasons: ["state.fs"], at: "2026-11-18T00:00:01.000Z" });
+  subCalls[0]!.onClosed?.({ error: new Error("late close") });
+  await flushMicrotasks();
+  assert.equal(harness.rpcCalls.length, 3, "late events after stop do not refresh");
+  assert.deepEqual(spy.activeDelays(), [], "late close after stop does not re-arm interval");
+});
+
+test("T-23b-2: startSeatDirectory coalesces in-flight refreshes into one trailing tick and cancels queued tick on stop", async (t) => {
+  const { startSeatDirectory } = await loadHarness(t);
+  withDirectoryIntervalSpy(t);
+
+  let rpcQueue: Array<ReturnType<typeof deferred<any>>> = [];
+  let onEvent!: (e: unknown) => void;
+  let ready!: ReturnType<typeof deferred<void>>;
+  const harness = makeDirectoryHarness({
+    rpc: () => {
+      const d = deferred<any>();
+      rpcQueue.push(d);
+      return d.promise;
+    },
+    subscribe: (_c: unknown, _i: unknown, ev: (e: unknown) => void) => {
+      onEvent = ev;
+      ready = deferred<void>();
+      return Object.assign(() => {}, { ready: ready.promise });
+    },
+  });
+
+  const stop = startSeatDirectory(harness.client);
+  assert.equal(rpcQueue.length, 1, "mount tick is in flight");
+
+  // While mount tick is in flight, ready and multiple push events coalesce into one trailing tick.
+  ready.resolve();
+  await flushMicrotasks();
+  onEvent({ seq: 1 });
+  onEvent({ seq: 2 });
+  onEvent({ seq: 3 });
+  assert.equal(rpcQueue.length, 1, "no overlapping seatsDirectory RPC runs while inFlight");
+
+  // Resolving the first RPC triggers exactly one trailing tick.
+  rpcQueue[0]!.resolve(harness.makeReply(0, null));
+  await flushMicrotasks();
+  assert.equal(rpcQueue.length, 2, "exactly one coalesced trailing tick fires");
+  assert.equal(harness.headers.get("factory-header-ws-1")?.label, "Factory");
+
+  // Resolve trailing tick with updated data.
+  rpcQueue[1]!.resolve(harness.makeReply(4, "scheduled"));
+  await flushMicrotasks();
+  assert.equal(rpcQueue.length, 2, "no extra tick after coalesced refresh finishes");
+  assert.equal(harness.headers.get("factory-header-ws-1")?.label, "Factory · 4");
+  assert.equal(harness.pills.get("factory-pill-lead-1")?.label, "lead · handing off");
+
+  // Start another in-flight tick, queue a trailing refresh, then call stop() before resolution.
+  onEvent({ seq: 4 });
+  assert.equal(rpcQueue.length, 3);
+  onEvent({ seq: 5 });
+  stop();
+  rpcQueue[2]!.resolve(harness.makeReply(9, null));
+  await flushMicrotasks();
+  assert.equal(rpcQueue.length, 3, "stop() cancels queued trailing tick");
+  assert.equal(harness.headers.get("factory-header-ws-1")?.removed, true);
+});
+
+test("T-23b-2: startSeatDirectory falls back to DIRECTORY_POLL_MS on <0.16.0 host and <0.16.0 @getpaseo/plugin", async (t) => {
+  // 1. Missing client.subscribe (<0.16.0 host)
+  {
+    const { startSeatDirectory, DIRECTORY_POLL_MS } = await loadHarness(t, { legacyClientHost: true });
+    const spy = withDirectoryIntervalSpy(t);
+    const harness = makeDirectoryHarness();
+
+    const stop = startSeatDirectory(harness.client);
+    await flushMicrotasks();
+    assert.equal(harness.rpcCalls.length, 1);
+    assert.deepEqual(spy.activeDelays(), [DIRECTORY_POLL_MS]);
+
+    harness.setReply(harness.makeReply(3, null));
+    spy.fireLatest();
+    await flushMicrotasks();
+    assert.equal(harness.rpcCalls.length, 2);
+    assert.equal(harness.headers.get("factory-header-ws-1")?.label, "Factory · 3");
+
+    stop();
+    assert.deepEqual(spy.activeDelays(), []);
+    assert.equal(harness.headers.get("factory-header-ws-1")?.removed, true);
+  }
+
+  // 2. Missing defineSubscription (<0.16.0 @getpaseo/plugin) even if client.subscribe exists
+  {
+    const { startSeatDirectory, DIRECTORY_POLL_MS, supportsSubscriptionContract } = await loadHarness(t, {
+      legacyPluginPackage: true,
+    });
+    assert.equal(supportsSubscriptionContract, false);
+    const spy = withDirectoryIntervalSpy(t);
+    let subscribeCalls = 0;
+    const harness = makeDirectoryHarness({
+      subscribe: () => {
+        subscribeCalls++;
+        return Object.assign(() => {}, { ready: Promise.resolve() });
+      },
+    });
+
+    const stop = startSeatDirectory(harness.client);
+    await flushMicrotasks();
+    assert.equal(subscribeCalls, 0, "never calls client.subscribe when supportsSubscriptionContract is false");
+    assert.equal(harness.rpcCalls.length, 1);
+    assert.deepEqual(spy.activeDelays(), [DIRECTORY_POLL_MS]);
+
+    harness.setReply(harness.makeReply(1, null));
+    spy.fireLatest();
+    await flushMicrotasks();
+    assert.equal(harness.rpcCalls.length, 2);
+    assert.equal(harness.headers.get("factory-header-ws-1")?.label, "Factory · 1");
+
+    stop();
+    assert.deepEqual(spy.activeDelays(), []);
+  }
+});
+
+test("T-23b-2: startSeatDirectory falls back to 20s polling without reconnect thrashing on ready reject, sync throw, close, and error", async (t) => {
+  const { startSeatDirectory, DIRECTORY_POLL_MS } = await loadHarness(t);
+  const spy = withDirectoryIntervalSpy(t);
+
+  // 1. Ready rejection (<0.16.0 daemon) keeps 20s interval and does not retry subscribe.
+  {
+    let subscribeCalls = 0;
+    const ready = deferred<void>();
+    const harness = makeDirectoryHarness({
+      subscribe: () => {
+        subscribeCalls++;
+        return Object.assign(() => {}, { ready: ready.promise });
+      },
+    });
+    const stop = startSeatDirectory(harness.client);
+    await flushMicrotasks();
+    ready.reject(new Error("Unknown subscription method: factory.state.updates"));
+    await flushMicrotasks();
+    assert.equal(subscribeCalls, 1, "ready rejection does not thrash reconnects");
+    assert.deepEqual(spy.activeDelays(), [DIRECTORY_POLL_MS]);
+
+    harness.setReply(harness.makeReply(5, null));
+    spy.fireLatest();
+    await flushMicrotasks();
+    assert.equal(harness.headers.get("factory-header-ws-1")?.label, "Factory · 5");
+    stop();
+    assert.deepEqual(spy.activeDelays(), []);
+  }
+
+  // 2. Synchronous subscribe throw keeps single 20s interval without thrash.
+  {
+    let subscribeCalls = 0;
+    const beforeIntervals = spy.totalCreated();
+    const harness = makeDirectoryHarness({
+      subscribe: () => {
+        subscribeCalls++;
+        throw new Error("subscribe unavailable");
+      },
+    });
+    const stop = startSeatDirectory(harness.client);
+    await flushMicrotasks();
+    assert.equal(subscribeCalls, 1);
+    assert.equal(spy.totalCreated() - beforeIntervals, 1, "only one fallback interval created");
+    assert.deepEqual(spy.activeDelays(), [DIRECTORY_POLL_MS]);
+    stop();
+    assert.deepEqual(spy.activeDelays(), []);
+  }
+
+  // 3. Live -> closed (no error) and Live -> error re-arm 20s polling without thrashing, keeping existing registrations.
+  for (const closePayload of [{}, { error: new Error("transport dropped") }]) {
+    let subscribeCalls = 0;
+    let onClosed: ((c: { error?: Error }) => void) | undefined;
+    const ready = deferred<void>();
+    const harness = makeDirectoryHarness({
+      subscribe: (_c: unknown, _i: unknown, _e: unknown, opts: { onClosed?: (c: { error?: Error }) => void }) => {
+        subscribeCalls++;
+        onClosed = opts?.onClosed;
+        return Object.assign(() => {}, { ready: ready.promise });
+      },
+    });
+    const stop = startSeatDirectory(harness.client);
+    ready.resolve();
+    await flushMicrotasks();
+    assert.deepEqual(spy.activeDelays(), [], "live suppresses 20s polling");
+    assert.equal(harness.headers.get("factory-header-ws-1")?.removed, false);
+
+    onClosed?.(closePayload);
+    await flushMicrotasks();
+    assert.equal(subscribeCalls, 1, "close/error does not thrash reconnects");
+    assert.deepEqual(spy.activeDelays(), [DIRECTORY_POLL_MS], "close/error restores 20s fallback polling");
+    assert.equal(harness.headers.get("factory-header-ws-1")?.removed, false, "existing registrations stay intact");
+
+    harness.setReply(harness.makeReply(7, null));
+    spy.fireLatest();
+    await flushMicrotasks();
+    assert.equal(harness.headers.get("factory-header-ws-1")?.label, "Factory · 7");
+    stop();
+    assert.deepEqual(spy.activeDelays(), []);
+    assert.equal(harness.headers.get("factory-header-ws-1")?.removed, true);
+  }
 });

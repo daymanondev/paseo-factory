@@ -3,10 +3,11 @@ import type { PluginButton, PluginButtonContentProps, PluginClientContext } from
 import { useState } from "react";
 import { Icon } from "@getpaseo/plugin/client/ui";
 import { Platform, Pressable, Text, View } from "react-native";
-import { handoffStart, lanesSet, seatsDirectory } from "../../shared/rpc.ts";
+import { handoffStart, lanesSet, seatsDirectory, stateUpdates } from "../../shared/rpc.ts";
 import type { ProjectDirectoryEntry, SeatDirectoryEntry } from "../../shared/view.ts";
 import { headerPlans, pillPlans, reconcileDirectory } from "../kit/directory.ts";
 import type { RegistrationLike } from "../kit/directory.ts";
+import { isSubscriptionLive, subscribeClientUpdates } from "../kit/subscription.ts";
 import { CONTROL_SM, RADIUS, SPACING, hoveredOf, text } from "../kit/theme.ts";
 import { Btn } from "../kit/pill.tsx";
 import type { SeatEditorRequests } from "./editor-request.ts";
@@ -111,8 +112,10 @@ function SeatDirectoryPopover({ theme, seat, close, otherModel, switchModel, han
 }
 
 /**
- * Starts the directory poll. Returns the disposer `contribute()` rides: the
- * interval clears and every live registration removes.
+ * Starts the seat directory sync (global `stateUpdates` subscription on
+ * `>= 0.16.0` hosts with `DIRECTORY_POLL_MS` fallback polling). Returns the
+ * disposer `contribute()` rides: the subscription and fallback interval clear,
+ * and every live registration removes.
  */
 export function startSeatDirectory(client: PluginClientContext, editorRequests?: SeatEditorRequests): () => void {
   const headers = new Map<string, { fingerprint: string; registration: DirectoryRegistration }>();
@@ -151,8 +154,13 @@ export function startSeatDirectory(client: PluginClientContext, editorRequests?:
   };
   let stopped = false;
   let inFlight = false;
+  let queued = false;
   const tick = async (): Promise<void> => {
-    if (stopped || inFlight) return;
+    if (stopped) return;
+    if (inFlight) {
+      queued = true;
+      return;
+    }
     inFlight = true;
     try {
       // Transport success may still carry a failed daemon read. Keep the last surfaces.
@@ -203,13 +211,48 @@ export function startSeatDirectory(client: PluginClientContext, editorRequests?:
         );
       } catch (error) { warn("pill", error); }
     } catch (error) { warn("directory poll", error); }
-    finally { inFlight = false; }
+    finally {
+      inFlight = false;
+      if (queued && !stopped) {
+        queued = false;
+        void tick();
+      }
+    }
   };
+  let timer: ReturnType<typeof setInterval> | undefined;
+  const startFallbackPoll = (): void => {
+    if (stopped || timer !== undefined) return;
+    timer = setInterval(() => { void tick(); }, DIRECTORY_POLL_MS);
+  };
+  const stopFallbackPoll = (): void => {
+    if (timer === undefined) return;
+    clearInterval(timer);
+    timer = undefined;
+  };
+  const stopSubscription = subscribeClientUpdates({
+    client,
+    contract: stateUpdates,
+    input: {},
+    onEvent: () => {
+      if (stopped) return;
+      void tick();
+    },
+    onReady: () => {
+      if (stopped) return;
+      void tick();
+    },
+    onStateChange: (state) => {
+      if (stopped) return;
+      if (isSubscriptionLive(state)) stopFallbackPoll();
+      else startFallbackPoll();
+    },
+  });
   void tick();
-  const timer = setInterval(() => { void tick(); }, DIRECTORY_POLL_MS);
   return () => {
     stopped = true;
-    clearInterval(timer);
+    queued = false;
+    stopFallbackPoll();
+    stopSubscription();
     for (const entry of headers.values()) { try { entry.registration.remove(); } catch (error) { warn("header", error); } }
     for (const entry of pills.values()) { try { entry.registration.remove(); } catch (error) { warn("pill", error); } }
     headers.clear();

@@ -1060,10 +1060,13 @@ test("W4: header buttons and composer pills register ONLY through the seat direc
   assert.deepEqual(offenders, [join(repoRoot, "plugin/client/factory/directory.tsx")], "the directory starter is the one registration door (the bundle-gate acceptance)");
 });
 
-test("W4: the starter polls factory.seats.directory every 20 seconds, keeps the last registrations on error, and the header button opens the panel at the workspace location", () => {
+test("W4: the starter subscribes to stateUpdates with conditional 20-second fallback polling, keeps the last registrations on error, and the header button opens the panel at the workspace location", () => {
   const directory = read("plugin/client/factory/directory.tsx");
   assert.match(directory, /DIRECTORY_POLL_MS = 20_000/, "the spec's 20-second cadence");
-  assert.match(directory, /setInterval\(\(\) => \{ void tick\(\); \}, DIRECTORY_POLL_MS\)/);
+  assert.match(directory, /subscribeClientUpdates\(\{[\s\S]*contract:\s*stateUpdates,[\s\S]*input:\s*\{\}/, "subscribes globally to stateUpdates ({})");
+  assert.match(directory, /isSubscriptionLive\(state\)\)\s*stopFallbackPoll\(\)[\s\S]*else\s*startFallbackPoll\(\)/, "suppresses the 20s poll while live and arms it otherwise");
+  assert.match(directory, /if \(stopped \|\| timer !== undefined\) return;\s*timer = setInterval\(\(\) => \{ void tick\(\); \}, DIRECTORY_POLL_MS\)/, "conditional 20s fallback interval");
+  assert.match(directory, /clearInterval\(timer\)/, "clears fallback interval when live or stopped");
   assert.match(directory, /client\.rpc\(seatsDirectory, \{\}\)/, "the poll rides the read RPC");
   assert.match(directory, /client\.openPanel\(PANEL_ID, \{ workspaceId: plan\.workspaceId, location: "workspace" \}\)/, "the header button opens the existing panel as a workspace-location tab");
   assert.match(directory, /warn\("directory poll",/, "failed polls warn and keep registrations; mounted recovery test covers retention");
