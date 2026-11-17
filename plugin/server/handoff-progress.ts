@@ -33,8 +33,34 @@ export function readHandoffProgress(stateDir: string, slug: string, seat: string
   }
 }
 
+export interface HandoffProgressChangeEvent {
+  stateDir: string;
+  projectSlug: string;
+  seat: string;
+  progress: HandoffProgress | null;
+}
+
+export type HandoffProgressListener = (event: HandoffProgressChangeEvent) => void;
+
+const progressListeners = new Set<HandoffProgressListener>();
+
+/** Registers a listener notified whenever `writeHandoffProgress` persists or clears state. */
+export function onHandoffProgressChange(listener: HandoffProgressListener): () => void {
+  progressListeners.add(listener);
+  return () => {
+    progressListeners.delete(listener);
+  };
+}
+
 export function writeHandoffProgress(stateDir: string, slug: string, progress: HandoffProgress | null, seat = progress?.seat ?? "lead"): void {
   const path = pathOf(stateDir, slug, seat);
   if (progress === null) rmSync(path, { force: true });
   else atomicJson(path, progress);
+  for (const listener of [...progressListeners]) {
+    try {
+      listener({ stateDir, projectSlug: slug, seat, progress });
+    } catch {
+      // listener failures never abort handoff progress persistence
+    }
+  }
 }

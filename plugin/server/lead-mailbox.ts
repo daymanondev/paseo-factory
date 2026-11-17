@@ -176,6 +176,21 @@ export type EnsureLeadResult =
 
 export type LeadSeatEnsureResult = EnsureLeadResult;
 
+export type LeadMailboxStateChangeKind =
+  | "mail_queued"
+  | "mail_delivered"
+  | "mail_acked"
+  | "mail_requeued"
+  | "mailbox_recovered"
+  | "mailbox_rotated"
+  | "mailbox_reset"
+  | "registration_written";
+
+export interface LeadMailboxStateChange {
+  projectSlug: string;
+  kind: LeadMailboxStateChangeKind;
+}
+
 export interface LeadMailRuntimeDeps {
   factory: Factory;
   stateDir: string;
@@ -232,6 +247,8 @@ export interface LeadMailRuntimeDeps {
    * settlement path even when the Lead never hands off through the plugin.
    */
   settleReleasedSupervisor?: (input: { slug: string; leadAgentId: string }) => Promise<void>;
+  /** Optional hook notified when mailbox state or project registration is mutated. */
+  onStateChange?: (event: LeadMailboxStateChange) => void;
   onLog?: (message: string) => void;
   logger?: { warn?: (message: string) => void; info?: (message: string) => void; error?: (message: string) => void };
 }
@@ -430,13 +447,46 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
   };
   const resolveDaemon = (): SurfaceDaemonApi => (typeof deps.daemon === "function" ? deps.daemon() : deps.daemon);
   const mailboxPath = (slug: string): string => join(projectStateDir(deps.stateDir, slug), "mailbox.jsonl");
+  const emitStateChange = (projectSlug: string, kind: LeadMailboxStateChangeKind): void => {
+    deps.onStateChange?.({ projectSlug, kind });
+  };
+  const queueMail = (slug: string, mail: Parameters<typeof appendMailQueued>[1]) => {
+    const queued = appendMailQueued(mailboxPath(slug), mail);
+    emitStateChange(slug, "mail_queued");
+    return queued;
+  };
+  const deliverMail = (slug: string, delivery: Parameters<typeof appendMailDelivered>[1]): void => {
+    appendMailDelivered(mailboxPath(slug), delivery);
+    emitStateChange(slug, "mail_delivered");
+  };
+  const ackMail = (slug: string, ack: Parameters<typeof appendMailAcked>[1]): void => {
+    appendMailAcked(mailboxPath(slug), ack);
+    emitStateChange(slug, "mail_acked");
+  };
+  const requeueMail = (slug: string, requeue: Parameters<typeof appendMailRequeued>[1]): void => {
+    appendMailRequeued(mailboxPath(slug), requeue);
+    emitStateChange(slug, "mail_requeued");
+  };
+  const recoverMailbox = (
+    slug: string,
+    reason: Parameters<typeof recoverLeadMailbox>[1],
+    to?: Parameters<typeof recoverLeadMailbox>[2],
+  ) => {
+    const settled = recoverLeadMailbox(mailboxPath(slug), reason, to);
+    if (settled.length > 0) emitStateChange(slug, "mailbox_recovered");
+    return settled;
+  };
+  const writeRegistration = (slug: string, patch: Parameters<typeof writeProjectRegistration>[2]): void => {
+    writeProjectRegistration(deps.stateDir, slug, patch);
+    emitStateChange(slug, "registration_written");
+  };
   const peerBlockersQueued = new Set<string>();
   const peerHandoff = createPeerHandoffRuntime({
     factory: deps.factory, factoryFor: (slug, task) => taskFactoryOf(slug, task), eventsFor: projectStreamOf, stateDir: deps.stateDir, home: deps.home, stopAgent: deps.stopAgent,
     daemon: resolveDaemon, timeoutMs: handoffTimeoutMs, ownerTimeoutMs: deps.ownerHandoffTimeoutMs, readTokens: (agent) => readLeadContextTokens(agent, deps.usagePaths), log,
     ...(deps.usage === undefined ? {} : { recordUsage: async (input: { slug: string; task: string; agent: SurfaceAgentSnapshot }) => { await deps.usage!.meterAgentBoundary({ task: input.task, agent: input.agent, slug: input.slug }); } }),
     queueNotice: (slug, task, key, text) => {
-      appendMailQueued(mailboxPath(slug), { requestId: `peer-owner-handoff:${task}:${key}:lead`, to: "lead", from: "peer", kind: "report", task, text });
+      queueMail(slug, { requestId: `peer-owner-handoff:${task}:${key}:lead`, to: "lead", from: "peer", kind: "report", task, text });
       peerBlockersQueued.add(slug);
     },
     queueBlocked: (slug, task, epoch, text) => {
@@ -444,7 +494,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       // genuine needs-human-grade Peer stall, but it routes exclusively to the
       // Lead mailbox — Supervisor mail comes only from Owner directives and
       // `lead_report_to_supervisor`, never from a Peer stall.
-      appendMailQueued(mailboxPath(slug), { requestId: `peer-context-ceiling:${task}:${epoch}:lead`, to: "lead", from: "peer", kind: "needs_human", task, text });
+      queueMail(slug, { requestId: `peer-context-ceiling:${task}:${epoch}:lead`, to: "lead", from: "peer", kind: "needs_human", task, text });
       peerBlockersQueued.add(slug);
     },
     wake: async slug => {
@@ -506,7 +556,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       const entries = (await resolveDaemon().agents.list({ filter: { includeArchived: false, includeBackground: true } })).entries;
       const child = entries.map(e => e.agent).find(a => !a.archivedAt && a.parentAgentId === agent.id && (a.id === reg.lead || (a.labels.seat === "lead" && a.labels.project === slug)));
       if (child) {
-        writeProjectRegistration(deps.stateDir, slug, { root: reg.root, releasedSupervisors: [...(reg.releasedSupervisors ?? []).filter(r => r.agentId !== agent.id), { agentId: agent.id, waitingOnLead: child.id, releasedAt: new Date().toISOString() }] });
+        writeRegistration(slug, { root: reg.root, releasedSupervisors: [...(reg.releasedSupervisors ?? []).filter(r => r.agentId !== agent.id), { agentId: agent.id, waitingOnLead: child.id, releasedAt: new Date().toISOString() }] });
         return;
       }
       if (deps.usage) await deps.usage.flushAgent(agent, { slug });
@@ -522,7 +572,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
 
   /** Persists a rotation transition under the registry's merge-by-field law (the seats' precedent). */
   const writeRotationState = (slug: string, root: string, patch: { rotationState: LeadRotationState | null; handoffRequestedAt?: string | null }): void => {
-    writeProjectRegistration(deps.stateDir, slug, {
+    writeRegistration(slug, {
       root,
       rotationState: patch.rotationState,
       ...(patch.handoffRequestedAt === undefined ? {} : { handoffRequestedAt: patch.handoffRequestedAt }),
@@ -534,7 +584,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     mail: { to?: MailRecipient; from: LeadMailFrom; kind: LeadMailKind; task?: string; text: string },
   ): Promise<{ mailId: string }> =>
     projectLane(slug, async () => {
-      const queued = appendMailQueued(mailboxPath(slug), mail);
+      const queued = queueMail(slug, mail);
       return { mailId: queued.mailId };
     });
 
@@ -713,7 +763,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       inFlightHandoffByAgentId.set(lead.id, pendingHandoff);
       pendingHandoffByAgentId.delete(lead.id);
     }
-    if (state.queued.length > 0) appendMailDelivered(path, { mailIds: state.queued.map((item) => item.mailId), toAgentId: lead.id });
+    if (state.queued.length > 0) deliverMail(slug, { mailIds: state.queued.map((item) => item.mailId), toAgentId: lead.id });
     log(`lead-mailbox: delivered ${state.queued.length} item(s) to the lead of ${slug} (${lead.id})`);
   };
 
@@ -787,7 +837,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       kickoffSentAgentIds.add(supervisor.id);
       inFlightKickoffAgentIds.add(supervisor.id);
     }
-    appendMailDelivered(path, {
+    deliverMail(slug, {
       to: "supervisor",
       mailIds: state.supervisorQueued.map((item) => item.mailId),
       toAgentId: supervisor.id,
@@ -1001,7 +1051,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
           if (state.supervisorInFlight !== null && state.supervisorInFlight.toAgentId === input.agentId) {
             const mailIds = state.supervisorInFlight.items.map((item) => item.mailId);
             if (input.outcome.kind === "completed") {
-              appendMailAcked(path, {
+              ackMail(slug, {
                 to: "supervisor",
                 deliveryId: state.supervisorInFlight.deliveryId,
                 mailIds,
@@ -1009,7 +1059,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
               });
               clearRetriedFailedBatch(slug, "supervisor", mailIds);
             } else {
-              appendMailRequeued(path, {
+              requeueMail(slug, {
                 to: "supervisor",
                 deliveryId: state.supervisorInFlight.deliveryId,
                 mailIds,
@@ -1054,10 +1104,10 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     if (state.inFlight !== null && state.inFlight.toAgentId === input.agentId) {
       const mailIds = state.inFlight.items.map((item) => item.mailId);
       if (input.outcome.kind === "completed") {
-        appendMailAcked(path, { deliveryId: state.inFlight.deliveryId, mailIds, byAgentId: input.agentId });
+        ackMail(slug, { deliveryId: state.inFlight.deliveryId, mailIds, byAgentId: input.agentId });
         clearRetriedFailedBatch(slug, "lead", mailIds);
       } else {
-        appendMailRequeued(path, { deliveryId: state.inFlight.deliveryId, mailIds, reason: input.outcome.kind });
+        requeueMail(slug, { deliveryId: state.inFlight.deliveryId, mailIds, reason: input.outcome.kind });
         if (!claimFailedBatchRetry(slug, "lead", mailIds, input.outcome.kind)) {
           const failedHandoff = inFlightHandoffByAgentId.get(input.agentId);
           if (failedHandoff !== undefined) {
@@ -1352,7 +1402,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     // and its `requestId` keeps re-pumps from ever minting a second one.
     if (input.fuseReason !== undefined) {
       try {
-        appendMailQueued(mailboxPath(slug), {
+        queueMail(slug, {
           requestId: `lead-handoff-degraded:${slug}:${ensured.agentId}`,
           to: "supervisor",
           from: "system",
@@ -1575,7 +1625,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       }
       return false;
     }
-    appendMailQueued(mailboxPath(slug), {
+    queueMail(slug, {
       requestId: `peer-unclaimed:${key}`,
       to: "lead",
       from: "system",
@@ -1660,7 +1710,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
         // mislabeled `needs_human` (that Ledger fact is the Lead's alone to
         // record through `lead_needs_human`).
         const kind = from === "peer" ? "peer_challenge" : "directive";
-        const queued = appendMailQueued(mailboxPath(slug), { ...(from === "peer" ? { to: "lead" as const } : {}), from, kind, ...(from === "peer" && blockerTask !== undefined ? { task: blockerTask } : {}), text: request.message });
+        const queued = queueMail(slug, { ...(from === "peer" ? { to: "lead" as const } : {}), from, kind, ...(from === "peer" && blockerTask !== undefined ? { task: blockerTask } : {}), text: request.message });
         return { ok: true, agentId: ensured.agentId, mailId: queued.mailId };
       },
     );
@@ -1734,13 +1784,13 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       ) {
         const reg = readProjectRegistration(deps.stateDir, slug);
         if (submitter !== live?.id && submitter !== reg?.supervisor && submitter !== reg?.lead) {
-          writeProjectRegistration(deps.stateDir, slug, {
+          writeRegistration(slug, {
             root: reg?.root ?? root,
             dispatchers: [submitter],
           });
         }
       }
-      const queued = appendMailQueued(mailboxPath(slug), {
+      const queued = queueMail(slug, {
         to: "supervisor",
         from: "owner",
         kind: "directive",
@@ -1786,7 +1836,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     if (!target.ok) return target;
     const { slug } = target;
     const laneOutcome = await projectLane(slug, async (): Promise<{ ok: true; mailId: string } | { ok: false; code: string; error: string }> => {
-      const queued = appendMailQueued(mailboxPath(slug), {
+      const queued = queueMail(slug, {
         to: "supervisor",
         from: "lead",
         kind: "report",
@@ -1878,7 +1928,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     for (const registration of listProjectRegistrations(deps.stateDir)) {
       try {
         if (registration.rotationState && registration.rotationState !== "normal" && progressOf(registration.slug) === null) updateProgress(registration.slug, { reason: "context-mark", state: registration.rotationState === "rotation_pending" ? "scheduled" : "handing-over" });
-        const settled = recoverLeadMailbox(mailboxPath(registration.slug), "daemon-restart");
+        const settled = recoverMailbox(registration.slug, "daemon-restart");
         for (const event of settled) {
           log(`lead-mailbox: recovered ${event.mailIds.length} item(s) of ${registration.slug} — requeued (daemon-restart)`);
         }
@@ -1921,7 +1971,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       pendingHandoffByAgentId.delete(reg.lead);
       inFlightHandoffByAgentId.delete(reg.lead);
     }
-    const settled = recoverLeadMailbox(mailboxPath(slug), "lead-rotated", "lead");
+    const settled = recoverMailbox(slug, "lead-rotated", "lead");
     for (const event of settled) {
       log(`lead-mailbox: rotation of ${slug} requeued ${event.mailIds.length} item(s) — the un-acked delivery returns to queued (lead-rotated)`);
     }
@@ -1990,14 +2040,14 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       await projectLane(registration.slug, async () => {
         try {
           // (1) The binding clears — the mailbox never routes to a dead Lead.
-          writeProjectRegistration(deps.stateDir, registration.slug, { root: registration.root, lead: null });
+          writeRegistration(registration.slug, { root: registration.root, lead: null });
           kickoffSentAgentIds.delete(agentId);
           inFlightKickoffAgentIds.delete(agentId);
           failedFirstTurnAgentIds.delete(agentId);
           pendingHandoffByAgentId.delete(agentId);
           inFlightHandoffByAgentId.delete(agentId);
           // (2) Delivered-but-unacked mail returns to queued.
-          const settled = recoverLeadMailbox(mailboxPath(registration.slug), "lead_lost", "lead");
+          const settled = recoverMailbox(registration.slug, "lead_lost", "lead");
           for (const event of settled) {
             log(
               `lead-mailbox: ${registration.slug}'s lead ${agentId} was archived outside the plugin — requeued ${event.mailIds.length} item(s) (lead_lost), the next pump raises a successor`,
@@ -2094,6 +2144,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
   const resetProjectMailbox = (slug: string): void => {
     clearSeatRuntime(slug);
     peerHandoff.reset(slug);
+    emitStateChange(slug, "mailbox_reset");
   };
 
   /**
@@ -2113,6 +2164,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
         log(`lead-mailbox: could not drop ${path} on rotate (${messageOf(err)})`);
       }
     }
+    emitStateChange(slug, "mailbox_rotated");
   };
 
   const markKickoffSent = (agentId: string): void => {

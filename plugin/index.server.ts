@@ -14,7 +14,7 @@
 import { homedir } from "node:os";
 import { watch, type FSWatcher } from "node:fs";
 import { SleepInhibitor } from "./server/core/sleep-inhibitor.ts";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import type { PluginHookContext, PluginHookEvents, PluginHookRequests, PluginServerContext } from "@getpaseo/plugin/server";
 import { pendingUpgradeFor } from "./server/core/upgrade-state.ts";
 import { ensureFactoryBinScripts } from "./server/core/agy-home.ts";
@@ -31,6 +31,7 @@ import { spoolRootFor, startSpool } from "./server/spool.ts";
 import { createUsageRuntime } from "./server/usage-rollup.ts";
 import { createSurfaceHandlers, registerSurfaceRpc } from "./server/surface-rpc.ts";
 import { createStateHub } from "./server/state-hub.ts";
+import { onHandoffProgressChange } from "./server/handoff-progress.ts";
 import { stateUpdates, supportsSubscriptionContract } from "./shared/rpc.ts";
 import { createLeadMailRuntime, type LeadTurnEndedInput } from "./server/lead-mailbox.ts";
 import { syncPeerHelpersBeforeCreate, injectRoleOnCreate, injectSessionEnv, sanitizeAgentCreateHookResult } from "./server/roles.ts";
@@ -80,6 +81,11 @@ export default function contribute(server: PluginServerContext) {
   // verdict. One variable, written idempotently; undefined until the first
   // hook fires.
   const stateHub = createStateHub({ stateDir, onLog: log });
+  const resolvedStateDir = resolve(stateDir);
+  const offHandoffProgress = onHandoffProgressChange((event) => {
+    if (resolve(event.stateDir) !== resolvedStateDir) return;
+    stateHub.emit("handoff.progress", { projectSlug: event.projectSlug });
+  });
   let paseoApi: TimelineSourceApi | undefined;
   let onPaseoCaptured: (() => void) | undefined;
   const capturePaseo = (context: { paseo?: unknown }): void => {
@@ -129,7 +135,13 @@ export default function contribute(server: PluginServerContext) {
   // Opening validates any existing ledger (fail closed — a corrupt ledger
   // fails the plugin loudly) and closes attempts interrupted by a previous
   // lifetime: red, reported, and logged, never silently dropped (ADR 0003).
-  const registry = factoryRegistryFor(stateDir, { fetchTimeline, onLog: log });
+  const registry = factoryRegistryFor(stateDir, {
+    fetchTimeline,
+    onLog: log,
+    onLedgerMutate: ({ projectSlug, method }) => {
+      stateHub.emit(`ledger.${method}`, projectSlug === undefined ? undefined : { projectSlug });
+    },
+  });
   const factory = registry.root;
   factory.history.start();
   for (const { task, attempt } of factory.recoveredAttempts) {
@@ -339,6 +351,16 @@ export default function contribute(server: PluginServerContext) {
     // v0.6.1 (ADR 0057 §5): a newly bound Supervisor receives its Seat kickoff
     // packet plus every held report through the mailbox's own drain.
     pumpSupervisorMailbox: (slug) => leadMail.pumpProjectSupervisor(slug),
+    onStateChange: ({ handler, projectSlug, projectRoot }) => {
+      const target =
+        projectSlug === undefined && projectRoot === undefined
+          ? undefined
+          : {
+              ...(projectSlug !== undefined ? { projectSlug } : {}),
+              ...(projectRoot !== undefined ? { projectRoot } : {}),
+            };
+      stateHub.emit(`surface.${handler}`, target);
+    },
   });
   // The Lead mailbox runtime (v0.0.20, ADR 0013 §4–§5): the single writer
   // around each Project's mailbox.jsonl. Its seat doors are the surface's
@@ -359,6 +381,9 @@ export default function contribute(server: PluginServerContext) {
     // settles the released Supervisors waiting on it — the surface's settle
     // door is the implementation.
     settleReleasedSupervisor: (input) => surface.settleReleasedSupervisor(input),
+    onStateChange: ({ projectSlug, kind }) => {
+      stateHub.emit(`mailbox.${kind}`, { projectSlug });
+    },
     onLog: log,
   });
   const sleepInhibitor = new SleepInhibitor({ onError: error => log(`sleep inhibition unavailable: ${String(error)}`) });
@@ -721,6 +746,7 @@ export default function contribute(server: PluginServerContext) {
 
   return () => {
     sleepStopped = true;
+    offHandoffProgress();
     stateWatcher?.close();
     stateHub.stop();
     activityWatcher?.close();

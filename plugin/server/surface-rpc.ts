@@ -430,6 +430,8 @@ export interface SurfaceDeps {
    * is refused `project-rotate-unavailable`.
    */
   rotateProjectMailbox?: (slug: string) => void;
+  /** Optional hook notified after a non-read surface handler completes. */
+  onStateChange?: (event: { handler: string; projectSlug?: string; projectRoot?: string }) => void;
   onLog?: (message: string) => void;
 }
 
@@ -4253,6 +4255,34 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
   /** The handlers that take their lane's exclusive maintenance — the Project acts plus register. The one place the set is named. */
   const EXCLUSIVE_MAINTENANCE_HANDLERS: ReadonlySet<string> = new Set([...PROJECT_ACT_HANDLERS, "projectRegister"]);
   const reads = new Set(["cachedProviders", "sanitizeLane", "snapshot", "seatsDirectory", "pluginsCheckUpdates", "selfUpdateStatus", "selfUpdateApply", "historyImport", "historyImports", "historyUpgrade", "vaultHydrate", "vaultPull", "vaultPush", "vaultSync", "vaultImport"]);
+  const nonEmptyString = (value: unknown): string | undefined =>
+    typeof value === "string" && value.trim() !== "" ? value.trim() : undefined;
+  const surfaceChangeTarget = (
+    input: unknown,
+    result: unknown,
+    fallbackSlug: string | undefined,
+  ): { projectSlug?: string; projectRoot?: string } => {
+    const arg = input !== null && typeof input === "object" ? (input as Record<string, unknown>) : undefined;
+    const res = result !== null && typeof result === "object" ? (result as Record<string, unknown>) : undefined;
+    const projectCandidate = nonEmptyString(res?.project) ?? nonEmptyString(arg?.project);
+    const projectSlug =
+      nonEmptyString(res?.projectSlug) ??
+      nonEmptyString(res?.slug) ??
+      nonEmptyString(arg?.projectSlug) ??
+      (projectCandidate !== undefined && !projectCandidate.includes("/") && !projectCandidate.includes("\\") ? projectCandidate : undefined) ??
+      fallbackSlug;
+    const projectRoot =
+      nonEmptyString(res?.projectRoot) ??
+      nonEmptyString(res?.root) ??
+      nonEmptyString(arg?.projectRoot) ??
+      nonEmptyString(arg?.workspace) ??
+      nonEmptyString(arg?.root) ??
+      (projectCandidate !== undefined && (projectCandidate.includes("/") || projectCandidate.includes("\\")) ? projectCandidate : undefined);
+    return {
+      ...(projectSlug !== undefined ? { projectSlug } : {}),
+      ...(projectRoot !== undefined ? { projectRoot } : {}),
+    };
+  };
   const wrappers = new Map<PropertyKey, unknown>();
   return new Proxy(handlers, {
     get(target, key, receiver) {
@@ -4271,9 +4301,14 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           : registerSlug !== undefined && deps.registry !== undefined
             ? deps.registry.factoryForProject(registerSlug)
             : deps.factory;
-        return !lane.history.maintenanceActive && EXCLUSIVE_MAINTENANCE_HANDLERS.has(key)
+        const pending = !lane.history.maintenanceActive && EXCLUSIVE_MAINTENANCE_HANDLERS.has(key)
           ? lane.history.withExclusiveMaintenance(() => value.apply(receiver, args))
           : lane.history.runOperation(() => value.apply(receiver, args), { newWork: true });
+        if (deps.onStateChange === undefined) return pending;
+        return pending.then((result) => {
+          deps.onStateChange?.({ handler: key, ...surfaceChangeTarget(args[0], result, registerSlug) });
+          return result;
+        });
       });
       return wrappers.get(key);
     },

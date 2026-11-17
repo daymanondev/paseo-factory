@@ -57,11 +57,18 @@ import { resolve as resolvePath } from "node:path";
 // WITHIN each Project. The root Factory remains as the lightweight fallback
 // strictly for unbound machine-level operations (upgrade, machine lanes).
 
+export interface LedgerMutateEvent {
+  projectSlug?: string;
+  method: "append" | "purgeWhere" | "activateHistory" | "refreshHistoryFromDisk";
+}
+
 export interface FactoryRegistryOptions {
   stateDir: string;
   /** The timeline feed every per-Project Factory's watch pass shares (the shell's one captured PaseoApi). */
   fetchTimeline?: TimelineFetcher;
   onLog?: (message: string) => void;
+  /** Optional hook notified after a ledger mutation completes on root or a per-Project Factory. */
+  onLedgerMutate?: (event: LedgerMutateEvent) => void;
   /**
    * An already-constructed root Factory (tests construct their own) — the
    * registry adopts it as its root instead of opening a second one on the
@@ -101,14 +108,69 @@ export interface FactoryRegistry {
 
 const registryByStateDir = new Map<string, FactoryRegistry>();
 
+function wrapLedger(
+  ledger: Factory["ledger"],
+  projectSlug: string | undefined,
+  onLedgerMutate: FactoryRegistryOptions["onLedgerMutate"],
+): (() => void) | undefined {
+  if (onLedgerMutate === undefined) return undefined;
+  const methods = ["append", "purgeWhere", "activateHistory", "refreshHistoryFromDisk"] as const;
+  const previous = new Map<(typeof methods)[number], PropertyDescriptor | undefined>();
+  for (const method of methods) {
+    previous.set(method, Object.getOwnPropertyDescriptor(ledger, method));
+  }
+  const notify = (method: LedgerMutateEvent["method"]): void => {
+    onLedgerMutate({ ...(projectSlug !== undefined ? { projectSlug } : {}), method });
+  };
+
+  const origAppend = ledger.append.bind(ledger);
+  ledger.append = ((...args: Parameters<typeof ledger.append>) => {
+    const result = origAppend(...args);
+    notify("append");
+    return result;
+  }) as typeof ledger.append;
+
+  const origPurgeWhere = ledger.purgeWhere.bind(ledger);
+  ledger.purgeWhere = ((...args: Parameters<typeof ledger.purgeWhere>) => {
+    const result = origPurgeWhere(...args);
+    notify("purgeWhere");
+    return result;
+  }) as typeof ledger.purgeWhere;
+
+  const origActivateHistory = ledger.activateHistory.bind(ledger);
+  ledger.activateHistory = ((...args: Parameters<typeof ledger.activateHistory>) => {
+    origActivateHistory(...args);
+    notify("activateHistory");
+  }) as typeof ledger.activateHistory;
+
+  const origRefreshHistoryFromDisk = ledger.refreshHistoryFromDisk.bind(ledger);
+  ledger.refreshHistoryFromDisk = ((...args: Parameters<typeof ledger.refreshHistoryFromDisk>) => {
+    origRefreshHistoryFromDisk(...args);
+    notify("refreshHistoryFromDisk");
+  }) as typeof ledger.refreshHistoryFromDisk;
+
+  return () => {
+    for (const method of methods) {
+      const desc = previous.get(method);
+      if (desc === undefined) {
+        delete (ledger as unknown as Record<string, unknown>)[method];
+      } else {
+        Object.defineProperty(ledger, method, desc);
+      }
+    }
+  };
+}
+
 export function createFactoryRegistry(options: FactoryRegistryOptions): FactoryRegistry {
   const { stateDir } = options;
   const log = options.onLog ?? (() => {});
   const bySlug = new Map<string, Factory>();
+  const unwrapBySlug = new Map<string, () => void>();
   const root = options.root ?? createFactory({
     stateDir,
     ...(options.fetchTimeline === undefined ? {} : { fetchTimeline: options.fetchTimeline }),
   });
+  const unwrapRoot = wrapLedger(root.ledger, undefined, options.onLedgerMutate);
   const registry: FactoryRegistry = {
     stateDir,
     root,
@@ -125,6 +187,8 @@ export function createFactoryRegistry(options: FactoryRegistryOptions): FactoryR
         projectSlug: key,
         ...(options.fetchTimeline === undefined ? {} : { fetchTimeline: options.fetchTimeline }),
       });
+      const unwrap = wrapLedger(factory.ledger, key, options.onLedgerMutate);
+      if (unwrap !== undefined) unwrapBySlug.set(key, unwrap);
       factory.history.start();
       for (const { task, attempt } of factory.recoveredAttempts) {
         log(`project ${key}: recovered on open: attempt ${attempt} of task ${task} closed red — interrupted by a restart`);
@@ -153,6 +217,8 @@ export function createFactoryRegistry(options: FactoryRegistryOptions): FactoryR
       const factory = bySlug.get(key);
       if (factory === undefined) return undefined;
       bySlug.delete(key);
+      unwrapBySlug.get(key)?.();
+      unwrapBySlug.delete(key);
       try {
         factory.history.stop();
       } catch {
@@ -162,6 +228,11 @@ export function createFactoryRegistry(options: FactoryRegistryOptions): FactoryR
     },
     stop(): void {
       if (registryByStateDir.get(resolvePath(stateDir)) === registry) registryByStateDir.delete(resolvePath(stateDir));
+      for (const unwrap of unwrapBySlug.values()) {
+        unwrap();
+      }
+      unwrapBySlug.clear();
+      unwrapRoot?.();
       for (const factory of bySlug.values()) {
         try {
           factory.history.stop();
