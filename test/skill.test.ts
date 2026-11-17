@@ -330,6 +330,45 @@ test("pre-flight: an unregistered folder gets a three-way choice — register he
   assert.ok(/slug.*root.*home/s.test(modeA.slice(modeA.indexOf("Pick an existing Project"))), "pick-existing labels carry slug + root + home");
 });
 
+test("directive packing: step 3 packs evidence between the echo and the dispatch, Owner words verbatim", () => {
+  const echo = at("Echo to the Owner");
+  const pack = at("3. **Pack the directive**");
+  const dispatch = at("4. Run a single command:");
+  assert.ok(echo < pack && pack < dispatch, "echo, then packing, then dispatch");
+  const step = modeA.slice(pack, dispatch);
+  assert.ok(/Owner's words stay verbatim/.test(step) && /never rewrite, reorder, or drop them/.test(step), "the Owner's words are the verbatim goal");
+  for (const field of ["**Evidence:**", "**Already at HEAD:**", "**Done when:**", "**Out of scope:**"]) {
+    assert.ok(step.includes(field), `the packing step names ${field}`);
+  }
+  assert.ok(step.includes("`git log --oneline -5`"), "already-done items are checked against the git log");
+  assert.ok(/verified or assumed/.test(step), "each fact is marked verified or assumed");
+  assert.ok(/no new research/.test(step), "packing adds no new research");
+  assert.ok(/Do not write the implementation as prose diffs/.test(step) && /do not split it into waves/.test(step), "no prose diffs, no waves");
+  assert.ok(/Supervisor and Lead own the plan/.test(step), "Supervisor and Lead own the plan");
+  assert.ok(/one-line directive with no evidence in this session goes out unchanged/.test(step), "a bare one-liner goes out unchanged");
+});
+
+test("directive packing: a multi-line or shell-active directive goes through a single-quoted heredoc", () => {
+  const dispatch = at("4. Run a single command:");
+  const stop = at("**STOP IMMEDIATELY:**");
+  const step = modeA.slice(dispatch, stop);
+  assert.ok(step.includes('factory supervisor dispatch --workspace "$PWD" --message "<directive>"'), "the pinned plain dispatch line stays");
+  assert.ok(/backticks or `\$`/.test(step) && /single-quoted heredoc/.test(step), "the heredoc rule names backticks and $");
+  assert.ok(step.includes(`--message "$(cat <<'EOF'`) && /^ {2}<directive>\n {2}EOF\n {2}\)"$/m.test(step), "the heredoc form is shown");
+  assert.ok(step.indexOf('--message "<directive>"') < step.indexOf("<<'EOF'"), "the plain form leads, the heredoc follows");
+});
+
+test("directive packing: step numbers are consistent after the renumber", () => {
+  assert.ok(modeA.includes("skips to step 3: no gate, no echo"), "a seat skips to the packing step");
+  assert.ok(modeA.includes("go to step 2"), "registered / registered-here go to the echo");
+  const stop = modeA.slice(at("5. **STOP IMMEDIATELY:**"));
+  assert.ok(/step 6's optional lane-profile offer/.test(stop), "STOP's exception points at the lane-profile step");
+  assert.ok(at("6. **Lane profile") > at("5. **STOP IMMEDIATELY:**"), "lane profile is step 6, after STOP");
+  assert.ok(!/step 5's optional/.test(modeA) && !modeA.includes("4. **STOP"), "no stale numbering");
+  const numbers = [...modeA.matchAll(/^(?:`)?(\d)\. /gm)].map((m) => Number(m[1]));
+  assert.deepEqual(numbers.slice(0, 6), [1, 2, 3, 4, 5, 6], "top-level steps run 1..6 in order");
+});
+
 test("pre-flight: pick-existing dispatches with explicit --project <slug> routing", () => {
   assert.ok(modeA.includes('factory supervisor dispatch --project <slug> --message "<directive>"'), "dispatch routes by --project <slug>");
 });
