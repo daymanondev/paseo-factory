@@ -1,4 +1,5 @@
 import { test } from "node:test";
+import type { TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -80,10 +81,12 @@ test('kickoff packet drops only the system-prompt duplicates when omitSystemProm
     // …while every dynamic preflight line and the Fire-and-End-Turn law stay.
     assert.match(lean, new RegExp(`^- Workspace: ${root.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'm'));
     assert.match(lean, /- Git: branch=`.*`, head=`.*`, status=clean/);
-    assert.match(lean, /- Top-level files: design/);
-    assert.match(lean, /- Memory\/docs present: /);
+    if (role === 'lead') {
+      assert.match(lean, /- Top-level files: design/);
+      assert.match(lean, /- Memory\/docs present: /);
+      assert.match(lean, /- Build\/Test commands: /);
+    }
     assert.match(lean, /Project memory: none present on disk/);
-    assert.match(lean, /- Build\/Test commands: /);
     assert.match(lean, /- Active lanes: default/);
     assert.match(lean, /- Ledger tasks: none \(clean slate\)/);
     assert.match(lean, /- Role MCP tools \(paseo_factory\): /);
@@ -96,6 +99,66 @@ test('kickoff packet drops only the system-prompt duplicates when omitSystemProm
     for (const line of lean.split('\n')) {
       assert.ok(fullLines.has(line), `line only in the omit packet: ${JSON.stringify(line)}`);
     }
+  }
+});
+
+/** A tiny non-git Project: deterministic git line, one memory doc, two scripts. */
+function slimPacketFixture(t: TestContext): string {
+  const root = makeTempDir(); disposeDir(t, root);
+  mkdirSync(join(root, 'src'));
+  writeFileSync(join(root, 'package.json'), '{"scripts":{"test":"node --test","typecheck":"tsc --noEmit"}}');
+  writeFileSync(join(root, 'AGENTS.md'), 'rules');
+  return root;
+}
+
+test('the Lead kickoff packet is byte-identical to the pre-0.12.4 render (Supervisor slimming never touches it)', t => {
+  const root = slimPacketFixture(t);
+  const lean = buildSeatKickoffPacket({ role: 'lead', projectSlug: 'repo', projectRoot: root, ledgerEvents: [], lanes: { agent: 'claude' }, omitSystemPromptDuplicates: true });
+  const expected = [
+    '--- [paseo-factory seat kickoff packet · role=lead · project=repo] ---',
+    `- Workspace: ${root}`,
+    '- Git: branch=`(detached/unborn)`, head=`(no commits)`, status=clean',
+    '- Top-level files: AGENTS.md, package.json, src',
+    '- Memory/docs present: AGENTS.md',
+    '- Project memory: read before acting: AGENTS.md; CLAUDE.md (absent — do not call read_file); CONTEXT.md (absent — do not call read_file)',
+    '- Build/Test commands: package.json scripts (test: `node --test`, typecheck: `tsc --noEmit`)',
+    '- Active lanes: agent=claude',
+    '- Ledger tasks: none (clean slate)',
+    '- Role MCP tools (paseo_factory): `lead_set_contract`, `lead_dispatch_agent`, `lead_read_ledger`, `lead_verify`, `lead_merge`, `lead_report_to_supervisor`',
+    '- Law: Fire-and-End-Turn: orient within <= 3 small boundary reads (dispatch a read-only `scout` or `architect` Peer first whenever deeper repo/design discovery is needed), outline the serial-wave roadmap, call `lead_set_contract` then `lead_dispatch_agent` (or `factory contract` + `factory run`) for the current wave only, and IMMEDIATELY end your turn — never poll, never sleep, never grep raw `ledger.jsonl` or `~/.paseo/plugins/**`, and never edit product source code on `<project-root>`.',
+    '--- [end seat kickoff packet] ---',
+    '',
+  ].join('\n');
+  assert.equal(lean, expected);
+
+  // The complete packet keeps the same line order, with the wave laws trailing.
+  const full = buildSeatKickoffPacket({ role: 'lead', projectSlug: 'repo', projectRoot: root, ledgerEvents: [], lanes: { agent: 'claude' } }).split('\n');
+  const order = ['- Workspace: ', '- Git: ', '- Top-level files: ', '- Memory/docs present: ', '- Project memory: ', '- Build/Test commands: ', '- Active lanes: ', '- Ledger tasks: ', '- Role MCP tools (paseo_factory): ', '- Law: Fire-and-End-Turn: '];
+  const at = order.map(prefix => full.findIndex(line => line.startsWith(prefix)));
+  assert.ok(at.every(i => i > 0), 'every lead line is present');
+  assert.deepEqual([...at].sort((a, b) => a - b), at, 'lead lines keep their original order');
+});
+
+test('the Supervisor kickoff packet leads with the tool table and the one behavioural law, and drops the Lead-only repository inventory', t => {
+  const root = slimPacketFixture(t);
+  for (const omit of [false, true]) {
+    const packet = buildSeatKickoffPacket({ role: 'supervisor', projectSlug: 'repo', projectRoot: root, ledgerEvents: [], lanes: { agent: 'claude' }, omitSystemPromptDuplicates: omit });
+    const lines = packet.split('\n');
+    assert.match(lines[0]!, /^--- \[paseo-factory seat kickoff packet · role=supervisor · project=repo\] ---$/);
+    assert.match(lines[1]!, /^- Role MCP tools \(paseo_factory\): `supervisor_dispatch_lead`/, 'the tool table sits directly after the header');
+    assert.match(lines[2]!, /^- Law: Fire-and-End-Turn: call `supervisor_dispatch_lead`/, 'the Fire-and-End-Turn law follows it');
+    assert.equal(lines[3], `- Workspace: ${root}`);
+    for (const dropped of ['- Top-level files: ', '- Memory/docs present: ', '- Build/Test commands: ']) {
+      assert.ok(!lines.some(line => line.startsWith(dropped)), `the Supervisor packet drops ${dropped}`);
+    }
+    assert.equal(lines.filter(line => line.startsWith('- Role MCP tools')).length, 1, 'the tool table is not repeated at the tail');
+    assert.equal(lines.filter(line => line.startsWith('- Law: Fire-and-End-Turn')).length, 1, 'the law is not repeated at the tail');
+    // Everything else stays.
+    for (const kept of ['- Git: ', '- Project memory: read before acting: AGENTS.md', '- Active lanes: agent=claude', '- Ledger tasks: none (clean slate)']) {
+      assert.ok(lines.some(line => line.startsWith(kept)), `the Supervisor packet keeps ${kept}`);
+    }
+    assert.equal(lines.includes(`- Law: ${SUPERVISOR_OUTCOME_BOUNDARY}`), !omit, 'the outcome boundary rides only the self-contained packet');
+    assert.equal(lines.at(-2), '--- [end seat kickoff packet] ---');
   }
 });
 
@@ -223,7 +286,8 @@ test('the kickoff packet renders the SLP MCP tool table and the Project notebook
     assert.doesNotMatch(packet, /scrum/i, `${role} packet carries no Scrum vocabulary`);
     // Every deterministic repo preflight line and the Project notebook ride the packet.
     assert.match(packet, /- Git: branch=`.*`, head=`.*`, status=clean/);
-    assert.match(packet, /- Top-level files: /);
+    if (role === "lead") assert.match(packet, /- Top-level files: /);
+    else assert.doesNotMatch(packet, /- Top-level files: /, "the Supervisor packet carries no repository inventory");
     assert.match(packet, /- Ledger tasks: none \(clean slate\)/);
     assert.ok(lines.has(`- Project notebook path: ${projectNotebookPath(stateDir, "repo")}`));
     assert.ok(lines.has("## 1. Verification & Run Recipe"));

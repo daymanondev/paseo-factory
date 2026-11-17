@@ -354,8 +354,19 @@ test("directive packing: a multi-line or shell-active directive goes through a s
   const step = modeA.slice(dispatch, stop);
   assert.ok(step.includes('factory supervisor dispatch --workspace "$PWD" --message "<directive>"'), "the pinned plain dispatch line stays");
   assert.ok(/backticks or `\$`/.test(step) && /single-quoted heredoc/.test(step), "the heredoc rule names backticks and $");
-  assert.ok(step.includes(`--message "$(cat <<'EOF'`) && /^ {2}<directive>\n {2}EOF\n {2}\)"$/m.test(step), "the heredoc form is shown");
+  assert.ok(step.includes(`--message "$(cat <<'EOF'`) && /^<directive>\nEOF\n\)"$/m.test(step), "the heredoc form is shown");
   assert.ok(step.indexOf('--message "<directive>"') < step.indexOf("<<'EOF'"), "the plain form leads, the heredoc follows");
+});
+
+test("directive packing: the heredoc example is a fenced sh block with EOF alone at column 0", () => {
+  const lines = preflight.split("\n");
+  assert.ok(lines.includes("EOF"), "a line exactly equal to EOF exists — bash only ends <<'EOF' there");
+  assert.ok(!lines.some((line) => /^\s+EOF$/.test(line)), "no indented EOF anywhere in the render");
+  const open = lines.findIndex((line) => line.includes("<<'EOF'"));
+  assert.ok(open > 0 && lines[open - 1] === "```sh", "the heredoc opens inside a fenced sh block");
+  assert.ok(lines[open]!.startsWith("factory supervisor dispatch --workspace"), "the first heredoc line starts at column 0");
+  assert.deepEqual(lines.slice(open + 1, open + 4), ["<directive>", "EOF", ')"'], "body, terminator and closer all sit at column 0");
+  assert.equal(lines[open + 4], "```", "the block closes right after the closer");
 });
 
 test("directive packing: step numbers are consistent after the renumber", () => {

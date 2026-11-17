@@ -194,8 +194,18 @@ export function buildSeatKickoffPacket(input: SeatKickoffPacketInput): string {
   const statusSummary =
     statusLines.length === 0 ? "clean" : `${statusLines.length} modified/untracked: ${statusLines.join(" | ")}`;
 
-  const scriptsSummary = summarizePackageScripts(input.projectRoot);
-  const { entries, memoryDocs } = summarizeTopLevelEntries(input.projectRoot);
+  // The Supervisor never edits code — it dispatches a Lead and ends its turn —
+  // so its packet leads with the one behavioural law and drops the Lead-only
+  // repository inventory (top-level files, memory-docs scan, build/test
+  // commands); `Project memory:` already names the files a seat may read.
+  const isSupervisor = input.role === "supervisor";
+  const leadOnlyLines: string[] = [];
+  const leadOnlyBuildLines: string[] = [];
+  if (!isSupervisor) {
+    const { entries, memoryDocs } = summarizeTopLevelEntries(input.projectRoot);
+    leadOnlyLines.push(`- Top-level files: ${entries}`, `- Memory/docs present: ${memoryDocs}`);
+    leadOnlyBuildLines.push(`- Build/Test commands: ${summarizePackageScripts(input.projectRoot)}`);
+  }
   const tasksSummary = summarizeLedgerTasks(input.projectRoot, input.ledgerEvents);
   const lanesSummary =
     input.lanes !== undefined && Object.keys(input.lanes).length > 0
@@ -232,14 +242,16 @@ export function buildSeatKickoffPacket(input: SeatKickoffPacketInput): string {
     );
   }
 
+  const roleLines = [`- Role MCP tools (paseo_factory): ${roleTools}`, `- Law: ${fireAndEndTurn}`];
+
   return [
     `--- [paseo-factory seat kickoff packet · role=${input.role} · project=${input.projectSlug}] ---`,
+    ...(isSupervisor ? roleLines : []),
     `- Workspace: ${input.projectRoot}`,
     `- Git: branch=\`${branch}\`, head=\`${head}\`, status=${statusSummary}`,
-    `- Top-level files: ${entries}`,
-    `- Memory/docs present: ${memoryDocs}`,
+    ...leadOnlyLines,
     `- ${projectMemoryPresence(input.projectRoot)}`,
-    `- Build/Test commands: ${scriptsSummary}`,
+    ...leadOnlyBuildLines,
     `- Active lanes: ${lanesSummary}`,
     `- Ledger tasks: ${tasksSummary}`,
     ...notebookLines,
@@ -250,8 +262,7 @@ export function buildSeatKickoffPacket(input: SeatKickoffPacketInput): string {
     // dynamic repository preflight lines above.
     ...(omitDuplicates ? [] : [linkedDesignSpecification(input.projectRoot, undefined, input.role)]),
     ...(input.role === "lead" && !omitDuplicates ? [renderHelperMcpRoster(input.helperMcps ?? [])] : []),
-    `- Role MCP tools (paseo_factory): ${roleTools}`,
-    `- Law: ${fireAndEndTurn}`,
+    ...(isSupervisor ? [] : roleLines),
     ...(omitDuplicates
       ? []
       : input.role === "lead"
