@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.4] - 2026-11-17
+
+### Changed
+
+- The Supervisor seat kickoff packet is slimmer and leads with its one behavioural law. The `Role MCP tools` and `Fire-and-End-Turn` lines now sit directly after the header, and the Lead-only `Top-level files`, `Memory/docs present` and `Build/Test commands` lines are dropped (the `Project memory` line still names the readable files). The Lead packet is byte-identical.
+
+### Fixed
+
+- The `/factory` skill's heredoc dispatch example now renders as a fenced `sh` block with every line at column 0. The previous 2-space indent rendered the terminator as `  EOF`, which bash and zsh never accept, so a literal copy left the heredoc unterminated.
+
 ## [0.12.3] - 2026-11-17
 
 ### Changed
