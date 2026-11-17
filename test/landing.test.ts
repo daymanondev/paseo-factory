@@ -177,3 +177,18 @@ test("an untracked .scratch/notebook.md promotes into <projectStateDir> and neve
   );
   assert.equal(existsSync(worktree), false);
 });
+
+test("large untracked .factory-dependencies-* staging trees do not overflow or block cleanliness checks", async (t) => {
+  const { factory, task, workspace, worktree, claimed } = landingFixture(t);
+  for (const cwd of [workspace, worktree]) {
+    for (let directory = 0; directory < 16; directory++) {
+      const staged = join(cwd, ".factory-dependencies-fixture", "installation", `package-${directory}-${"x".repeat(140)}`);
+      mkdirSync(staged, { recursive: true });
+      for (let file = 0; file < 256; file++) {
+        writeFileSync(join(staged, `${file}-${"y".repeat(140)}.js`), "staged fixture\n");
+      }
+    }
+  }
+  assert.equal((await factory.claim({ task, sha: claimed, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } })).verdict, "green");
+  assert.equal((await factory.accept({ task, attempt: 1 })).landing, "landed");
+});

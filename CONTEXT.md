@@ -40,7 +40,7 @@ Done-criteria fixed before a `Peer` starts: `Gate` command (mandatory for `engin
 _Avoid_: spec, acceptance criteria, bare `gate`-only Contracts, retry cycle, Task version
 
 **Workspace**:
-Git working copy where a Task's work and `Gate` run and `Artifact` resolves — normally an isolated **Task worktree** (`<projectStateDir>/worktrees/<task>` on `factory/<task>`, copying `.worktreeinclude`, symlinking `node_modules`, reaping leaked child processes on cleanup, and landing `claimedCommit` on `Accepted`). **Workspace conflict** occurs only when live Workspaces nest or share overlapping explicit `scope` globs.
+Git working copy where a Task's work and `Gate` run and `Artifact` resolves — normally an isolated **Task worktree** (`<projectStateDir>/worktrees/<task>` on `factory/<task>`, copying `.worktreeinclude`, symlinking `node_modules`, hydrating updated `node_modules` back to `<project-root>` via `.git/` staging on `Accepted` with backup-guarded stale staging cleanup, reaping leaked child processes on cleanup, and landing `claimedCommit` on `Accepted`). **Workspace conflict** occurs only when live Workspaces nest or share overlapping explicit `scope` globs.
 _Avoid_: repo, project dir, cwd, clone, sandbox, scope conflict, merge conflict
 
 **Serial Wave**:

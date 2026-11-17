@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { execFileSync } from "node:child_process";
 import { spawnSync, type SpawnSyncReturns } from "node:child_process";
-import { cpSync, existsSync, lstatSync, mkdtempSync, realpathSync, renameSync, rmSync, statSync } from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdtempSync, readdirSync, realpathSync, renameSync, rmSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { isFactoryInfrastructureProcess } from "./process-policy.ts";
@@ -50,6 +50,22 @@ export function resolveClaimedCommit(cwd: string, sha: string): Promise<CommitRe
 }
 
 
+const DEPENDENCY_STAGING_ROOT_PREFIX = ".factory-dependencies-";
+const DEPENDENCY_STAGING_GIT_PREFIX = "factory-dependencies-";
+const UNTRACKED_ARTIFACT_EXCLUDES = [
+  "node_modules",
+  "playwright-report",
+  "test-results",
+  "coverage",
+  ".nyc_output",
+  "*-snapshots",
+  `${DEPENDENCY_STAGING_ROOT_PREFIX}*`,
+] as const;
+
+function untrackedExcludePathspecs(): string[] {
+  return UNTRACKED_ARTIFACT_EXCLUDES.map((directory) => `:(top,exclude,glob)**/${directory}/**`);
+}
+
 function isUntrackedInstallArtifact(porcelainLine: string): boolean {
   if (!porcelainLine.startsWith("?? ")) return false;
   const rel = porcelainLine
@@ -64,7 +80,12 @@ function isUntrackedInstallArtifact(porcelainLine: string): boolean {
   ) {
     return true;
   }
-  const directories = rel.split("/").slice(0, -1);
+  const segments = rel.replace(/\/$/, "").split("/");
+  const directorySegments = rel.endsWith("/") ? segments : segments.slice(0, -1);
+  if (directorySegments.some((name) => name.startsWith(DEPENDENCY_STAGING_ROOT_PREFIX))) {
+    return true;
+  }
+  const directories = segments.slice(0, -1);
   if (directories.some((name) => ["playwright-report", "test-results", "coverage", ".nyc_output"].includes(name) || name.endsWith("-snapshots"))) {
     return true;
   }
@@ -116,9 +137,7 @@ export function commitSeatMemoryOnRoot(
       "--untracked-files=all",
       "--",
       ":(top,glob)**",
-      ...["node_modules", "playwright-report", "test-results", "coverage", ".nyc_output", "*-snapshots"].map(
-        (directory) => `:(top,exclude,glob)**/${directory}/**`,
-      ),
+      ...untrackedExcludePathspecs(),
     ]);
     if (expanded.error !== undefined || expanded.status !== 0) return false;
     const untracked = expanded.stdout.split("\n").filter((line) => line.startsWith("?? "));
@@ -181,8 +200,7 @@ async function workspaceStatus(cwd: string): Promise<{ stdout: string }> {
   const tracked = await git(cwd, ["status", "--porcelain", "--untracked-files=no"]);
   const expanded = await git(cwd, [
     "status", "--porcelain", "--untracked-files=all", "--", ":(top,glob)**",
-    ...["node_modules", "playwright-report", "test-results", "coverage", ".nyc_output", "*-snapshots"]
-      .map((directory) => `:(top,exclude,glob)**/${directory}/**`),
+    ...untrackedExcludePathspecs(),
   ]);
   const untracked = expanded.stdout.split("\n").filter((line) => line.startsWith("?? "));
   return { stdout: [tracked.stdout.trimEnd(), ...untracked].filter(Boolean).join("\n") };
@@ -399,6 +417,7 @@ async function landCleanly(
   if (stateDir !== undefined && projectSlug !== undefined && projectSlug !== "") {
     syncLegacyScratchNotebook(stateDir, projectSlug, projectRoot);
   }
+  cleanupStaleDependencyStaging(projectRoot);
   let status: { stdout: string };
   try {
     status = await workspaceStatus(projectRoot);
@@ -434,8 +453,71 @@ async function landCleanly(
   return finishLanding(projectRoot, worktree);
 }
 
+function resolveGitDir(projectRoot: string): string | undefined {
+  try {
+    const result = gitIn(projectRoot, ["rev-parse", "--absolute-git-dir"]);
+    if (result.error !== undefined || result.status !== 0) return undefined;
+    const dir = result.stdout.trim();
+    if (dir === "" || !statSync(dir).isDirectory()) return undefined;
+    return dir;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Removes leftover dependency hydration staging directories in both `<projectRoot>`
+ * and `<gitDir>`. Preserves any staging directory that holds a `previous/` backup
+ * while `<projectRoot>/node_modules` is missing, so retained failure backups are
+ * never discarded before recovery.
+ */
+function cleanupStaleDependencyStaging(projectRoot: string): void {
+  const rootDepsExist = lstatSync(join(projectRoot, "node_modules"), { throwIfNoEntry: false }) !== undefined;
+  const targets: Array<{ parent: string; prefix: string }> = [
+    { parent: projectRoot, prefix: DEPENDENCY_STAGING_ROOT_PREFIX },
+  ];
+  const gitDir = resolveGitDir(projectRoot);
+  if (gitDir !== undefined) {
+    targets.push({ parent: gitDir, prefix: DEPENDENCY_STAGING_GIT_PREFIX });
+  }
+  for (const { parent, prefix } of targets) {
+    let entries;
+    try {
+      entries = readdirSync(parent, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory() || !entry.name.startsWith(prefix)) continue;
+      const entryPath = join(parent, entry.name);
+      const hasBackup = lstatSync(join(entryPath, "previous"), { throwIfNoEntry: false }) !== undefined;
+      if (hasBackup && !rootDepsExist) continue;
+      try {
+        rmSync(entryPath, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+      } catch {
+        // Best-effort cleanup: a locked leftover never blocks landing.
+      }
+    }
+  }
+}
+
+function createDependencyStagingDir(projectRoot: string): string {
+  const gitDir = resolveGitDir(projectRoot);
+  if (gitDir !== undefined) {
+    try {
+      if (statSync(gitDir).dev === statSync(projectRoot).dev) {
+        return mkdtempSync(join(gitDir, DEPENDENCY_STAGING_GIT_PREFIX));
+      }
+    } catch {
+      // Fall back to projectRoot when gitDir is on another filesystem or unwritable.
+    }
+  }
+  return mkdtempSync(join(projectRoot, DEPENDENCY_STAGING_ROOT_PREFIX));
+}
+
 /** Keep the verified installation alive until it is safely available in the root. */
 function hydrateDependencies(projectRoot: string, worktree: string): void {
+  cleanupStaleDependencyStaging(projectRoot);
   const source = join(worktree, "node_modules");
   const destination = join(projectRoot, "node_modules");
   if (!existsSync(join(projectRoot, "package.json")) || !existsSync(source) || !lstatSync(source).isDirectory()) return;
@@ -445,7 +527,7 @@ function hydrateDependencies(projectRoot: string, worktree: string): void {
     if (!installed.isDirectory()) throw new Error("root node_modules is obstructed by a non-directory");
     if (installed.mtimeMs >= statSync(join(projectRoot, "package.json")).mtimeMs) return;
   }
-  const staging = mkdtempSync(join(projectRoot, ".factory-dependencies-"));
+  const staging = createDependencyStagingDir(projectRoot);
   let retainBackup = false;
   try {
     // Copy into the destination filesystem; source and root may be on different volumes.
@@ -466,7 +548,13 @@ function hydrateDependencies(projectRoot: string, worktree: string): void {
       throw err;
     }
   } finally {
-    if (!retainBackup) rmSync(staging, { recursive: true, force: true });
+    if (!retainBackup) {
+      try {
+        rmSync(staging, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+      } catch {
+        // Destination is already swapped; any locked backup entry is swept on the next landing.
+      }
+    }
   }
 }
 

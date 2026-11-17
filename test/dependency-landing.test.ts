@@ -1,9 +1,9 @@
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { createFactory } from "../src/index.ts";
+import { createFactory, landTaskWorktree } from "../src/index.ts";
 import { disposeDir, gitCommitAll, gitCommitChanges, makeTempDir } from "./helpers.ts";
 
 function landingFixture(t: TestContext) {
@@ -114,4 +114,60 @@ test("accept never hydrates an inherited worktree dependency symlink", async (t)
   assert.equal((await factory.accept({ task, attempt: 1 })).landing, "landed");
   assert.equal(readFileSync(join(destination, "sentinel"), "utf8"), "shared root dependencies");
   assert.equal(lstatSync(destination).mtimeMs, 0);
+});
+
+test("accept sweeps stale root and .git dependency staging directories when root node_modules is present", async (t) => {
+  const { factory, task, workspace, worktree, claimed } = landingFixture(t);
+  install(workspace, "current root dependencies");
+  install(worktree, "verified dependencies");
+  const rootStale = join(workspace, ".factory-dependencies-stale1");
+  mkdirSync(join(rootStale, "previous"), { recursive: true });
+  writeFileSync(join(rootStale, "previous", "sentinel"), "stale backup");
+  const gitStale = join(workspace, ".git", "factory-dependencies-stale2");
+  mkdirSync(join(gitStale, "installation"), { recursive: true });
+  writeFileSync(join(gitStale, "installation", "sentinel"), "stale install");
+
+  assert.equal((await factory.claim({ task, sha: claimed, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } })).verdict, "green");
+  assert.equal((await factory.accept({ task, attempt: 1 })).landing, "landed");
+  assert.equal(existsSync(rootStale), false);
+  assert.equal(existsSync(gitStale), false);
+  assert.equal(readdirSync(workspace).some((name) => name.startsWith(".factory-dependencies-")), false);
+  assert.equal(readdirSync(join(workspace, ".git")).some((name) => name.startsWith("factory-dependencies-")), false);
+  assert.equal(readFileSync(join(workspace, "node_modules", "sentinel"), "utf8"), "verified dependencies");
+});
+
+test("cleanup preserves retained previous backup when root node_modules is missing, while untracked staging never blocks landing", async (t) => {
+  const { factory, task, workspace, claimed } = landingFixture(t);
+  const retained = join(workspace, ".factory-dependencies-keep01");
+  mkdirSync(join(retained, "previous"), { recursive: true });
+  writeFileSync(join(retained, "previous", "sentinel"), "sole backup");
+
+  assert.equal((await factory.claim({ task, sha: claimed, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } })).verdict, "green");
+  assert.equal((await factory.accept({ task, attempt: 1 })).landing, "landed");
+  assert.equal(existsSync(join(retained, "previous", "sentinel")), true);
+});
+
+test("landTaskWorktree hydrates dependencies via rev-parse --absolute-git-dir when projectRoot is a linked worktree", async (t) => {
+  const dir = makeTempDir("factory-dependencies-linked-");
+  disposeDir(t, dir);
+  const originRepo = join(dir, "origin-repo");
+  mkdirSync(originRepo);
+  writeFileSync(join(originRepo, "package.json"), '{"name":"linked-fixture"}\n');
+  const base = gitCommitAll(originRepo);
+  const linkedCheckout = join(dir, "linked-checkout");
+  execFileSync("git", ["worktree", "add", "-b", "main-checkout", linkedCheckout, base], { cwd: originRepo, stdio: "pipe" });
+  const task = "LINKEDDEPS";
+  const branch = `factory/${task}`;
+  const taskWorktree = join(dir, "task-worktree");
+  execFileSync("git", ["worktree", "add", "-b", branch, taskWorktree, base], { cwd: linkedCheckout, stdio: "pipe" });
+  writeFileSync(join(taskWorktree, "package.json"), '{"name":"linked-fixture","dependencies":{"vite":"1.0.0"}}\n');
+  const claimed = gitCommitChanges(taskWorktree, "add linked dependencies");
+  install(taskWorktree, "linked verified");
+
+  const landed = await landTaskWorktree({ projectRoot: linkedCheckout, worktree: taskWorktree, claimedCommit: claimed, base, branch });
+  assert.equal(landed.landing, "landed");
+  assert.equal(readFileSync(join(linkedCheckout, "node_modules", "sentinel"), "utf8"), "linked verified");
+  assert.equal(readdirSync(linkedCheckout).some((name) => name.startsWith(".factory-dependencies-")), false);
+  const gitDir = execFileSync("git", ["rev-parse", "--absolute-git-dir"], { cwd: linkedCheckout, encoding: "utf8" }).trim();
+  assert.equal(readdirSync(gitDir).some((name) => name.startsWith("factory-dependencies-")), false);
 });
