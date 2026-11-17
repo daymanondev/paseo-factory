@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.5] - 2026-11-17
+
+### Fixed
+
+- Dependency hydration staging during `accept` (`hydrateDependencies`) now stages inside `<gitDir>/factory-dependencies-*` (via `git rev-parse --absolute-git-dir`) when on the same filesystem as `<project-root>`, falling back to `<project-root>/.factory-dependencies-*` only when needed, with retried best-effort cleanup in `finally`.
+- `landCleanly()` and `hydrateDependencies()` now automatically sweep stale `.factory-dependencies-*` / `factory-dependencies-*` staging directories before clean-tree checks while preserving any `previous/` backup if `<project-root>/node_modules` is missing.
+- `isUntrackedInstallArtifact()`, `workspaceStatus()`, and `commitSeatMemoryOnRoot()` now recognize and exclude untracked `.factory-dependencies-*` trees so leftover fallback directories neither trigger `pending-conflict` nor overflow `git status` buffers, without weakening `Seat write fence`.
+
 ## [0.12.4] - 2026-11-17
 
 ### Changed
