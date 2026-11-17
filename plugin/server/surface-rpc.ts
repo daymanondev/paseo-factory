@@ -190,6 +190,11 @@ export interface SurfaceAgentSnapshot {
    * no turn has ever been sent to this seat yet, ADR 0031).
    */
   lastUserMessageAt?: string | null;
+  /**
+   * Shells and monitors the agent left running after its turn (`@getpaseo/plugin` >=0.16.0).
+   * Absent on <0.16.0 daemons or when unreported.
+   */
+  backgroundWork?: { readonly count?: number | null } | null;
 }
 
 /** One provider entry resolved from the daemon's provider & model catalog. */
@@ -452,6 +457,13 @@ function messageOf(err: unknown): string {
 
 function codeOf(err: unknown): string {
   return err instanceof FactoryError ? err.code : "failed";
+}
+
+/** Extracts a validated non-negative integer background-work count, or undefined when absent/invalid. */
+function backgroundWorkCountOf(agent: SurfaceAgentSnapshot): number | undefined {
+  const count = agent.backgroundWork?.count;
+  if (typeof count !== "number" || !Number.isSafeInteger(count) || count < 0) return undefined;
+  return count === 0 ? 0 : count;
 }
 
 /** One companion install's sentence — the source actually used, the ref when one was given. */
@@ -874,6 +886,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     const registration = projectSlug ? readProjectRegistration(deps.stateDir, projectSlug) : undefined;
     let queuedMailCount = 0;
     if (projectSlug && role === "lead") try { queuedMailCount = readLeadMailbox(join(projectStateDir(deps.stateDir, projectSlug), "mailbox.jsonl")).queued.length; } catch { /* Unknown mailbox count. */ }
+    const backgroundWorkCount = backgroundWorkCountOf(agent);
     return {
       lane,
       pendingLane: handoffProgress?.reason === "provider-change" && handoffProgress.state === "scheduled" ? { ...handoffProgress.toLane, scope: lane.scope } : null,
@@ -895,6 +908,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       requiresAttention: agent.requiresAttention,
       attentionReason: agent.attentionReason,
       ...(agent.lastError === undefined ? {} : { lastError: agent.lastError }),
+      ...(backgroundWorkCount === undefined ? {} : { backgroundWorkCount }),
       cwd: agent.cwd,
     };
   };
@@ -919,6 +933,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       if (!lane.model || isCurrent(lane) || seen.has(key)) return false;
       seen.add(key); return true;
     }).slice(0, 6);
+    const backgroundWorkCount = row.backgroundWorkCount ?? backgroundWorkCountOf(agent);
     return {
       slug: registration.slug, workspaceId: agent.workspaceId ?? registration.workspaceId ?? null,
       agentId: agent.id, role, task: "task" in row ? row.task : null,
@@ -926,6 +941,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       lane: row.lane, pendingLane: row.pendingLane, context: row.context!, contextUsedTokens: row.context!.usedTokens,
       markTokens: row.markTokens, handoff: row.handoff, handoffState: row.handoff?.state ?? null,
       allowedActions: row.allowedActions, quickSwitchModels,
+      ...(backgroundWorkCount === undefined ? {} : { backgroundWorkCount }),
     };
   };
 

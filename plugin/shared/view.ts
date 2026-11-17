@@ -212,6 +212,8 @@ export const AgentViewSchema = z.object({
   attentionReason: z.string().nullable().optional(),
   /** The daemon's last error line for the agent, when it reported one. */
   lastError: z.string().nullable().optional(),
+  /** Running background shells/monitors reported by the daemon (>=0.16.0); absent when unreported. */
+  backgroundWorkCount: z.number().int().nonnegative().optional(),
   cwd: z.string().nullable(),
 });
 export type AgentView = z.infer<typeof AgentViewSchema>;
@@ -483,6 +485,8 @@ export const PanelSeatRowSchema = z.object({
   hint: z.string().nullable(),
   /** The seat context-window reading against its model-dependent handoff mark. */
   context: SeatContextSchema.nullable(),
+  /** Running background shells/monitors reported by the daemon (>=0.16.0); absent when vacant or unreported. */
+  backgroundWorkCount: z.number().int().nonnegative().optional(),
 });
 export type PanelSeatRow = z.infer<typeof PanelSeatRowSchema>;
 
@@ -515,6 +519,8 @@ export const PanelPeerRowSchema = z.object({
   statusLabel: z.string(),
   tone: PanelToneSchema,
   model: z.string().nullable(),
+  /** Running background shells/monitors reported by the daemon (>=0.16.0); absent when unreported. */
+  backgroundWorkCount: z.number().int().nonnegative().optional(),
 });
 export type PanelPeerRow = z.infer<typeof PanelPeerRowSchema>;
 
@@ -606,6 +612,8 @@ export const SeatDirectoryEntrySchema = z.object({
   markTokens: z.number().int(),
   /** Compatibility status summary of handoff.state, or null. */
   handoffState: z.string().nullable(),
+  /** Running background shells/monitors reported by the daemon (>=0.16.0); absent when unreported. */
+  backgroundWorkCount: z.number().int().nonnegative().optional(),
 });
 export type SeatDirectoryEntry = z.infer<typeof SeatDirectoryEntrySchema>;
 

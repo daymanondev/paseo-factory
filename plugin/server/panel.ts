@@ -191,7 +191,18 @@ function seatRow(role: SeatRole, agent: AgentView | null, input: PanelInput): Pa
   const fields = seatFields(agent, input.seatLanes?.[role] ?? fallbackLane, input.handoffs?.[role], input.handovers?.includes(role));
   if (agent === null) return { ...fields, role, vacant: true, agentId: null, statusLabel: "vacant", tone: "normal", model: null, hint: role === "supervisor" ? "No Supervisor is running." : "No Lead is running — ask your Supervisor.", context: null };
   const status = statusOf(agent);
-  return { ...fields, role, vacant: false, agentId: agent.id, statusLabel: status.label, tone: status.tone, model: modelOf(agent), hint: status.tone === "error" ? (agent.lastError ?? null) : null, context: contextOf(role, agent) };
+  return {
+    ...fields,
+    role,
+    vacant: false,
+    agentId: agent.id,
+    statusLabel: status.label,
+    tone: status.tone,
+    model: modelOf(agent),
+    hint: status.tone === "error" ? (agent.lastError ?? null) : null,
+    context: contextOf(role, agent),
+    ...(agent.backgroundWorkCount === undefined ? {} : { backgroundWorkCount: agent.backgroundWorkCount }),
+  };
 }
 
 /**
@@ -237,6 +248,7 @@ function peerRows(input: PanelInput): PanelPeerRow[] {
       statusLabel: status.label,
       tone: status.tone,
       model: modelOf(agent),
+      ...(agent.backgroundWorkCount === undefined ? {} : { backgroundWorkCount: agent.backgroundWorkCount }),
     });
   }
   return rows;
