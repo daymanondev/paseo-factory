@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.2] - 2026-11-17
+
+### Changed
+
+- Pinned the Paseo SDK development dependencies to **0.16.0**. The minimum Paseo requirement remains `>=0.13.0`.
+
+### Fixed
+
+- Updated `agent.turn.after` handling for Paseo 0.16.0: pass `turnId` without reading the removed event timeline. Post-turn recovery prefers a whole-turn tail request with limit 1 filtered by turn ID, falling back to tail 20. Lead mailbox and Peer and Supervisor handoffs safely handle missing timelines.
+- Fenced `paseo workspace` commands inside Factory seats: known read verbs pass through; mutating and unknown verbs are refused.
+- Published fence-owned `auto_accept` settings through both legacy feature values and modern provider options. Copilot Supervisor and Lead seats retain forced-false settings even when a modern toggle requests otherwise.
+
 ## [0.12.1] - 2026-11-16
 
 **Retire `factory-burn-lab` from the Factory companion catalog and Vault config sync.**
