@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.3] - 2026-11-17
+
+### Changed
+
+- The global `/factory` skill now packs evidence into the directive it dispatches: the Owner's words stay verbatim as the goal, followed by sourced evidence (marked verified or assumed), items already at HEAD dropped via `git log --oneline -5`, one observable done-when, and a one-line out-of-scope. It no longer relays implementation as prose diffs or splits work into waves; Supervisor and Lead own the plan.
+- The skill's dispatch step now sends a multi-line directive, or one containing backticks or `$`, through a single-quoted heredoc so the shell never expands it.
+
 ## [0.12.2] - 2026-11-17
 
 ### Changed
