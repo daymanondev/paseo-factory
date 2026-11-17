@@ -5,7 +5,7 @@
  * reference survives on Hermes (the typeof guard), `window` event methods are
  * guarded per method (React Native's window lacks them), no node built-ins.
  */
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createResponseOrder } from "./response-order.ts";
 
 export const BUSY_MS = 5000;
@@ -25,34 +25,47 @@ function hidden(): boolean {
 
 export type Failed = { code: string; message: string };
 export type Loaded<T> = { value: T | null; error: Failed | null; at: number | null };
+export type PollState<T> = Loaded<T> & { refresh: () => void };
+export type PollOptions = { cadenceKey?: unknown };
 
 export function usePoll<T>(
   load: () => Promise<{ ok: true; value: T } | { ok: false; code: string; error: string }>,
   reloadKey: string,
   every: (value: T | null) => number,
-): Loaded<T> {
+  options?: PollOptions,
+): PollState<T> {
   const [state, setState] = useState<Loaded<T>>({ value: null, error: null, at: null });
   const latest = useRef({ load, every });
   latest.current = { load, every };
+  const refreshRef = useRef<() => void>(() => {});
+  const rescheduleRef = useRef<() => void>(() => {});
+  const cadenceInitializedRef = useRef(false);
+
   useEffect(() => {
     let live = true;
     const order = createResponseOrder();
     let timer: ReturnType<typeof setTimeout> | undefined;
     let last: T | null = null;
+    let inFlight = false;
     const again = () => {
-      if (live) timer = setTimeout(tick, hidden() ? QUIET_MS : latest.current.every(last));
+      if (!live) return;
+      clearTimeout(timer);
+      timer = setTimeout(tick, hidden() ? QUIET_MS : latest.current.every(last));
     };
     const tick = async () => {
       if (hidden()) return again();
       const request = order.begin();
+      inFlight = true;
       clearTimeout(timer);
       try {
         const r = await latest.current.load();
         if (!live || !order.current(request)) return;
+        inFlight = false;
         if (r.ok) last = r.value;
         if (live) setState((s) => (r.ok ? { value: r.value, error: null, at: Date.now() } : { ...s, error: { code: r.code, message: r.error } }));
       } catch (error) {
         if (!order.current(request)) return;
+        inFlight = false;
         if (live) setState((s) => ({ ...s, error: { code: "failed", message: String(error) } }));
       }
       again();
@@ -61,6 +74,16 @@ export function usePoll<T>(
       if (hidden() || !live) return;
       clearTimeout(timer);
       void tick();
+    };
+    // Non-resetting refresh: keeps the last good view and existing DOM listeners intact.
+    refreshRef.current = () => {
+      if (!live) return;
+      clearTimeout(timer);
+      void tick();
+    };
+    rescheduleRef.current = () => {
+      if (!live || inFlight) return;
+      again();
     };
     setState({ value: null, error: null, at: null });
     void tick();
@@ -71,11 +94,27 @@ export function usePoll<T>(
       live = false;
       order.invalidate();
       clearTimeout(timer);
+      refreshRef.current = () => {};
+      rescheduleRef.current = () => {};
       page?.removeEventListener?.("visibilitychange", shown);
       if (typeof window?.removeEventListener === "function") window.removeEventListener("focus", shown);
     };
   }, [reloadKey]);
-  return state;
+
+  const cadenceKey = options?.cadenceKey;
+  useEffect(() => {
+    if (!cadenceInitializedRef.current) {
+      cadenceInitializedRef.current = true;
+      return;
+    }
+    rescheduleRef.current();
+  }, [cadenceKey]);
+
+  const refresh = useCallback(() => {
+    refreshRef.current();
+  }, []);
+
+  return useMemo(() => ({ ...state, refresh }), [state, refresh]);
 }
 
 /** A ticking `now`, for freshness dots and swimlane geometry. */

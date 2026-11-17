@@ -7,13 +7,14 @@
 import type { PluginTheme } from "@getpaseo/plugin";
 import { useRpc } from "@getpaseo/plugin/client";
 import { Modal, ScrollView, useToast } from "@getpaseo/plugin/client/ui";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Text, View } from "react-native";
-import { skillsImport, skillsPackSave, skillsPackDelete, skillsPackReset, skillsTogglePack, lanesSet, lanesReset, lanesSetBatch, handoffStart, handoffReplaceNow, handoffCancel, handoffRetry, handoffHandover, onboardingCommit, onboardingInspect, openDesignCatalog, openDesignSync, helperMcpsSyncAndProbe, helperMcpsSetEnabled, pluginsInstall, pluginsManage, pluginsCheckUpdates, selfUpdateApply, selfUpdateStatus, profilesApply, profilesDelete, profilesSave, projectDelete, projectReset, projectRotate, snapshot, supervisorAdopt, supervisorStart, vaultConfigure, vaultHydrate, vaultImport, vaultSync } from "../../shared/rpc.ts";
+import { skillsImport, skillsPackSave, skillsPackDelete, skillsPackReset, skillsTogglePack, lanesSet, lanesReset, lanesSetBatch, handoffStart, handoffReplaceNow, handoffCancel, handoffRetry, handoffHandover, onboardingCommit, onboardingInspect, openDesignCatalog, openDesignSync, helperMcpsSyncAndProbe, helperMcpsSetEnabled, pluginsInstall, pluginsManage, pluginsCheckUpdates, selfUpdateApply, selfUpdateStatus, profilesApply, profilesDelete, profilesSave, projectDelete, projectReset, projectRotate, snapshot, stateUpdates, supervisorAdopt, supervisorStart, vaultConfigure, vaultHydrate, vaultImport, vaultSync } from "../../shared/rpc.ts";
 import type { ManageablePluginId } from "../../shared/companions.ts";
 import type { FactoryView, LaneName } from "../../shared/view.ts";
 import { SPACING, text } from "../kit/theme.ts";
-import { useNow, usePoll, pollEvery, PROVIDERS_LOADING_MS } from "../kit/poll.ts";
+import { useNow, usePoll, pollEvery, PROVIDERS_LOADING_MS, QUIET_MS } from "../kit/poll.ts";
+import { isSubscriptionLive, useClientSubscription } from "../kit/subscription.ts";
 import { OpenDesignControl } from "./open-design.tsx";
 import type { SeatEditorRequest } from "./editor-request.ts";
 import { ProjectPanel } from "./project-panel.tsx";
@@ -110,7 +111,6 @@ export function FactoryShell({
   const vaultSyncCall = useRpc(vaultSync);
   const vaultImportCall = useRpc(vaultImport);
 
-  const [bump, setBump] = useState(0);
   const [busy, setBusy] = useState(false);
   const [handover, setHandover] = useState<{ seat: string; text: string; source: "extracted" | "substitute" } | null>(null);
   const [busyAct, setBusyAct] = useState<string | null>(null);
@@ -124,7 +124,7 @@ export function FactoryShell({
   const [laneNote, setLaneNote] = useState<string | null>(null);
   const [containerWidth, setContainerWidth] = useState<number>(0);
   const lastViewRef = useRef<FactoryView | null>(null);
-  const refresh = () => setBump((n) => n + 1);
+  const refreshRef = useRef<() => void>(() => {});
 
   // The active Project scope: the workspace panel's directory (auto-bound).
   const scopeRoot = dir;
@@ -133,6 +133,12 @@ export function FactoryShell({
   /** Paseo mobile: a monitor with quick actions — no settings writes, no desktop-only panes. */
   const mobile = layout?.platform === "ios" || layout?.platform === "android";
 
+  const subscriptionInput = useMemo(() => ({ projectRoot: scopeRoot }), [scopeRoot]);
+  const subscription = useClientSubscription(stateUpdates, subscriptionInput, () => {
+    refreshRef.current();
+  });
+  const subscriptionLive = isSubscriptionLive(subscription);
+
   const poll = usePoll(
     async () => {
       const r = await snapshotCall({ projectRoot: scopeRoot });
@@ -140,18 +146,31 @@ export function FactoryShell({
       vaultResponses.current.invalidate();
       return { ok: true as const, value: r.view };
     },
-    `factory:${scopeRoot ?? "global"}:${bump}`,
+    `factory:${scopeRoot ?? "global"}`,
     (view) =>
       activePluginAct?.kind === "restarting-core"
         ? 1000
         : view?.providersLoading === true
           ? PROVIDERS_LOADING_MS
-          : pollEvery(
-              (view?.kpis.running ?? 0) + (view?.kpis.needsHuman ?? 0) > 0 ||
-                (view?.panel.handoffs ?? []).some(handoff => handoff.state !== "done") ||
-                (view?.vault.historyImports ?? []).some((item) => item.status === "pending" || item.status === "staged"),
-            ),
+          : subscriptionLive
+            ? QUIET_MS
+            : pollEvery(
+                (view?.kpis.running ?? 0) + (view?.kpis.needsHuman ?? 0) > 0 ||
+                  (view?.panel.handoffs ?? []).some(handoff => handoff.state !== "done") ||
+                  (view?.vault.historyImports ?? []).some((item) => item.status === "pending" || item.status === "staged"),
+              ),
+    { cadenceKey: `${subscriptionLive}:${activePluginAct?.kind === "restarting-core"}` },
   );
+  refreshRef.current = poll.refresh;
+  const refresh = poll.refresh;
+  const prevSubscriptionStatusRef = useRef(subscription.status);
+  useEffect(() => {
+    const prev = prevSubscriptionStatusRef.current;
+    prevSubscriptionStatusRef.current = subscription.status;
+    if (prev !== "live" && subscription.status === "live") {
+      poll.refresh();
+    }
+  }, [subscription.status, poll.refresh]);
   if (poll.value !== null) lastViewRef.current = poll.value;
   const serverView = poll.value ?? lastViewRef.current;
   const view = serverView;
