@@ -422,8 +422,11 @@ export function applyProviderExecutionFence<T extends AgentCreateRequest["config
     };
   }
 
-  const existingFeatures = isRecord(config.featureValues) ? config.featureValues : {};
   const existingProviderOpts = isRecord(config.providerOptions) ? config.providerOptions : {};
+  const existingFeatures = {
+    ...(isRecord(config.featureValues) ? config.featureValues : {}),
+    ...existingProviderOpts,
+  };
 
   if (providerFamily === "opencode") {
     const existingPerm = isRecord(existingProviderOpts.permission) ? existingProviderOpts.permission : {};
@@ -512,6 +515,22 @@ export function applyProviderExecutionFence<T extends AgentCreateRequest["config
     }
   } else if (providerFamily === "pi" || providerFamily === "antigravity") {
     delete nextConfig.modeId;
+  }
+
+  // 0.15+ folds legacy features into options, with options winning conflicts.
+  // Keep the legacy field for 0.13–0.14 hosts, and explicitly publish seat
+  // overrides in both fields so modern launches never depend on that fold.
+  const features = isRecord(nextConfig.featureValues) ? nextConfig.featureValues : {};
+  const options = isRecord(nextConfig.providerOptions) ? nextConfig.providerOptions : {};
+  const seatAutoAccept =
+    (providerFamily === "opencode" && (role === "supervisor" || role === "lead" || role === "agent")) ||
+    (providerFamily === "copilot" && (role === "supervisor" || role === "lead"));
+  if (Object.keys(features).length > 0 || seatAutoAccept) {
+    nextConfig.providerOptions = {
+      ...features,
+      ...options,
+      ...(seatAutoAccept ? { auto_accept: features.auto_accept } : {}),
+    };
   }
 
   return nextConfig as T;
