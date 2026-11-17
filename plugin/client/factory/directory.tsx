@@ -1,17 +1,72 @@
-/** Project directory contributions: one header per root workspace and one actionable pill per live seat. */
-import type { PluginButton, PluginButtonContentProps, PluginClientContext } from "@getpaseo/plugin/client";
-import { useState } from "react";
-import { Icon } from "@getpaseo/plugin/client/ui";
+/** Project directory contributions: one header per root workspace, one actionable pill per live seat, and one sidebar workspace-row badge item. */
+import type {
+  PluginButton,
+  PluginButtonContentProps,
+  PluginClientContext,
+  PluginWorkspaceRowBadgeItemProps,
+} from "@getpaseo/plugin/client";
+import { useState, useSyncExternalStore } from "react";
+import * as pluginUi from "@getpaseo/plugin/client/ui";
 import { Platform, Pressable, Text, View } from "react-native";
 import { handoffStart, lanesSet, seatsDirectory, stateUpdates } from "../../shared/rpc.ts";
 import type { ProjectDirectoryEntry, SeatDirectoryEntry } from "../../shared/view.ts";
-import { headerPlans, pillPlans, reconcileDirectory } from "../kit/directory.ts";
+import { headerPlans, pillPlans, reconcileDirectory, workspaceRowBadgePlan } from "../kit/directory.ts";
 import type { RegistrationLike } from "../kit/directory.ts";
 import { isSubscriptionLive, subscribeClientUpdates } from "../kit/subscription.ts";
 import { CONTROL_SM, RADIUS, SPACING, hoveredOf, text } from "../kit/theme.ts";
 import { Btn } from "../kit/pill.tsx";
 import type { SeatEditorRequests } from "./editor-request.ts";
 import { PANEL_ID } from "./entries.tsx";
+
+const { Icon } = pluginUi;
+
+function resolveWorkspaceRowBadge(): typeof pluginUi.WorkspaceRowBadge | null {
+  const candidate = (pluginUi as { WorkspaceRowBadge?: unknown }).WorkspaceRowBadge;
+  if (typeof candidate === "function") return candidate as typeof pluginUi.WorkspaceRowBadge;
+  if (typeof candidate === "object" && candidate !== null && "$$typeof" in candidate) {
+    return candidate as typeof pluginUi.WorkspaceRowBadge;
+  }
+  return null;
+}
+
+const HostWorkspaceRowBadge = resolveWorkspaceRowBadge();
+
+/** Sidebar workspace-row badge contribution id (lowercase hyphenated per Paseo's id contract). */
+export const WORKSPACE_ROW_BADGE_ID = "factory-workspace-badge";
+
+function createProjectDirectoryStore() {
+  let projects: readonly ProjectDirectoryEntry[] = [];
+  let fingerprint = "[]";
+  const listeners = new Set<() => void>();
+  const notify = (): void => {
+    for (const listener of listeners) listener();
+  };
+  return {
+    subscribe(listener: () => void): () => void {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+    getSnapshot(): readonly ProjectDirectoryEntry[] {
+      return projects;
+    },
+    setProjects(next: readonly ProjectDirectoryEntry[]): void {
+      const nextFingerprint = JSON.stringify(next);
+      if (nextFingerprint === fingerprint) return;
+      projects = next;
+      fingerprint = nextFingerprint;
+      notify();
+    },
+    clear(): void {
+      const hadProjects = projects.length > 0;
+      projects = [];
+      fingerprint = "[]";
+      if (hadProjects) notify();
+      listeners.clear();
+    },
+  };
+}
 
 /** What one Paseo button registration accepts as an in-place refresh. */
 type ButtonPatch = Partial<PluginButton<string>>;
@@ -120,6 +175,7 @@ function SeatDirectoryPopover({ theme, seat, close, otherModel, switchModel, han
 export function startSeatDirectory(client: PluginClientContext, editorRequests?: SeatEditorRequests): () => void {
   const headers = new Map<string, { fingerprint: string; registration: DirectoryRegistration }>();
   const pills = new Map<string, { fingerprint: string; registration: DirectoryRegistration }>();
+  const projectStore = createProjectDirectoryStore();
   const warned = new Set<string>();
   const warn = (surface: string, error: unknown): void => {
     const message = error instanceof Error ? error.message : String(error);
@@ -128,6 +184,31 @@ export function startSeatDirectory(client: PluginClientContext, editorRequests?:
     warned.add(key);
     console.warn(`[Factory ${surface}] ${message}`);
   };
+  const WorkspaceRowBadgeItem = ({ workspaceId }: PluginWorkspaceRowBadgeItemProps) => {
+    const projects = useSyncExternalStore(projectStore.subscribe, projectStore.getSnapshot, projectStore.getSnapshot);
+    if (HostWorkspaceRowBadge === null) return null;
+    const plan = workspaceRowBadgePlan(workspaceId, projects);
+    if (plan === null) return null;
+    return (
+      <HostWorkspaceRowBadge
+        icon={plan.icon}
+        label={plan.label}
+        tone={plan.tone}
+        accessibilityLabel={plan.accessibilityLabel}
+      />
+    );
+  };
+  let removeBadgeItem: (() => void) | undefined;
+  if (typeof (client as { addWorkspaceRowBadgeItem?: unknown }).addWorkspaceRowBadgeItem === "function" && HostWorkspaceRowBadge !== null) {
+    try {
+      removeBadgeItem = client.addWorkspaceRowBadgeItem({
+        id: WORKSPACE_ROW_BADGE_ID,
+        title: "Factory",
+        icon: "Activity",
+        Component: WorkspaceRowBadgeItem,
+      });
+    } catch (error) { warn("workspace badge", error); }
+  }
   const behaviorOf = (seat: SeatDirectoryEntry, project: ProjectDirectoryEntry | undefined) => {
     const target = seat.role === "peer" ? (seat.task ? `peer:${seat.task}` : null) : seat.role;
     const openEditor = project?.workspaceId && target ? () => {
@@ -168,6 +249,7 @@ export function startSeatDirectory(client: PluginClientContext, editorRequests?:
       if (stopped) return;
       if (!reply.ok) { warn("directory poll", reply.error); return; }
       if (reply.daemonError) { warn("directory poll", reply.daemonError); return; }
+      try { projectStore.setProjects(reply.projects); } catch (error) { warn("workspace badge", error); }
       try {
         reconcileDirectory(
           headers,
@@ -253,6 +335,11 @@ export function startSeatDirectory(client: PluginClientContext, editorRequests?:
     queued = false;
     stopFallbackPoll();
     stopSubscription();
+    if (removeBadgeItem !== undefined) {
+      try { removeBadgeItem(); } catch (error) { warn("workspace badge", error); }
+      removeBadgeItem = undefined;
+    }
+    projectStore.clear();
     for (const entry of headers.values()) { try { entry.registration.remove(); } catch (error) { warn("header", error); } }
     for (const entry of pills.values()) { try { entry.registration.remove(); } catch (error) { warn("pill", error); } }
     headers.clear();
