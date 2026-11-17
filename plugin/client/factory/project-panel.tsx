@@ -270,6 +270,38 @@ const seatIsLive = (row: PanelSeatRow): boolean => !row.vacant && row.agentId !=
 /** A standing seat's chip is editable when vacant with no handoff in flight, or when the seat may switch model or hand off. */
 const seatChipEditable = (row: PanelSeatRow): boolean => (!seatIsLive(row) && (row.handoff === null || row.handoff.state === "done")) || row.allowedActions.includes("switch-model") || (seatIsLive(row) && row.allowedActions.includes("hand-off-now"));
 
+/** Flags leftover post-turn background processes when an otherwise idle seat or Peer still owns running shells/monitors. */
+function IdleBackgroundWork({ theme, seatKey, row }: { theme: PluginTheme; seatKey: string; row: PanelSeatRow | PanelPeerRow }) {
+  const count = row.backgroundWorkCount;
+  const isIdle = (row.role === "peer" || !row.vacant) && /^idle$/i.test(row.statusLabel.trim());
+  if (!isIdle || typeof count !== "number" || !Number.isFinite(count) || count <= 0) return null;
+  const processes = Math.trunc(count);
+  if (processes <= 0) return null;
+  const colour = factoryPalette(theme).wait;
+  const label = `${processes} background ${processes === 1 ? "process" : "processes"} running`;
+  return (
+    <View
+      testID={`factory-seat-background-work-${seatKey}`}
+      style={{
+        flexDirection: "row",
+        alignItems: "center",
+        alignSelf: "flex-start",
+        maxWidth: "100%",
+        gap: SPACING[1.5],
+        paddingHorizontal: SPACING[2],
+        paddingVertical: 2,
+        borderRadius: RADIUS.sm,
+        borderWidth: 1,
+        borderColor: tint(colour, "66"),
+        backgroundColor: tint(colour, "18"),
+      }}
+    >
+      <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: colour, flexShrink: 0 }} />
+      <Text style={{ ...text(theme, "label"), color: colour, flexShrink: 1 }}>{label}</Text>
+    </View>
+  );
+}
+
 function SeatRow({
   theme,
   name,
@@ -312,6 +344,7 @@ function SeatRow({
           {row.allowedActions.includes("view-handover") ? <Btn theme={theme} small variant="ghost" testID={`factory-seat-view-handover-${row.role}`} label="View handover" disabled={actions.busy} onPress={() => actions.viewHandover(row.role)} /> : null}
         </>}
       />
+      <IdleBackgroundWork theme={theme} seatKey={row.role} row={row} />
       {row.hint !== null ? <Text style={text(theme, "meta", colour)}>{row.hint}</Text> : null}
       {row.handoff !== null && row.handoff.state !== "failed" ? <Text style={{ ...text(theme, "meta"), color: row.handoff.state === "done" ? factoryPalette(theme).ok : factoryPalette(theme).move }}>Handoff: {row.handoff.state === "scheduled" ? `Scheduled · waiting for ${row.handoff.waitingPeers ?? 0} Peers` : row.handoff.state}</Text> : null}
       {isSupervisor && row.vacant && !mobile ? (
@@ -369,6 +402,7 @@ function PeerRowView({ theme, row, wide, actions }: { theme: PluginTheme; row: P
           {row.allowedActions.includes("view-handover") ? <Btn theme={theme} small variant="ghost" testID={`factory-seat-view-handover-peer-${row.task}`} label="View handover" disabled={actions.busy} onPress={() => actions.viewHandover(`peer:${row.task}`)} /> : null}
         </>}
       />
+      <IdleBackgroundWork theme={theme} seatKey={`peer-${row.task}`} row={row} />
     </View></View>
   );
 }
