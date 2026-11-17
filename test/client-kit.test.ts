@@ -9,6 +9,8 @@ import assert from "node:assert/strict";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { loadClientModule, testTheme } from "./client-markup.ts";
+import { workspaceRowBadgePlan } from "../plugin/client/kit/directory.ts";
+import type { ProjectDirectoryEntry } from "../plugin/shared/view.ts";
 
 const theme = testTheme as never;
 const c = testTheme.colors;
@@ -90,4 +92,93 @@ test("Tabs only fires onChange for a different tab", () => {
   root.props.children[0]!.props.onPress();
   root.props.children[1]!.props.onPress();
   assert.deepEqual(seen, ["b"]);
+});
+
+test("workspaceRowBadgePlan returns null for non-Factory workspaces, empty ids, and idle Projects", () => {
+  const projects: ProjectDirectoryEntry[] = [
+    { slug: "idle", root: "/tmp/idle", workspaceId: "ws-idle", needsYouCount: 0, handoffActive: false, activeWorkCount: 0, backgroundWorkCount: 0 },
+    { slug: "legacy-idle", root: "/tmp/legacy", workspaceId: "ws-legacy", needsYouCount: 0 },
+    { slug: "unanchored", root: "/tmp/unanchored", workspaceId: null, needsYouCount: 2, handoffActive: true, activeWorkCount: 1, backgroundWorkCount: 1 },
+  ];
+
+  assert.equal(workspaceRowBadgePlan("", projects), null);
+  assert.equal(workspaceRowBadgePlan("ws-stranger", projects), null);
+  assert.equal(workspaceRowBadgePlan("ws-idle", projects), null);
+  assert.equal(workspaceRowBadgePlan("ws-legacy", projects), null);
+});
+
+test("workspaceRowBadgePlan enforces priority: Needs you > handoff > active work > background work", () => {
+  const base = { slug: "proj", root: "/tmp/proj", workspaceId: "ws-1" };
+
+  assert.deepEqual(
+    workspaceRowBadgePlan("ws-1", [
+      { ...base, needsYouCount: 3, handoffActive: true, activeWorkCount: 2, backgroundWorkCount: 4 },
+    ]),
+    {
+      label: "Needs you · 3",
+      tone: "warning",
+      icon: "AlertTriangle",
+      accessibilityLabel: "Factory: Needs you · 3",
+    },
+  );
+
+  assert.deepEqual(
+    workspaceRowBadgePlan("ws-1", [
+      { ...base, needsYouCount: 0, handoffActive: true, activeWorkCount: 2, backgroundWorkCount: 4 },
+    ]),
+    {
+      label: "Handing off",
+      tone: "info",
+      icon: "RefreshCw",
+      accessibilityLabel: "Factory: Handing off",
+    },
+  );
+
+  assert.deepEqual(
+    workspaceRowBadgePlan("ws-1", [
+      { ...base, needsYouCount: 0, handoffActive: false, activeWorkCount: 1, backgroundWorkCount: 4 },
+    ]),
+    {
+      label: "1 active",
+      tone: "success",
+      icon: "Activity",
+      accessibilityLabel: "Factory: 1 active seat",
+    },
+  );
+
+  assert.deepEqual(
+    workspaceRowBadgePlan("ws-1", [
+      { ...base, needsYouCount: 0, handoffActive: false, activeWorkCount: 2, backgroundWorkCount: 0 },
+    ]),
+    {
+      label: "2 active",
+      tone: "success",
+      icon: "Activity",
+      accessibilityLabel: "Factory: 2 active seats",
+    },
+  );
+
+  assert.deepEqual(
+    workspaceRowBadgePlan("ws-1", [
+      { ...base, needsYouCount: 0, handoffActive: false, activeWorkCount: 0, backgroundWorkCount: 1 },
+    ]),
+    {
+      label: "1 background",
+      tone: "warning",
+      icon: "Activity",
+      accessibilityLabel: "Factory: 1 background process running",
+    },
+  );
+
+  assert.deepEqual(
+    workspaceRowBadgePlan("ws-1", [
+      { ...base, needsYouCount: 0, handoffActive: false, activeWorkCount: 0, backgroundWorkCount: 3 },
+    ]),
+    {
+      label: "3 background",
+      tone: "warning",
+      icon: "Activity",
+      accessibilityLabel: "Factory: 3 background processes running",
+    },
+  );
 });

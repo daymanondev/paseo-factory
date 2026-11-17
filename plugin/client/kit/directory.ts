@@ -8,7 +8,71 @@
  * live-seats.ts precedent); the starter and popover live in
  * factory/directory.tsx.
  */
+import type { WorkspaceRowBadgeTone } from "@getpaseo/plugin/client/ui";
 import type { ProjectDirectoryEntry, SeatDirectoryEntry } from "../../shared/view.ts";
+
+/** Zero-RN descriptor for Paseo's `WorkspaceRowBadge` in the sidebar workspace list. */
+export interface WorkspaceRowBadgePlan {
+  readonly label: string;
+  readonly tone: WorkspaceRowBadgeTone;
+  readonly icon: string;
+  readonly accessibilityLabel: string;
+}
+
+/**
+ * Pure workspace-row badge planner: maps `(workspaceId, projects)` to the
+ * highest-priority badge descriptor (`Needs you · N` > `Handing off` > active
+ * work / leftover background work), or `null` when idle or not a Factory Project.
+ */
+export function workspaceRowBadgePlan(
+  workspaceId: string,
+  projects: readonly ProjectDirectoryEntry[],
+): WorkspaceRowBadgePlan | null {
+  if (workspaceId === "") return null;
+  const project = projects.find(
+    (entry) => typeof entry.workspaceId === "string" && entry.workspaceId !== "" && entry.workspaceId === workspaceId,
+  );
+  if (project === undefined) return null;
+
+  if (project.needsYouCount > 0) {
+    const label = `Needs you · ${project.needsYouCount}`;
+    return {
+      label,
+      tone: "warning",
+      icon: "AlertTriangle",
+      accessibilityLabel: `Factory: ${label}`,
+    };
+  }
+  if (project.handoffActive === true) {
+    return {
+      label: "Handing off",
+      tone: "info",
+      icon: "RefreshCw",
+      accessibilityLabel: "Factory: Handing off",
+    };
+  }
+  const activeWorkCount = project.activeWorkCount ?? 0;
+  if (activeWorkCount > 0) {
+    const label = `${activeWorkCount} active`;
+    return {
+      label,
+      tone: "success",
+      icon: "Activity",
+      accessibilityLabel: `Factory: ${activeWorkCount} active ${activeWorkCount === 1 ? "seat" : "seats"}`,
+    };
+  }
+  const backgroundWorkCount = project.backgroundWorkCount ?? 0;
+  if (backgroundWorkCount > 0) {
+    const label = `${backgroundWorkCount} background`;
+    return {
+      label,
+      tone: "warning",
+      icon: "Activity",
+      accessibilityLabel: `Factory: ${backgroundWorkCount} background ${backgroundWorkCount === 1 ? "process" : "processes"} running`,
+    };
+  }
+  return null;
+}
 
 /** The header button's contribution id — `factory-header-<workspaceId>` (the spike's E2E hook). */
 export const headerButtonId = (workspaceId: string): string => `factory-header-${workspaceId.toLowerCase().replace(/[^a-z0-9-]/g, "-")}`;

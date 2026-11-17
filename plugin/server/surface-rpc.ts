@@ -2699,7 +2699,26 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           now: Date.now(),
         });
         const workspaceId = registration.workspaceId ?? supervisorRaw?.workspaceId ?? leadRaw?.workspaceId ?? null;
-        projects.push({ slug: registration.slug, root: registration.root, workspaceId, needsYouCount: panel.needsYou.length });
+        const seatRows = [panel.seats!.supervisor, panel.seats!.lead, ...panel.seats!.peers];
+        const handoffActive = panel.handoffs.some(
+          (handoff) => handoff.state !== "done" && handoff.state !== "failed",
+        );
+        const activeWorkCount = seatRows.filter(
+          (row) => !("vacant" in row && row.vacant) && (row.statusLabel === "working" || row.statusLabel === "starting"),
+        ).length;
+        const backgroundWorkCount = seatRows.reduce(
+          (sum, row) => sum + (row.backgroundWorkCount ?? 0),
+          0,
+        );
+        projects.push({
+          slug: registration.slug,
+          root: registration.root,
+          workspaceId,
+          needsYouCount: panel.needsYou.length,
+          handoffActive,
+          activeWorkCount,
+          backgroundWorkCount,
+        });
         if (supervisorRaw !== undefined) directoryRows.push([registration, supervisorRaw, panel.seats!.supervisor, profiles]);
         if (leadRaw !== undefined) directoryRows.push([registration, leadRaw, panel.seats!.lead, profiles]);
         for (const row of panel.seats!.peers) { const peer = peers.find(p => p.id === row.agentId); if (peer) directoryRows.push([registration, peer, row, profiles]); }

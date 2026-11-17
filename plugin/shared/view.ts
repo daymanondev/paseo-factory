@@ -631,6 +631,12 @@ export const ProjectDirectoryEntrySchema = z.object({
   workspaceId: z.string().nullable(),
   /** How many Needs-you items the Project's panel view carries. */
   needsYouCount: z.number().int(),
+  /** True when any Project seat or open Peer has an in-flight or scheduled handoff. */
+  handoffActive: z.boolean().optional(),
+  /** Number of non-vacant Project seats or open Peers currently working or starting. */
+  activeWorkCount: z.number().int().nonnegative().optional(),
+  /** Total leftover background shells/monitors reported across live Project seats and open Peers. */
+  backgroundWorkCount: z.number().int().nonnegative().optional(),
 });
 export type ProjectDirectoryEntry = z.infer<typeof ProjectDirectoryEntrySchema>;
 
