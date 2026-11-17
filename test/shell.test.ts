@@ -17,6 +17,8 @@ const sessionOpenRequest = (reason: PluginSessionOpenRequest["reason"], env: Rec
   reason,
   purpose: "interactive",
   title: null,
+  background: false,
+  metadata: {},
   labels: {},
   tools: [],
   mcpServers: {},
