@@ -127,6 +127,7 @@ import {
 } from "../shared/rpc.ts";
 import type { CompanionPluginView, AgentView, LaneName, LaneProfileView, Lanes, ProjectDirectoryEntry, ProjectView, SeatDirectoryEntry, VaultStatusView } from "../shared/view.ts";
 import type { UsageRuntime } from "./usage-rollup.ts";
+import type { TurnTimelineSource } from "./turn-timeline.ts";
 
 // ---- the daemon slice ---------------------------------------------------------------------
 
@@ -265,12 +266,7 @@ export interface SurfaceDaemonApi {
        * seat. Failures are logged, never a failed adopt.
        */
       update?(input: { labels?: Record<string, string>; title?: string }): Promise<unknown>;
-      timeline: {
-        refetch(options?: {
-          direction?: "tail";
-          limit?: number;
-        }): Promise<{ entries?: { seqEnd?: number; item?: { type?: string; text?: string } }[]; error?: string | null }>;
-      };
+      timeline: TurnTimelineSource;
     };
   };
   workspaces?: {
