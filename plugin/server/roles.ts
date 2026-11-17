@@ -423,10 +423,8 @@ export function applyProviderExecutionFence<T extends AgentCreateRequest["config
   }
 
   const existingProviderOpts = isRecord(config.providerOptions) ? config.providerOptions : {};
-  const existingFeatures = {
-    ...(isRecord(config.featureValues) ? config.featureValues : {}),
-    ...existingProviderOpts,
-  };
+  const existingFeatures = isRecord(config.featureValues) ? config.featureValues : {};
+  const requestedAutoAccept = existingProviderOpts.auto_accept ?? existingFeatures.auto_accept;
 
   if (providerFamily === "opencode") {
     const existingPerm = isRecord(existingProviderOpts.permission) ? existingProviderOpts.permission : {};
@@ -437,7 +435,7 @@ export function applyProviderExecutionFence<T extends AgentCreateRequest["config
       // bypassing the choke when `auto_accept` is true.
       nextConfig.featureValues = {
         ...existingFeatures,
-        auto_accept: typeof existingFeatures.auto_accept === "boolean" ? existingFeatures.auto_accept : true,
+        auto_accept: typeof requestedAutoAccept === "boolean" ? requestedAutoAccept : true,
       };
       nextConfig.toolPolicy = { preapproved: [] };
       nextConfig.modeId = "build";
@@ -455,7 +453,7 @@ export function applyProviderExecutionFence<T extends AgentCreateRequest["config
     } else if (role === "agent") {
       nextConfig.featureValues = {
         ...existingFeatures,
-        auto_accept: typeof existingFeatures.auto_accept === "boolean" ? existingFeatures.auto_accept : true,
+        auto_accept: typeof requestedAutoAccept === "boolean" ? requestedAutoAccept : true,
       };
       nextConfig.toolPolicy = { preapproved: [] };
       nextConfig.providerOptions = {
@@ -525,11 +523,10 @@ export function applyProviderExecutionFence<T extends AgentCreateRequest["config
   const seatAutoAccept =
     (providerFamily === "opencode" && (role === "supervisor" || role === "lead" || role === "agent")) ||
     (providerFamily === "copilot" && (role === "supervisor" || role === "lead"));
-  if (Object.keys(features).length > 0 || seatAutoAccept) {
+  if (seatAutoAccept) {
     nextConfig.providerOptions = {
-      ...features,
       ...options,
-      ...(seatAutoAccept ? { auto_accept: features.auto_accept } : {}),
+      auto_accept: features.auto_accept,
     };
   }
 
