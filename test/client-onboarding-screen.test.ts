@@ -36,7 +36,7 @@ async function loadScreenModule(entry: string, options: LoadOptions = {}): Promi
             loader: "js",
             contents: `
               const React = require('react');
-              const tag = (name) => ({ children, onPress, disabled, ...rest }) =>
+              const tag = (name) => ({ children, onPress, disabled, style, ...rest }) =>
                 React.createElement(
                   name,
                   {
@@ -45,6 +45,7 @@ async function loadScreenModule(entry: string, options: LoadOptions = {}): Promi
                     'data-testid': rest.testID,
                     'data-role': rest.accessibilityRole,
                     'aria-label': rest.accessibilityLabel,
+                    'data-style': typeof style === 'object' && style !== null ? JSON.stringify(style) : undefined,
                   },
                   typeof children === 'function' ? children({ pressed: false }) : children,
                 );
@@ -387,6 +388,11 @@ test("OnboardingScreen filters unregistered Paseo Projects, supports 1-click sel
       assert.ok(newBtn, "unregistered Paseo Project renders");
       assert.match(newBtn.textContent!, /Brand New App/);
       assert.match(newBtn.textContent!, /\/Users\/owner\/work\/new-app/);
+      const folderBadge = newBtn.querySelector('[data-testid="factory-onboard-project-badge-p-new"]') as HTMLElement | null;
+      assert.ok(folderBadge, "project row renders ToneBadge with testID");
+      assert.match(folderBadge.textContent!, /^Folder$/);
+      assert.match(folderBadge.getAttribute("data-style") ?? "", /"borderRadius":999/);
+      assert.match(folderBadge.getAttribute("data-style") ?? "", /#67717618/);
 
       // 1-click selection mounts OnboardingWizard inline and runs inspect, never commit.
       await act(() => newBtn.click());
@@ -506,6 +512,10 @@ test("Visual Folder Browser starts at $HOME, traverses subdirectories and parent
       const dotfilesRow = container.querySelector('[data-testid="factory-onboard-entry-dotfiles"]') as HTMLElement;
       assert.ok(dotfilesRow);
       assert.match(dotfilesRow.textContent!, /Git/, "gitRepo entries show Git indicator");
+      const gitBadge = dotfilesRow.querySelector('[data-testid="factory-onboard-entry-badge-dotfiles"]') as HTMLElement | null;
+      assert.ok(gitBadge, "git browse entry renders ToneBadge with testID");
+      assert.match(gitBadge.getAttribute("data-style") ?? "", /"borderRadius":999/);
+      assert.match(gitBadge.getAttribute("data-style") ?? "", /#337e5818/);
 
       // Click subdirectory `repos`.
       await act(() => (container.querySelector('[data-testid="factory-onboard-entry-repos"]') as HTMLElement).click());
@@ -605,7 +615,10 @@ test("OnboardingScreen mounts safely under an RN-like window on iOS/Android with
 });
 
 test("05-commit: isReusableLocalWorkspace reuses active non-worktree local workspaces and excludes worktrees, archiving workspaces, and mismatched roots", async () => {
-  const { isReusableLocalWorkspace } = await loadScreenModule("plugin/client/factory/onboarding-screen.tsx", { platformOs: "web" });
+  const { isReusableLocalWorkspace, selectReusableWorkspace, filterUnregisteredProjects } = await loadScreenModule(
+    "plugin/client/factory/onboarding-targets.ts",
+    { platformOs: "web" },
+  );
   assert.equal(typeof isReusableLocalWorkspace, "function");
   assert.equal(
     isReusableLocalWorkspace(
@@ -651,6 +664,83 @@ test("05-commit: isReusableLocalWorkspace reuses active non-worktree local works
     ),
     false,
   );
+  assert.equal(
+    isReusableLocalWorkspace(
+      { id: "ws-bogus", directory: "/Users/owner/work/app", kind: "local" as any, archivingAt: null },
+      "/Users/owner/work/app",
+    ),
+    false,
+    "rejects non-SDK kind values",
+  );
+  assert.equal(
+    selectReusableWorkspace(
+      [
+        { id: "ws-dir", workspaceDirectory: "/Users/owner/work/app", workspaceKind: "directory", archivingAt: null },
+        { id: "ws-local", workspaceDirectory: "/Users/owner/work/app", workspaceKind: "local_checkout", archivingAt: null },
+      ],
+      "/Users/owner/work/app",
+    )?.id,
+    "ws-local",
+  );
+  assert.deepEqual(
+    filterUnregisteredProjects([{ rootPath: "/a/" }, { rootPath: "/b" }], [{ root: "/a" }]),
+    [{ rootPath: "/b" }],
+  );
+});
+
+test("OnboardingScreen renders factory-onboard-retry when snapshot fails and retries on press", async () => {
+  const { OnboardingScreen } = await loadScreenModule("plugin/client/factory/onboarding-screen.tsx", { platformOs: "web" });
+  const { createElement } = await import("react");
+
+  let snapshotCalls = 0;
+  (globalThis as any).__onboardScreenTestProjects = () => [];
+  (globalThis as any).__onboardScreenTestProject = () => null;
+  (globalThis as any).__onboardScreenTestRpc = async (name: string, input: any) => {
+    if (name === "factory.seats.directory") return { ok: true, daemonError: null, seats: [], projects: [] };
+    if (name === "factory.snapshot") {
+      snapshotCalls += 1;
+      if (snapshotCalls === 1) return { ok: false, error: "daemon busy" };
+      return { ok: true, view: makeSnapshotView() };
+    }
+    if (name === "factory.onboarding.browse") return { ok: true, path: "/Users/owner/app", parent: "/Users/owner", home: "/Users/owner", entries: [] };
+    if (name === "factory.onboarding.inspect") {
+      return { ok: true, folder: input.folder, gitRepo: true, hasCommits: true, registered: false, existingLead: false, existingSupervisor: false, prerequisites: [], missingPrerequisites: [] };
+    }
+    return { ok: false, error: `unexpected ${name}` };
+  };
+
+  try {
+    await mountDom(async (createRoot, container, act) => {
+      const root = createRoot(container);
+      try {
+        await act(() =>
+          root.render(
+            createElement(OnboardingScreen, {
+              theme: testTheme,
+              host: { id: "h1", label: "Local" },
+              layout: { compact: false, platform: "web" },
+              params: { folder: "/Users/owner/app" },
+            }),
+          ),
+        );
+        await act(() => new Promise<void>((r) => setTimeout(r, 10)));
+
+        const retryBtn = container.querySelector('[data-testid="factory-onboard-retry"]') as HTMLElement | null;
+        assert.ok(retryBtn, "Retry button exposes testID factory-onboard-retry");
+        await act(() => retryBtn.click());
+        await act(() => new Promise<void>((r) => setTimeout(r, 10)));
+
+        assert.equal(snapshotCalls, 2);
+        assert.ok(container.querySelector('[data-testid="factory-onboarding"]'), "wizard mounts after successful retry");
+      } finally {
+        await act(() => root.unmount());
+      }
+    });
+  } finally {
+    delete (globalThis as any).__onboardScreenTestRpc;
+    delete (globalThis as any).__onboardScreenTestProjects;
+    delete (globalThis as any).__onboardScreenTestProject;
+  }
 });
 
 async function runWizardStepsToCommit(

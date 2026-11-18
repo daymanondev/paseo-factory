@@ -51,6 +51,7 @@ export {
   resetProjectLanes,
   saveLaneProfile,
   saveLanesBatch,
+  validatedProfileLanes,
 } from "./lane-profiles.ts";
 export type { LaneProfile, LaneProfileTombstone, LaneProfilesFile } from "./lane-profiles.ts";
 

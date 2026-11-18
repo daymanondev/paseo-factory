@@ -49,7 +49,7 @@ import { FactoryError } from "./core/errors.ts";
 import type { Factory } from "./core/factory.ts";
 import { readLeadMailbox } from "./core/mailbox.ts";
 import { buildSeatKickoffPacket } from "./core/preflight.ts";
-import { LANE_NAMES, laneError, loadLanes, migrateLegacyZcodeLane, parseLane, saveLanes, projectLanesPath, listLaneProfiles, getLaneProfile, readLaneProfilesFile, saveLaneProfile, deleteLaneProfile, applyLaneProfile, saveLanesBatch, resetProjectLanes } from "./core/lanes.ts";
+import { LANE_NAMES, laneError, loadLanes, migrateLegacyZcodeLane, parseLane, saveLanes, projectLanesPath, listLaneProfiles, getLaneProfile, readLaneProfilesFile, saveLaneProfile, deleteLaneProfile, applyLaneProfile, saveLanesBatch, resetProjectLanes, validatedProfileLanes } from "./core/lanes.ts";
 import type { LaneProfile } from "./core/lanes.ts";
 import { listProjectRegistrations, projectNotebookPath, projectStateDir, readProjectRegistration, resolveOrBootstrapProject, resolveProject } from "./core/project.ts";
 import type { ProjectResolution } from "./core/project.ts";
@@ -3539,13 +3539,10 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         if (profile === undefined) {
           return failure("profile-not-found", `no Lane profile "${profileId}" under ${deps.stateDir} — save one first`);
         }
-        for (const name of LANE_NAMES) {
-          const value = profile.lanes[name];
-          if (typeof value !== "string") {
-            return failure("invalid-profile", `profile lane ${name} is missing — a profile carries all six lanes whole`);
-          }
-          const problem = laneError(name, value.trim());
-          if (problem !== undefined) return failure("invalid-lane", problem);
+        try {
+          validatedProfileLanes(profile.lanes);
+        } catch (err) {
+          return failure(codeOf(err), messageOf(err));
         }
       }
       let providers: ProviderEntry[] = [];

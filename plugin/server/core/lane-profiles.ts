@@ -146,22 +146,23 @@ export function getLaneProfile(stateDir: string, id: string): LaneProfile | unde
 }
 
 /**
- * Validates a whole 6-lane table through the existing `laneError` — every
+ * Validates a whole 5-lane table through the existing `laneError` — every
  * lane must be present and usable; a missing lane is an error, never a
  * silent default (a profile is a complete preset or it is refused).
  */
-function validatedProfileLanes(lanes: Lanes): Lanes {
+export function validatedProfileLanes(lanes: Lanes): Lanes {
+  const validated = {} as Lanes;
   for (const name of LANE_NAMES) {
     const value = lanes[name];
     if (typeof value !== "string") {
-      throw new FactoryError("invalid-profile", `profile lane ${name} is missing — a profile carries all six lanes whole`);
+      throw new FactoryError("invalid-profile", `profile lane ${name} is missing — a profile carries all five lanes whole`);
     }
-    const error = laneError(name, value.trim());
+    const migrated = migrateLegacyZcodeLane(value.trim());
+    const error = laneError(name, migrated);
     if (error !== undefined) throw new FactoryError("invalid-lane", error);
+    validated[name] = migrated;
   }
-  const trimmed = {} as Lanes;
-  for (const name of LANE_NAMES) trimmed[name] = migrateLegacyZcodeLane(lanes[name].trim());
-  return trimmed;
+  return validated;
 }
 
 /**
