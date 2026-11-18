@@ -370,7 +370,9 @@ export const onboardingCommit = defineRpc({
     folder: z.string(),
     /** Initialise Git when the folder is not a repository; without it a non-Git folder is refused. */
     initGit: z.boolean().optional(),
-    /** The step-3 choices; only lanes that differ from the machine defaults persist as the Project's override. */
+    /** Optional saved Lane profile to apply before any per-seat model overrides. */
+    profileId: z.string().min(1).optional(),
+    /** The step-3 choices; only lanes that differ from the baseline (profile or machine defaults) persist as the Project's override. */
     models: z.object({ supervisor: z.string().optional(), lead: z.string().optional(), worker: z.string().optional() }).optional(),
     /** An Open Design project id from the host catalog to link before the Supervisor starts. */
     openDesignProjectId: z.string().optional(),

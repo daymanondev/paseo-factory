@@ -26,12 +26,21 @@ export interface DesignChoice {
   projectName: string;
 }
 
+export interface ProfileChoice {
+  id: string;
+  lanes: Pick<Lanes, OnboardingLaneName>;
+}
+
 /** Everything the Owner has entered — kept across Back and Next. */
 export interface WizardInput {
   step: OnboardingStep;
   /** The Owner accepted initialising Git for a folder that is not a repository. */
   initGit: boolean;
   lanes: Record<OnboardingLaneName, string>;
+  /** Selected saved Lane profile id, or null when using machine defaults. */
+  profileId: string | null;
+  /** True when a seat was individually edited after selecting a Lane profile. */
+  profileModified: boolean;
   directive: string;
   design: DesignChoice | null;
 }
@@ -41,15 +50,23 @@ export type WizardAction =
   | { type: "back" }
   | { type: "initGit"; value: boolean }
   | { type: "lane"; lane: OnboardingLaneName; value: string }
+  | { type: "profile"; profile: ProfileChoice }
+  | { type: "machineDefaults"; machineLanes: Pick<Lanes, OnboardingLaneName> }
   | { type: "directive"; value: string }
   | { type: "design"; design: DesignChoice | null };
+
+function pickOnboardingLanes(lanes: Pick<Lanes, OnboardingLaneName>): Record<OnboardingLaneName, string> {
+  return { supervisor: lanes.supervisor, lead: lanes.lead, worker: lanes.worker };
+}
 
 /** Step 3 is prefilled from the machine defaults. */
 export function initialWizard(machineLanes: Pick<Lanes, OnboardingLaneName>): WizardInput {
   return {
     step: 1,
     initGit: false,
-    lanes: { supervisor: machineLanes.supervisor, lead: machineLanes.lead, worker: machineLanes.worker },
+    lanes: pickOnboardingLanes(machineLanes),
+    profileId: null,
+    profileModified: false,
     directive: "",
     design: null,
   };
@@ -63,8 +80,28 @@ export function reduceWizard(state: WizardInput, action: WizardAction): WizardIn
       return { ...state, step: Math.max(1, state.step - 1) as OnboardingStep };
     case "initGit":
       return { ...state, initGit: action.value };
-    case "lane":
-      return { ...state, lanes: { ...state.lanes, [action.lane]: action.value } };
+    case "lane": {
+      const changed = state.lanes[action.lane] !== action.value;
+      return {
+        ...state,
+        lanes: { ...state.lanes, [action.lane]: action.value },
+        profileModified: state.profileId !== null ? state.profileModified || changed : false,
+      };
+    }
+    case "profile":
+      return {
+        ...state,
+        profileId: action.profile.id,
+        profileModified: false,
+        lanes: pickOnboardingLanes(action.profile.lanes),
+      };
+    case "machineDefaults":
+      return {
+        ...state,
+        profileId: null,
+        profileModified: false,
+        lanes: pickOnboardingLanes(action.machineLanes),
+      };
     case "directive":
       return { ...state, directive: action.value };
     case "design":
@@ -92,12 +129,13 @@ export function canAdvance(step: OnboardingStep, inspection: Inspection | null, 
   return inspection.gitRepo || initGit;
 }
 
-/** The commit RPC's payload — `initGit` only when the folder is not a repository, the directive trimmed or absent. */
+/** The commit RPC's payload — `initGit` only when the folder is not a repository, `profileId` when a profile is active, the directive trimmed or absent. */
 export function commitInputOf(state: WizardInput, inspection: Inspection, folder: string): CommitInput {
   const directive = state.directive.trim();
   return {
     folder,
     ...(!inspection.gitRepo && state.initGit ? { initGit: true } : {}),
+    ...(state.profileId === null ? {} : { profileId: state.profileId }),
     models: { supervisor: state.lanes.supervisor, lead: state.lanes.lead, worker: state.lanes.worker },
     ...(state.design === null ? {} : { openDesignProjectId: state.design.projectId }),
     ...(directive === "" ? {} : { directive }),

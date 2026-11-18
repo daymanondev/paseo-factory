@@ -7276,6 +7276,83 @@ test("onboarding.commit: an unusable lane is a named refusal that starts no Supe
   assert.equal(fake.created.length, 0);
 });
 
+test("02-profiles: onboarding.commit applies profileId first (preserving watch lane and activeProfileByScope), then applies any overridden models", async (t) => {
+  const { readLaneProfilesFile, saveLaneProfile } = await import("../plugin/server/core/lanes.ts");
+  const { onboardingCommit } = await import("../plugin/shared/rpc.ts");
+  assert.equal(onboardingCommit.input.safeParse({ folder: "/work/a", profileId: "fast" }).success, true);
+  assert.equal(onboardingCommit.input.safeParse({ folder: "/work/a", profileId: "" }).success, false);
+
+  // 1. Unknown profileId is refused up front before registering or starting a Supervisor.
+  const missingProject = makeProject(t, "commit-missing-profile");
+  const missingSurface = makeSurface(t, []);
+  const refused = await missingSurface.handlers.onboardingCommit({ folder: missingProject.root, profileId: "no-such-profile" });
+  assert.ok(!refused.ok);
+  assert.equal(refused.code, "profile-not-found");
+  assert.equal(missingSurface.fake.created.length, 0);
+  assert.equal(readProjectRegistration(missingSurface.stateDir, missingProject.slug), undefined);
+
+  // 2. Profile applied intact: all 6 lanes (including watch) and activeProfileByScope persist.
+  const cleanProject = makeProject(t, "commit-profile-clean");
+  const { handlers, stateDir, fake } = makeSurface(t, []);
+  writeLanes(stateDir, { supervisor: "claude/opus-4-8", lead: "pi/zcode/glm-5.3", worker: "pi/zcode/glm-5.3", watch: "pi/zcode/glm-5.3" });
+  saveLaneProfile(stateDir, {
+    id: "fast",
+    name: "Fast",
+    lanes: {
+      supervisor: "claude/claude-sonnet-4-6",
+      lead: "codex/gpt-5.4:low",
+      worker: "opencode/glm-5.1",
+      watch: "claude/claude-haiku-4-5",
+      freshEyes: "claude/claude-sonnet-4-6",
+    },
+  });
+  const cleanReply = await handlers.onboardingCommit({
+    folder: cleanProject.root,
+    profileId: "fast",
+    models: {
+      supervisor: "claude/claude-sonnet-4-6",
+      lead: "codex/gpt-5.4:low",
+      worker: "opencode/glm-5.1",
+    },
+  });
+  assert.ok(cleanReply.ok, cleanReply.ok ? "" : cleanReply.error);
+  const cleanLanes = loadLanes(stateDir, cleanProject.slug);
+  assert.ok(cleanLanes.ok);
+  assert.equal(cleanLanes.lanes.supervisor, "claude/claude-sonnet-4-6");
+  assert.equal(cleanLanes.lanes.lead, "codex/gpt-5.4:low");
+  assert.equal(cleanLanes.lanes.worker, "opencode/glm-5.1");
+  assert.equal(cleanLanes.lanes.watch, "claude/claude-haiku-4-5", "profile watch lane is preserved");
+  assert.equal(readLaneProfilesFile(stateDir).activeProfileByScope?.[cleanProject.slug], "fast");
+  assert.equal(fake.created[0]!.config.provider, "factory-supervisor/claude-sonnet-4-6");
+  const cleanSnap = await handlers.snapshot({ projectRoot: cleanProject.root });
+  assert.ok(cleanSnap.ok, cleanSnap.ok ? "" : cleanSnap.error);
+  assert.equal(cleanSnap.view.activeProfileId, "fast");
+  assert.equal(cleanSnap.view.activeProfileModified, false);
+
+  // 3. Profile applied + individual seat override: watch lane and activeProfileByScope stay intact; snapshot shows modified.
+  const modifiedProject = makeProject(t, "commit-profile-modified");
+  const modReply = await handlers.onboardingCommit({
+    folder: modifiedProject.root,
+    profileId: "fast",
+    models: {
+      supervisor: "claude/claude-sonnet-4-6",
+      lead: "claude/opus-4-8:high",
+      worker: "opencode/glm-5.1",
+    },
+  });
+  assert.ok(modReply.ok, modReply.ok ? "" : modReply.error);
+  const modLanes = loadLanes(stateDir, modifiedProject.slug);
+  assert.ok(modLanes.ok);
+  assert.equal(modLanes.lanes.lead, "claude/opus-4-8:high", "overridden seat lands after profile");
+  assert.equal(modLanes.lanes.supervisor, "claude/claude-sonnet-4-6", "unmodified profile seat remains");
+  assert.equal(modLanes.lanes.watch, "claude/claude-haiku-4-5", "profile watch lane stays preserved after seat override");
+  assert.equal(readLaneProfilesFile(stateDir).activeProfileByScope?.[modifiedProject.slug], "fast");
+  const modSnap = await handlers.snapshot({ projectRoot: modifiedProject.root });
+  assert.ok(modSnap.ok, modSnap.ok ? "" : modSnap.error);
+  assert.equal(modSnap.view.activeProfileId, "fast");
+  assert.equal(modSnap.view.activeProfileModified, true);
+});
+
 // ---- the seat directory (v0.6.1 W4 spike, ADR 0057 §8/§11) ---------------------------------------
 //
 // `factory.seats.directory` is the spike's one read: every live seat across
