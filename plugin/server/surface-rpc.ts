@@ -13,7 +13,7 @@ import { discoverOpenDesignProjects, exportOpenDesignProject, syncOpenDesignLink
 import type { HelperMcpConfigUpdate } from "./core/helper-mcp-sync.ts";
 import { discoverHelperMcps, helperMcpRoster, setHelperMcpEnabled, syncHelperMcps } from "./core/helper-mcp-sync.ts";
 import { provisionPiAgentHome } from "./core/pi-home.ts";
-import { pluginDirFor } from "./paths.ts";
+import { expandHome, pluginDirFor } from "./paths.ts";
 import { liveSeatCandidates, seatCandidates } from "./seats.ts";
 import { checkProjectResetRepository, removeProjectStateDirectory, resetProjectRepository } from "./project-reset.ts";
 import { boundTaskPeers } from "./task-peers.ts";
@@ -65,7 +65,7 @@ import {
   installOrUpdateExpoSkillPack, inspectSkillHub, importHostSkillOrPack, detectProjectSkillPacks,
 } from "./core/companion-tools.ts";
 import type { CompanionToolRunner, CompanionToolUpdateStatus } from "./core/companion-tools.ts";
-import { basename, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { foldView, foldTasks } from "./view.ts";
 import { foldPanel, inspectGitReadiness, probeOpenDesign } from "./panel.ts";
 import { handoffMarkTokens } from "./handoff-limits.ts";
@@ -107,6 +107,7 @@ import {
   profilesApply,
   profilesDelete,
   profilesSave,
+  onboardingBrowse,
   onboardingCommit,
   onboardingInspect,
   projectDelete,
@@ -3379,6 +3380,68 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     },
 
     /**
+     * Read-only host folder browser for the global Onboarding screen (ADR 0063).
+     * Defaults to `$HOME` (`resolveSurfaceUserHome()`), lists sorted visible
+     * subdirectories with `.git` hints, and never mutates the filesystem.
+     */
+    async onboardingBrowse(input: { path?: string } = {}) {
+      const home = realpathSafe(resolveSurfaceUserHome());
+      const raw = (input.path ?? "").trim();
+      const target = raw === "" ? home : resolve(home, expandHome(raw, home));
+      let isDirectory = false;
+      try {
+        isDirectory = statSync(target).isDirectory();
+      } catch (err) {
+        const errno = (err as NodeJS.ErrnoException | null)?.code;
+        if (errno === "EACCES" || errno === "EPERM") {
+          return failure("unreadable-directory", `${target} cannot be read: ${messageOf(err)}`);
+        }
+        if (errno === "ENOTDIR") {
+          return failure("not-a-directory", `${target} is not a folder`);
+        }
+        return failure("missing-directory", `${target} does not exist on disk`);
+      }
+      if (!isDirectory) {
+        return failure("not-a-directory", `${target} is not a folder`);
+      }
+      const folder = realpathSafe(target);
+      let dirents;
+      try {
+        dirents = readdirSync(folder, { withFileTypes: true });
+      } catch (err) {
+        return failure("unreadable-directory", `${folder} cannot be read: ${messageOf(err)}`);
+      }
+      const entries: { name: string; path: string; gitRepo: boolean }[] = [];
+      for (const dirent of dirents) {
+        if (dirent.name.startsWith(".")) continue;
+        const entryPath = join(folder, dirent.name);
+        let isDir = dirent.isDirectory();
+        if (!isDir && dirent.isSymbolicLink()) {
+          try {
+            isDir = statSync(entryPath).isDirectory();
+          } catch {
+            isDir = false;
+          }
+        }
+        if (!isDir) continue;
+        entries.push({
+          name: dirent.name,
+          path: entryPath,
+          gitRepo: existsSync(join(entryPath, ".git")),
+        });
+      }
+      entries.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }) || a.name.localeCompare(b.name));
+      const parentDir = dirname(folder);
+      return {
+        ok: true as const,
+        path: folder,
+        parent: parentDir === folder ? null : parentDir,
+        home,
+        entries,
+      };
+    },
+
+    /**
      * The onboarding wizard's read-only look at the workspace's folder (v0.6.0
      * W7, ADR 0056): Git repository yes/no, whether it holds a commit, whether a
      * Project is already registered for it, a Lead or Supervisor already live
@@ -4696,7 +4759,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
   const PROJECT_ACT_HANDLERS: ReadonlySet<string> = new Set(["projectReset", "projectDelete", "projectRotate"]);
   /** The handlers that take their lane's exclusive maintenance — the Project acts plus register. The one place the set is named. */
   const EXCLUSIVE_MAINTENANCE_HANDLERS: ReadonlySet<string> = new Set([...PROJECT_ACT_HANDLERS, "projectRegister"]);
-  const reads = new Set(["cachedProviders", "sanitizeLane", "snapshot", "seatsDirectory", "pluginsCheckUpdates", "selfUpdateStatus", "selfUpdateApply", "historyImport", "historyImports", "historyUpgrade", "vaultHydrate", "vaultPull", "vaultPush", "vaultSync", "vaultImport", "releaseSettingsRead", "githubPublishPreflight"]);
+  const reads = new Set(["cachedProviders", "sanitizeLane", "snapshot", "seatsDirectory", "onboardingBrowse", "pluginsCheckUpdates", "selfUpdateStatus", "selfUpdateApply", "historyImport", "historyImports", "historyUpgrade", "vaultHydrate", "vaultPull", "vaultPush", "vaultSync", "vaultImport", "releaseSettingsRead", "githubPublishPreflight"]);
   const nonEmptyString = (value: unknown): string | undefined =>
     typeof value === "string" && value.trim() !== "" ? value.trim() : undefined;
   const surfaceChangeTarget = (
@@ -4808,6 +4871,7 @@ export function registerSurfaceRpc(
   server.handle(handoffCancel, (input, context) => handlers.handoff(input, "cancel", pass(context)));
   server.handle(handoffRetry, (input, context) => handlers.handoff(input, "retry", pass(context)));
   server.handle(handoffHandover, (input, context) => handlers.handoff(input, "handover", pass(context)));
+  server.handle(onboardingBrowse, (input, context) => { pass(context); return handlers.onboardingBrowse(input); });
   server.handle(onboardingInspect, (input, context) => handlers.onboardingInspect(input, pass(context)));
   server.handle(onboardingCommit, (input, context) => handlers.onboardingCommit(input, pass(context)));
   server.handle(projectDelete, (input, context) => handlers.projectDelete(input, pass(context)));
