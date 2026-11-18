@@ -11,6 +11,7 @@ import { createLeadMailRuntime } from "../plugin/server/lead-mailbox.ts";
 import { PEER_HANDOFF_TOKENS } from "../plugin/server/peer-handoff.ts";
 import { createSurfaceHandlers, type SurfaceAgentSnapshot, type SurfaceDaemonApi } from "../plugin/server/surface-rpc.ts";
 import { handleSpoolRequest, startSpool } from "../plugin/server/spool.ts";
+import { saveLanes } from "../plugin/server/core/lanes.ts";
 import { readLeadMailbox } from "../plugin/server/core/mailbox.ts";
 import { disposeDir, gitCommitAll, gitCommitChanges, makeTempDir } from "./helpers.ts";
 
@@ -667,4 +668,34 @@ test("a smaller Peer window clips the handoff mark to eighty percent", async t =
   assert.ok(snap.ok);
   assert.equal(snap.view.panel.seats!.peers[0]!.context!.markTokens, 102_400);
   assert.equal(f.created.length, 0, "extraction preserves the existing Peer until its reply");
+});
+
+test("auto context-mark Peer handoff preserves the epoch spawn thinking via sibling model resolution (ADR 0062)", async t => {
+  const f = fixture(t);
+  saveLanes(f.stateDir, { worker: "antigravity/gemini-4-hydrogen-high" }, f.slug);
+  f.daemon.providers.listModels = async (provider: string) =>
+    provider === "antigravity"
+      ? {
+          models: [
+            { id: "gemini-4-hydrogen-low", thinkingOptions: [] },
+            { id: "gemini-4-hydrogen-medium", thinkingOptions: [] },
+            { id: "gemini-4-hydrogen-high", thinkingOptions: [] },
+            { id: "gemini-4-hydrogen-xhigh", thinkingOptions: [] },
+          ],
+        }
+      : { models: [] };
+  f.factory.setContract({ task: "T-04", workspace: f.root, gate: "true", description: "Complete the bounded slice" });
+  f.factory.requestSpawn({ task: "T-04", provider: "antigravity/gemini-4-hydrogen-high", arity: 1, worktree: f.cwd, thinking: "low", thinkingReason: "Mechanical slice" });
+
+  await f.runtime.onLeadTurnEnded(ended(f.peer.id));
+  writeFileSync(f.handoff, "# Completed & Verified Slice\nCarry on with the remaining check.");
+  await f.runtime.onLeadTurnEnded(ended(f.peer.id));
+
+  assert.equal(f.created.length, 1);
+  assert.deepEqual(f.created[0]!.config, { provider: "antigravity/gemini-4-hydrogen-low" }, "auto handoff inherits spawn_dispatched.thinking and resolves to the same-base -low sibling");
+
+  const ownerOverride = await f.surface.handoff({ projectRoot: f.root, seat: "peer:T-04", lane: "antigravity/gemini-4-argon-medium" }, "replaceNow");
+  assert.equal(ownerOverride.ok, true);
+  assert.equal(f.created.length, 2);
+  assert.deepEqual(f.created[1]!.config, { provider: "antigravity/gemini-4-argon-medium" }, "explicit Owner handoff lane override is never overridden by spawn thinking");
 });

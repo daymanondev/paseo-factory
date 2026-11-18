@@ -1189,3 +1189,49 @@ test("a partial catalog maps xhigh to max, else high, else the last option — n
   const onlyLowMedium = catalogOf({ provider: "pi", models: [{ id: "zcode/glm-5.3", thinkingOptions: [{ id: "low" }, { id: "medium" }] }] });
   assert.equal(resolvePeerThinkingLane("pi/zcode/glm-5.3", "xhigh", onlyLowMedium), "pi/zcode/glm-5.3:medium");
 });
+
+test("sibling effort models (antigravity/agy with thinkingOptions: []) switch within the same base and never cross families", () => {
+  const agyModels = [
+    "gemini-4-hydrogen-low",
+    "gemini-4-hydrogen-medium",
+    "gemini-4-hydrogen-high",
+    "gemini-4-hydrogen-xhigh",
+    "gemini-4-argon-low",
+    "gemini-4-argon-medium",
+    "gemini-4-argon-high",
+    "gemini-3.8-flash-low",
+    "gpt-oss-120b-medium",
+    "gemini-pro-orchestrator",
+  ].map((id) => ({ id, thinkingOptions: [] as const }));
+  const catalog = catalogOf(
+    { provider: "antigravity", models: agyModels },
+    { provider: "agy", models: agyModels },
+  );
+
+  // Exact same-base sibling matches (no :thinking suffix)
+  assert.equal(resolvePeerThinkingLane("antigravity/gemini-4-hydrogen-high", "low", catalog), "antigravity/gemini-4-hydrogen-low");
+  assert.equal(resolvePeerThinkingLane("antigravity/gemini-4-hydrogen-high", "xhigh", catalog), "antigravity/gemini-4-hydrogen-xhigh");
+  assert.equal(resolvePeerThinkingLane("agy/gemini-4-hydrogen-low", "medium", catalog), "agy/gemini-4-hydrogen-medium");
+
+  // Nearest-tier sibling ladder inside the same base
+  assert.equal(resolvePeerThinkingLane("antigravity/gemini-4-hydrogen-high", "max", catalog), "antigravity/gemini-4-hydrogen-xhigh");
+  assert.equal(resolvePeerThinkingLane("antigravity/gemini-4-argon-high", "xhigh", catalog), "antigravity/gemini-4-argon-high");
+  assert.equal(resolvePeerThinkingLane("antigravity/gemini-4-argon-low", "max", catalog), "antigravity/gemini-4-argon-high");
+
+  // Non-sibling / single-variant / non-suffixed models stay untouched
+  assert.equal(resolvePeerThinkingLane("antigravity/gpt-oss-120b-medium", "low", catalog), "antigravity/gpt-oss-120b-medium");
+  assert.equal(resolvePeerThinkingLane("antigravity/gemini-pro-orchestrator", "low", catalog), "antigravity/gemini-pro-orchestrator");
+
+  // Partial same-base ladders respect directional proximity
+  const partialCatalog = catalogOf({
+    provider: "antigravity",
+    models: [
+      { id: "gemini-partial-medium", thinkingOptions: [] },
+      { id: "gemini-partial-high", thinkingOptions: [] },
+      { id: "gemini-gap-low", thinkingOptions: [] },
+      { id: "gemini-gap-high", thinkingOptions: [] },
+    ],
+  });
+  assert.equal(resolvePeerThinkingLane("antigravity/gemini-partial-high", "low", partialCatalog), "antigravity/gemini-partial-medium");
+  assert.equal(resolvePeerThinkingLane("antigravity/gemini-gap-high", "medium", partialCatalog), "antigravity/gemini-gap-high");
+});

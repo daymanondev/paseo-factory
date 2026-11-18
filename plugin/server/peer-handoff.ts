@@ -13,7 +13,7 @@ import { refetchTurnTimeline } from "./turn-timeline.ts";
 import type { SurfaceAgentSnapshot, SurfaceDaemonApi } from "./surface-rpc.ts";
 import { stopAgentViaCli, type DaemonReply } from "./daemon-cli.ts";
 import { boundTaskPeers, peerIsRunning } from "./task-peers.ts";
-import { associateTaskPeer, createTaskPeer, resolvePeerSpawnProvider, resolveSpawnWorkspaceAndParent } from "./spool.ts";
+import { associateTaskPeer, createTaskPeer, resolvePeerDispatchLane, resolveSpawnWorkspaceAndParent } from "./spool.ts";
 import { READ_ONLY_DISPOSITION_FENCE, readOnlyDispositionEvidence } from "./core/disposition-prompt.ts";
 import { laneRef, readHandoffProgress, writeHandoffProgress } from "./handoff-progress.ts";
 import type { HandoffRequest, HandoffReply, HandoffProgress } from "../shared/handoff.ts";
@@ -113,6 +113,21 @@ export function createPeerHandoffRuntime(deps: PeerHandoffDeps) {
     const current = projectTask(eventsOf(slug), contract.task);
     return current.contract?.seq === contract.seq && !current.acceptance && current.verdict !== "green" && !current.attempts.some(attempt => attempt.gateOpen);
   };
+  const successorProviderFor = async (slug: string, task: string, ownerLane?: string): Promise<string> => {
+    const dispatchThinking =
+      ownerLane !== undefined
+        ? undefined
+        : projectTask(eventsOf(slug), task).history.findLast(
+            (event): event is Extract<LedgerEvent, { event: "spawn_dispatched" }> => event.event === "spawn_dispatched",
+          )?.thinking;
+    return resolvePeerDispatchLane({
+      factory: factoryOf(slug, task),
+      daemon: deps.daemon(),
+      requestedProvider: ownerLane ?? "worker",
+      projectSlug: slug,
+      ...(dispatchThinking === undefined ? {} : { thinking: dispatchThinking }),
+    });
+  };
 
   const finish = async (slug: string, contract: ContractSet, state: PeerHandoffState, live: SurfaceAgentSnapshot[], input?: LeadTurnEndedInput): Promise<void> => {
     if (!eligible(slug, contract)) return;
@@ -189,7 +204,7 @@ export function createPeerHandoffRuntime(deps: PeerHandoffDeps) {
     // Adopt it, and count even an already archived automatic successor.
     successorId ??= boundTaskPeers({ stateDir: deps.stateDir, slug, task, events: eventsOf(slug), live: all }).find(agent => agent.id !== state.outgoingId)?.id;
     if (!successorId) {
-      const provider = await resolvePeerSpawnProvider(factoryOf(slug, task), state.ownerLane ?? "worker", slug);
+      const provider = await successorProviderFor(slug, task, state.ownerLane);
       state.toLane = provider; save(slug, task, state); progress(slug, task, state, "creating-successor");
       const meta = await resolveSpawnWorkspaceAndParent(factoryOf(slug, task), daemon, task, state.worktree, deps.home);
       const labels = { seat: "agent", project: slug, task, epoch: String(contract.seq), peerHandoff: handoffKey };
@@ -224,7 +239,7 @@ export function createPeerHandoffRuntime(deps: PeerHandoffDeps) {
     if (state.reason === "owner" && !state.noticeQueued) {
       const successor = all.find(agent => agent.id === successorId);
       if (successor) state.toLane = snapshotLane(successor);
-      state.toLane ??= state.ownerLane ?? await resolvePeerSpawnProvider(factoryOf(slug, task), "worker", slug);
+      state.toLane ??= state.ownerLane ?? await successorProviderFor(slug, task);
       deps.queueNotice?.(slug, task, handoffKey, `Owner replaced Peer for Task ${task}: ${state.fromLane} → ${state.toLane}. Handover: ${state.handover ?? "extracted"}. Successor: ${successorId}.`);
       state.noticeQueued = true;
     }
@@ -268,7 +283,7 @@ export function createPeerHandoffRuntime(deps: PeerHandoffDeps) {
         const worktree = factoryOf(slug, task).worktreeFor(task);
         if (!worktree) continue; // A standing seat/shared checkout is never a Task worktree.
         worktreeDigest(worktree, contract); // Refuse missing/wrong-branch worktrees before interrupting.
-        state = { contractEpochSeq: contract.seq, peerHandoffCount: state.peerHandoffCount, ownerLane: state.ownerLane, phase: "extracting", reason: "context-mark", outgoingId: peer.id, requestedAt: Date.now(), worktree, fromLane: snapshotLane(peer), toLane: await resolvePeerSpawnProvider(factoryOf(slug, task), state.ownerLane ?? "worker", slug), localHandoffStamp: fileStamp(join(worktree, ".paseo-peer-handoff.md")) };
+        state = { contractEpochSeq: contract.seq, peerHandoffCount: state.peerHandoffCount, ownerLane: state.ownerLane, phase: "extracting", reason: "context-mark", outgoingId: peer.id, requestedAt: Date.now(), worktree, fromLane: snapshotLane(peer), toLane: await successorProviderFor(slug, task, state.ownerLane), localHandoffStamp: fileStamp(join(worktree, ".paseo-peer-handoff.md")) };
         progress(slug, task, state, "handing-over");
         save(slug, task, state);
         rmSync(summaryPath(slug, task), { force: true }); // An earlier epoch/extraction is never continuity evidence.
@@ -342,7 +357,7 @@ export function createPeerHandoffRuntime(deps: PeerHandoffDeps) {
         if (!worktree) return { ok: false, code: "peer-worktree-unavailable", error: "Task has no worktree" };
         try { worktreeDigest(worktree, contract); } catch (error) { return { ok: false, code: "peer-worktree-unavailable", error: String(error) }; }
         const ownerLane = input.lane ?? state.ownerLane;
-        state = { contractEpochSeq: contract.seq, peerHandoffCount: state.peerHandoffCount, ownerLane, reason: "owner", phase: "extracting", outgoingId: peer.id, requestedAt: Date.now(), worktree, fromLane: snapshotLane(peer), toLane: await resolvePeerSpawnProvider(factoryOf(input.slug, task), ownerLane ?? "worker", input.slug), localHandoffStamp: fileStamp(join(worktree, ".paseo-peer-handoff.md")), forceSubstitute: input.action === "replaceNow" };
+        state = { contractEpochSeq: contract.seq, peerHandoffCount: state.peerHandoffCount, ownerLane, reason: "owner", phase: "extracting", outgoingId: peer.id, requestedAt: Date.now(), worktree, fromLane: snapshotLane(peer), toLane: await successorProviderFor(input.slug, task, ownerLane), localHandoffStamp: fileStamp(join(worktree, ".paseo-peer-handoff.md")), forceSubstitute: input.action === "replaceNow" };
         save(input.slug, task, state); rmSync(summaryPath(input.slug, task), { force: true }); progress(input.slug, task, state, "handing-over");
         if (!state.forceSubstitute && peer.status !== "error") {
           arm(input.slug, task, state.requestedAt!, extractionTimeout(state));

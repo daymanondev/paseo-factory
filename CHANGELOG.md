@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-11-18
+
+**Same-base sibling model resolution for per-dispatch thinking effort and auto Peer handoff thinking continuity (ADR 0062).**
+
+### Added
+
+- **Same-base sibling model effort resolution (`src/lanes.ts`, `plugin/server/core/lanes.ts`):** Extended `resolvePeerThinkingLane` so providers without `thinkingOptions` that encode reasoning tiers as separate sibling model IDs (such as `antigravity` and `agy` — e.g. `gemini-4-hydrogen-{low,medium,high,xhigh}`, `gemini-4-argon-{low,medium,high}`, `claude-opus-5-5-{low,medium,high}`) automatically resolve `Lead`'s per-dispatch `thinking` tier onto the matching same-base sibling model using a directional nearest-tier ladder, without `:thinking` suffixes or cross-family switching. Single-variant and non-suffixed models (`gpt-oss-120b-medium`, `gemini-pro-orchestrator`) stay unchanged.
+- **Auto `Peer handoff` thinking continuity (`plugin/server/spool.ts`, `plugin/server/peer-handoff.ts`):** Extracted `resolvePeerDispatchLane` and wired `Peer handoff` successor creation to inherit the Task's latest `spawn_dispatched.thinking` tier when `state.ownerLane` is unset (preserving explicit Owner `lane` overrides).
+- **Domain documentation (`docs/adr/0062-sibling-model-thinking-effort-resolution.md`, `CONTEXT.md`):** Recorded ADR 0062 amending ADR 0054 §4 and updated the `Spawn` entry in `CONTEXT.md`.
+
 ## [0.14.1] - 2026-11-18
 
 ### Fixed

@@ -1890,7 +1890,7 @@ test("Seam 1 (ADR 0053): lead accept on a GREEN read-only Task records attempt_a
  */
 function makeThinkingSpawnSurface(
   t: TestContext,
-  options: { workerLane: string; provider: string; thinkingOptions: string[] },
+  options: { workerLane: string; provider: string; thinkingOptions: string[]; modelIds?: string[] },
 ) {
   const dir = makeTempDir();
   disposeDir(t, dir);
@@ -1904,6 +1904,7 @@ function makeThinkingSpawnSurface(
   saveLanes(stateDir, { worker: options.workerLane });
   const factory = createFactory({ stateDir });
   const created: { config: { provider: string; thinkingOptionId?: string }; labels: Record<string, string> }[] = [];
+  const defaultModels = [options.provider === "pi" ? "zcode/glm-5.3" : "gemini-4-argon-high"];
   const daemon = {
     agents: {
       list: async () => ({ entries: [] as never[] }),
@@ -1917,7 +1918,7 @@ function makeThinkingSpawnSurface(
       listAvailable: async () => ({ providers: [{ provider: options.provider, available: true }] }),
       listModels: async (provider: string) =>
         provider === options.provider
-          ? { models: [{ id: options.provider === "pi" ? "zcode/glm-5.3" : "gemini-4-argon-high", thinkingOptions: options.thinkingOptions.map((id) => ({ id })) }] }
+          ? { models: (options.modelIds ?? defaultModels).map((id) => ({ id, thinkingOptions: options.thinkingOptions.map((opt) => ({ id: opt })) })) }
           : { models: [] },
     },
   };
@@ -2047,6 +2048,53 @@ test("a promptless (driver-path) thinking spawn replies with the resolved lane f
   assert.equal(reply.ok, true, JSON.stringify(reply));
   assert.equal(reply.resolvedProvider, "pi/zcode/glm-5.3:high", "medium lands on the configured suffix the catalog carries");
   assert.equal(surface.created.length, 0, "the driver creates this agent itself — the plugin never does");
+});
+
+test("sibling-effort models (antigravity/agy) switch to the matching same-base sibling without thinkingOptionId (ADR 0062)", async (t) => {
+  const surface = makeThinkingSpawnSurface(t, {
+    workerLane: "antigravity/gemini-4-hydrogen-high",
+    provider: "antigravity",
+    thinkingOptions: [],
+    modelIds: ["gemini-4-hydrogen-low", "gemini-4-hydrogen-medium", "gemini-4-hydrogen-high", "gemini-4-hydrogen-xhigh"],
+  });
+  surface.factory.setContract({ task: "TH-6", workspace: surface.projectRoot, gate: "true", artifact: "README.md" });
+
+  const reply = await handleSpoolRequest(
+    surface.factory,
+    {
+      id: "th-6",
+      kind: "spawn",
+      task: "TH-6",
+      provider: "antigravity/gemini-4-hydrogen-high",
+      arity: 1,
+      prompt: "Execute task TH-6: pass gate `true`, and call agent_claim.",
+      seat: "lead",
+      thinking: "low",
+      thinkingReason: "Routine configuration edit with a mechanical gate.",
+    },
+    { daemon: surface.daemon },
+  );
+
+  assert.equal(reply.ok, true, JSON.stringify(reply));
+  assert.deepEqual(surface.created[0]!.config, { provider: "antigravity/gemini-4-hydrogen-low" }, "switches to the same-base -low sibling with no thinkingOptionId");
+
+  surface.factory.setContract({ task: "TH-7", workspace: surface.projectRoot, gate: "true", artifact: "README.md" });
+  const driverReply = await handleSpoolRequest(
+    surface.factory,
+    {
+      id: "th-7",
+      kind: "spawn",
+      task: "TH-7",
+      provider: "antigravity/gemini-4-hydrogen-high",
+      arity: 1,
+      thinking: "max",
+      thinkingReason: "Complex concurrency bugfix requiring maximum reasoning effort.",
+    },
+    { daemon: surface.daemon },
+  );
+
+  assert.equal(driverReply.ok, true, JSON.stringify(driverReply));
+  assert.equal(driverReply.resolvedProvider, "antigravity/gemini-4-hydrogen-xhigh", "max falls back onto the nearest same-base sibling -xhigh");
 });
 
 // ---- clean Task retirement (v0.5.0, ADR 0054 §5, ticket 05) -----------------------------------

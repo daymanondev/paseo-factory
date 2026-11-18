@@ -31,6 +31,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { provisionPiAgentHome } from "./pi-home.ts";
 import { projectStateDir } from "./project.ts";
+import { PEER_THINKING_LEVELS } from "./peer-thinking.ts";
 import type { PeerThinkingLevel } from "./peer-thinking.ts";
 
 // ---- Owner-authored Lane profiles (v0.0.38, ADR 0026 §2) -----------------------------------
@@ -185,26 +186,74 @@ export interface LaneThinkingCatalogEntry {
   models?: readonly LaneThinkingCatalogModel[] | null;
 }
 
+const SIBLING_TIER_SUFFIX = /^(.*)-(low|medium|high|xhigh|max)$/;
+
+const SIBLING_LADDER_BASE: Record<PeerThinkingLevel, readonly PeerThinkingLevel[]> = {
+  max: ["max", "xhigh", "high", "medium", "low"],
+  xhigh: ["xhigh", "max", "high", "medium", "low"],
+  high: ["high", "xhigh", "medium", "max", "low"],
+  medium: ["medium", "high", "low", "xhigh", "max"],
+  low: ["low", "medium", "high", "xhigh", "max"],
+};
+
+function resolveSiblingThinkingModel(
+  provider: string,
+  laneModel: string,
+  strippedModel: string,
+  requestedThinking: PeerThinkingLevel,
+  models: readonly LaneThinkingCatalogModel[],
+): string | undefined {
+  const match = SIBLING_TIER_SUFFIX.exec(strippedModel);
+  if (match === null || match[1] === "") return undefined;
+  const [, baseModel, configuredTier] = match as unknown as [string, string, PeerThinkingLevel];
+  const innerPrefix = laneModel.slice(0, laneModel.length - strippedModel.length);
+  const expectedPrefix = `${baseModel}-`;
+  const siblings: Partial<Record<PeerThinkingLevel, string>> = {};
+  for (const candidate of models) {
+    if (Array.isArray(candidate.thinkingOptions) && candidate.thinkingOptions.length > 0) continue;
+    const candidateStripped = candidate.id.replace(/^[^/]+\//, "");
+    if (!candidateStripped.startsWith(expectedPrefix)) continue;
+    const tier = candidateStripped.slice(expectedPrefix.length);
+    if ((PEER_THINKING_LEVELS as readonly string[]).includes(tier)) {
+      siblings[tier as PeerThinkingLevel] = `${innerPrefix}${candidateStripped}`;
+    }
+  }
+  if (Object.keys(siblings).length < 2) return undefined;
+  const ladder =
+    requestedThinking === "medium" || requestedThinking === "low"
+      ? [requestedThinking, ...(requestedThinking === "medium" ? [configuredTier] : ["medium" as const, configuredTier]), ...SIBLING_LADDER_BASE[requestedThinking]]
+      : [...SIBLING_LADDER_BASE[requestedThinking].slice(0, 3), configuredTier, ...SIBLING_LADDER_BASE[requestedThinking].slice(3)];
+  const chosenTier = ladder.find((tier) => siblings[tier] !== undefined);
+  return chosenTier === undefined ? undefined : `${provider}/${siblings[chosenTier]}`;
+}
+
 /**
  * Resolves one per-dispatch `thinking` override against the configured
- * `worker` lane and the provider model catalog (ADR 0054 §4; the inverse of
- * `sanitizeLaneWithProviders` — this mapping never strips thinking):
+ * `worker` lane and the provider model catalog (ADR 0054 §4, amended by
+ * ADR 0062; the inverse of `sanitizeLaneWithProviders` — this mapping never
+ * strips thinking):
  *
  * 1. No override requested → the configured lane verbatim (the Owner's
  *    `lanes.json` word is the whole truth).
- * 2. A model with no `thinkingOptions` (fixed/baked-in effort such as
- *    `antigravity/gemini-4-argon-high`, an unknown model, or an unreachable
- *    catalog) → the configured lane verbatim — the override is silently
- *    ignored, never an error, never a suffix mutation.
- * 3. The catalog carries the requested tier → `<provider>/<model>:<tier>`.
- * 4. A non-empty catalog without the requested tier → the nearest supported
- *    option, never a bare `<provider>/<model>`: `"medium"` lands on the
- *    Owner's configured suffix when the catalog carries it (else `"high"`,
- *    else the last option); `"xhigh"` lands on `"max"` (else `"high"`, else
- *    the last option); any other unsupported tier follows the medium ladder.
+ * 2. Unknown model or unreachable catalog → the configured lane verbatim.
+ * 3. A model with no `thinkingOptions` (`[]` / absent):
+ *    a. Sibling effort models (ADR 0062): when `lane.model` ends in
+ *       `-(low|medium|high|xhigh|max)` and the provider catalog advertises
+ *       `>= 2` same-base fixed-effort siblings (`<base>-<tier>`), resolve to
+ *       the matching same-base sibling via the nearest-tier ladder (never
+ *       cross-family, no `:thinking` suffix).
+ *    b. Single fixed-effort model (no siblings) → the configured lane verbatim.
+ * 4. The catalog carries the requested tier in `thinkingOptions` →
+ *    `<provider>/<model>:<tier>`.
+ * 5. A non-empty `thinkingOptions` catalog without the requested tier → the
+ *    nearest supported option, never a bare `<provider>/<model>`: `"medium"`
+ *    lands on the Owner's configured suffix when the catalog carries it (else
+ *    `"high"`, else the last option); `"xhigh"` lands on `"max"` (else
+ *    `"high"`, else the last option); any other unsupported tier follows the
+ *    medium ladder.
  *
  * Pure string work — no fs, no env — so the plugin server consults it at the
- * spawn call sites with the daemon catalog in hand.
+ * spawn and handoff call sites with the daemon catalog in hand.
  */
 export function resolvePeerThinkingLane(
   configuredWorkerLane: string,
@@ -226,8 +275,11 @@ export function resolvePeerThinkingLane(
       m.id === strippedModel ||
       m.id.replace(/^[^/]+\//, "") === strippedModel,
   );
-  const options = meta?.thinkingOptions;
-  if (!Array.isArray(options) || options.length === 0) return configuredWorkerLane;
+  if (meta === undefined) return configuredWorkerLane;
+  const options = meta.thinkingOptions;
+  if (!Array.isArray(options) || options.length === 0) {
+    return resolveSiblingThinkingModel(lane.provider, lane.model, strippedModel, requestedThinking, models) ?? configuredWorkerLane;
+  }
   const carried = options.some((o) => o.id === requestedThinking);
   if (carried) return `${lane.provider}/${lane.model}:${requestedThinking}`;
   // The nearest supported option — the Owner's configured suffix first for the

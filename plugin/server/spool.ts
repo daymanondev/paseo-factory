@@ -1362,12 +1362,31 @@ async function providerCatalogForLane(
   const parsed = parseLane(lane);
   if (daemon === undefined || parsed === undefined) return undefined;
   try {
-    const listed = await daemon.providers.listModels(parsed.provider);
+    const listed = await daemon.providers?.listModels?.(parsed.provider);
     if (!Array.isArray(listed?.models)) return undefined;
     return [{ provider: parsed.provider, models: listed.models }];
   } catch {
     return undefined; // best-effort catalog lookup — the configured lane stands
   }
+}
+
+/**
+ * Resolves the effective Peer launch lane for both initial dispatches and
+ * automatic Peer handoffs (ADR 0054 §4, ADR 0062): resolves the Project's
+ * `worker` lane via `resolvePeerSpawnProvider`, then adapts `thinking` against
+ * the daemon's provider catalog (either `:thinkingOptionId` or same-base
+ * sibling model ID).
+ */
+export async function resolvePeerDispatchLane(input: {
+  factory: Factory;
+  daemon: SurfaceDaemonApi | undefined;
+  requestedProvider: string;
+  projectSlug: string | undefined;
+  thinking?: PeerThinkingLevel;
+}): Promise<string> {
+  const lane = await resolvePeerSpawnProvider(input.factory, input.requestedProvider, input.projectSlug);
+  if (input.thinking === undefined) return lane;
+  return resolvePeerThinkingLane(lane, input.thinking, await providerCatalogForLane(input.daemon, lane));
 }
 
 export function associateTaskPeer(factory: Factory, task: string, agentId: string): void {
@@ -2188,8 +2207,13 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
       // spawn receives it as `resolvedProvider` so its own create does too.
       let resolvedSpawnProvider: string | undefined;
       if (request.thinking !== undefined) {
-        const lane = await resolvePeerSpawnProvider(factory, sanitizedProvider, spawnMeta.projectSlug);
-        resolvedSpawnProvider = resolvePeerThinkingLane(lane, request.thinking, await providerCatalogForLane(resolvedDaemon, lane));
+        resolvedSpawnProvider = await resolvePeerDispatchLane({
+          factory,
+          daemon: resolvedDaemon,
+          requestedProvider: sanitizedProvider,
+          projectSlug: spawnMeta.projectSlug,
+          thinking: request.thinking,
+        });
       }
       let spawnedAgentId: string | undefined;
       if (request.prompt !== undefined && request.prompt !== "" && resolvedDaemon !== undefined) {
