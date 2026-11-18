@@ -7291,7 +7291,35 @@ test("02-profiles: onboarding.commit applies profileId first (preserving watch l
   assert.equal(missingSurface.fake.created.length, 0);
   assert.equal(readProjectRegistration(missingSurface.stateDir, missingProject.slug), undefined);
 
-  // 2. Profile applied intact: all 6 lanes (including watch) and activeProfileByScope persist.
+  // 1b. Incomplete profile in profiles.json is refused up front with accurate 5-lane wording before registering.
+  const { laneProfilesPath } = await import("../plugin/server/core/lanes.ts");
+  const badProfileProject = makeProject(t, "commit-bad-profile");
+  const badProfileSurface = makeSurface(t, []);
+  writeFileSync(
+    laneProfilesPath(badProfileSurface.stateDir),
+    JSON.stringify({
+      profiles: {
+        broken: {
+          name: "Broken",
+          lanes: {
+            supervisor: "claude/claude-sonnet-4-6",
+            lead: "codex/gpt-5.4:low",
+            worker: "opencode/glm-5.1",
+            watch: "claude/claude-haiku-4-5",
+          },
+          updatedAt: "2026-11-18T00:00:00Z",
+        },
+      },
+    }),
+  );
+  const badProfileReply = await badProfileSurface.handlers.onboardingCommit({ folder: badProfileProject.root, profileId: "broken" });
+  assert.ok(!badProfileReply.ok);
+  assert.equal(badProfileReply.code, "invalid-profile");
+  assert.match(badProfileReply.error, /all five lanes whole/);
+  assert.equal(badProfileSurface.fake.created.length, 0);
+  assert.equal(readProjectRegistration(badProfileSurface.stateDir, badProfileProject.slug), undefined);
+
+  // 2. Profile applied intact: all 5 lanes (including watch) and activeProfileByScope persist.
   const cleanProject = makeProject(t, "commit-profile-clean");
   const { handlers, stateDir, fake } = makeSurface(t, []);
   writeLanes(stateDir, { supervisor: "claude/opus-4-8", lead: "pi/zcode/glm-5.3", worker: "pi/zcode/glm-5.3", watch: "pi/zcode/glm-5.3" });

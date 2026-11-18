@@ -404,12 +404,17 @@ function PeerRowView({ theme, row, wide, actions }: { theme: PluginTheme; row: P
  * (ADR 0057 §10), so this action never gates on `mobile`.
  */
 function SupervisorCandidateRow({ theme, row, actions }: { theme: PluginTheme; row: PanelSupervisorCandidateRow; actions: ProjectPanelActions }) {
-  const colour = toneColour(row.tone);
   return (
     <View testID="factory-panel-supervisor-candidate" style={{ ...seatRowStyle(theme, true), gap: SPACING[0.5] }}>
       <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[2] }}>
         <Text style={text(theme, "rowTitle")}>{row.title ?? row.agentId}</Text>
-        <Text style={text(theme, "label", colour)}>{row.statusLabel}</Text>
+        <ToneBadge
+          theme={theme}
+          colour={statusBadgeColour(theme, row.statusLabel)}
+          label={row.statusLabel}
+          dot
+          testID="factory-seat-status-supervisor-candidate"
+        />
       </View>
       {row.model !== null ? <Text style={text(theme, "code", "foregroundMuted")} numberOfLines={1}>{row.model}</Text> : null}
       <Btn

@@ -7,7 +7,6 @@
  *
  * Function components only — no class syntax reaches the Hermes bundle.
  */
-import type { PluginProjectSnapshot } from "@getpaseo/plugin";
 import type { PluginClientOpenPanelOptions, PluginScreenProps, ProjectRef } from "@getpaseo/plugin/client";
 import { usePaseo, useProject, useProjects, useRpc, useWorkspaces } from "@getpaseo/plugin/client";
 import { Icon, Loading, ScrollView, TextInput, useToast } from "@getpaseo/plugin/client/ui";
@@ -24,90 +23,96 @@ import {
   snapshot,
 } from "../../shared/rpc.ts";
 import type { FactoryView, ProjectDirectoryEntry } from "../../shared/view.ts";
-import { Btn, Card } from "../kit/pill.tsx";
-import { RADIUS, SPACING, factoryPalette, hoveredOf, text, tint } from "../kit/theme.ts";
+import { Btn, Card, ToneBadge } from "../kit/pill.tsx";
+import { RADIUS, SPACING, factoryPalette, hoveredOf, text } from "../kit/theme.ts";
 import type { CommitInput } from "./onboarding-state.ts";
+import {
+  filterUnregisteredProjects,
+  isFactoryRegisteredRoot,
+  isReusableLocalWorkspace,
+  normalizeFolderPath,
+  resolveOrCreateProjectWorkspace,
+} from "./onboarding-targets.ts";
+import type { WorkspaceCandidate } from "./onboarding-targets.ts";
 import { OnboardingWizard } from "./onboarding-wizard.tsx";
+
+export { filterUnregisteredProjects, isFactoryRegisteredRoot, isReusableLocalWorkspace, normalizeFolderPath };
+export type { WorkspaceCandidate };
 
 type BrowseView = Extract<z.output<typeof onboardingBrowse.output>, { ok: true }>;
 export type OnboardingCommitSuccess = Extract<z.output<typeof onboardingCommit.output>, { ok: true }>;
 
 const FACTORY_PANEL_ID = "paseo-factory";
 
-export interface WorkspaceCandidate {
-  id: string;
-  directory?: string | null;
-  workspaceDirectory?: string | null;
-  kind?: string | null;
-  workspaceKind?: string | null;
-  archivingAt?: string | null;
-  internal?: boolean | null;
-  background?: boolean | null;
-}
-
-/** Trims trailing slashes (preserving `"/"`) so host project roots match Factory roots reliably. */
-export function normalizeFolderPath(folder: string): string {
-  const trimmed = folder.trim();
-  if (trimmed === "" || trimmed === "/") return trimmed;
-  return trimmed.replace(/\/+$/, "");
-}
-
-/** True when `workspace` is an active non-worktree local Paseo workspace rooted at `projectRoot`. */
-export function isReusableLocalWorkspace(workspace: WorkspaceCandidate, projectRoot: string): boolean {
-  if (workspace.archivingAt !== undefined && workspace.archivingAt !== null && workspace.archivingAt !== "") {
-    return false;
-  }
-  if (workspace.internal === true || workspace.background === true) {
-    return false;
-  }
-  const kind = workspace.kind ?? workspace.workspaceKind;
-  if (kind === "worktree") {
-    return false;
-  }
-  if (
-    kind !== undefined &&
-    kind !== null &&
-    kind !== "directory" &&
-    kind !== "local_checkout" &&
-    kind !== "checkout" &&
-    kind !== "local"
-  ) {
-    return false;
-  }
-  const dir = workspace.directory ?? workspace.workspaceDirectory ?? "";
-  if (dir.trim() === "") return false;
-  const normalizedTarget = normalizeFolderPath(projectRoot);
-  if (normalizedTarget === "") return false;
-  return normalizeFolderPath(dir) === normalizedTarget;
-}
-
-function selectReusableWorkspace(
-  entries: readonly WorkspaceCandidate[],
-  projectRoot: string,
-): WorkspaceCandidate | undefined {
-  const matches = entries.filter((entry) => isReusableLocalWorkspace(entry, projectRoot));
+function SelectableFolderRow({
+  theme,
+  testID,
+  title,
+  subtitle,
+  gitRepo,
+  badgeLabel,
+  badgeTestID,
+  showChevron = false,
+  compact = false,
+  onPress,
+}: {
+  theme: PluginScreenProps["theme"];
+  testID: string;
+  title: string;
+  subtitle?: string;
+  gitRepo: boolean;
+  badgeLabel?: string;
+  badgeTestID?: string;
+  showChevron?: boolean;
+  compact?: boolean;
+  onPress: () => void;
+}) {
+  const palette = factoryPalette(theme);
   return (
-    matches.find((entry) => (entry.kind ?? entry.workspaceKind) === "local_checkout") ??
-    matches[0]
+    <Pressable
+      testID={testID}
+      accessibilityRole="button"
+      onPress={onPress}
+      style={(state) => ({
+        flexDirection: "row",
+        alignItems: "center",
+        justifyContent: "space-between",
+        gap: SPACING[2],
+        paddingHorizontal: SPACING[2.5],
+        paddingVertical: compact ? SPACING[1.5] : SPACING[2],
+        borderRadius: RADIUS.md,
+        borderWidth: 1,
+        borderColor: hoveredOf(state) ? theme.colors.accent : theme.colors.border,
+        backgroundColor: state.pressed || hoveredOf(state) ? theme.colors.surface2 : theme.colors.surface0,
+      })}
+    >
+      <View style={{ flexDirection: "row", alignItems: "center", gap: SPACING[2], flex: 1, minWidth: 0 }}>
+        <Icon name={gitRepo ? "GitBranch" : "Folder"} size={14} color={gitRepo ? palette.ok : theme.colors.foregroundMuted} />
+        <View style={{ flex: 1, minWidth: 0, gap: 2 }}>
+          <Text style={text(theme, "rowTitle")} numberOfLines={1}>
+            {title}
+          </Text>
+          {subtitle !== undefined ? (
+            <Text style={{ ...text(theme, "code"), color: theme.colors.foregroundMuted }} numberOfLines={1}>
+              {subtitle}
+            </Text>
+          ) : null}
+        </View>
+      </View>
+      <View style={{ flexDirection: "row", alignItems: "center", gap: SPACING[2] }}>
+        {badgeLabel !== undefined ? (
+          <ToneBadge
+            theme={theme}
+            label={badgeLabel}
+            colour={gitRepo ? palette.ok : palette.idle}
+            dot={false}
+            {...(badgeTestID === undefined ? {} : { testID: badgeTestID })}
+          />
+        ) : null}
+        {showChevron ? <Icon name="ChevronRight" size={14} color={theme.colors.foregroundMuted} /> : null}
+      </View>
+    </Pressable>
   );
-}
-
-/** True when `rootPath` matches any Project root already registered in Factory. */
-export function isFactoryRegisteredRoot(
-  rootPath: string,
-  registeredProjects: readonly Pick<ProjectDirectoryEntry, "root">[],
-): boolean {
-  const normalized = normalizeFolderPath(rootPath);
-  if (normalized === "") return false;
-  return registeredProjects.some((project) => normalizeFolderPath(project.root) === normalized);
-}
-
-/** Pure filter helper for unregistered Paseo project snapshots. */
-export function filterUnregisteredProjects<T extends Pick<PluginProjectSnapshot, "rootPath">>(
-  projects: readonly T[],
-  registeredProjects: readonly Pick<ProjectDirectoryEntry, "root">[],
-): T[] {
-  return projects.filter((project) => !isFactoryRegisteredRoot(project.rootPath, registeredProjects));
 }
 
 function UnregisteredProjectRow({
@@ -123,55 +128,19 @@ function UnregisteredProjectRow({
 }) {
   const project = useProject(projectRef);
   if (project === null || isFactoryRegisteredRoot(project.rootPath, registeredProjects)) return null;
-  const palette = factoryPalette(theme);
   const isGit = project.kind === "git";
   return (
-    <Pressable
+    <SelectableFolderRow
+      theme={theme}
       testID={`factory-onboard-project-${project.ref.id}`}
-      accessibilityRole="button"
+      title={project.displayName}
+      subtitle={project.rootPath}
+      gitRepo={isGit}
+      badgeLabel={isGit ? "Git" : "Folder"}
+      badgeTestID={`factory-onboard-project-badge-${project.ref.id}`}
+      showChevron
       onPress={() => onSelect(project.rootPath)}
-      style={(state) => ({
-        flexDirection: "row",
-        alignItems: "center",
-        justifyContent: "space-between",
-        gap: SPACING[2],
-        paddingHorizontal: SPACING[2.5],
-        paddingVertical: SPACING[2],
-        borderRadius: RADIUS.md,
-        borderWidth: 1,
-        borderColor: hoveredOf(state) ? theme.colors.accent : theme.colors.border,
-        backgroundColor: state.pressed || hoveredOf(state) ? theme.colors.surface2 : theme.colors.surface0,
-      })}
-    >
-      <View style={{ flexDirection: "row", alignItems: "center", gap: SPACING[2], flex: 1, minWidth: 0 }}>
-        <Icon name={isGit ? "GitBranch" : "Folder"} size={14} color={isGit ? palette.ok : theme.colors.foregroundMuted} />
-        <View style={{ flex: 1, minWidth: 0, gap: 2 }}>
-          <Text style={text(theme, "rowTitle")} numberOfLines={1}>
-            {project.displayName}
-          </Text>
-          <Text style={{ ...text(theme, "code"), color: theme.colors.foregroundMuted }} numberOfLines={1}>
-            {project.rootPath}
-          </Text>
-        </View>
-      </View>
-      <View style={{ flexDirection: "row", alignItems: "center", gap: SPACING[2] }}>
-        <View
-          style={{
-            paddingHorizontal: SPACING[1.5],
-            paddingVertical: 2,
-            borderRadius: RADIUS.sm,
-            borderWidth: 1,
-            borderColor: tint(isGit ? palette.ok : palette.idle, "55"),
-            backgroundColor: tint(isGit ? palette.ok : palette.idle, "18"),
-          }}
-        >
-          <Text style={{ ...text(theme, "badge"), color: isGit ? palette.ok : palette.idle }}>
-            {isGit ? "Git" : "Folder"}
-          </Text>
-        </View>
-        <Icon name="ChevronRight" size={14} color={theme.colors.foregroundMuted} />
-      </View>
-    </Pressable>
+    />
   );
 }
 
@@ -298,58 +267,18 @@ export function OnboardingScreen({
 
   const palette = factoryPalette(theme);
 
-  const resolveOrCreateProjectWorkspace = async (
-    projectRoot: string,
-  ): Promise<{ workspaceId: string | null; error: string | null }> => {
-    if (typeof paseo?.workspaces?.list === "function") {
-      try {
-        const listed = await paseo.workspaces.list();
-        const reusable = selectReusableWorkspace(listed.entries, projectRoot);
-        if (reusable !== undefined) {
-          return { workspaceId: reusable.id, error: null };
-        }
-      } catch {
-        // Fall through to client state lookup and workspace creation.
-      }
-    }
-
-    if (
-      selectedFolder !== null &&
-      normalizeFolderPath(selectedFolder) === normalizeFolderPath(projectRoot) &&
-      activeWorkspaceRefs.length > 0
-    ) {
-      return { workspaceId: activeWorkspaceRefs[0]!.id, error: null };
-    }
-
-    const matchingProjectRef =
-      selectedFolder !== null && normalizeFolderPath(selectedFolder) === normalizeFolderPath(projectRoot)
-        ? matchingProjectRefs[0]
-        : undefined;
-    try {
-      if (matchingProjectRef !== undefined && typeof paseo?.projects?.ref === "function") {
-        const created = await paseo.projects.ref(matchingProjectRef).createWorkspace({
-          source: { kind: "directory", path: projectRoot, projectId: matchingProjectRef.id },
-        });
-        return { workspaceId: created.id, error: null };
-      }
-      if (typeof paseo?.workspaces?.create === "function") {
-        const created = await paseo.workspaces.create({
-          source: { kind: "directory", path: projectRoot },
-        });
-        return { workspaceId: created.id, error: null };
-      }
-      return { workspaceId: null, error: "Paseo workspace API is unavailable." };
-    } catch (error) {
-      return { workspaceId: null, error: error instanceof Error ? error.message : String(error) };
-    }
-  };
-
   const startOnboarding = async (input: CommitInput): Promise<{ ok: true } | { ok: false; error: string }> => {
     const reply = await commitCall(input);
     if (!reply.ok) return { ok: false, error: reply.error };
     toast.show(reply.summary, { variant: "success" });
     await loadSnapshotAndDirectory();
-    const workspaceResult = await resolveOrCreateProjectWorkspace(reply.projectRoot);
+    const workspaceResult = await resolveOrCreateProjectWorkspace({
+      paseo,
+      projectRoot: reply.projectRoot,
+      selectedFolder,
+      activeWorkspaceRefs,
+      matchingProjectRefs,
+    });
     if (onCommitted !== undefined) {
       await onCommitted({ input, reply });
     }
@@ -480,45 +409,16 @@ export function OnboardingScreen({
                 ) : browse !== null ? (
                   <View style={{ gap: SPACING[1] }}>
                     {browse.entries.map((entry) => (
-                      <Pressable
+                      <SelectableFolderRow
                         key={entry.path}
+                        theme={theme}
                         testID={`factory-onboard-entry-${entry.name}`}
-                        accessibilityRole="button"
+                        title={entry.name}
+                        gitRepo={entry.gitRepo}
+                        {...(entry.gitRepo ? { badgeLabel: "Git", badgeTestID: `factory-onboard-entry-badge-${entry.name}` } : {})}
+                        compact
                         onPress={() => void browseTo(entry.path)}
-                        style={(state) => ({
-                          flexDirection: "row",
-                          alignItems: "center",
-                          justifyContent: "space-between",
-                          gap: SPACING[2],
-                          paddingHorizontal: SPACING[2.5],
-                          paddingVertical: SPACING[1.5],
-                          borderRadius: RADIUS.md,
-                          borderWidth: 1,
-                          borderColor: hoveredOf(state) ? theme.colors.accent : theme.colors.border,
-                          backgroundColor: state.pressed || hoveredOf(state) ? theme.colors.surface2 : theme.colors.surface0,
-                        })}
-                      >
-                        <View style={{ flexDirection: "row", alignItems: "center", gap: SPACING[2], flex: 1, minWidth: 0 }}>
-                          <Icon name={entry.gitRepo ? "GitBranch" : "Folder"} size={14} color={entry.gitRepo ? palette.ok : theme.colors.foregroundMuted} />
-                          <Text style={text(theme, "rowTitle")} numberOfLines={1}>
-                            {entry.name}
-                          </Text>
-                        </View>
-                        {entry.gitRepo ? (
-                          <View
-                            style={{
-                              paddingHorizontal: SPACING[1.5],
-                              paddingVertical: 1,
-                              borderRadius: RADIUS.sm,
-                              borderWidth: 1,
-                              borderColor: tint(palette.ok, "55"),
-                              backgroundColor: tint(palette.ok, "18"),
-                            }}
-                          >
-                            <Text style={{ ...text(theme, "badge"), color: palette.ok }}>Git</Text>
-                          </View>
-                        ) : null}
-                      </Pressable>
+                      />
                     ))}
                   </View>
                 ) : null}
@@ -548,7 +448,7 @@ export function OnboardingScreen({
                 snapshotError !== null ? (
                   <View style={{ gap: SPACING[2] }}>
                     <Text style={{ ...text(theme, "label"), color: palette.bad }}>{snapshotError}</Text>
-                    <Btn theme={theme} label="Retry" small onPress={() => void loadSnapshotAndDirectory()} />
+                    <Btn theme={theme} testID="factory-onboard-retry" label="Retry" small onPress={() => void loadSnapshotAndDirectory()} />
                   </View>
                 ) : (
                   <Loading />

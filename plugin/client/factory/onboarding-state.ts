@@ -39,7 +39,9 @@ export interface WizardInput {
   lanes: Record<OnboardingLaneName, string>;
   /** Selected saved Lane profile id, or null when using machine defaults. */
   profileId: string | null;
-  /** True when a seat was individually edited after selecting a Lane profile. */
+  /** Snapshot of the selected profile's lanes so reverting a seat clears `profileModified`. */
+  profileLanes: Record<OnboardingLaneName, string> | null;
+  /** True when any seat currently differs from the selected Lane profile. */
   profileModified: boolean;
   directive: string;
   design: DesignChoice | null;
@@ -66,6 +68,7 @@ export function initialWizard(machineLanes: Pick<Lanes, OnboardingLaneName>): Wi
     initGit: false,
     lanes: pickOnboardingLanes(machineLanes),
     profileId: null,
+    profileLanes: null,
     profileModified: false,
     directive: "",
     design: null,
@@ -81,24 +84,34 @@ export function reduceWizard(state: WizardInput, action: WizardAction): WizardIn
     case "initGit":
       return { ...state, initGit: action.value };
     case "lane": {
-      const changed = state.lanes[action.lane] !== action.value;
+      const lanes = { ...state.lanes, [action.lane]: action.value };
+      const profileModified =
+        state.profileId === null
+          ? false
+          : state.profileLanes !== null
+            ? ONBOARDING_LANES.some((lane) => lanes[lane] !== state.profileLanes![lane])
+            : state.profileModified || state.lanes[action.lane] !== action.value;
       return {
         ...state,
-        lanes: { ...state.lanes, [action.lane]: action.value },
-        profileModified: state.profileId !== null ? state.profileModified || changed : false,
+        lanes,
+        profileModified,
       };
     }
-    case "profile":
+    case "profile": {
+      const profileLanes = pickOnboardingLanes(action.profile.lanes);
       return {
         ...state,
         profileId: action.profile.id,
+        profileLanes,
         profileModified: false,
-        lanes: pickOnboardingLanes(action.profile.lanes),
+        lanes: profileLanes,
       };
+    }
     case "machineDefaults":
       return {
         ...state,
         profileId: null,
+        profileLanes: null,
         profileModified: false,
         lanes: pickOnboardingLanes(action.machineLanes),
       };

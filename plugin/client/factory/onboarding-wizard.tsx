@@ -57,6 +57,21 @@ export interface OnboardingActions {
   start(input: CommitInput): Promise<{ ok: true } | Failed>;
 }
 
+const SEAT_ROLE: Record<OnboardingLaneName, "supervisor" | "lead" | "peer"> = {
+  supervisor: "supervisor",
+  lead: "lead",
+  worker: "peer",
+};
+
+function onboardingSeatMeta(card: LaneCard): { lane: OnboardingLaneName; role: "supervisor" | "lead" | "peer"; label: string } {
+  const lane = card.id as OnboardingLaneName;
+  return {
+    lane,
+    role: SEAT_ROLE[lane],
+    label: lane === "worker" ? "Worker" : card.title,
+  };
+}
+
 /** UI-only state a host may seed — hosts and tests; never data the server owns. */
 export interface OnboardingInitialUi {
   step?: 1 | 2 | 3 | 4;
@@ -171,21 +186,22 @@ export function OnboardingWizard({
       const base = initialWizard(view.machineLanes);
       const profileId = initialUi?.profileId ?? base.profileId;
       const matched = profileId === null ? null : (profiles.find((p) => p.id === profileId) ?? null);
-      const lanes =
-        initialUi?.lanes ??
-        (matched !== null
+      const profileLanes =
+        matched !== null
           ? { supervisor: matched.lanes.supervisor, lead: matched.lanes.lead, worker: matched.lanes.worker }
-          : base.lanes);
+          : null;
+      const lanes = initialUi?.lanes ?? profileLanes ?? base.lanes;
       const profileModified =
         initialUi?.profileModified ??
-        (matched !== null && initialUi?.lanes !== undefined
-          ? ONBOARDING_LANES.some((lane) => lanes[lane] !== matched.lanes[lane])
+        (profileLanes !== null && initialUi?.lanes !== undefined
+          ? ONBOARDING_LANES.some((lane) => lanes[lane] !== profileLanes[lane])
           : false);
       return {
         step: initialUi?.step ?? base.step,
         initGit: initialUi?.initGit ?? base.initGit,
         lanes,
         profileId,
+        profileLanes,
         profileModified,
         directive: initialUi?.directive ?? base.directive,
         design: initialUi?.design ?? base.design,
@@ -487,9 +503,7 @@ export function OnboardingWizard({
                 : `Prefilled from "${selectedProfile.name}" — individual seat edits stay local to this Project.`}
           </Note>
           {PROJECT_OVERRIDE_CARDS.map((card) => {
-            const lane = card.id as OnboardingLaneName;
-            const role = lane === "worker" ? "peer" : lane;
-            const label = lane === "worker" ? "Worker" : card.title;
+            const { lane, role, label } = onboardingSeatMeta(card);
             const baseline = selectedProfile !== null ? selectedProfile.lanes[lane] : view.machineLanes[lane];
             const changed = input.lanes[lane] !== baseline;
             const thinking = splitLaneParts(input.lanes[lane]).thinking || "off";
@@ -548,20 +562,17 @@ export function OnboardingWizard({
             </View>
             <Text style={text(theme, "code", "foregroundMuted")} numberOfLines={1}>{folder}</Text>
             <View style={{ gap: SPACING[1] }}>
-              {(
-                [
-                  ["supervisor", "Supervisor", input.lanes.supervisor],
-                  ["lead", "Lead", input.lanes.lead],
-                  ["peer", "Worker", input.lanes.worker],
-                ] as const
-              ).map(([role, label, value]) => (
-                <View key={role} style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[2] }}>
-                  <View style={{ minWidth: 96 }}>
-                    <RoleName theme={theme} role={role} label={label} />
+              {PROJECT_OVERRIDE_CARDS.map((card) => {
+                const { lane, role, label } = onboardingSeatMeta(card);
+                return (
+                  <View key={card.id} style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[2] }}>
+                    <View style={{ minWidth: 96 }}>
+                      <RoleName theme={theme} role={role} label={label} />
+                    </View>
+                    <Text style={{ ...text(theme, "code"), flexShrink: 1 }} numberOfLines={1}>{input.lanes[lane]}</Text>
                   </View>
-                  <Text style={{ ...text(theme, "code"), flexShrink: 1 }} numberOfLines={1}>{value}</Text>
-                </View>
-              ))}
+                );
+              })}
             </View>
             <Text style={text(theme, "meta")}>
               {selectedProfile !== null ? `Profile: ${selectedProfile.name}${input.profileModified ? " (modified)" : ""} · ` : ""}

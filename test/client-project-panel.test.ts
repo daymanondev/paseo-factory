@@ -421,7 +421,9 @@ test("a live Supervisor with a candidate chat renders the candidate row with 'Us
   const panel = makePanel({
     seats: {
       ...healthySeats,
-      supervisorCandidates: [{ allowedActions: ["adopt"], agentId: "agent-candidate", title: "Chat about release", statusLabel: "idle", tone: "normal", model: "glm-5.3" }],
+      supervisorCandidates: [
+        { allowedActions: ["adopt"], agentId: "agent-candidate", title: "Chat about release", statusLabel: "idle", tone: "error", model: "glm-5.3" },
+      ],
     },
   });
   for (const mobile of [false, true]) {
@@ -430,7 +432,25 @@ test("a live Supervisor with a candidate chat renders the candidate row with 'Us
     assert.match(html, /Chat about release/, "the candidate chat is named");
     assert.ok(hasHook(html, "factory-panel-adopt-supervisor"), `the adopt button renders (mobile=${mobile})`);
     assert.match(html, /Use this chat as Supervisor/, "the button carries its label");
+    const statusBadge = elementOf(html, "factory-seat-status-supervisor-candidate");
+    assert.match(statusBadge, />idle</);
+    assert.ok(statusBadge.includes("#67717618") && statusBadge.includes("#67717666"), "candidate status renders as statusLabel-strict ToneBadge pill even when row.tone differs");
+    assert.ok(statusBadge.includes("&quot;borderRadius&quot;:999"), "candidate status badge is a pill with dot");
+    assert.ok(statusBadge.includes("&quot;backgroundColor&quot;:&quot;#677176&quot;"), "candidate status badge includes dot");
   }
+  const workingPanel = makePanel({
+    seats: {
+      ...healthySeats,
+      supervisorCandidates: [
+        { allowedActions: ["adopt"], agentId: "agent-candidate-2", title: "Active chat", statusLabel: "working", tone: "normal", model: null },
+      ],
+    },
+  });
+  const dark = { colors: { ...theme.colors, surface0: "#000000" } };
+  const workingHtml = await render(workingPanel, { theme: dark });
+  const workingBadge = elementOf(workingHtml, "factory-seat-status-supervisor-candidate");
+  assert.match(workingBadge, />working</);
+  assert.ok(workingBadge.includes("#68b78d18") && workingBadge.includes("#68b78d66"), "dark working candidate status uses ok palette");
   const none = await render(makePanel());
   assert.equal(hasHook(none, "factory-panel-supervisor-candidates"), false, "no candidate, no block");
   assert.equal(hasHook(none, "factory-panel-adopt-supervisor"), false);

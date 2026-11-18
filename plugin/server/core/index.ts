@@ -56,6 +56,7 @@ export {
   projectLanesPath,
   runLaneCli,
   saveLanes,
+  validatedProfileLanes,
 } from "./lanes.ts";
 export type { LaneCliInvocation, LaneCliRunner, LaneName, Lanes, LanesResult, ParsedLane } from "./lanes.ts";
 export { provisionPiAgentHome, renderRoleAppendSystem } from "./pi-home.ts";

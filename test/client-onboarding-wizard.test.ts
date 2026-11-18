@@ -10,10 +10,67 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { join } from "node:path";
+import { build } from "esbuild";
 import { repoRoot } from "./helpers.ts";
 import { loadClientModule, testTheme } from "./client-markup.ts";
 import type { PanelView } from "../plugin/shared/view.ts";
+
+async function loadInteractiveWizard(): Promise<Record<string, any>> {
+  const bundle = await build({
+    entryPoints: [join(repoRoot, "plugin/client/factory/onboarding-wizard.tsx")],
+    bundle: true,
+    write: false,
+    platform: "node",
+    format: "cjs",
+    jsx: "automatic",
+    external: ["react", "react/jsx-runtime"],
+    plugins: [
+      {
+        name: "native-adapter",
+        setup(b) {
+          b.onResolve({ filter: /^(react-native|@getpaseo\/plugin\/client\/ui)$/ }, (args) => ({ path: args.path, namespace: "native" }));
+          b.onLoad({ filter: /.*/, namespace: "native" }, () => ({
+            loader: "js",
+            contents: `
+              const React = require('react');
+              const tag = (name) => ({ children, onPress, disabled, testID, accessibilityRole, accessibilityState, accessibilityLabel }) =>
+                React.createElement(name, {
+                  disabled,
+                  onClick: onPress,
+                  'data-testid': testID,
+                  'data-role': accessibilityRole,
+                  'aria-label': accessibilityLabel,
+                  'data-selected': accessibilityState && accessibilityState.selected !== undefined ? String(accessibilityState.selected) : undefined,
+                }, typeof children === 'function' ? children({ pressed: false }) : children);
+              exports.View = tag('div');
+              exports.ScrollView = tag('div');
+              exports.Text = tag('span');
+              exports.Pressable = tag('button');
+              exports.Icon = () => null;
+              exports.TextInput = ({ value, placeholder, testID, onChangeText, editable }) =>
+                React.createElement('input', {
+                  value: value ?? '',
+                  placeholder,
+                  readOnly: !onChangeText || editable === false,
+                  onInput: (e) => onChangeText && onChangeText(e.currentTarget.value),
+                  'data-testid': testID,
+                });
+              const Modal = ({ children, open, title }) => (open ? React.createElement('div', { 'data-modal-title': title }, children) : null);
+              Modal.Content = tag('div');
+              exports.Modal = Modal;
+              exports.Platform = { OS: 'web', select: (spec) => (spec.web !== undefined ? spec.web : spec.default) };
+            `,
+          }));
+        },
+      },
+    ],
+  });
+  const compiled = { exports: {} as Record<string, any> };
+  new Function("require", "module", "exports", bundle.outputFiles[0]!.text)(createRequire(import.meta.url), compiled, compiled.exports);
+  return compiled.exports;
+}
 
 const theme = testTheme;
 const MACHINE_LANES = { supervisor: "claude/opus-4-8", lead: "pi/zcode/glm-5.3", worker: "pi/zcode/glm-5.3", watch: "pi/zcode/glm-5.3", freshEyes: "pi/zcode/glm-5.3" };
@@ -149,6 +206,14 @@ test("02-profiles: selecting a profile prefills seats and sets profileId, editin
   assert.equal(state.profileModified, true);
   assert.equal(commitInputOf(state, readyInspection, "/work/my-app").profileId, "fast");
   assert.equal(commitInputOf(state, readyInspection, "/work/my-app").models?.lead, "claude/opus-4-8:high");
+
+  // Editing another seat and reverting one keeps modified=true until ALL seats match the profile again.
+  state = reduceWizard(state, { type: "lane", lane: "worker", value: "codex/gpt-5.4:medium" });
+  assert.equal(state.profileModified, true);
+  state = reduceWizard(state, { type: "lane", lane: "lead", value: fastProfile.lanes.lead });
+  assert.equal(state.profileModified, true, "worker still diverges from profile");
+  state = reduceWizard(state, { type: "lane", lane: "worker", value: fastProfile.lanes.worker });
+  assert.equal(state.profileModified, false, "reverting every edited seat back to profile lanes clears profileModified");
 
   // Re-selecting the same or another profile clears modified.
   state = reduceWizard(state, { type: "profile", profile: fastProfile });
@@ -433,7 +498,7 @@ test("02-profiles: Step 3 renders Lane profile pills + Machine defaults, highlig
 });
 
 test("02-profiles: clicking a profile pill prefills seats, Machine defaults resets, and Start submits profileId", async () => {
-  const { OnboardingWizard } = await loadClientModule("plugin/client/factory/onboarding-wizard.tsx");
+  const { OnboardingWizard } = await loadInteractiveWizard();
   const { createElement } = await import("react");
   const { createRoot } = await import("react-dom/client");
   const { act } = await import("react");
@@ -481,7 +546,36 @@ test("02-profiles: clicking a profile pill prefills seats, Machine defaults rese
     assert.match(dom.window.document.querySelector('[data-testid="factory-onboarding-lane-supervisor"]')?.textContent ?? "", /claude\/opus-4-8/);
 
     await click("factory-onboarding-profile-fast");
+
+    // Edit Lead thinking to High -> modified badge & Step 4 (modified) appear.
+    await click("factory-onboarding-lane-change-lead");
+    const buttonNamed = (label: string): HTMLButtonElement | undefined =>
+      (Array.from(dom.window.document.querySelectorAll("button")) as HTMLButtonElement[]).find((b) => b.textContent?.trim() === label);
+    const highBtn = buttonNamed("High");
+    assert.ok(highBtn, "High thinking chip renders");
+    await act(async () => { highBtn.click(); });
+    const saveBtn = buttonNamed("Save lane");
+    assert.ok(saveBtn, "Save lane button renders");
+    await act(async () => { saveBtn.click(); });
+    assert.ok(dom.window.document.querySelector('[data-testid="factory-onboarding-profile-modified"]'), "modified badge renders after seat edit");
     await click("factory-onboarding-next");
+    assert.match(dom.window.document.querySelector('[data-testid="factory-onboarding-summary"]')?.textContent ?? "", /Profile: Fast \(modified\)/);
+
+    // Revert Lead back to Low -> modified badge & Step 4 (modified) disappear.
+    await click("factory-onboarding-back");
+    await click("factory-onboarding-lane-change-lead");
+    const lowBtn = buttonNamed("Low");
+    assert.ok(lowBtn, "Low thinking chip renders");
+    await act(async () => { lowBtn.click(); });
+    const saveBtn2 = buttonNamed("Save lane");
+    assert.ok(saveBtn2, "Save lane button renders");
+    await act(async () => { saveBtn2.click(); });
+    assert.equal(dom.window.document.querySelector('[data-testid="factory-onboarding-profile-modified"]'), null, "modified badge clears when seat reverts to profile lane");
+    await click("factory-onboarding-next");
+    const summaryText = dom.window.document.querySelector('[data-testid="factory-onboarding-summary"]')?.textContent ?? "";
+    assert.match(summaryText, /Profile: Fast/);
+    assert.doesNotMatch(summaryText, /\(modified\)/);
+
     await click("factory-onboarding-start");
     assert.equal(started.length, 1);
     assert.deepEqual(started[0], {
