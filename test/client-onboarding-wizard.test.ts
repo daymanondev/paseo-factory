@@ -45,6 +45,15 @@ async function render(initialUi: Record<string, unknown>, props: Record<string, 
 const hasHook = (html: string, id: string): boolean => html.includes(`data-testid="${id}"`);
 /** The hook's element opens with `<button disabled=""` when disabled. */
 const isDisabled = (html: string, id: string): boolean => new RegExp(`<button[^>]*disabled=""[^>]*data-testid="${id}"`).test(html);
+function elementOf(html: string, id: string): string {
+  const start = html.lastIndexOf("<div", html.indexOf(`data-testid="${id}"`));
+  let depth = 0;
+  for (const m of html.slice(start).matchAll(/<div\b|<\/div>/g)) {
+    depth += m[0] === "</div>" ? -1 : 1;
+    if (depth === 0) return html.slice(start, start + m.index! + m[0].length);
+  }
+  throw new Error(`unbalanced markup for ${id}`);
+}
 
 // ---- the pure state machine -----------------------------------------------------------------
 
@@ -223,6 +232,54 @@ test("a failed Start says what went wrong and how to fix it, and Start stays ava
   assert.match(html, /then Start again/);
   assert.ok(hasHook(html, "factory-onboarding-start"));
   assert.equal(isDisabled(html, "factory-onboarding-start"), false);
+});
+
+test("01-badges: OnboardingWizard applies FACTORY_PALETTE to progress steps, Step 1–2 status badges, Step 3 seat/thinking pills, and Step 4 summary", async () => {
+  const darkTheme = { colors: { ...theme.colors, surface0: "#000000" } };
+
+  // Step 3 progress bar: steps 1 & 2 completed (ok), step 3 active (lead), step 4 pending (idle).
+  const step3Light = await render({ step: 3, inspection: readyInspection, lanes: { ...MACHINE_LANES, lead: "claude/opus-4-8:high" } });
+  assert.ok(hasHook(step3Light, "factory-onboarding-steps"));
+  assert.ok(elementOf(step3Light, "factory-onboarding-step-pill-1").includes("#337e58"), "completed step 1 uses palette.ok");
+  assert.ok(elementOf(step3Light, "factory-onboarding-step-pill-2").includes("#337e58"), "completed step 2 uses palette.ok");
+  assert.ok(elementOf(step3Light, "factory-onboarding-step-pill-3").includes("#2f7899"), "active step 3 uses palette.lead");
+  assert.ok(elementOf(step3Light, "factory-onboarding-step-pill-4").includes("#677176"), "pending step 4 uses palette.idle");
+
+  // Step 3 seat colours & thinking pills across light/dark.
+  assert.ok(elementOf(step3Light, "factory-onboarding-lane-supervisor").includes("#7459b4"), "Supervisor seat colour");
+  assert.ok(elementOf(step3Light, "factory-onboarding-lane-lead").includes("#2f7899"), "Lead seat colour");
+  assert.ok(elementOf(step3Light, "factory-onboarding-lane-worker").includes("#287a81"), "Worker uses peer seat colour");
+  assert.match(elementOf(step3Light, "factory-onboarding-lane-worker"), />Worker</);
+  assert.ok(elementOf(step3Light, "factory-onboarding-lane-thinking-lead").includes("#b23a98"), "high thinking pill uses thinking ramp");
+  assert.match(elementOf(step3Light, "factory-onboarding-lane-thinking-lead"), />high</);
+
+  const step3Dark = await render({ step: 3, inspection: readyInspection, lanes: { ...MACHINE_LANES, lead: "claude/opus-4-8:high" } }, { theme: darkTheme });
+  assert.ok(elementOf(step3Dark, "factory-onboarding-step-pill-1").includes("#68b78d"));
+  assert.ok(elementOf(step3Dark, "factory-onboarding-step-pill-3").includes("#5fa8cc"));
+  assert.ok(elementOf(step3Dark, "factory-onboarding-lane-worker").includes("#5db3ba"));
+  assert.ok(elementOf(step3Dark, "factory-onboarding-lane-thinking-lead").includes("#de54c1"));
+
+  // Step 1 status badges: ok, wait, bad.
+  const step1Ok = await render({ step: 1, inspection: readyInspection });
+  assert.ok(elementOf(step1Ok, "factory-onboarding-git-badge").includes("#337e5818"), "Git ready uses ok badge");
+  const step1Wait = await render({ step: 1, inspection: { ...readyInspection, gitRepo: false, hasCommits: false } });
+  assert.ok(elementOf(step1Wait, "factory-onboarding-git-badge").includes("#8f680218"), "non-Git uses wait badge");
+  const step1Bad = await render({ step: 1, inspection: { ...readyInspection, existingLead: true } });
+  assert.ok(elementOf(step1Bad, "factory-onboarding-blocker-badge").includes("#c8253d18"), "blocker uses bad badge");
+
+  // Step 2 status badges: ready (ok) and missing (wait).
+  const step2Mixed = await render({ step: 2, inspection: { ...readyInspection, prerequisites: [ready("a", "Core skills"), missing("b", "Expo skills")], missingPrerequisites: ["Expo skills"] } });
+  assert.ok(elementOf(step2Mixed, "factory-onboarding-prereq-badge-a").includes("#337e5818"));
+  assert.ok(elementOf(step2Mixed, "factory-onboarding-prereq-badge-b").includes("#8f680218"));
+
+  // Step 4 compact summary.
+  const step4 = await render({ step: 4, inspection: readyInspection, design: { projectId: "d", projectName: "Owner screens" } });
+  const summary = elementOf(step4, "factory-onboarding-summary");
+  assert.match(summary, /\/work\/my-app/);
+  assert.match(summary, /claude\/opus-4-8/);
+  assert.match(summary, /pi\/zcode\/glm-5\.3/);
+  assert.match(summary, /Owner screens/);
+  assert.ok(summary.includes("#7459b4") && summary.includes("#2f7899") && summary.includes("#287a81"), "summary carries seat colours");
 });
 
 // ---- panel integration + structural pins -----------------------------------------------------

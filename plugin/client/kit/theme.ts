@@ -56,19 +56,49 @@ export function hoveredOf(state: PressableStateCallbackType): boolean {
   return "hovered" in state && (state as { hovered?: boolean }).hovered === true;
 }
 
-/** Frozen pi palette (ADR 0057 §9). Host foreground/background still own body text. */
+/** Frozen pi palette (ADR 0057 §9, extended in ADR 0063). Host foreground/background still own body text. */
 export const FACTORY_PALETTE = {
   dark: {
     supervisor: "#a798d7", lead: "#5fa8cc", peer: "#5db3ba",
     ok: "#68b78d", wait: "#cd9a22", move: "#de54c1", bad: "#fe5462", idle: "#6c767b",
     thinking: ["#6c767b", "#5489a4", "#6185cc", "#9776e5", "#de54c1", "#fe5462"],
+    disposition: { engineer: "#6185cc", architect: "#9776e5", scout: "#5db3ba", reviewer: "#de54c1" },
   },
   light: {
     supervisor: "#7459b4", lead: "#2f7899", peer: "#287a81",
     ok: "#337e58", wait: "#8f6802", move: "#b23a98", bad: "#c8253d", idle: "#677176",
     thinking: ["#677176", "#3d8eb3", "#4f6fc0", "#7459b4", "#b23a98", "#c8253d"],
+    disposition: { engineer: "#4f6fc0", architect: "#7459b4", scout: "#287a81", reviewer: "#b23a98" },
   },
 } as const;
+
+export type StatusBadgeTone = "ok" | "wait" | "bad" | "idle";
+export type PeerDisposition = keyof typeof FACTORY_PALETTE.light.disposition;
+
+const STATUS_BADGE_TONES: Record<string, StatusBadgeTone> = {
+  working: "ok",
+  starting: "wait",
+  "waiting for permission": "wait",
+  error: "bad",
+  idle: "idle",
+  vacant: "idle",
+};
+
+/** Maps a seat/Peer `statusLabel` strictly 1:1 to a semantic palette tone (ADR 0063 §3). */
+export function statusBadgeTone(statusLabel: string): StatusBadgeTone {
+  return STATUS_BADGE_TONES[statusLabel.trim().toLowerCase()] ?? "idle";
+}
+
+/** Resolves the theme-aware `FACTORY_PALETTE` colour for a `statusLabel`. */
+export function statusBadgeColour(theme: PluginTheme, statusLabel: string): string {
+  return factoryPalette(theme)[statusBadgeTone(statusLabel)];
+}
+
+/** Resolves the fixed `FACTORY_PALETTE` colour for a Peer disposition. */
+export function dispositionColour(theme: PluginTheme, disposition: PeerDisposition | string): string {
+  const palette = factoryPalette(theme);
+  return (palette.disposition as Record<string, string>)[disposition] ?? palette.peer;
+}
 
 /** Relative luminance accepts the host's hex (short or full) and rgb colours. */
 function luminance(colour: string): number {
