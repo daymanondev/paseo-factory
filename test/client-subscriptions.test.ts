@@ -108,6 +108,7 @@ async function loadHarness(t: TestContext, opts: LoadHarnessOptions = {}): Promi
                   onChange: (event) => onChangeText && onChangeText(event.target.value),
                 });
               exports.Icon = () => null;
+              exports.Loading = () => null;
               exports.Platform = {
                 OS: ${JSON.stringify(platformOs)},
                 select: (spec) => (spec[${JSON.stringify(platformOs)}] !== undefined ? spec[${JSON.stringify(platformOs)}] : spec.default),
@@ -127,6 +128,8 @@ async function loadHarness(t: TestContext, opts: LoadHarnessOptions = {}): Promi
                 join(repoRoot, "node_modules/@getpaseo/plugin/dist/client/rpc-context.js"),
               )};
               export const useWorkspace = () => "/project";
+              export const useProjects = () => [];
+              export const useProject = () => null;
               export const useToast = () => ({ show() {}, error() {} });
               export const openExternalUrl = async () => {};
             `,
@@ -136,6 +139,8 @@ async function loadHarness(t: TestContext, opts: LoadHarnessOptions = {}): Promi
             contents: `
               exports.useRpc = (contract) => (input) => globalThis.__factoryClientRpc(contract.name, input);
               exports.useWorkspace = () => "/project";
+              exports.useProjects = () => [];
+              exports.useProject = () => null;
               exports.useToast = () => ({ show() {}, error() {} });
               exports.openExternalUrl = async () => {};
             `,

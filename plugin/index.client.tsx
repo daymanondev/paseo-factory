@@ -14,12 +14,21 @@
  * built-ins, no class syntax — Hermes) is enforced by scripts/check-bundle.mjs.
  */
 import type { PluginClientContext } from "@getpaseo/plugin/client";
-import { FactoryPanel, FactorySettings, PANEL_ID } from "./client/factory/entries.tsx";
+import { Platform } from "react-native";
+import {
+  FactoryOnboardScreen,
+  FactoryOnboardSidebarItem,
+  FactoryPanel,
+  FactorySettings,
+  ONBOARD_SCREEN_ID,
+  PANEL_ID,
+} from "./client/factory/entries.tsx";
 import { createSeatEditorRequests } from "./client/factory/editor-request.ts";
 import { startSeatDirectory } from "./client/factory/directory.tsx";
 
 export default function contribute(client: PluginClientContext) {
   const editorRequests = createSeatEditorRequests();
+  const mobile = Platform.OS === "ios" || Platform.OS === "android";
   const cleanups = [
     client.addWorkspacePanel({
       id: PANEL_ID,
@@ -41,6 +50,39 @@ export default function contribute(client: PluginClientContext) {
     }),
     startSeatDirectory(client, editorRequests),
   ];
+  if (!mobile) {
+    if (typeof (client as { addSidebarFooterItem?: unknown }).addSidebarFooterItem === "function") {
+      cleanups.push(
+        client.addSidebarFooterItem({
+          id: ONBOARD_SCREEN_ID,
+          title: "Onboard Project",
+          Component: FactoryOnboardSidebarItem,
+        }),
+      );
+    }
+    if (typeof (client as { addScreen?: unknown }).addScreen === "function") {
+      cleanups.push(
+        client.addScreen({
+          id: ONBOARD_SCREEN_ID,
+          title: "Onboard Project",
+          Component: FactoryOnboardScreen,
+        }),
+      );
+    }
+    cleanups.push(
+      client.addCommandCenterItem({
+        id: "factory-onboard-project",
+        title: "Factory: Onboard Project",
+        icon: "FolderPlus",
+        keywords: ["factory", "onboard", "project", "setup", "wizard"],
+        context: "global",
+        onSelect({ openScreen }) {
+          if (Platform.OS === "ios" || Platform.OS === "android") return;
+          openScreen({ screenId: ONBOARD_SCREEN_ID });
+        },
+      }),
+    );
+  }
   return () => {
     for (const off of cleanups) off();
   };
