@@ -3,9 +3,11 @@ import type { TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { makeTempDir, disposeDir, factoryErrorCode } from "./helpers.ts";
+import { makeTempDir, disposeDir, factoryErrorCode, gitCommitAll } from "./helpers.ts";
 import { buildSeatKickoffPacket, writeProjectNotebook, syncLegacyScratchNotebook, PROJECT_NOTEBOOK_MAX_GUARD_ROWS } from "../src/preflight.ts";
 import { projectNotebookPath } from "../src/project.ts";
+import { setProjectReleaseSettings } from "../src/project-settings.ts";
+import { execFileSync } from "node:child_process";
 import { FactoryError } from "../src/errors.ts";
 import { LEAD_WAVE_LAWS, SUPERVISOR_OUTCOME_BOUNDARY } from "../src/roles-contract.ts";
 import type { LedgerEvent } from "../src/events.ts";
@@ -124,7 +126,7 @@ test('the Lead kickoff packet is byte-identical to the pre-0.12.4 render (Superv
     '- Build/Test commands: package.json scripts (test: `node --test`, typecheck: `tsc --noEmit`)',
     '- Active lanes: agent=claude',
     '- Ledger tasks: none (clean slate)',
-    '- Role MCP tools (paseo_factory): `lead_set_contract`, `lead_dispatch_agent`, `lead_read_ledger`, `lead_verify`, `lead_merge`, `lead_report_to_supervisor`',
+    '- Role MCP tools (paseo_factory): `lead_set_contract`, `lead_dispatch_agent`, `lead_read_ledger`, `lead_verify`, `lead_merge`, `lead_release`, `lead_report_to_supervisor`',
     '- Law: Fire-and-End-Turn: orient within <= 3 small boundary reads (dispatch a read-only `scout` or `architect` Peer first whenever deeper repo/design discovery is needed), outline the serial-wave roadmap, call `lead_set_contract` then `lead_dispatch_agent` (or `factory contract` + `factory run`) for the current wave only, and IMMEDIATELY end your turn — never poll, never sleep, never grep raw `ledger.jsonl` or `~/.paseo/plugins/**`, and never edit product source code on `<project-root>`.',
     '--- [end seat kickoff packet] ---',
     '',
@@ -281,7 +283,7 @@ test('the kickoff packet renders the SLP MCP tool table and the Project notebook
     const lines = new Set(packet.split("\n"));
     const tools = role === "supervisor"
       ? "`supervisor_dispatch_lead`, `supervisor_read_ledger`, `supervisor_end_cycle`"
-      : "`lead_set_contract`, `lead_dispatch_agent`, `lead_read_ledger`, `lead_verify`, `lead_merge`, `lead_report_to_supervisor`";
+      : "`lead_set_contract`, `lead_dispatch_agent`, `lead_read_ledger`, `lead_verify`, `lead_merge`, `lead_release`, `lead_report_to_supervisor`";
     assert.ok(lines.has(`- Role MCP tools (paseo_factory): ${tools}`), `${role} renders the SLP MCP tool table`);
     assert.doesNotMatch(packet, /scrum/i, `${role} packet carries no Scrum vocabulary`);
     // Every deterministic repo preflight line and the Project notebook ride the packet.
@@ -448,4 +450,39 @@ test("the seat kickoff packet promotes a legacy scratch notebook when it carries
   assert.match(packet, /Project notebook/, "the packet carries the notebook block");
   assert.equal(readFileSync(projectNotebookPath(stateDir, "demo-abc123"), "utf8"), legacy, "the read promoted the legacy copy");
   assert.equal(existsSync(join(projectRoot, ".scratch", "notebook.md")), false, "the untracked copy is gone before any clean-tree check");
+});
+
+test("seat kickoff packet announces Release mode and resolved Release branch across deduplication", (t) => {
+  const stateDir = makeTempDir("release-kickoff-");
+  disposeDir(t, stateDir);
+  const projectRoot = makeTempDir("release-kickoff-root-");
+  disposeDir(t, projectRoot);
+  writeFileSync(join(projectRoot, "README.md"), "hi\n");
+  gitCommitAll(projectRoot);
+  execFileSync("git", ["branch", "-M", "trunk"], { cwd: projectRoot, stdio: "pipe" });
+
+  // Default without origin: mode=off, branch=trunk (current checked-out branch)
+  const offPacket = buildSeatKickoffPacket({ role: "lead", projectSlug: "demo-rel", projectRoot, ledgerEvents: [], stateDir });
+  assert.match(offPacket, /^- Release: mode=off, branch=trunk$/m);
+
+  // Configured mode + explicit branch, plus omitSystemPromptDuplicates keeps dynamic line
+  setProjectReleaseSettings(stateDir, "demo-rel", { mode: "on-request", branch: "release" });
+  const leanLead = buildSeatKickoffPacket({
+    role: "lead",
+    projectSlug: "demo-rel",
+    projectRoot,
+    ledgerEvents: [],
+    stateDir,
+    omitSystemPromptDuplicates: true,
+  });
+  assert.match(leanLead, /^- Release: mode=on-request, branch=release$/m);
+
+  const supAuto = buildSeatKickoffPacket({
+    role: "supervisor",
+    projectSlug: "demo-rel",
+    projectRoot,
+    ledgerEvents: [],
+    stateDir,
+  });
+  assert.match(supAuto, /^- Release: mode=on-request, branch=release$/m);
 });

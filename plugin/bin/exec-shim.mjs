@@ -25,6 +25,7 @@ import { homedir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { inheritChildOutcome, isFactoryInfrastructureProcess, isTaskWorktreeScopedProcess } from "./process-policy.mjs";
+import { refuseReleaseGhArgv } from "./git-refusals.mjs";
 
 const tool = process.argv[2] ?? "";
 const argv = process.argv.slice(3);
@@ -219,7 +220,11 @@ if (inFactorySeat) {
       );
     }
   } else if (tool === "gh") {
-    const valueFlags = new Set(["-R", "--repo", "--hostname"]);
+    const releaseRefusal = refuseReleaseGhArgv(argv);
+    if (releaseRefusal !== undefined) {
+      recordAndRefuse(releaseRefusal.rule, releaseRefusal.reason);
+    }
+    const valueFlags = new Set(["-R", "--repo", "--hostname", "-C"]);
     const positional = [];
     for (let i = 0; i < argv.length; i++) {
       const tok = argv[i];
@@ -233,8 +238,7 @@ if (inFactorySeat) {
     const [sub1, sub2] = positional;
     if (
       (sub1 === "pr" && sub2 === "merge") ||
-      (sub1 === "repo" && sub2 === "delete") ||
-      sub1 === "release"
+      (sub1 === "repo" && sub2 === "delete")
     ) {
       recordAndRefuse(
         "seat-write-fence",

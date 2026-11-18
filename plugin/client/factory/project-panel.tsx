@@ -10,7 +10,9 @@ import { Modal, TextInput } from "@getpaseo/plugin/client/ui";
 import { createContext, useContext, useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { Pressable, Text, View } from "react-native";
-import type { PanelNeedsYouItem, PanelOpenDesign, PanelPeerRow, PanelSeatRow, PanelSupervisorCandidateRow, PanelTone, PanelView, Lanes } from "../../shared/view.ts";
+import type { GitHubPublishPreflightView, PanelNeedsYouItem, PanelOpenDesign, PanelPeerRow, PanelSeatRow, PanelSupervisorCandidateRow, PanelTone, PanelView, Lanes, ReleaseSettingsView } from "../../shared/view.ts";
+import { GitHubReleaseCard } from "./github-release-card.tsx";
+import type { GitHubReleaseActions, ReleaseCardFeedback } from "./github-release-card.tsx";
 import { Btn } from "../kit/pill.tsx";
 import { Tabs } from "../kit/tabs.tsx";
 import { CONTROL_H, RADIUS, SPACING, factoryPalette, hoveredOf, text, thinkingColour, tint } from "../kit/theme.ts";
@@ -894,9 +896,23 @@ export function ProjectPanel({
   machineLanes,
   modelView,
   selfUpdate,
+  release = null,
+  publishPreflight = null,
+  releaseBusy = false,
+  releaseFeedback = null,
+  releaseCopiedLogin = false,
+  releaseActions,
+  onTabChange,
 }: {
   /** The header's version + update control (ticket 11), mounted by the Shell; omitted, no control. */
   selfUpdate?: SelfUpdateView;
+  release?: ReleaseSettingsView | null;
+  publishPreflight?: GitHubPublishPreflightView | null;
+  releaseBusy?: boolean;
+  releaseFeedback?: ReleaseCardFeedback | null;
+  releaseCopiedLogin?: boolean;
+  releaseActions?: GitHubReleaseActions;
+  onTabChange?: (tab: ProjectPanelTab) => void;
   modelView?: LanePickerView;
   editorRequest?: SeatEditorRequest;
   onEditorRequestHandled?: () => void;
@@ -968,9 +984,18 @@ export function ProjectPanel({
         <>
           {/* One alert stack, full width above the tabs: what needs the Owner, then handoff progress. */}
           {needsYouItems.length > 0 || panel.handoffs.length > 0 ? <View testID="factory-alert-stack" style={{ gap: SPACING[1.5] }}>{boundary("Needs you", needsYou)}{boundary("Handoff", handoff)}</View> : null}
-          <Tabs theme={theme} tabs={PANEL_TABS} value={tab} onChange={setTab} testID="factory-tab" />
+          <Tabs
+            theme={theme}
+            tabs={PANEL_TABS}
+            value={tab}
+            onChange={(next) => {
+              setTab(next);
+              onTabChange?.(next);
+            }}
+            testID="factory-tab"
+          />
           <View testID={`factory-tab-body-${tab}`}>
-            {tab === "team" ? boundary("Seats", seats) : tab === "models" ? boundary("Models", models) : <>{boundary("Project usage", panel.usage == null ? null : <ProjectUsage theme={theme} usage={panel.usage} mobile={mobile} />)}{boundary("Skill packs", packs)}{boundary("Open Design", design)}</>}
+            {tab === "team" ? boundary("Seats", seats) : tab === "models" ? boundary("Models", models) : <>{boundary("Project usage", panel.usage == null ? null : <ProjectUsage theme={theme} usage={panel.usage} mobile={mobile} />)}{boundary("Skill packs", packs)}{boundary("Open Design", design)}{release === null ? null : boundary("GitHub & Release", <GitHubReleaseCard theme={theme} release={release} publishPreflight={publishPreflight} mobile={mobile} now={now} busy={releaseBusy} feedback={releaseFeedback} copiedLogin={releaseCopiedLogin} {...(releaseActions === undefined ? {} : { actions: releaseActions })} />)}</>}
           </View>
         </>
       ) : (

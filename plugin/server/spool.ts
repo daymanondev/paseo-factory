@@ -45,6 +45,8 @@ import { loadLanes, parseLane, PEER_THINKING_LEVELS, resolvePeerThinkingLane } f
 import type { LaneThinkingCatalogEntry, PeerThinkingLevel } from "./core/lanes.ts";
 import { listProjectRegistrations, readProjectRegistration, resolveProject, writeProjectRegistration } from "./core/project.ts";
 import { writeProjectNotebook } from "./core/preflight.ts";
+import { releaseProject } from "./release.ts";
+import type { VaultRunner } from "./core/vault.ts";
 import { allocateTaskWorktree } from "./core/mcp/worktrees.ts";
 import { ensureProjectRegistered, isProjectSeat, registerLaneSlug, resolveTargetProject, seatCannotRegisterMessage } from "./projects.ts";
 import type { FactoryRegistry, TargetProjectContext } from "./projects.ts";
@@ -276,6 +278,10 @@ export interface LeadRotateRequest {
  * `leadAgentId`, `mailId`, `rotationState`) so the caller never needs a raw
  * Paseo agentId.
  */
+export interface SpoolReleaseIntent {
+  version?: string;
+}
+
 export interface SpoolLeadDispatchRequest {
   task?: string;
   id: string;
@@ -284,6 +290,7 @@ export interface SpoolLeadDispatchRequest {
   workspace?: string;
   from?: "supervisor" | "owner" | "peer";
   message: string;
+  release?: SpoolReleaseIntent;
   submitter?: string;
   /** Caller seat stamped from `PASEO_FACTORY_SEAT` when present (v0.0.23, ADR 0015 §1). */
   seat?: SpoolSeat;
@@ -301,6 +308,7 @@ export interface SpoolSupervisorDispatchRequest {
   project?: string;
   workspace?: string;
   message: string;
+  release?: SpoolReleaseIntent;
   submitter?: string;
   seat?: SpoolSeat;
 }
@@ -526,6 +534,16 @@ export interface AskRequest {
   projectSlug?: string;
 }
 
+export interface SpoolReleaseRequest {
+  id: string;
+  kind: "release";
+  version: string;
+  workspace?: string;
+  projectSlug?: string;
+  submitter?: string;
+  seat?: SpoolSeat;
+}
+
 export type SpoolRequest =
   | ({ id: string; kind: "upgrade"; submitter?: string; seat?: SpoolSeat } & Omit<UpgradeInput, "controlId">)
   | { id: string; kind: "history_import" | "history_import_status"; sources?: HistoryImportSource[]; project?: string; submitter?: string; seat?: SpoolSeat }
@@ -547,7 +565,8 @@ export type SpoolRequest =
   | MeterRequest
   | RepokeRequest
   | NeedsHumanRequest
-  | NotebookRequest;
+  | NotebookRequest
+  | SpoolReleaseRequest;
 
 /** Handles a synthetic ask — `createChoke(...).spoolAskHandler` is the implementation. */
 export type AskHandler = (request: AskRequest) => SpoolReply;
@@ -643,8 +662,14 @@ export type SpoolReply =
       archivedAgents?: string[];
       data?: unknown;
       historyImports?: ImportStatus[];
+      version?: string;
+      tag?: string;
+      commit?: string;
+      branch?: string;
+      url?: string | null;
+      skipped?: string[];
     }
-  | { id: string; ok: false; code: string; message: string; event?: LedgerEvent };
+  | { id: string; ok: false; code: string; message: string; event?: LedgerEvent; step?: string };
 
 
 
@@ -883,6 +908,14 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
     if (typeof req.projectRoot !== "string" || req.projectRoot.trim() === "") return undefined;
     return { id: req.id, kind: "lead_rotate", projectRoot: req.projectRoot, ...submitterField, ...seatField };
   }
+  const parseReleaseField = (raw: unknown): { ok: true; field: { release?: SpoolReleaseIntent } } | { ok: false } => {
+    if (raw === undefined) return { ok: true, field: {} };
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return { ok: false };
+    const rawVersion = (raw as Record<string, unknown>).version;
+    if (rawVersion !== undefined && typeof rawVersion !== "string") return { ok: false };
+    const trimmed = typeof rawVersion === "string" ? rawVersion.trim() : "";
+    return { ok: true, field: { release: trimmed !== "" ? { version: trimmed } : {} } };
+  };
   if (req.kind === "lead_dispatch") {
     // The v0.0.20 dispatch: the message is the payload (never blank); the
     // target Project rides either form — a registry slug or a workspace
@@ -892,6 +925,8 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
     if (req.project !== undefined && (typeof req.project !== "string" || req.project.trim() === "")) return undefined;
     if (req.workspace !== undefined && (typeof req.workspace !== "string" || req.workspace.trim() === "")) return undefined;
     if (req.from !== undefined && req.from !== "supervisor" && req.from !== "owner" && !(req.from === "peer" && req.seat === "agent")) return undefined;
+    const releaseParsed = parseReleaseField(req.release);
+    if (!releaseParsed.ok) return undefined;
     return {
       id: req.id,
       kind: "lead_dispatch",
@@ -900,6 +935,7 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
       ...(req.workspace === undefined ? {} : { workspace: req.workspace }),
       ...(req.from === undefined ? {} : { from: req.from }),
       message: req.message,
+      ...releaseParsed.field,
       ...submitterField,
       ...seatField,
     };
@@ -908,12 +944,15 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
     if (typeof req.message !== "string" || req.message.trim() === "") return undefined;
     if (req.project !== undefined && (typeof req.project !== "string" || req.project.trim() === "")) return undefined;
     if (req.workspace !== undefined && (typeof req.workspace !== "string" || req.workspace.trim() === "")) return undefined;
+    const releaseParsed = req.kind === "supervisor_dispatch" ? parseReleaseField(req.release) : { ok: true as const, field: {} };
+    if (!releaseParsed.ok) return undefined;
     return {
       id: req.id,
       kind: req.kind,
       ...(req.project === undefined ? {} : { project: req.project }),
       ...(req.workspace === undefined ? {} : { workspace: req.workspace }),
       message: req.message,
+      ...releaseParsed.field,
       ...submitterField,
       ...seatField,
     };
@@ -985,6 +1024,20 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
       content: req.content,
       ...(req.projectSlug === undefined ? {} : { projectSlug: req.projectSlug }),
       ...(req.projectRoot === undefined ? {} : { projectRoot: req.projectRoot }),
+      ...submitterField,
+      ...seatField,
+    };
+  }
+  if (req.kind === "release") {
+    if (typeof req.version !== "string" || req.version.trim() === "") return undefined;
+    if (req.workspace !== undefined && (typeof req.workspace !== "string" || req.workspace.trim() === "")) return undefined;
+    if (req.projectSlug !== undefined && (typeof req.projectSlug !== "string" || req.projectSlug.trim() === "")) return undefined;
+    return {
+      id: req.id,
+      kind: "release",
+      version: req.version.trim(),
+      ...(req.workspace === undefined ? {} : { workspace: req.workspace }),
+      ...(req.projectSlug === undefined ? {} : { projectSlug: req.projectSlug }),
       ...submitterField,
       ...seatField,
     };
@@ -1520,6 +1573,7 @@ const PROJECT_SCOPED_SPOOL_KINDS = new Set([
   "needs_human",
   "ask",
   "notebook",
+  "release",
   "reset",
   "project_rotate",
   "delete",
@@ -1545,6 +1599,8 @@ function contextOfSpoolRequest(request: SpoolRequest): TargetProjectContext {
       return { project: request.projectSlug, task: request.task, agentId: request.agent, submitter: request.submitter };
     case "notebook":
       return { project: request.projectSlug, workspace: request.projectRoot, submitter: request.submitter };
+    case "release":
+      return { project: request.projectSlug, workspace: request.workspace, submitter: request.submitter };
     case "ask":
       return { project: request.projectSlug, task: request.task, workspace: request.cwd, agentId: request.agent, submitter: request.submitter };
     case "reset":
@@ -1626,7 +1682,13 @@ export async function handleSpoolRequest(
   if (takesExclusiveMaintenance(request.kind) && !effective.history.maintenanceActive) return effective.history.withExclusiveMaintenance(() => handleAdmittedSpoolRequest(effective, request, deps, registry));
   const admitted = () => effective.history.runOperation(() => handleAdmittedSpoolRequest(effective, request, deps, registry), { newWork: !["ask", "meter", "repoke", "respawn", "needs_human"].includes(request.kind) });
   const run = () => {
-    const workspace = request.kind === "contract" ? request.workspace : (request.kind === "spawn" || request.kind === "respawn") ? effective.contractFor(request.task)?.workspace : undefined;
+    const workspace = request.kind === "contract"
+      ? request.workspace
+      : request.kind === "release"
+        ? (request.workspace ?? (request.projectSlug ? readProjectRegistration(effective.stateDir, request.projectSlug)?.root : undefined))
+        : (request.kind === "spawn" || request.kind === "respawn")
+          ? effective.contractFor(request.task)?.workspace
+          : undefined;
     const project = workspace === undefined ? undefined : resolveProject(workspace);
     return project?.ok ? withProjectIngressLock(effective.stateDir, project.slug, admitted) : admitted();
   };
@@ -1727,6 +1789,14 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
         message: `Seat supervisor cannot call factory notebook; the Project notebook is the Lead's operational memory — dispatch the ruling to Lead instead.`,
       };
     }
+    if (request.kind === "release" && effectiveSeat === "supervisor") {
+      return {
+        id: request.id,
+        ok: false,
+        code: "supervisor-cannot-release",
+        message: "Seat supervisor cannot call lead_release; Lead owns Release within the Owner's Release mode.",
+      };
+    }
 
     if (
       (request.kind === "contract" ||
@@ -1738,6 +1808,7 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
         request.kind === "accept" ||
         request.kind === "close" ||
         request.kind === "notebook" ||
+        request.kind === "release" ||
         (request.kind === "lead_dispatch" && request.from !== "peer") ||
         request.kind === "supervisor_dispatch" ||
         request.kind === "supervisor_report" ||
@@ -1939,6 +2010,7 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
           ...(request.workspace === undefined ? {} : { workspace: request.workspace }),
           from: "supervisor",
           message: request.message,
+          ...(request.release === undefined ? {} : { release: request.release }),
           ...(request.submitter === undefined ? {} : { submitter: request.submitter }),
           seat: "supervisor",
         });
@@ -2434,6 +2506,62 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
         summary: `notebook updated: ${path} (${request.content.split("\n").length} lines, ${Buffer.byteLength(request.content, "utf8")} bytes) by ${request.submitter ?? "owner"}`,
       };
     }
+    if (request.kind === "release") {
+      let projectSlug = request.projectSlug;
+      let projectRoot = request.workspace;
+      if (projectRoot !== undefined) {
+        const resolved = resolveProject(projectRoot);
+        if (!resolved.ok) {
+          return { id: request.id, ok: false, code: "unknown-project", message: `could not resolve Project root "${projectRoot}" — ${resolved.reason}` };
+        }
+        projectSlug = resolved.slug;
+        projectRoot = resolved.root;
+      } else if (projectSlug !== undefined) {
+        projectRoot = readProjectRegistration(factory.stateDir, projectSlug)?.root;
+      } else {
+        const regs = listProjectRegistrations(factory.stateDir);
+        if (regs.length === 1) {
+          projectSlug = regs[0]!.slug;
+          projectRoot = regs[0]!.root;
+        }
+      }
+      if (projectSlug === undefined || projectRoot === undefined || projectRoot.trim() === "") {
+        return {
+          id: request.id,
+          ok: false,
+          code: "unknown-project",
+          message: "release requires a registered Project workspace",
+        };
+      }
+      const res = await releaseProject({
+        factory,
+        stateDir: factory.stateDir,
+        projectSlug,
+        projectRoot,
+        version: request.version,
+        runner: deps.vaultRunner,
+      });
+      if (!res.ok) {
+        return {
+          id: request.id,
+          ok: false,
+          code: res.code,
+          step: res.step,
+          message: `[${res.step}] ${res.code}: ${res.message}`,
+        };
+      }
+      return {
+        id: request.id,
+        ok: true,
+        summary: `Released ${res.tag} on ${res.branch} (${res.commit.slice(0, 7)})${res.url ? ` — ${res.url}` : ""}`,
+        version: res.version,
+        tag: res.tag,
+        commit: res.commit,
+        branch: res.branch,
+        url: res.url,
+        skipped: res.skipped,
+      };
+    }
     // The acceptance (v0.0.14): awaited — a worktree task's local landing
     // runs before the line records, and the reply carries the outcome. The
     // `--by` seat, when the request claims one, overrides the submitter
@@ -2522,6 +2650,8 @@ export interface SpoolOptions {
    * exactly as before.
    */
   registry?: FactoryRegistry;
+  /** Injectable VaultRunner for release / gh / git calls (defaults to builtinVaultRunner). */
+  vaultRunner?: VaultRunner;
 }
 
 export type SpoolDeps = Omit<SpoolOptions, "onLog" | "pollMs">;

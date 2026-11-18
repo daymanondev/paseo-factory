@@ -227,9 +227,12 @@ test("identified readers enforce each event's typed payload while legacy records
     { row: { event: "git_blocked", agent: "peer", command: "git push", rule: "push", reason: "forbidden", cwd: dir, blockId: "block" }, required: ["reason"] },
     { row: { event: "spawn_dispatched", provider: "model", arity: 1, worktree: dir }, required: [], invalid: [{ worktree: 2 }] },
     { row: { event: "retro_written", model: "retro", outcome: "written", durationMs: 1, proposalsPath: "retro.md", proposalCount: 0 }, required: ["proposalsPath", "proposalCount"], invalid: [{ proposalCount: -1 }, { error: 5 }] },
+    { row: { event: "release_published", version: "0.14.0", tag: "v0.14.0", commit: "abc1234", branch: "main", url: "https://github.com/org/repo/releases/tag/v0.14.0", mode: "on-request", skipped: ["tag"] }, required: ["version", "tag", "commit", "branch", "mode", "skipped"], invalid: [{ version: "" }, { mode: "manual" }, { skipped: "tag" }, { url: 5 }, { task: "T" }, { attempt: 1 }] },
+    { row: { event: "release_failed", version: "0.14.0", step: "github-release", code: "gh-unauthenticated", detail: "not logged in" }, required: ["version", "step", "code", "detail"], invalid: [{ version: "" }, { step: "" }, { code: "" }, { detail: 5 }, { task: "T" }, { attempt: 1 }] },
   ];
   for (const fixture of cases) {
-    const source = fixture.row.event === "contract_set" ? [{ ...fixture.row, seq: 1, ts }] : [base, { ...fixture.row, seq: 2, ts, ...(fixture.row.event === "retro_written" ? {} : { task: "T" }) }];
+    const taskless = fixture.row.event === "retro_written" || fixture.row.event === "release_published" || fixture.row.event === "release_failed";
+    const source = fixture.row.event === "contract_set" ? [{ ...fixture.row, seq: 1, ts }] : [base, { ...fixture.row, seq: 2, ts, ...(taskless ? {} : { task: "T" }) }];
     const plan = planLegacyIdentity(source.map(row => JSON.stringify(row) + "\n").join(""), { writerId: "local" });
     assert.equal(plan.ok, true, String(fixture.row.event));
     const valid = plan.events.map(row => JSON.stringify(row) + "\n").join("");

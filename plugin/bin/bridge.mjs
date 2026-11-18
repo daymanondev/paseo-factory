@@ -87,7 +87,9 @@ var EVENT_NAMES = [
   "respawn_refused",
   "needs_human",
   "retro_written",
-  "task_closed"
+  "task_closed",
+  "release_published",
+  "release_failed"
 ];
 var PEER_DISPOSITIONS = ["engineer", "architect", "reviewer", "scout"];
 var PEER_HANDOFF_OUTCOMES = ["complete", "partial", "blocked", "reopen"];
@@ -235,6 +237,12 @@ function shapeIsValid(evt) {
   if (evt.event === "task_closed") {
     return taskIsString && typeof asRecord.reason === "string" && (asRecord.closed_by === void 0 || typeof asRecord.closed_by === "string");
   }
+  if (evt.event === "release_published") {
+    return asRecord.task === void 0 && asRecord.attempt === void 0 && typeof asRecord.version === "string" && typeof asRecord.tag === "string" && typeof asRecord.commit === "string" && typeof asRecord.branch === "string" && (asRecord.url === null || typeof asRecord.url === "string") && typeof asRecord.mode === "string" && Array.isArray(asRecord.skipped) && asRecord.skipped.every((s) => typeof s === "string");
+  }
+  if (evt.event === "release_failed") {
+    return asRecord.task === void 0 && asRecord.attempt === void 0 && typeof asRecord.version === "string" && typeof asRecord.step === "string" && typeof asRecord.code === "string" && typeof asRecord.detail === "string";
+  }
   const attempt = asRecord.attempt;
   return taskIsString && typeof attempt === "number" && Number.isInteger(attempt) && attempt >= 1;
 }
@@ -266,7 +274,7 @@ function v2PayloadIsValid(event) {
   if (event.attempt !== void 0 && !["claim_reported", "gate_started", "gate_finished", "fresh_eyes_written", "watch_written", "report_written", "attempt_accepted"].includes(event.event)) return false;
   if (event.event === "needs_human" && record(event.evidence) && !Object.values(event.evidence).every((value) => Number.isSafeInteger(value) && value > 0)) return false;
   if (event.arity !== void 0 && (!Number.isSafeInteger(event.arity) || event.arity < 1)) return false;
-  if (event.event === "ledger_schema" || event.event === "retro_written") {
+  if (event.event === "ledger_schema" || event.event === "retro_written" || event.event === "release_published" || event.event === "release_failed") {
     if (event.task !== void 0 || event.attempt !== void 0) return false;
   }
   switch (event.event) {
@@ -303,6 +311,10 @@ function v2PayloadIsValid(event) {
       return optionalString("worktree") && (event.thinking === void 0 || PEER_THINKING_LEVELS.includes(event.thinking)) && optionalString("thinkingReason");
     case "retro_written":
       return string("model") && duration() && optionalString("error") && optionalString("proposalsPath") && (event.proposalCount === void 0 || Number.isSafeInteger(event.proposalCount) && event.proposalCount >= 0) && (event.outcome === "written" ? string("proposalsPath") && event.proposalCount !== void 0 : event.outcome === "failed" && string("error"));
+    case "release_published":
+      return nonempty(event.version) && nonempty(event.tag) && nonempty(event.commit) && nonempty(event.branch) && (event.url === null || string("url")) && typeof event.mode === "string" && ["off", "on-request", "auto"].includes(event.mode) && Array.isArray(event.skipped) && event.skipped.every((item) => typeof item === "string");
+    case "release_failed":
+      return nonempty(event.version) && nonempty(event.step) && nonempty(event.code) && string("detail");
     default:
       return true;
   }
@@ -1266,7 +1278,9 @@ var EVENT_NAMES = [
   "respawn_refused",
   "needs_human",
   "retro_written",
-  "task_closed"
+  "task_closed",
+  "release_published",
+  "release_failed"
 ];
 var PEER_DISPOSITIONS = ["engineer", "architect", "reviewer", "scout"];
 var PEER_HANDOFF_OUTCOMES = ["complete", "partial", "blocked", "reopen"];
@@ -1414,6 +1428,12 @@ function shapeIsValid(evt) {
   if (evt.event === "task_closed") {
     return taskIsString && typeof asRecord.reason === "string" && (asRecord.closed_by === void 0 || typeof asRecord.closed_by === "string");
   }
+  if (evt.event === "release_published") {
+    return asRecord.task === void 0 && asRecord.attempt === void 0 && typeof asRecord.version === "string" && typeof asRecord.tag === "string" && typeof asRecord.commit === "string" && typeof asRecord.branch === "string" && (asRecord.url === null || typeof asRecord.url === "string") && typeof asRecord.mode === "string" && Array.isArray(asRecord.skipped) && asRecord.skipped.every((s) => typeof s === "string");
+  }
+  if (evt.event === "release_failed") {
+    return asRecord.task === void 0 && asRecord.attempt === void 0 && typeof asRecord.version === "string" && typeof asRecord.step === "string" && typeof asRecord.code === "string" && typeof asRecord.detail === "string";
+  }
   const attempt = asRecord.attempt;
   return taskIsString && typeof attempt === "number" && Number.isInteger(attempt) && attempt >= 1;
 }
@@ -1445,7 +1465,7 @@ function v2PayloadIsValid(event) {
   if (event.attempt !== void 0 && !["claim_reported", "gate_started", "gate_finished", "fresh_eyes_written", "watch_written", "report_written", "attempt_accepted"].includes(event.event)) return false;
   if (event.event === "needs_human" && record(event.evidence) && !Object.values(event.evidence).every((value) => Number.isSafeInteger(value) && value > 0)) return false;
   if (event.arity !== void 0 && (!Number.isSafeInteger(event.arity) || event.arity < 1)) return false;
-  if (event.event === "ledger_schema" || event.event === "retro_written") {
+  if (event.event === "ledger_schema" || event.event === "retro_written" || event.event === "release_published" || event.event === "release_failed") {
     if (event.task !== void 0 || event.attempt !== void 0) return false;
   }
   switch (event.event) {
@@ -1482,6 +1502,10 @@ function v2PayloadIsValid(event) {
       return optionalString("worktree") && (event.thinking === void 0 || PEER_THINKING_LEVELS.includes(event.thinking)) && optionalString("thinkingReason");
     case "retro_written":
       return string("model") && duration() && optionalString("error") && optionalString("proposalsPath") && (event.proposalCount === void 0 || Number.isSafeInteger(event.proposalCount) && event.proposalCount >= 0) && (event.outcome === "written" ? string("proposalsPath") && event.proposalCount !== void 0 : event.outcome === "failed" && string("error"));
+    case "release_published":
+      return nonempty(event.version) && nonempty(event.tag) && nonempty(event.commit) && nonempty(event.branch) && (event.url === null || string("url")) && typeof event.mode === "string" && ["off", "on-request", "auto"].includes(event.mode) && Array.isArray(event.skipped) && event.skipped.every((item) => typeof item === "string");
+    case "release_failed":
+      return nonempty(event.version) && nonempty(event.step) && nonempty(event.code) && string("detail");
     default:
       return true;
   }
@@ -1736,12 +1760,19 @@ function extendTool(tool, properties) {
 var sharedTools = {
   supervisor_dispatch_lead: {
     name: "supervisor_dispatch_lead",
-    description: "Dispatch an implementation directive to the Project's Lead seat via the serialized Lead mailbox. After calling this tool, end your turn immediately and wait for Lead's wave report.",
+    description: "Dispatch an implementation directive to the Project's Lead seat via the serialized Lead mailbox. Pass `release` when the Owner wants to record a Release intent (optional pinned `version` X.Y.Z). After calling this tool, end your turn immediately and wait for Lead's wave report.",
     inputSchema: {
       type: "object",
       properties: {
         message: { type: "string", description: "The directive text for Lead." },
-        workspace: { type: "string", description: "Optional Project root path (defaults to current project root)." }
+        workspace: { type: "string", description: "Optional Project root path (defaults to current project root)." },
+        release: {
+          type: "object",
+          description: "Optional Owner release intent for `on-request` / `auto` Release modes.",
+          properties: {
+            version: { type: "string", description: "Optional exact target semver X.Y.Z; omit when Owner did not pin a version." }
+          }
+        }
       },
       required: ["message"]
     }
@@ -1910,6 +1941,18 @@ var sharedTools = {
       required: ["message"]
     }
   },
+  lead_release: {
+    name: "lead_release",
+    description: "Publish a Gate-verified Release for the Project at `version` (`vX.Y.Z`): creates an annotated tag on HEAD, fast-forward pushes the configured Release branch to `origin`, pushes the tag, and creates the GitHub Release (within the Owner's Release mode).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        version: { type: "string", description: 'Semver version to release (e.g. "0.14.0").' },
+        workspace: { type: "string", description: "Optional Project root path." }
+      },
+      required: ["version"]
+    }
+  },
   agent_claim: {
     name: "agent_claim",
     description: "Submit a Claim for your bound Task in the Task worktree with the mandatory 6-Field Handoff (`outcome`, `scope`, `verification`, `unknowns`, optional `ownership`). Runs the Contract's Gate and returns the Verdict (`GREEN` or `RED`) and report.",
@@ -1964,7 +2007,7 @@ var sharedTools = {
 };
 var sharedRoles = {
   supervisor: ["supervisor_accept_task", "supervisor_dispatch_lead", "supervisor_read_ledger", "supervisor_end_cycle", "lead_close_task", "lead_retire_task"],
-  lead: ["lead_repoke_agent", "lead_needs_human", "lead_create_worktree", "lead_set_contract", "lead_dispatch_agent", "lead_verify", "lead_merge", "lead_remove_worktree", "lead_report_to_supervisor", "lead_close_task", "lead_retire_task", "lead_update_notebook", "lead_read_ledger"],
+  lead: ["lead_repoke_agent", "lead_needs_human", "lead_create_worktree", "lead_set_contract", "lead_dispatch_agent", "lead_verify", "lead_merge", "lead_remove_worktree", "lead_release", "lead_report_to_supervisor", "lead_close_task", "lead_retire_task", "lead_update_notebook", "lead_read_ledger"],
   agent: ["agent_claim", "agent_escalate_blocker"],
   unbound: ["factory_dispatch_supervisor", "factory_status"]
 };
@@ -2134,12 +2177,24 @@ async function handleToolCall(name, rawArgs) {
         // best-effort active supervisor binding update
       }
     }
+    let release;
+    if (args.release !== undefined) {
+      if (args.release === null || typeof args.release !== "object" || Array.isArray(args.release)) {
+        return toolResult("supervisor_dispatch_lead: `release` must be an object with optional string `version`.", true);
+      }
+      if (args.release.version !== undefined && typeof args.release.version !== "string") {
+        return toolResult("supervisor_dispatch_lead: `release.version` must be a string when provided.", true);
+      }
+      const trimmedVersion = typeof args.release.version === "string" ? args.release.version.trim() : "";
+      release = trimmedVersion !== "" ? { version: trimmedVersion } : {};
+    }
     const reply = await roundTripSpool(ctx, {
       id: randomId(),
       kind: "lead_dispatch",
       ...(workspace ? { workspace } : ctx.projectSlug ? { project: ctx.projectSlug } : {}),
       from: "supervisor",
       message,
+      ...(release !== undefined ? { release } : {}),
       seat: "supervisor",
     });
     if (!reply.ok) return toolResult(`${reply.code}: ${reply.message}`, true);
@@ -2275,6 +2330,27 @@ async function handleToolCall(name, rawArgs) {
       content: args.content,
       ...(ctx.projectSlug !== undefined ? { projectSlug: ctx.projectSlug } : {}),
       ...(workspace !== undefined && workspace !== null && workspace !== "" ? { projectRoot: workspace } : {}),
+      seat: "lead",
+    });
+    if (!reply.ok) return toolResult(`${reply.code}: ${reply.message}`, true);
+    return toolResult(reply.summary);
+  }
+
+  if (name === "lead_release") {
+    const version = typeof args.version === "string" ? args.version.trim() : "";
+    if (version === "") {
+      return toolResult("lead_release requires a non-empty `version` string (e.g. \"0.14.0\").", true);
+    }
+    const workspace =
+      typeof args.workspace === "string" && args.workspace.trim() !== ""
+        ? resolve(args.workspace.trim())
+        : ctx.projectRoot ?? ctx.workspace;
+    const reply = await roundTripSpool(ctx, {
+      id: randomId(),
+      kind: "release",
+      version,
+      ...(ctx.projectSlug !== undefined ? { projectSlug: ctx.projectSlug } : {}),
+      ...(workspace !== undefined && workspace !== null && workspace !== "" ? { workspace } : {}),
       seat: "lead",
     });
     if (!reply.ok) return toolResult(`${reply.code}: ${reply.message}`, true);

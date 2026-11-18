@@ -53,6 +53,7 @@
 
 import type { LandingResult } from "./workspace.ts";
 import type { PeerThinkingLevel } from "./lanes.ts";
+import type { ProjectReleaseMode } from "./project-settings.ts";
 
 export type Verdict = "red" | "green";
 
@@ -90,6 +91,8 @@ export const EVENT_NAMES = [
   "needs_human",
   "retro_written",
   "task_closed",
+  "release_published",
+  "release_failed",
 ] as const;
 
 export type EventName = (typeof EVENT_NAMES)[number];
@@ -732,6 +735,31 @@ export interface TaskClosed extends EventIdentityMetadata {
   closed_by?: string;
 }
 
+/** Task-less Project-level Release success event (v0.14.0, ADR 0061). */
+export interface ReleasePublished extends EventIdentityMetadata {
+  seq: number;
+  ts: Timestamp;
+  event: "release_published";
+  version: string;
+  tag: string;
+  commit: string;
+  branch: string;
+  url: string | null;
+  mode: ProjectReleaseMode;
+  skipped: string[];
+}
+
+/** Task-less Project-level Release failure event recorded after preconditions pass (v0.14.0, ADR 0061). */
+export interface ReleaseFailed extends EventIdentityMetadata {
+  seq: number;
+  ts: Timestamp;
+  event: "release_failed";
+  version: string;
+  step: string;
+  code: string;
+  detail: string;
+}
+
 export type LedgerEvent =
   | LedgerSchema
   | ContractSet
@@ -754,7 +782,9 @@ export type LedgerEvent =
   | RespawnRefused
   | NeedsHuman
   | RetroWritten
-  | TaskClosed;
+  | TaskClosed
+  | ReleasePublished
+  | ReleaseFailed;
 
 /** What callers hand to Ledger.append — same shape, `seq` and `ts` not yet assigned. */
 type PendingOf<T> = T extends LedgerSchema ? never : T extends LedgerEvent ? Omit<T, "seq" | "ts" | keyof EventIdentityMetadata> : never;

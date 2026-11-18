@@ -16,6 +16,8 @@ import { claimCliBinDir, ensureClaimCli, ensureGitShim } from "../plugin/server/
 import { startSpool } from "../plugin/server/spool.ts";
 import { createSurfaceHandlers } from "../plugin/server/surface-rpc.ts";
 import type { SurfaceDaemonApi } from "../plugin/server/surface-rpc.ts";
+import { setProjectReleaseSettings } from "../plugin/server/core/project-settings.ts";
+import { builtinVaultRunner } from "../plugin/server/core/vault.ts";
 import { disposeDir, gitCommitAll, makeTempDir, repoRoot } from "./helpers.ts";
 
 const BRIDGE_BIN = resolve(repoRoot, "plugin/bin/bridge.mjs");
@@ -455,4 +457,171 @@ test("Full SLP lifecycle: Owner -> Supervisor -> Lead -> Agent -> Lead -> Superv
   assert.equal(spawnSync(join(binDir, "pkill"), ["-9", "-f", "plugin-process.js"], { cwd: projectRoot, env: shimEnv }).status, 126);
   assert.equal(spawnSync(join(binDir, "paseo"), ["agent", "create"], { cwd: projectRoot, env: shimEnv }).status, 126);
   assert.equal(spawnSync(join(binDir, "gh"), ["pr", "merge"], { cwd: projectRoot, env: shimEnv }).status, 126);
+});
+
+test("on-request lifecycle: Supervisor dispatch carries release intent, Lead lead_release succeeds once, second call refuses no-release-intent", async (t) => {
+  const dir = makeTempDir("slp-release-lifecycle-");
+  disposeDir(t, dir);
+  const home = join(dir, "home");
+  const stateDir = join(dir, "state");
+  const projectRoot = join(dir, "repo");
+  const bareOrigin = join(dir, "origin.git");
+  mkdirSync(home, { recursive: true });
+  mkdirSync(projectRoot, { recursive: true });
+  writeFileSync(join(projectRoot, "CHANGELOG.md"), "# Changelog\n\n## [0.14.0] - 2026-11-18\n- Ship release flow.\n");
+  const headSha = gitCommitAll(projectRoot);
+  execFileSync("git", ["branch", "-M", "main"], { cwd: projectRoot, stdio: "pipe" });
+  execFileSync("git", ["init", "--bare", bareOrigin], { stdio: "pipe" });
+  execFileSync("git", ["remote", "add", "origin", bareOrigin], { cwd: projectRoot, stdio: "pipe" });
+  execFileSync("git", ["push", "origin", "HEAD:refs/heads/main"], { cwd: projectRoot, stdio: "pipe" });
+
+  const correlations = new CorrelationRegistry(stateDir);
+  const factory = createFactory({ stateDir });
+  const agents: Array<{ id: string; provider: string; title: string | null; status: string; cwd: string; labels: Record<string, string>; env: Record<string, string> }> = [];
+
+  const daemon: SurfaceDaemonApi = {
+    agents: {
+      list: async (options) => {
+        const filterLabels = options?.filter?.labels;
+        const matched = agents.filter((a) => {
+          if (filterLabels !== undefined) {
+            for (const [k, v] of Object.entries(filterLabels)) {
+              if (a.labels[k] !== v) return false;
+            }
+          }
+          return true;
+        });
+        return {
+          entries: matched.map((a) => ({
+            agent: {
+              id: a.id,
+              provider: a.provider,
+              title: a.title,
+              status: a.status,
+              model: null,
+              labels: a.labels,
+              archivedAt: null,
+              requiresAttention: false,
+              attentionReason: null,
+              updatedAt: new Date().toISOString(),
+              cwd: a.cwd,
+            },
+          })),
+        };
+      },
+      create: async (options) => {
+        const createHookOut = injectRoleOnCreate(
+          { config: { provider: options.config.provider, cwd: options.cwd, title: options.title }, env: {} },
+          stateDir,
+          home,
+        );
+        const effectiveEnv = { ...(createHookOut?.env ?? {}) };
+        const id = `agent-${agents.length + 1}`;
+        const sessionOpenOut = injectSessionEnv({ agentId: id, cwd: options.cwd, env: effectiveEnv }, stateDir, home);
+        const finalEnv = sessionOpenOut?.env ?? effectiveEnv;
+        agents.push({
+          id,
+          provider: options.config.provider,
+          title: options.title ?? null,
+          status: "idle",
+          cwd: options.cwd,
+          labels: options.labels ?? {},
+          env: finalEnv,
+        });
+        return { id };
+      },
+      ref: () => ({
+        send: async () => {},
+        archive: async () => ({ archivedAt: new Date().toISOString() }),
+        timeline: { refetch: async () => ({ entries: [] }) },
+        waitForTurnResult: async () => ({ status: "idle" }),
+        cancel: async () => {},
+      }),
+    },
+    providers: {
+      listAvailable: async () => ({ providers: [{ provider: "claude-code", available: true }] }),
+      listModels: async () => ({ models: [] }),
+    },
+  };
+
+  let leadMail!: ReturnType<typeof createLeadMailRuntime>;
+  const surface = createSurfaceHandlers({
+    factory,
+    stateDir,
+    home,
+    daemon,
+    stopAgent: async () => ({ ok: true }),
+    onLeadRetired: (input) => leadMail.settleLeadRotation(input.slug),
+    leadDispatch: (req) => leadMail.dispatchLead(req),
+  });
+  leadMail = createLeadMailRuntime({
+    factory,
+    stateDir,
+    daemon,
+    ensureLead: (input) => surface.leadEnsure(input),
+    retireLead: (input) => surface.leadRotate(input),
+  });
+  const spool = startSpool(stateDir, factory, {
+    pollMs: 20,
+    leadDispatch: (req) => leadMail.dispatchLead(req),
+    supervisorDispatch: (req) => leadMail.dispatchSupervisor(req),
+    supervisorReport: (req) => leadMail.reportSupervisor(req),
+    peerMail: leadMail.notifyPeer,
+    daemon: daemon as never,
+    vaultRunner: async (call) => {
+      if (call.command === "gh") {
+        if (call.args[0] === "repo" && call.args[1] === "view") {
+          return Buffer.from(JSON.stringify({ nameWithOwner: "owner/demo", isPrivate: true, defaultBranchRef: { name: "main" } }));
+        }
+        if (call.args[0] === "release" && call.args[1] === "view") throw new Error("release does not exist");
+        if (call.args[0] === "release" && call.args[1] === "create") {
+          return Buffer.from("https://github.com/owner/demo/releases/tag/v0.14.0\n");
+        }
+      }
+      return builtinVaultRunner(call);
+    },
+  });
+  t.after(() => spool.stop());
+
+  const supStarted = await surface.supervisorStart({ projectRoot });
+  assert.ok(supStarted.ok);
+  const supAgent = agents.find((a) => a.labels.seat === "supervisor")!;
+  setProjectReleaseSettings(stateDir, supStarted.slug, { mode: "on-request" });
+
+  // Supervisor dispatches Lead with explicit release intent
+  const supDispatch = await callMcpTool({
+    args: ["--correlation", supAgent.env.PASEO_FACTORY_CORRELATION!, "--state-dir", stateDir],
+    toolName: "supervisor_dispatch_lead",
+    toolArgs: { message: "Release v0.14.0 after final wave.", release: { version: "0.14.0" } },
+  });
+  assert.notEqual(supDispatch.isError, true, supDispatch.text);
+  const leadAgent = agents.find((a) => a.labels.seat === "lead")!;
+  await leadMail.onLeadTurnEnded({ agentId: leadAgent.id, outcome: { kind: "completed" }, timeline: [] });
+
+  // Land accepted wave matching HEAD
+  factory.setContract({ task: "T-REL", workspace: projectRoot, gate: "true", artifact: "CHANGELOG.md" });
+  factory.ledger.append({ event: "claim_reported", task: "T-REL", attempt: 1, sha: headSha });
+  factory.ledger.append({ event: "gate_started", task: "T-REL", attempt: 1, cmd: "true" });
+  factory.ledger.append({ event: "gate_finished", task: "T-REL", attempt: 1, exit: 0, verdict: "green", note: "ok", sha: headSha });
+  factory.ledger.append({ event: "report_written", task: "T-REL", attempt: 1, path: "report-T-REL-1.md" });
+  await factory.accept({ task: "T-REL", attempt: 1, accepted_by: "lead" });
+
+  // First lead_release succeeds and consumes the one-shot request
+  const firstRelease = await callMcpTool({
+    args: ["--correlation", leadAgent.env.PASEO_FACTORY_CORRELATION!, "--state-dir", stateDir],
+    toolName: "lead_release",
+    toolArgs: { version: "0.14.0" },
+  });
+  assert.notEqual(firstRelease.isError, true, firstRelease.text);
+  assert.match(firstRelease.text, /v0\.14\.0/);
+  assert.match(firstRelease.text, /https:\/\/github\.com\/owner\/demo\/releases\/tag\/v0\.14\.0/);
+
+  // Second lead_release on the same on-request Project refuses with no-release-intent
+  const secondRelease = await callMcpTool({
+    args: ["--correlation", leadAgent.env.PASEO_FACTORY_CORRELATION!, "--state-dir", stateDir],
+    toolName: "lead_release",
+    toolArgs: { version: "0.14.0" },
+  });
+  assert.equal(secondRelease.isError, true);
+  assert.match(secondRelease.text, /no-release-intent/);
 });

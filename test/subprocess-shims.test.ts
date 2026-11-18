@@ -137,3 +137,51 @@ test("process shims allow Task worktree targets while refusing factory infrastru
   const blocks = readFileSync(join(env.FACTORY_STATE_DIR, "git-blocked.log"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
   assert.ok(blocks.every((entry) => entry.rule === "process-kill"));
 });
+
+test("gh shim enforces release-fence for seats and correlations while passing non-release gh and operator invocations", (t) => {
+  const { executable, env, wrappedArgs } = stage(t, { name: "exec", tool: "gh", script: "exec-shim.mjs" });
+  writeFileSync(executable, `#!${process.execPath}\nconsole.log(JSON.stringify(process.argv.slice(2)));\n`, { mode: 0o755 });
+
+  const fenced: string[][] = [
+    ["release", "create", "v0.14.0"],
+    ["release", "list"],
+    ["-R", "owner/repo", "release", "view", "v0.14.0"],
+    ["repo", "create", "owner/repo", "--private"],
+    ["repo", "edit", "--visibility", "public"],
+    ["-R", "owner/repo", "repo", "edit"],
+    ["-C", "/tmp/ws", "repo", "create", "demo"],
+  ];
+  const allowed: string[][] = [
+    ["pr", "list"],
+    ["issue", "list"],
+    ["auth", "status"],
+    ["repo", "view"],
+    ["api", "user"],
+  ];
+
+  for (const extraEnv of [
+    { PASEO_FACTORY_SEAT: "supervisor" },
+    { PASEO_FACTORY_SEAT: "lead" },
+    { PASEO_FACTORY_SEAT: "agent" },
+    { PASEO_FACTORY_CORRELATION: "cor_test_123" },
+  ]) {
+    for (const args of fenced) {
+      const res = spawnSync(process.execPath, [...wrappedArgs, ...args], { env: { ...env, ...extraEnv }, encoding: "utf8" });
+      assert.equal(res.status, 126, `${JSON.stringify(extraEnv)}: gh ${args.join(" ")} must refuse`);
+      assert.match(res.stderr, /release-fence/, `stderr must name release-fence for gh ${args.join(" ")}`);
+      assert.equal(res.stdout, "");
+    }
+    for (const args of allowed) {
+      const res = spawnSync(process.execPath, [...wrappedArgs, ...args], { env: { ...env, ...extraEnv }, encoding: "utf8" });
+      assert.equal(res.status, 0, `${JSON.stringify(extraEnv)}: gh ${args.join(" ")} must pass: ${res.stderr}`);
+      assert.deepEqual(JSON.parse(res.stdout), args);
+    }
+  }
+
+  // Operator (no seat env, no correlation env) passes fenced gh commands through
+  for (const args of fenced) {
+    const res = spawnSync(process.execPath, [...wrappedArgs, ...args], { env, encoding: "utf8" });
+    assert.equal(res.status, 0, `operator gh ${args.join(" ")} must pass: ${res.stderr}`);
+    assert.deepEqual(JSON.parse(res.stdout), args);
+  }
+});

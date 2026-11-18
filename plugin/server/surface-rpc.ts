@@ -3,9 +3,10 @@ import { recentSeatModels } from "./seat-model-history.ts";
 import { readPeerHandover } from "./peer-handoff.ts";
 import { parseHandoffFile } from "./handoff-text.ts";
 import { readHandoffProgress, laneRef } from "./handoff-progress.ts";
-import type { PanelView, ScopedLaneRef, TaskView } from "../shared/view.ts";
+import type { LastReleaseView, PanelView, ReleaseOriginView, ReleaseSettingsView, ScopedLaneRef, TaskView } from "../shared/view.ts";
 import type { HandoffProgress, HandoffAction, HandoffRequest, HandoffReply } from "../shared/handoff.ts";
-import { readProjectSettings, setProjectSkillPacks, resetProjectSkillPacks } from "./core/project-settings.ts";
+import { clearReleaseRequest, readProjectSettings, readReleaseRequest, readReleaseSettings, setProjectReleaseSettings, setProjectSkillPacks, resetProjectSkillPacks } from "./core/project-settings.ts";
+import type { ProjectReleaseMode } from "./core/project-settings.ts";
 import { linkedPreviewBundle } from "./core/open-design/preview-bundle.ts";
 import { serveLinkedPreview } from "./core/open-design/preview-server.ts";
 import { discoverOpenDesignProjects, exportOpenDesignProject, syncOpenDesignLink, readOpenDesignLink, unlinkOpenDesign, prepareOpenDesignDispatch } from "./core/open-design/open-design-link.ts";
@@ -52,7 +53,7 @@ import { LANE_NAMES, laneError, loadLanes, migrateLegacyZcodeLane, parseLane, sa
 import type { LaneProfile } from "./core/lanes.ts";
 import { listProjectRegistrations, projectNotebookPath, projectStateDir, readProjectRegistration, resolveOrBootstrapProject, resolveProject } from "./core/project.ts";
 import type { ProjectResolution } from "./core/project.ts";
-import { hydrateVaultDirect, importVaultSecrets, isLocalCompanionGitSource, loadVaultConfig, probeCompanionGitAccess, probeGhAuth, pullVault, pushVault, readVaultStatus, saveVaultConfig, syncVault } from "./core/vault.ts";
+import { builtinVaultRunner, hydrateVaultDirect, importVaultSecrets, isLocalCompanionGitSource, loadVaultConfig, probeCompanionGitAccess, probeGhAuth, pullVault, pushVault, readVaultStatus, saveVaultConfig, syncVault } from "./core/vault.ts";
 import type { ImportVaultSecretsInput, SyncVaultOptions, VaultConfig, VaultRunner } from "./core/vault.ts";
 import { materializeVaultSkillsFromRuntime, resolveVaultUserHome } from "./core/vault-materialization.ts";
 import {
@@ -97,6 +98,8 @@ import {
   helperMcpsSetEnabled,
   pluginsCheckUpdates,
   skillsImport, skillsTogglePack, skillsPackSave, skillsPackDelete, skillsPackReset,
+  releaseSettingsRead, releaseSettingsWrite,
+  githubPublishPreflight, githubPublish,
   pluginsInstall,
   pluginsManage,
   selfUpdateApply,
@@ -655,6 +658,208 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
 
   /** The transport handlers' shared runner leg — the injected seam, else the core's default children. */
   const vaultRunnerOptions = (): { runner?: VaultRunner } => (deps.vaultRunner === undefined ? {} : { runner: deps.vaultRunner });
+
+  const parseGithubSlugFromRemoteUrl = (remoteUrl: string): string | null => {
+    const trimmed = remoteUrl.trim();
+    const httpsMatch = /^https?:\/\/(?:[^@]+@)?github\.com\/([^/]+\/[^/]+?)(?:\.git)?\/?$/i.exec(trimmed);
+    if (httpsMatch?.[1]) return httpsMatch[1];
+    const sshMatch = /^(?:ssh:\/\/)?git@github\.com[:/]([^/]+\/[^/]+?)(?:\.git)?\/?$/i.exec(trimmed);
+    if (sshMatch?.[1]) return sshMatch[1];
+    return null;
+  };
+
+  const runTextOrNull = async (
+    runner: VaultRunner,
+    command: string,
+    args: readonly string[],
+    cwd?: string,
+  ): Promise<string | null> => {
+    try {
+      const buf = await runner({ command, args, ...(cwd === undefined ? {} : { cwd }) });
+      const text = buf.toString("utf8").trim();
+      return text === "" ? null : text;
+    } catch {
+      return null;
+    }
+  };
+
+  const callerSeatOf = (input?: { seat?: string }, context?: { seat?: string }): string =>
+    typeof input?.seat === "string" && input.seat.trim() !== ""
+      ? input.seat.trim()
+      : typeof context?.seat === "string" && context.seat.trim() !== ""
+        ? context.seat.trim()
+        : "";
+
+  const scanTrackedSensitiveFiles = async (runner: VaultRunner, projectRoot: string): Promise<string[]> => {
+    const lsRaw = await runTextOrNull(runner, "git", ["ls-files", "-z"], projectRoot);
+    if (lsRaw === null) return [];
+    const matched: string[] = [];
+    for (const file of lsRaw.split("\0")) {
+      const rel = file.trim();
+      if (rel === "") continue;
+      const fileBase = basename(rel);
+      const lower = fileBase.toLowerCase();
+      if (
+        fileBase === ".env" ||
+        fileBase.startsWith(".env.") ||
+        lower.endsWith(".pem") ||
+        lower.endsWith(".p8") ||
+        lower.endsWith(".keystore") ||
+        fileBase.startsWith("id_rsa") ||
+        fileBase === "google-services.json" ||
+        fileBase === "GoogleService-Info.plist"
+      ) {
+        matched.push(rel);
+      }
+    }
+    matched.sort();
+    return matched;
+  };
+
+  const readReleaseSettingsViewForProject = async (project: { slug: string; root: string }): Promise<ReleaseSettingsView> => {
+    const runner = deps.vaultRunner ?? builtinVaultRunner;
+    const stored = readReleaseSettings(deps.stateDir, project.slug);
+    const pending = readReleaseRequest(deps.stateDir, project.slug);
+    const ghAuth = await probeGhAuth(deps.vaultRunner);
+
+    const remoteUrl = await runTextOrNull(runner, "git", ["remote", "get-url", "origin"], project.root);
+    let checkedOutBranch = await runTextOrNull(runner, "git", ["symbolic-ref", "--short", "HEAD"], project.root);
+    if (checkedOutBranch === null) {
+      const rev = await runTextOrNull(runner, "git", ["rev-parse", "--abbrev-ref", "HEAD"], project.root);
+      checkedOutBranch = rev !== null && rev !== "HEAD" ? rev : null;
+    }
+
+    let origin: ReleaseOriginView | null = null;
+    let defaultBranch: string | null = checkedOutBranch;
+    const candidates = new Set<string>();
+
+    if (remoteUrl !== null) {
+      let slug = parseGithubSlugFromRemoteUrl(remoteUrl);
+      let visibility: "private" | "public" | null = null;
+      let ghDefaultBranch: string | null = null;
+
+      if (ghAuth.ghAuthenticated) {
+        const viewArgs = slug !== null
+          ? ["repo", "view", slug, "--json", "nameWithOwner,isPrivate,defaultBranchRef"]
+          : ["repo", "view", "--json", "nameWithOwner,isPrivate,defaultBranchRef"];
+        const rawView = await runTextOrNull(runner, "gh", viewArgs, project.root);
+        if (rawView !== null) {
+          try {
+            const parsed = JSON.parse(rawView) as {
+              nameWithOwner?: unknown;
+              isPrivate?: unknown;
+              defaultBranchRef?: { name?: unknown } | null;
+            };
+            if (typeof parsed.nameWithOwner === "string" && parsed.nameWithOwner.trim() !== "") {
+              slug = parsed.nameWithOwner.trim();
+            }
+            if (typeof parsed.isPrivate === "boolean") {
+              visibility = parsed.isPrivate ? "private" : "public";
+            }
+            if (typeof parsed.defaultBranchRef?.name === "string" && parsed.defaultBranchRef.name.trim() !== "") {
+              ghDefaultBranch = parsed.defaultBranchRef.name.trim();
+            }
+          } catch {
+            // ignore malformed gh repo view JSON
+          }
+        }
+      }
+
+      if (ghDefaultBranch === null) {
+        const originHead = await runTextOrNull(runner, "git", ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], project.root);
+        if (originHead !== null) {
+          ghDefaultBranch = originHead.startsWith("origin/") ? originHead.slice("origin/".length) : originHead;
+        }
+      }
+
+      defaultBranch = ghDefaultBranch ?? checkedOutBranch;
+      origin = {
+        remoteUrl,
+        slug,
+        visibility,
+        defaultBranch,
+      };
+
+      if (defaultBranch !== null) candidates.add(defaultBranch);
+      if (checkedOutBranch !== null) candidates.add(checkedOutBranch);
+      if (stored.branch !== undefined) candidates.add(stored.branch);
+
+      const trackingRefs = await runTextOrNull(runner, "git", ["for-each-ref", "--format=%(refname:short)", "refs/remotes/origin"], project.root);
+      if (trackingRefs !== null) {
+        for (const line of trackingRefs.split(/\r?\n/)) {
+          const ref = line.trim();
+          if (ref === "" || ref === "origin/HEAD" || ref === "HEAD") continue;
+          candidates.add(ref.startsWith("origin/") ? ref.slice("origin/".length) : ref);
+        }
+      }
+      const isLocalRemote = !remoteUrl.includes("://") && !/^[^/]+@[^:]+:/.test(remoteUrl);
+      if (isLocalRemote || ghAuth.ghAuthenticated) {
+        const lsHeads = await runTextOrNull(runner, "git", ["ls-remote", "--heads", "origin"], project.root);
+        if (lsHeads !== null) {
+          for (const line of lsHeads.split(/\r?\n/)) {
+            const match = /\srefs\/heads\/(.+)$/.exec(line.trim());
+            if (match?.[1]) candidates.add(match[1].trim());
+          }
+        }
+      }
+    }
+
+    const projectFactory =
+      deps.registry !== undefined && readProjectRegistration(deps.stateDir, project.slug) !== undefined
+        ? deps.registry.factoryForProject(project.slug)
+        : deps.factory;
+    const ledgerEvents = projectFactory.ledger.events;
+    const resetIdx = ledgerEvents.findLastIndex((evt) => (evt as { event: string }).event === "project_reset");
+    const lastEvt = [...ledgerEvents.slice(resetIdx + 1)]
+      .reverse()
+      .find((evt) => (evt as { event: string }).event === "release_published") as
+      | {
+          version: string;
+          tag: string;
+          commit: string;
+          branch: string;
+          url?: string | null;
+          mode: ProjectReleaseMode;
+          ts: string;
+        }
+      | undefined;
+
+    const lastRelease: LastReleaseView | null = lastEvt === undefined
+      ? null
+      : {
+          version: lastEvt.version,
+          tag: lastEvt.tag,
+          commit: lastEvt.commit,
+          branch: lastEvt.branch,
+          url: lastEvt.url ?? null,
+          mode: lastEvt.mode,
+          ts: lastEvt.ts,
+        };
+
+    return {
+      project: project.slug,
+      projectRoot: project.root,
+      mode: stored.mode,
+      branch: stored.branch ?? null,
+      resolvedBranch: stored.branch ?? defaultBranch,
+      defaultBranch,
+      branchCandidates: [...candidates],
+      updatedAt: stored.updatedAt ?? null,
+      pendingRequest: pending === undefined
+        ? null
+        : {
+            ...(pending.version !== undefined ? { version: pending.version } : {}),
+            requestedAt: pending.requestedAt,
+          },
+      origin,
+      gh: {
+        installed: ghAuth.ghInstalled,
+        authenticated: ghAuth.ghAuthenticated,
+        user: ghAuth.ghUser,
+      },
+      lastRelease,
+    };
+  };
 
   /**
    * Resolves a projectRoot RPC input — the one door every seats-only act
@@ -3597,6 +3802,11 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         // best-effort
       }
       try {
+        clearReleaseRequest(deps.stateDir, project.slug);
+      } catch {
+        // best-effort
+      }
+      try {
         rmSync(join(projectDir, "lead-handoff.md"), { force: true });
       } catch {
         // best-effort
@@ -3770,6 +3980,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         return undefined;
       };
       deps.rotateProjectMailbox(project.slug);
+      clearReleaseRequest(deps.stateDir, project.slug);
 
       // 3. Lead first, then Supervisor — marked archives only. A failed retire stops here: the
       // mail and handovers are already dropped, and the reply says which seat is still bound.
@@ -3803,6 +4014,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       }
       // The retires requeue a Lead's un-acked batch into the mailbox file; drop it and every record again.
       deps.rotateProjectMailbox(project.slug);
+      clearReleaseRequest(deps.stateDir, project.slug);
 
       const snap = await this.snapshot({ projectRoot: project.root }, context);
       const archivedText = archivedSeats.length === 0
@@ -4284,12 +4496,207 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         return failure(codeOf(err), messageOf(err));
       }
     },
+
+    async releaseSettingsRead(
+      input: { projectRoot?: string; project?: string } = {},
+      _context?: SurfaceCallContext,
+    ) {
+      const target = resolveActTarget(input, "read release settings");
+      if (!target.ok) return target;
+      try {
+        const settings = await readReleaseSettingsViewForProject(target.project);
+        return { ok: true as const, settings };
+      } catch (err) {
+        return failure(codeOf(err), messageOf(err));
+      }
+    },
+
+    async releaseSettingsWrite(
+      input: { projectRoot?: string; project?: string; mode?: ProjectReleaseMode; branch?: string | null; seat?: string } = {},
+      context?: SurfaceCallContext & { seat?: string },
+    ) {
+      const callerSeat = callerSeatOf(input, context);
+      if (isProjectSeat(callerSeat)) {
+        return failure(
+          "seat-cannot-grant",
+          `Seat ${callerSeat} cannot change Release settings; Release mode and Release branch are Owner-only.`,
+        );
+      }
+      const target = resolveActTarget(input, "update release settings");
+      if (!target.ok) return target;
+      if (input.mode === undefined && input.branch === undefined) {
+        return failure("invalid-release-settings", "pass mode or branch to update release settings");
+      }
+      try {
+        const hadPending = readReleaseRequest(deps.stateDir, target.project.slug) !== undefined;
+        setProjectReleaseSettings(deps.stateDir, target.project.slug, {
+          ...(input.mode !== undefined ? { mode: input.mode } : {}),
+          ...(input.branch !== undefined ? { branch: input.branch } : {}),
+        });
+        const droppedPendingRequest = hadPending && readReleaseRequest(deps.stateDir, target.project.slug) === undefined;
+        const settings = await readReleaseSettingsViewForProject(target.project);
+        log(`release-settings: ${target.project.slug} mode=${settings.mode} branch=${settings.resolvedBranch ?? "-"}`);
+        return { ok: true as const, droppedPendingRequest, settings };
+      } catch (err) {
+        return failure(codeOf(err), messageOf(err));
+      }
+    },
+
+    async githubPublishPreflight(
+      input: { projectRoot?: string; project?: string } = {},
+      _context?: SurfaceCallContext,
+    ) {
+      const target = resolveActTarget(input, "inspect GitHub publish preflight");
+      if (!target.ok) return target;
+      const runner = deps.vaultRunner ?? builtinVaultRunner;
+      try {
+        const remoteUrl = await runTextOrNull(runner, "git", ["remote", "get-url", "origin"], target.project.root);
+        const ghAuth = await probeGhAuth(deps.vaultRunner);
+        const owners: string[] = [];
+        const addOwner = (value: string | null) => {
+          if (value === null) return;
+          for (const line of value.split(/\r?\n/)) {
+            const trimmed = line.trim();
+            if (trimmed !== "" && !owners.includes(trimmed)) owners.push(trimmed);
+          }
+        };
+        if (ghAuth.ghAuthenticated) {
+          addOwner((await runTextOrNull(runner, "gh", ["api", "user", "--jq", ".login"], target.project.root)) ?? ghAuth.ghUser);
+          addOwner(await runTextOrNull(runner, "gh", ["api", "user/orgs", "--jq", ".[].login"], target.project.root));
+        }
+
+        const sensitiveFiles = await scanTrackedSensitiveFiles(runner, target.project.root);
+        const statusOut = await runTextOrNull(runner, "git", ["status", "--porcelain"], target.project.root);
+        return {
+          ok: true as const,
+          project: target.project.slug,
+          projectRoot: target.project.root,
+          originPresent: remoteUrl !== null,
+          gh: {
+            installed: ghAuth.ghInstalled,
+            authenticated: ghAuth.ghAuthenticated,
+            user: ghAuth.ghUser,
+          },
+          owners,
+          defaultOwner: owners[0] ?? ghAuth.ghUser ?? null,
+          defaultName: basename(target.project.root) || target.project.slug,
+          sensitiveFiles,
+          hasUncommittedChanges: statusOut !== null,
+          commitHistoryNotScannedNote: "Commit history is not scanned for past secrets — only tracked files at HEAD are checked.",
+        };
+      } catch (err) {
+        return failure(codeOf(err), messageOf(err));
+      }
+    },
+
+    async githubPublish(
+      input: {
+        projectRoot?: string;
+        project?: string;
+        owner: string;
+        name: string;
+        description?: string;
+        visibility: "private" | "public";
+        confirmPublicName?: string;
+        allowSensitiveFiles?: boolean;
+        seat?: string;
+      },
+      context?: SurfaceCallContext & { seat?: string },
+    ) {
+      const callerSeat = callerSeatOf(input, context);
+      if (isProjectSeat(callerSeat)) {
+        return failure(
+          "seat-cannot-publish",
+          `Seat ${callerSeat} cannot publish a repository to GitHub; GitHub publish is Owner-only.`,
+        );
+      }
+      const target = resolveActTarget(input, "publish repository to GitHub");
+      if (!target.ok) return target;
+      const runner = deps.vaultRunner ?? builtinVaultRunner;
+
+      const owner = input.owner.trim();
+      const name = input.name.trim();
+      const description = typeof input.description === "string" ? input.description.trim() : "";
+      if (!/^[A-Za-z0-9_.-]+$/.test(owner) || !/^[A-Za-z0-9._-]+$/.test(name)) {
+        return failure("invalid-publish-target", "Owner and repository name must use valid GitHub characters.");
+      }
+      const slug = `${owner}/${name}`;
+
+      try {
+        const existingOrigin = await runTextOrNull(runner, "git", ["remote", "get-url", "origin"], target.project.root);
+        if (existingOrigin !== null) {
+          return failure("origin-already-configured", `Project already has an origin remote (${existingOrigin}).`);
+        }
+
+        const ghAuth = await probeGhAuth(deps.vaultRunner);
+        if (!ghAuth.ghInstalled) {
+          return failure("gh-unavailable", "GitHub CLI (`gh`) is required to publish repositories.");
+        }
+        if (!ghAuth.ghAuthenticated) {
+          return failure("gh-unauthenticated", "Run `gh auth login --web -p https` to sign in to GitHub first.");
+        }
+
+        const headCommit = await runTextOrNull(runner, "git", ["rev-parse", "--verify", "HEAD"], target.project.root);
+        if (headCommit === null) {
+          return failure("no-commits", "Create an initial commit before publishing to GitHub.");
+        }
+
+        if (input.visibility === "public") {
+          const sensitiveFiles = await scanTrackedSensitiveFiles(runner, target.project.root);
+          if (sensitiveFiles.length > 0 && input.allowSensitiveFiles !== true) {
+            return failure(
+              "sensitive-files-present",
+              `Tracked sensitive files detected (${sensitiveFiles.join(", ")}). Confirm override to include them when publishing as Public.`,
+            );
+          }
+
+          if ((input.confirmPublicName?.trim() ?? "") !== name) {
+            return failure(
+              "public-confirmation-required",
+              `Type "${name}" to confirm publishing a Public repository.`,
+            );
+          }
+        }
+
+        const outBuf = await runner({
+          command: "gh",
+          args: [
+            "repo",
+            "create",
+            slug,
+            input.visibility === "public" ? "--public" : "--private",
+            ...(description !== "" ? ["--description", description] : []),
+            `--source=${target.project.root}`,
+            "--remote=origin",
+            "--push",
+          ],
+          cwd: target.project.root,
+        });
+        const stdoutText = outBuf.toString("utf8").trim();
+        const urlMatch = /https:\/\/github\.com\/[^\s]+/.exec(stdoutText);
+        const settings = await readReleaseSettingsViewForProject(target.project);
+        const remoteUrl = settings.origin?.remoteUrl ?? `https://github.com/${slug}.git`;
+        const resolvedSlug = settings.origin?.slug ?? slug;
+        const resolvedVisibility = settings.origin?.visibility ?? input.visibility;
+        log(`github-publish: ${target.project.slug} -> ${resolvedSlug} (${resolvedVisibility})`);
+        return {
+          ok: true as const,
+          slug: resolvedSlug,
+          remoteUrl,
+          visibility: resolvedVisibility,
+          url: urlMatch?.[0] ?? `https://github.com/${resolvedSlug}`,
+          settings,
+        };
+      } catch (err) {
+        return failure(codeOf(err), messageOf(err));
+      }
+    },
   };
   /** The Owner's whole-Project acts: each runs on its target Project's own Factory lane. */
   const PROJECT_ACT_HANDLERS: ReadonlySet<string> = new Set(["projectReset", "projectDelete", "projectRotate"]);
   /** The handlers that take their lane's exclusive maintenance — the Project acts plus register. The one place the set is named. */
   const EXCLUSIVE_MAINTENANCE_HANDLERS: ReadonlySet<string> = new Set([...PROJECT_ACT_HANDLERS, "projectRegister"]);
-  const reads = new Set(["cachedProviders", "sanitizeLane", "snapshot", "seatsDirectory", "pluginsCheckUpdates", "selfUpdateStatus", "selfUpdateApply", "historyImport", "historyImports", "historyUpgrade", "vaultHydrate", "vaultPull", "vaultPush", "vaultSync", "vaultImport"]);
+  const reads = new Set(["cachedProviders", "sanitizeLane", "snapshot", "seatsDirectory", "pluginsCheckUpdates", "selfUpdateStatus", "selfUpdateApply", "historyImport", "historyImports", "historyUpgrade", "vaultHydrate", "vaultPull", "vaultPush", "vaultSync", "vaultImport", "releaseSettingsRead", "githubPublishPreflight"]);
   const nonEmptyString = (value: unknown): string | undefined =>
     typeof value === "string" && value.trim() !== "" ? value.trim() : undefined;
   const surfaceChangeTarget = (
@@ -4427,4 +4834,8 @@ export function registerSurfaceRpc(
   server.handle(vaultPush, (input, context) => handlers.vaultPush(input, pass(context)));
   server.handle(vaultSync, (input, context) => handlers.vaultSync(input, pass(context)));
   server.handle(vaultImport, (input, context) => handlers.vaultImport(input, pass(context)));
+  server.handle(releaseSettingsRead, (input, context) => handlers.releaseSettingsRead(input, pass(context)));
+  server.handle(releaseSettingsWrite, (input, context) => handlers.releaseSettingsWrite(input, pass(context)));
+  server.handle(githubPublishPreflight, (input, context) => handlers.githubPublishPreflight(input, pass(context)));
+  server.handle(githubPublish, (input, context) => handlers.githubPublish(input, pass(context)));
 }

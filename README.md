@@ -10,7 +10,7 @@ claims the task is finished at a specific commit, and the factory — never the
 agent — runs the gate and records every step in an append-only ledger it
 cannot edit. A green verdict is evidence, not acceptance.
 
-**Status: v0.13.0.** The verification core and installed plugin have automated
+**Status: v0.14.0.** The verification core and installed plugin have automated
 validation through `npm run check`; the CI workflow covers Node 22 and 24.
 The Paseo 0.13 plugin owns the Ledger as its single
 writer and serves CLI, MCP and surface RPC entrances. Acceptance uses trusted
@@ -281,6 +281,27 @@ State lives under `<daemon home>/plugin-state/paseo-factory/` — the ledger,
 `lanes.json`, per-attempt reports, the spool (`requests/`, `replies/`,
 `processed/`), and the generated `bin/factory-claim` wrapper + `bin/git` shim
 that ride agent PATHs.
+
+## GitHub & Release
+
+Every registered Project includes a **GitHub & Release** card on the Project
+tab:
+
+- **One-time GitHub publish (Owner-only):** Projects without an `origin` remote
+  can be published once from Paseo Desktop (select personal/org owner, repository
+  name defaulting to folder name, **Private** by default or **Public** with typed
+  name confirmation, and explicit override for tracked sensitive files such as
+  `.env*`, `*.pem`, `*.p8`, `*.keystore`, `id_rsa*`, `google-services.json`, and
+  `GoogleService-Info.plist`; commit history is not scanned). Visibility is set
+  only at publish time and never edited by Factory afterwards.
+- **Release modes (`off` | `on-request` | `auto`) & Release branch:** Stored per
+  Project in `project-settings.json`. In `on-request`, Supervisor passes release
+  intent via `supervisor_dispatch_lead`; in `auto`, Lead releases once after a
+  wave lands product changes (never bumping major automatically). **Lead** owns
+  `lead_release`, which tags `vX.Y.Z` on the clean landed HEAD, fast-forward
+  pushes the Release branch and tag, and creates the GitHub Release; seat shells
+  remain fenced from `git tag`, `git push`, `gh release`, and `gh repo`
+  (`release-fence`).
 
 ## License
 

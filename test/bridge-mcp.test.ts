@@ -7,6 +7,9 @@ import { join, resolve } from "node:path";
 import { CorrelationRegistry } from "../src/correlations.ts";
 import { createFactory } from "../plugin/server/core/factory.ts";
 import { ensureProjectRegistered, readProjectRegistration, writeProjectRegistration } from "../src/project.ts";
+import { setProjectReleaseSettings, setReleaseRequest, readReleaseRequest } from "../src/project-settings.ts";
+import { builtinVaultRunner } from "../src/vault-transport.ts";
+import type { VaultRunnerCall } from "../src/vault-transport.ts";
 import { readLeadMailbox } from "../src/mailbox.ts";
 import { createLeadMailRuntime, LEAD_ROTATE_TOKENS } from "../plugin/server/lead-mailbox.ts";
 import { startSpool } from "../plugin/server/spool.ts";
@@ -221,7 +224,7 @@ test("bridge.mjs exposes strictly role-scoped tools in tools/list and enforces r
       ],
     });
     const leadTools = ((leadResponses[1].result as { tools: Array<{ name: string }> }).tools).map((t) => t.name).sort();
-    assert.deepEqual(leadTools, ["lead_close_task", "lead_create_worktree", "lead_dispatch_agent", "lead_merge", "lead_needs_human", "lead_read_ledger", "lead_remove_worktree", "lead_repoke_agent", "lead_report_to_supervisor", "lead_retire_task", "lead_set_contract", "lead_update_notebook", "lead_verify"]);
+    assert.deepEqual(leadTools, ["lead_close_task", "lead_create_worktree", "lead_dispatch_agent", "lead_merge", "lead_needs_human", "lead_read_ledger", "lead_release", "lead_remove_worktree", "lead_repoke_agent", "lead_report_to_supervisor", "lead_retire_task", "lead_set_contract", "lead_update_notebook", "lead_verify"]);
 
     // 3. Working Agent session
     const agentResponses = await runMcpSession({
@@ -2517,6 +2520,255 @@ test("bridge.mjs: lead_close_task (and the lead_retire_task alias) closes a Task
     assert.match(agentCallText, /not permitted/i);
   } finally {
     spool.stop();
+    rmSync(homeDir, { recursive: true, force: true });
+    rmSync(repoDir, { recursive: true, force: true });
+  }
+});
+
+test("bridge.mjs: lead_release runs end-to-end via the Spool against a real bare origin and fake gh, enforcing mode, request, idempotency, and role boundaries", async () => {
+  const homeDir = mkdtempSync(join(tmpdir(), "factory-bridge-release-home-"));
+  const stateDir = join(homeDir, "plugin-state", "paseo-factory");
+  const repoDir = makeGitRepo();
+  const bareOrigin = mkdtempSync(join(tmpdir(), "factory-bridge-release-origin-"));
+  execFileSync("git", ["init", "--bare", bareOrigin], { stdio: "pipe" });
+  execFileSync("git", ["remote", "add", "origin", bareOrigin], { cwd: repoDir, stdio: "pipe" });
+  execFileSync("git", ["push", "origin", "HEAD:refs/heads/main"], { cwd: repoDir, stdio: "pipe" });
+
+  const ghCalls: VaultRunnerCall[] = [];
+  let failGhCreate = false;
+  let releaseExistsOnGh = false;
+  const project = ensureProjectRegistered(stateDir, realpathSync(repoDir));
+  assert.ok(project.ok);
+  const registry = createFactoryRegistry({ stateDir, root: createFactory({ stateDir }) });
+  const projectSpool = startSpool(stateDir, registry.root, {
+    pollMs: 25,
+    registry,
+    vaultRunner: async (call) => {
+      if (call.command === "gh") {
+        ghCalls.push(call);
+        if (call.args[0] === "auth" && call.args[1] === "status") {
+          return Buffer.from(JSON.stringify({ hosts: { "github.com": [{ active: true, login: "owner", state: "success" }] } }));
+        }
+        if (call.args[0] === "repo" && call.args[1] === "view") {
+          return Buffer.from(JSON.stringify({ nameWithOwner: "owner/demo", isPrivate: true, defaultBranchRef: { name: "main" } }));
+        }
+        if (call.args[0] === "release" && call.args[1] === "view") {
+          if (releaseExistsOnGh) return Buffer.from(JSON.stringify({ url: "https://github.com/owner/demo/releases/tag/v0.14.0" }));
+          throw new Error("release not found");
+        }
+        if (call.args[0] === "release" && call.args[1] === "create") {
+          if (failGhCreate) throw new Error("GitHub API 502 Bad Gateway");
+          releaseExistsOnGh = true;
+          return Buffer.from("https://github.com/owner/demo/releases/tag/v0.14.0\n");
+        }
+      }
+      return builtinVaultRunner(call);
+    },
+  });
+
+  try {
+    try {
+      const corr = new CorrelationRegistry(stateDir);
+      const leadCorr = corr.issue({ role: "lead", projectSlug: project.slug, projectRoot: realpathSync(repoDir) });
+      const supCorr = corr.issue({ role: "supervisor", projectSlug: project.slug, projectRoot: realpathSync(repoDir) });
+      const agentCorr = corr.issue({ role: "agent", projectSlug: project.slug, projectRoot: realpathSync(repoDir), task: "T-REL" });
+
+      // Land a real accepted wave with CHANGELOG.md on repoDir
+      writeFileSync(join(repoDir, "CHANGELOG.md"), "# Changelog\n\n## [0.14.0] - 2026-11-18\n- Lead-owned release.\n");
+      const landedSha = (() => {
+        execFileSync("git", ["add", "CHANGELOG.md"], { cwd: repoDir });
+        execFileSync("git", ["commit", "-m", "chore: prep 0.14.0"], { cwd: repoDir });
+        return execFileSync("git", ["rev-parse", "HEAD"], { cwd: repoDir, encoding: "utf8" }).trim();
+      })();
+      const pf = registry.factoryForProject(project.slug);
+      pf.setContract({ task: "T-REL", workspace: realpathSync(repoDir), gate: "true", artifact: "CHANGELOG.md" });
+      pf.ledger.append({ event: "claim_reported", task: "T-REL", attempt: 1, sha: landedSha });
+      pf.ledger.append({ event: "gate_started", task: "T-REL", attempt: 1, cmd: "true" });
+      pf.ledger.append({ event: "gate_finished", task: "T-REL", attempt: 1, exit: 0, verdict: "green", note: "ok", sha: landedSha });
+      pf.ledger.append({ event: "report_written", task: "T-REL", attempt: 1, path: "report-T-REL-1.md" });
+      await pf.accept({ task: "T-REL", attempt: 1, accepted_by: "lead" });
+
+      const callLeadRelease = async (version: string) =>
+        runMcpSession({
+          args: ["--correlation", leadCorr.correlationId, "--state-dir", stateDir],
+          cwd: repoDir,
+          requests: [{ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_release", arguments: { version } } }],
+        });
+
+      // 1. Supervisor and Agent cannot call lead_release
+      for (const [roleCorr, label] of [[supCorr, "supervisor"], [agentCorr, "agent"]] as const) {
+        const res = await runMcpSession({
+          args: ["--correlation", roleCorr.correlationId, "--state-dir", stateDir],
+          cwd: repoDir,
+          requests: [{ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_release", arguments: { version: "0.14.0" } } }],
+        });
+        assert.equal((res[0].result as { isError?: boolean }).isError, true, `${label} must be refused`);
+      }
+
+      // 2. Mode off -> release-not-granted
+      const offRes = await callLeadRelease("0.14.0");
+      assert.equal((offRes[0].result as { isError?: boolean }).isError, true);
+      assert.match((offRes[0].result as { content: Array<{ text: string }> }).content[0].text, /release-not-granted/);
+
+      // 3. Mode on-request without pending request -> no-release-intent
+      setProjectReleaseSettings(stateDir, project.slug, { mode: "on-request" });
+      const noIntentRes = await callLeadRelease("0.14.0");
+      assert.equal((noIntentRes[0].result as { isError?: boolean }).isError, true);
+      assert.match((noIntentRes[0].result as { content: Array<{ text: string }> }).content[0].text, /no-release-intent/);
+
+      // 4. Pinned version mismatch -> version-mismatch
+      setReleaseRequest(stateDir, project.slug, { version: "0.14.1", requestedAt: "2026-11-18T12:00:00.000Z" });
+      const mismatchRes = await callLeadRelease("0.14.0");
+      assert.equal((mismatchRes[0].result as { isError?: boolean }).isError, true);
+      assert.match((mismatchRes[0].result as { content: Array<{ text: string }> }).content[0].text, /version-mismatch/);
+
+      // 5. Force gh failure on step 4 -> release_failed recorded, tag & push already landed
+      setReleaseRequest(stateDir, project.slug, { version: "0.14.0", requestedAt: "2026-11-18T12:01:00.000Z" });
+      failGhCreate = true;
+      const failedRes = await callLeadRelease("0.14.0");
+      assert.equal((failedRes[0].result as { isError?: boolean }).isError, true);
+      assert.match((failedRes[0].result as { content: Array<{ text: string }> }).content[0].text, /release-create-failed/);
+      assert.ok(pf.ledger.events.some((e) => e.event === "release_failed" && e.step === "github-release" && e.code === "release-create-failed"));
+      assert.ok(readReleaseRequest(stateDir, project.slug) !== undefined, "failed release keeps request for retry");
+
+      // 6. Re-run after fixing gh -> idempotent skip of tag, push-branch, push-tag; gh release create receives changelog notes; request consumed
+      failGhCreate = false;
+      const okRes = await callLeadRelease("0.14.0");
+      assert.notEqual((okRes[0].result as { isError?: boolean }).isError, true, (okRes[0].result as { content: Array<{ text: string }> }).content[0].text);
+      assert.equal(readReleaseRequest(stateDir, project.slug), undefined, "successful release consumes pending request");
+      const pub = pf.ledger.events.findLast((e) => e.event === "release_published");
+      assert.ok(pub && pub.event === "release_published");
+      assert.equal(pub.version, "0.14.0");
+      assert.equal(pub.tag, "v0.14.0");
+      assert.equal(pub.commit, landedSha);
+      assert.equal(pub.branch, "main");
+      assert.deepEqual(pub.skipped, ["tag", "push-branch", "push-tag"]);
+      const createCall = ghCalls.findLast((c) => c.args[0] === "release" && c.args[1] === "create");
+      assert.ok(createCall);
+      assert.ok(createCall.args.includes("--notes"));
+      const notesIdx = createCall.args.indexOf("--notes");
+      assert.match(createCall.args[notesIdx + 1]!, /Lead-owned release\./);
+      assert.equal(execFileSync("git", ["rev-parse", "refs/heads/main"], { cwd: bareOrigin, encoding: "utf8" }).trim(), landedSha);
+      assert.equal(execFileSync("git", ["rev-list", "-n", "1", "refs/tags/v0.14.0"], { cwd: bareOrigin, encoding: "utf8" }).trim(), landedSha);
+    } finally {
+      projectSpool.stop();
+      registry.stop();
+    }
+  } finally {
+    rmSync(homeDir, { recursive: true, force: true });
+    rmSync(repoDir, { recursive: true, force: true });
+    rmSync(bareOrigin, { recursive: true, force: true });
+  }
+});
+
+test("supervisor_dispatch_lead carries optional release intent into release-request.json without clobbering on unrelated dispatches", async () => {
+  const homeDir = mkdtempSync(join(tmpdir(), "factory-bridge-dispatch-rel-home-"));
+  const repoDir = makeGitRepo();
+  const stateDir = join(homeDir, "plugin-state", "paseo-factory");
+  const project = ensureProjectRegistered(stateDir, realpathSync(repoDir));
+  assert.ok(project.ok);
+
+  const mailCalls: Array<Record<string, unknown>> = [];
+  const runtime = await import("../plugin/server/lead-mailbox.ts");
+  const factory = createFactory({ stateDir });
+  const daemon: any = {
+    agents: {
+      list: async () => ({ agents: [] }),
+      create: async (opts: any) => ({ agent: { id: "lead-1", ...opts } }),
+      sendMessage: async () => {},
+      ref: () => ({ archive: async () => {}, timeline: { refetch: async () => ({ entries: [] }) }, cancel: async () => {} }),
+    },
+    providers: { listAvailable: async () => ({ providers: [] }), listModels: async () => ({ models: [] }) },
+  };
+  const mailRuntime = runtime.createLeadMailRuntime({
+    factory,
+    stateDir,
+    daemon,
+    ensureLead: async () => ({
+      ok: true,
+      agentId: "lead-1",
+      created: false,
+      projectRoot: realpathSync(repoDir),
+      slug: project.slug,
+    }),
+    retireLead: async () => ({ ok: true, agentId: "lead-1" }),
+  });
+  const registry = createFactoryRegistry({ stateDir, root: factory });
+  const spool = startSpool(stateDir, registry.root, {
+    pollMs: 25,
+    registry,
+    leadDispatch: async (req) => {
+      mailCalls.push(req as unknown as Record<string, unknown>);
+      return mailRuntime.dispatchLead(req);
+    },
+    supervisorDispatch: async (req) => mailRuntime.dispatchSupervisor(req),
+  });
+
+  try {
+    const corr = new CorrelationRegistry(stateDir);
+    const supCorr = corr.issue({ role: "supervisor", projectSlug: project.slug, projectRoot: realpathSync(repoDir) });
+
+    // Schema exposes release.version
+    const listRes = await runMcpSession({
+      args: ["--correlation", supCorr.correlationId, "--state-dir", stateDir],
+      cwd: repoDir,
+      requests: [{ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }],
+    });
+    const tools = (listRes[0].result as { tools: Array<{ name: string; inputSchema: { properties: Record<string, unknown> } }> }).tools;
+    const supDispatch = tools.find((t) => t.name === "supervisor_dispatch_lead");
+    assert.ok(supDispatch?.inputSchema.properties.release, "supervisor_dispatch_lead schema exposes release");
+    assert.equal(tools.some((t) => t.name === "lead_release"), false, "Supervisor catalog excludes lead_release");
+
+    // 1. Dispatch with release: { version: "0.14.0" } writes release-request.json
+    const r1 = await runMcpSession({
+      args: ["--correlation", supCorr.correlationId, "--state-dir", stateDir],
+      cwd: repoDir,
+      requests: [{
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: { name: "supervisor_dispatch_lead", arguments: { message: "Ship v0.14.0", release: { version: "0.14.0" } } },
+      }],
+    });
+    assert.notEqual((r1[0].result as { isError?: boolean }).isError, true);
+    const req1 = readReleaseRequest(stateDir, project.slug);
+    assert.ok(req1 !== undefined);
+    assert.equal(req1.version, "0.14.0");
+    assert.equal(req1.requestedBy, "supervisor");
+
+    // 2. Subsequent dispatch WITHOUT release preserves pending request
+    const r2 = await runMcpSession({
+      args: ["--correlation", supCorr.correlationId, "--state-dir", stateDir],
+      cwd: repoDir,
+      requests: [{
+        jsonrpc: "2.0",
+        id: 3,
+        method: "tools/call",
+        params: { name: "supervisor_dispatch_lead", arguments: { message: "Unrelated fix" } },
+      }],
+    });
+    assert.notEqual((r2[0].result as { isError?: boolean }).isError, true);
+    assert.equal(readReleaseRequest(stateDir, project.slug)?.version, "0.14.0");
+
+    // 3. Subsequent dispatch WITH release: {} (no pinned version) replaces the prior request cleanly
+    const r3 = await runMcpSession({
+      args: ["--correlation", supCorr.correlationId, "--state-dir", stateDir],
+      cwd: repoDir,
+      requests: [{
+        jsonrpc: "2.0",
+        id: 4,
+        method: "tools/call",
+        params: { name: "supervisor_dispatch_lead", arguments: { message: "Ship next release", release: {} } },
+      }],
+    });
+    assert.notEqual((r3[0].result as { isError?: boolean }).isError, true);
+    const req3 = readReleaseRequest(stateDir, project.slug);
+    assert.ok(req3 !== undefined);
+    assert.equal(req3.version, undefined);
+    assert.equal(mailCalls.length >= 2, true);
+  } finally {
+    spool.stop();
+    registry.stop();
     rmSync(homeDir, { recursive: true, force: true });
     rmSync(repoDir, { recursive: true, force: true });
   }

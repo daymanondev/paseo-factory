@@ -13,12 +13,19 @@ export const sharedTools: Record<string, ToolDefinition> = {
   supervisor_dispatch_lead: {
     name: "supervisor_dispatch_lead",
     description:
-      "Dispatch an implementation directive to the Project's Lead seat via the serialized Lead mailbox. After calling this tool, end your turn immediately and wait for Lead's wave report.",
+      "Dispatch an implementation directive to the Project's Lead seat via the serialized Lead mailbox. Pass `release` when the Owner wants to record a Release intent (optional pinned `version` X.Y.Z). After calling this tool, end your turn immediately and wait for Lead's wave report.",
     inputSchema: {
       type: "object",
       properties: {
         message: { type: "string", description: "The directive text for Lead." },
         workspace: { type: "string", description: "Optional Project root path (defaults to current project root)." },
+        release: {
+          type: "object",
+          description: "Optional Owner release intent for `on-request` / `auto` Release modes.",
+          properties: {
+            version: { type: "string", description: "Optional exact target semver X.Y.Z; omit when Owner did not pin a version." },
+          },
+        },
       },
       required: ["message"],
     },
@@ -197,6 +204,19 @@ export const sharedTools: Record<string, ToolDefinition> = {
       required: ["message"],
     },
   },
+  lead_release: {
+    name: "lead_release",
+    description:
+      "Publish a Gate-verified Release for the Project at `version` (`vX.Y.Z`): creates an annotated tag on HEAD, fast-forward pushes the configured Release branch to `origin`, pushes the tag, and creates the GitHub Release (within the Owner's Release mode).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        version: { type: "string", description: "Semver version to release (e.g. \"0.14.0\")." },
+        workspace: { type: "string", description: "Optional Project root path." },
+      },
+      required: ["version"],
+    },
+  },
   agent_claim: {
     name: "agent_claim",
     description:
@@ -255,7 +275,7 @@ export const sharedTools: Record<string, ToolDefinition> = {
 
 export const sharedRoles = {
   supervisor: ["supervisor_accept_task", "supervisor_dispatch_lead", "supervisor_read_ledger", "supervisor_end_cycle", "lead_close_task", "lead_retire_task"],
-  lead: ["lead_repoke_agent", "lead_needs_human", "lead_create_worktree", "lead_set_contract", "lead_dispatch_agent", "lead_verify", "lead_merge", "lead_remove_worktree", "lead_report_to_supervisor", "lead_close_task", "lead_retire_task", "lead_update_notebook", "lead_read_ledger"],
+  lead: ["lead_repoke_agent", "lead_needs_human", "lead_create_worktree", "lead_set_contract", "lead_dispatch_agent", "lead_verify", "lead_merge", "lead_remove_worktree", "lead_release", "lead_report_to_supervisor", "lead_close_task", "lead_retire_task", "lead_update_notebook", "lead_read_ledger"],
   agent: ["agent_claim", "agent_escalate_blocker"],
   unbound: ["factory_dispatch_supervisor", "factory_status"],
 };

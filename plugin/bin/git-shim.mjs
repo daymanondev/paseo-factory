@@ -31,6 +31,7 @@ import {
   isSeatMemoryRelativePathAllowed,
   parseGitSubcommand,
   refuseGitArgv,
+  refuseReleaseGitArgv,
   refuseSupervisorGitArgv,
 } from "./git-refusals.mjs";
 
@@ -368,12 +369,17 @@ function checkAgentCommitScope(realGit, argvTokens) {
 // ---- the refusal -------------------------------------------------------------------------------
 
 const seat = (process.env.PASEO_FACTORY_SEAT ?? "").trim();
+const corr = (process.env.PASEO_FACTORY_CORRELATION ?? "").trim();
+const inFactorySeat = seat !== "" || corr !== "";
 let refusal = refuseGitArgv(argv);
 if (
   (refusal?.rule === "git:checkout-discard" || refusal?.rule === "git:restore-discard") &&
   isIsolatedTaskWorktree(resolveEffectiveCwd(parseGitSubcommand(argv).globalFlags))
 ) {
   refusal = undefined;
+}
+if (refusal === undefined && inFactorySeat) {
+  refusal = refuseReleaseGitArgv(argv);
 }
 if (refusal === undefined && seat === "supervisor") {
   refusal = refuseSupervisorGitArgv(argv);

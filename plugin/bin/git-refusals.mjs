@@ -14,7 +14,7 @@
  */
 
 /** Global flags that consume the following token as their value. */
-const GIT_GLOBAL_VALUE_FLAGS = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace"]);
+const GIT_GLOBAL_VALUE_FLAGS = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env"]);
 
 function shortCluster(token) {
   return token.length >= 2 && token[0] === "-" && token[1] !== "-";
@@ -242,4 +242,123 @@ export function isSeatMemoryRelativePathAllowed(relativePath) {
   if (normalized === "docs" || normalized.startsWith("docs/")) return true;
   if (normalized === ".scratch" || normalized.startsWith(".scratch/")) return true;
   return false;
+}
+
+const RELEASE_FENCE_GIT_PUSH_REASON =
+  "git push is forbidden inside a factory seat (release-fence) — Lead releases via lead_release";
+const RELEASE_FENCE_GIT_TAG_REASON =
+  "git tag creation or deletion is forbidden inside a factory seat (release-fence) — Lead releases via lead_release";
+
+const TAG_MUTATE_LONG_FLAGS = new Set([
+  "--annotate",
+  "--sign",
+  "--delete",
+  "--force",
+  "--message",
+  "--file",
+  "--local-user",
+  "--cleanup",
+  "--edit",
+  "--create-reflog",
+]);
+const TAG_MUTATE_SHORT_LETTERS = new Set(["a", "s", "d", "f", "m", "F", "u", "e"]);
+const TAG_QUERY_LONG_FLAGS = new Set([
+  "--list",
+  "--contains",
+  "--no-contains",
+  "--points-at",
+  "--merged",
+  "--no-merged",
+  "--verify",
+  "--help",
+]);
+const TAG_READ_VALUE_FLAGS = new Set(["--sort", "--format", "--color", "--column"]);
+
+/**
+ * Plain-JS mirror of `src/choke.ts`'s `refuseReleaseGitArgv` (v0.14.0, ADR 0061 §5).
+ */
+export function refuseReleaseGitArgv(argv) {
+  const { sub, args } = parseGitSubcommand(argv);
+  if (sub === undefined) return undefined;
+  if (sub === "push") {
+    return { rule: "release-fence", reason: RELEASE_FENCE_GIT_PUSH_REASON };
+  }
+  if (sub !== "tag") return undefined;
+
+  let hasQueryMode = false;
+  let hasPositional = false;
+  let afterDoubleDash = false;
+  for (let j = 0; j < args.length; j++) {
+    const token = args[j];
+    if (afterDoubleDash) {
+      hasPositional = true;
+      continue;
+    }
+    if (token === "--") {
+      afterDoubleDash = true;
+      continue;
+    }
+    const eq = token.indexOf("=");
+    const flagName = eq === -1 ? token : token.slice(0, eq);
+    if (TAG_MUTATE_LONG_FLAGS.has(flagName)) {
+      return { rule: "release-fence", reason: RELEASE_FENCE_GIT_TAG_REASON };
+    }
+    if (shortCluster(token)) {
+      const letters = token.slice(1);
+      for (const ch of letters) {
+        if (TAG_MUTATE_SHORT_LETTERS.has(ch)) {
+          return { rule: "release-fence", reason: RELEASE_FENCE_GIT_TAG_REASON };
+        }
+        if (ch === "l" || ch === "v" || ch === "h") {
+          hasQueryMode = true;
+        }
+      }
+      continue;
+    }
+    if (TAG_QUERY_LONG_FLAGS.has(flagName)) {
+      hasQueryMode = true;
+      continue;
+    }
+    if (TAG_READ_VALUE_FLAGS.has(token)) {
+      j += 1;
+      continue;
+    }
+    if (token.startsWith("-")) continue;
+    hasPositional = true;
+  }
+  if (!hasQueryMode && hasPositional) {
+    return { rule: "release-fence", reason: RELEASE_FENCE_GIT_TAG_REASON };
+  }
+  return undefined;
+}
+
+const GH_GLOBAL_VALUE_FLAGS = new Set(["-R", "--repo", "--hostname", "-C"]);
+
+/**
+ * Plain-JS mirror of `src/choke.ts`'s `refuseReleaseGhArgv` (v0.14.0, ADR 0061 §5).
+ */
+export function refuseReleaseGhArgv(argv) {
+  const positional = [];
+  for (let i = 0; i < argv.length; i++) {
+    const tok = argv[i];
+    if (tok === "--") {
+      positional.push(...argv.slice(i + 1));
+      break;
+    }
+    if (GH_GLOBAL_VALUE_FLAGS.has(tok)) {
+      i += 1;
+      continue;
+    }
+    if (tok.startsWith("-")) continue;
+    positional.push(tok);
+  }
+  const [sub1, sub2] = positional;
+  if (sub1 === "release" || (sub1 === "repo" && (sub2 === "create" || sub2 === "edit"))) {
+    const verb = [sub1, sub2].filter(Boolean).join(" ");
+    return {
+      rule: "release-fence",
+      reason: `'gh ${verb}' is forbidden inside a factory seat (release-fence) — Lead releases via lead_release and Owner publishes via the panel`,
+    };
+  }
+  return undefined;
 }

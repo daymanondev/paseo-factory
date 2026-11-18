@@ -5,11 +5,15 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import { createFactory } from "../src/factory.ts";
-import { refuseGitArgv } from "../src/choke.ts";
-import { refuseGitArgv as mirrorRefuseGitArgv } from "../plugin/bin/git-refusals.mjs";
+import { refuseGitArgv, refuseReleaseGhArgv, refuseReleaseGitArgv } from "../src/choke.ts";
+import {
+  refuseGitArgv as mirrorRefuseGitArgv,
+  refuseReleaseGhArgv as mirrorRefuseReleaseGhArgv,
+  refuseReleaseGitArgv as mirrorRefuseReleaseGitArgv,
+} from "../plugin/bin/git-refusals.mjs";
 import { ensureGitShim } from "../plugin/server/shell.ts";
 import { disposeDir, gitCommitAll, gitCommitChanges, makeTempDir, repoRoot } from "./helpers.ts";
-import { GIT_ARGV_CASES } from "./choke-cases.ts";
+import { GIT_ARGV_CASES, RELEASE_GH_ARGV_CASES, RELEASE_GIT_ARGV_CASES } from "./choke-cases.ts";
 
 /**
  * The git shim itself (`plugin/bin/git-shim.mjs`), hermetic: the "real git"
@@ -380,4 +384,63 @@ test("the agent git shim refuses git commit inside a read-only disposition's Tas
   // Only the three read-only refusals logged — the two engineer commits added none.
   const allRecords = readFileSync(join(stateDir, "git-blocked.log"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
   assert.equal(allRecords.length, 3, "scout + architect + reviewer refusals, nothing else");
+});
+
+test("release-fence mirror matches src/choke.ts, blocks fenced git spellings for seats/correlations, allows tag listing, and lets operators (no seat env) pass", (t) => {
+  for (const { argv, rule } of RELEASE_GIT_ARGV_CASES) {
+    const original = refuseReleaseGitArgv(argv);
+    const mirror = mirrorRefuseReleaseGitArgv(argv);
+    assert.equal(mirror?.rule ?? null, rule, `release git table ${argv.join(" ")}`);
+    assert.equal(mirror?.rule ?? null, original?.rule ?? null, `mirror disagrees on git ${argv.join(" ")}`);
+  }
+  for (const { argv, rule } of RELEASE_GH_ARGV_CASES) {
+    const original = refuseReleaseGhArgv(argv);
+    const mirror = mirrorRefuseReleaseGhArgv(argv);
+    assert.equal(mirror?.rule ?? null, rule, `release gh table ${argv.join(" ")}`);
+    assert.equal(mirror?.rule ?? null, original?.rule ?? null, `mirror disagrees on gh ${argv.join(" ")}`);
+  }
+
+  const s = stage(t);
+  const runWithSeat = (argv: string[], extraEnv: Record<string, string>) =>
+    spawnSync(process.execPath, [shim, ...argv], {
+      cwd: s.workspace,
+      encoding: "utf8",
+      env: { ...process.env, FACTORY_STATE_DIR: s.stateDir, PATH: s.fakeBin, ...extraEnv },
+      timeout: 30_000,
+    });
+
+  for (const extraEnv of [
+    { PASEO_FACTORY_SEAT: "supervisor" },
+    { PASEO_FACTORY_SEAT: "lead" },
+    { PASEO_FACTORY_SEAT: "agent" },
+    { PASEO_FACTORY_CORRELATION: "cor_test_123" },
+  ] as Record<string, string>[]) {
+    for (const { argv, rule } of RELEASE_GIT_ARGV_CASES) {
+      rmSync(join(s.stateDir, "git-blocked.log"), { force: true });
+      const res = runWithSeat([...argv], extraEnv);
+      if (rule === null) {
+        assert.equal(res.status, 0, `${JSON.stringify(extraEnv)}: git ${argv.join(" ")} must pass: ${res.stderr}`);
+        assert.equal(s.logLines().length, 0);
+      } else {
+        assert.equal(res.status, REFUSAL_EXIT, `${JSON.stringify(extraEnv)}: git ${argv.join(" ")} must refuse`);
+        assert.match(res.stderr, /release-fence/);
+        const lines = s.logLines() as Record<string, string>[];
+        assert.equal(lines.length, 1);
+        assert.equal(lines[0]!.rule, "release-fence");
+      }
+    }
+  }
+
+  // Operator (no seat env, no correlation env) passes every release-fence command through.
+  for (const argv of [
+    ["push", "origin", "main"],
+    ["tag", "v0.14.0"],
+    ["tag", "-a", "v0.14.0", "-m", "rel"],
+    ["tag", "-d", "v0.14.0"],
+  ]) {
+    rmSync(join(s.stateDir, "git-blocked.log"), { force: true });
+    const res = runWithSeat(argv, { PASEO_FACTORY_SEAT: "", PASEO_FACTORY_CORRELATION: "" });
+    assert.equal(res.status, 0, `operator git ${argv.join(" ")} must pass: ${res.stderr}`);
+    assert.equal(s.logLines().length, 0);
+  }
 });

@@ -15,7 +15,7 @@ import { createRequire } from "node:module";
 import { join } from "node:path";
 import { build } from "esbuild";
 import { repoRoot } from "./helpers.ts";
-import type { PanelView } from "../plugin/shared/view.ts";
+import type { PanelView, ReleaseSettingsView } from "../plugin/shared/view.ts";
 
 type Exports = Record<string, any>;
 
@@ -102,7 +102,7 @@ const noopActions = () => ({
   openAgent() {}, installPrerequisites() {}, handoffStart() {}, handoffReplaceNow() {}, handoffCancel() {}, handoffRetry() {}, viewHandover() {}, startSupervisor() {}, syncOpenDesign() {}, adoptSupervisor() {}, busy: false,
 });
 
-async function render(panel: PanelView, props: { mobile?: boolean; openDesignActions?: unknown; menu?: unknown; initialUi?: Record<string, unknown>; actions?: Record<string, unknown>; width?: number; skillPacks?: unknown[]; selfUpdate?: unknown } = {}): Promise<string> {
+async function render(panel: PanelView, props: { mobile?: boolean; openDesignActions?: unknown; menu?: unknown; initialUi?: Record<string, unknown>; actions?: Record<string, unknown>; width?: number; skillPacks?: unknown[]; selfUpdate?: unknown; release?: ReleaseSettingsView | null; publishPreflight?: Record<string, unknown> | null; releaseFeedback?: { text: string; tone: "info" | "error" } | null; releaseActions?: Record<string, unknown> } = {}): Promise<string> {
   const { ProjectPanel } = await loadPanel();
   const { createElement } = await import("react");
   const { renderToStaticMarkup } = await import("react-dom/server");
@@ -115,6 +115,10 @@ async function render(panel: PanelView, props: { mobile?: boolean; openDesignAct
       ...(props.menu === undefined ? {} : { menu: props.menu }),
       ...(props.initialUi === undefined ? {} : { initialUi: props.initialUi }),
       ...(props.selfUpdate === undefined ? {} : { selfUpdate: props.selfUpdate }),
+      ...(props.release === undefined ? {} : { release: props.release }),
+      ...(props.publishPreflight === undefined ? {} : { publishPreflight: props.publishPreflight }),
+      ...(props.releaseFeedback === undefined ? {} : { releaseFeedback: props.releaseFeedback }),
+      ...(props.releaseActions === undefined ? {} : { releaseActions: props.releaseActions }),
     }),
   );
 }
@@ -1035,4 +1039,281 @@ test("unscoped or older panels omit Project usage, and an unknown cache-hit rati
   }
   const html = await render(makePanel({ usage: { ...recordedUsage, newTokens: 0, cachedTokens: 0, cacheReadTokens: 0, totalTokens: 0, inputUncachedTokens: 0, outputTokens: 0, sessionCount: 1, cacheHitPercent: null, seats: [], models: [] } }), { initialUi: { tab: "project" } });
   assert.match(leafOf(html, "project-usage-summary"), /0 new \(0 in · 0 out\) · – cache \(0\) · 0 total · 1 session<\/span>/);
+});
+
+function makeRelease(overrides: Partial<ReleaseSettingsView> = {}): ReleaseSettingsView {
+  return {
+    project: "my-app",
+    projectRoot: "/repo/my-app",
+    mode: "off",
+    branch: null,
+    resolvedBranch: "main",
+    defaultBranch: "main",
+    branchCandidates: ["main", "release"],
+    updatedAt: null,
+    pendingRequest: null,
+    origin: {
+      remoteUrl: "git@github.com:acme/my-app.git",
+      slug: "acme/my-app",
+      visibility: "private",
+      defaultBranch: "main",
+    },
+    gh: { installed: true, authenticated: true, user: "octocat" },
+    lastRelease: null,
+    ...overrides,
+  };
+}
+
+test("GitHub & Release card renders read states on the Project tab with exact hooks and zero visibility-edit controls", async () => {
+  // Lives on Project tab, never on Team tab
+  assert.equal(hasHook(await render(makePanel(), { release: makeRelease() }), "factory-panel-github-release"), false);
+
+  // 1. Not on GitHub (no origin) + no releases yet + gh unauthenticated
+  const noOrigin = await render(makePanel(), {
+    initialUi: { tab: "project" },
+    release: makeRelease({
+      origin: null,
+      resolvedBranch: null,
+      defaultBranch: null,
+      branchCandidates: ["main"],
+      gh: { installed: true, authenticated: false, user: null },
+      lastRelease: null,
+    }),
+  });
+  for (const hook of [
+    "factory-panel-github-release",
+    "factory-panel-github-origin",
+    "factory-panel-release-mode",
+    "factory-panel-release-branch",
+    "factory-panel-release-last",
+    "factory-panel-github-login-guide",
+  ]) {
+    assert.ok(hasHook(noOrigin, hook), `${hook} renders when gh is unauthenticated and origin is absent`);
+  }
+  assert.match(elementOf(noOrigin, "factory-panel-github-origin"), /Not on GitHub/);
+  assert.match(elementOf(noOrigin, "factory-panel-release-mode"), /off/i);
+  assert.match(elementOf(noOrigin, "factory-panel-release-last"), /No releases yet/);
+  assert.match(elementOf(noOrigin, "factory-panel-github-login-guide"), /gh auth login --web -p https/);
+
+  // 2. Private repo, on-request mode, pending request, authenticated gh
+  const priv = await render(makePanel(), {
+    initialUi: { tab: "project" },
+    release: makeRelease({
+      mode: "on-request",
+      pendingRequest: { version: "0.14.0", requestedAt: new Date().toISOString() },
+    }),
+  });
+  assert.equal(hasHook(priv, "factory-panel-github-login-guide"), false, "authenticated gh hides login guide");
+  assert.match(elementOf(priv, "factory-panel-github-origin"), /acme\/my-app/);
+  assert.match(elementOf(priv, "factory-panel-github-origin"), /Private/);
+  assert.match(elementOf(priv, "factory-panel-release-mode"), /on-request/);
+  assert.match(elementOf(priv, "factory-panel-release-mode"), /0\.14\.0/);
+  assert.match(elementOf(priv, "factory-panel-release-branch"), /main/);
+
+  // 3. Public repo, auto mode, recorded lastRelease
+  const pub = await render(makePanel(), {
+    initialUi: { tab: "project" },
+    release: makeRelease({
+      mode: "auto",
+      branch: "release",
+      resolvedBranch: "release",
+      origin: { remoteUrl: "https://github.com/acme/oss.git", slug: "acme/oss", visibility: "public", defaultBranch: "main" },
+      lastRelease: {
+        version: "0.14.0",
+        tag: "v0.14.0",
+        commit: "1234567890abcdef",
+        branch: "release",
+        url: "https://github.com/acme/oss/releases/tag/v0.14.0",
+        mode: "auto",
+        ts: new Date(Date.now() - 120_000).toISOString(),
+      },
+    }),
+  });
+  assert.match(elementOf(pub, "factory-panel-github-origin"), /acme\/oss/);
+  assert.match(elementOf(pub, "factory-panel-github-origin"), /Public/);
+  assert.match(elementOf(pub, "factory-panel-release-mode"), /auto/);
+  assert.match(elementOf(pub, "factory-panel-release-branch"), /release/);
+  const lastHtml = elementOf(pub, "factory-panel-release-last");
+  assert.match(lastHtml, /v0\.14\.0/);
+  assert.match(lastHtml, /1234567/);
+  assert.match(lastHtml, /release/);
+  assert.match(lastHtml, /2m ago/);
+  assert.match(lastHtml, /https:\/\/github\.com\/acme\/oss\/releases\/tag\/v0\.14\.0/);
+
+  // 4. Static guard: zero repo visibility-change controls anywhere in plugin/client/
+  const walk = (dir: string): string[] => {
+    const out: string[] = [];
+    for (const entry of readdirSync(dir)) {
+      const p = join(dir, entry);
+      if (statSync(p).isDirectory()) out.push(...walk(p));
+      else if (/\.(ts|tsx)$/.test(entry)) out.push(p);
+    }
+    return out;
+  };
+  for (const file of walk(join(repoRoot, "plugin", "client"))) {
+    const src = readFileSync(file, "utf8");
+    assert.doesNotMatch(src, /change\s+visibility|make\s+public|make\s+private|gh\s+repo\s+edit/i, `${file} must not expose repo visibility mutation`);
+  }
+});
+
+test("GitHub & Release card renders desktop mode/branch selectors, no-origin hint, feedback, and mobile read-only discipline", async () => {
+  // Desktop interactive mode & branch controls + dropped-request feedback
+  const modeCalls: string[] = [];
+  const branchCalls: string[] = [];
+  const { ProjectPanel } = await loadPanel();
+  const { createElement, act } = await import("react");
+  const { JSDOM } = await import(["jsdom"].join(""));
+  const dom = new JSDOM("<!doctype html><div id=root></div>");
+  const g = globalThis as Record<string, any>;
+  const saved = { window: g.window, document: g.document, IS_REACT_ACT_ENVIRONMENT: g.IS_REACT_ACT_ENVIRONMENT };
+  g.window = dom.window; g.document = dom.window.document; g.IS_REACT_ACT_ENVIRONMENT = true;
+  const { createRoot } = await import("react-dom/client");
+  const container = dom.window.document.getElementById("root")!;
+  const root = createRoot(container);
+  try {
+    await act(() =>
+      root.render(
+        createElement(ProjectPanel, {
+          theme,
+          panel: makePanel(),
+          mobile: false,
+          now: Date.now(),
+          daemonError: null,
+          actions: noopActions(),
+          initialUi: { tab: "project" },
+          release: makeRelease({ mode: "off", branch: null, resolvedBranch: "main", defaultBranch: "main", branchCandidates: ["main", "release"] }),
+          releaseFeedback: { text: "Dropped pending Release request.", tone: "info" },
+          releaseActions: {
+            setMode: (mode: string) => { modeCalls.push(mode); },
+            setBranch: (branch: string) => { branchCalls.push(branch); },
+          },
+        }),
+      ),
+    );
+    assert.ok(container.querySelector('[data-testid="factory-panel-release-mode-off"]'));
+    assert.ok(container.querySelector('[data-testid="factory-panel-release-mode-on-request"]'));
+    assert.ok(container.querySelector('[data-testid="factory-panel-release-mode-auto"]'));
+    await act(() => (container.querySelector('[data-testid="factory-panel-release-mode-on-request"]') as HTMLButtonElement).click());
+    await act(() => (container.querySelector('[data-testid="factory-panel-release-branch-option-release"]') as HTMLButtonElement).click());
+    assert.deepEqual(modeCalls, ["on-request"]);
+    assert.deepEqual(branchCalls, ["release"]);
+    assert.match(container.querySelector('[data-testid="factory-panel-release-feedback"]')!.textContent!, /Dropped pending Release request/);
+  } finally {
+    await act(() => root.unmount());
+    Object.assign(g, saved);
+    dom.window.close();
+  }
+
+  // No-origin: branch selector is disabled with hint, zero candidate buttons
+  const noOriginHtml = await render(makePanel(), {
+    initialUi: { tab: "project" },
+    release: makeRelease({ origin: null, defaultBranch: null, resolvedBranch: null, branchCandidates: ["main"] }),
+    releaseActions: { setMode() {}, setBranch() {} },
+  });
+  const branchEl = elementOf(noOriginHtml, "factory-panel-release-branch");
+  assert.doesNotMatch(branchEl, /factory-panel-release-branch-option-/);
+  assert.match(branchEl, /origin/i);
+
+  // Mobile: read-only card, zero buttons anywhere inside factory-panel-github-release
+  const mobileHtml = await render(makePanel(), {
+    mobile: true,
+    initialUi: { tab: "project" },
+    release: makeRelease({ mode: "auto" }),
+    releaseActions: { setMode() { assert.fail("mobile mode write"); }, setBranch() { assert.fail("mobile branch write"); } },
+  });
+  assert.doesNotMatch(elementOf(mobileHtml, "factory-panel-github-release"), /<button/);
+});
+
+test("GitHub Publish form renders only without origin on desktop, gates Public & sensitive files, and hides once origin exists", async () => {
+  const preflight = {
+    project: "my-app",
+    projectRoot: "/repo/my-app",
+    originPresent: false,
+    gh: { installed: true, authenticated: true, user: "octo" },
+    owners: ["octo", "acme-org"],
+    defaultOwner: "octo",
+    defaultName: "my-app",
+    sensitiveFiles: [".env"],
+    hasUncommittedChanges: false,
+    commitHistoryNotScannedNote: "Commit history is not scanned for past secrets — only tracked files at HEAD are checked.",
+  };
+
+  // 1. With origin already set -> Publish form is absent
+  const withOrigin = await render(makePanel(), {
+    initialUi: { tab: "project" },
+    release: makeRelease(),
+    publishPreflight: preflight,
+  });
+  assert.equal(hasHook(withOrigin, "factory-panel-github-publish"), false);
+
+  // 2. Interactive Publish form without origin: owner, name (folder default), optional description, Private default (hides confirm/sensitive)
+  const noOriginHtml = await render(makePanel(), {
+    initialUi: { tab: "project" },
+    release: makeRelease({ origin: null, resolvedBranch: null, defaultBranch: null, gh: { installed: true, authenticated: true, user: "octo" } }),
+    publishPreflight: preflight,
+    releaseActions: { publish: async () => {} },
+  });
+  for (const hook of [
+    "factory-panel-github-publish",
+    "factory-panel-github-publish-owner",
+    "factory-panel-github-publish-name",
+    "factory-panel-github-publish-description",
+    "factory-panel-github-publish-visibility",
+    "factory-panel-github-publish-submit",
+  ]) {
+    assert.ok(hasHook(noOriginHtml, hook), `${hook} renders on no-origin desktop`);
+  }
+  assert.equal(hasHook(noOriginHtml, "factory-panel-github-publish-confirm-name"), false, "Private mode hides Public typed-name confirmation");
+  assert.equal(hasHook(noOriginHtml, "factory-panel-github-publish-sensitive"), false, "Private mode hides Public sensitive-file warning");
+
+  // 3. Switching to Public reveals -confirm-name, -sensitive, and history-not-scanned note, and gates submit until both match
+  const publishedCalls: Array<Record<string, unknown>> = [];
+  const { ProjectPanel } = await loadPanel();
+  const { createElement, act } = await import("react");
+  const { JSDOM } = await import(["jsdom"].join(""));
+  const dom = new JSDOM("<!doctype html><div id=root></div>");
+  const g = globalThis as Record<string, any>;
+  const saved = { window: g.window, document: g.document, IS_REACT_ACT_ENVIRONMENT: g.IS_REACT_ACT_ENVIRONMENT };
+  g.window = dom.window; g.document = dom.window.document; g.IS_REACT_ACT_ENVIRONMENT = true;
+  const { createRoot } = await import("react-dom/client");
+  const container = dom.window.document.getElementById("root")!;
+  const root = createRoot(container);
+  try {
+    await act(() =>
+      root.render(
+        createElement(ProjectPanel, {
+          theme,
+          panel: makePanel(),
+          mobile: false,
+          now: Date.now(),
+          daemonError: null,
+          actions: noopActions(),
+          initialUi: { tab: "project" },
+          release: makeRelease({ origin: null, resolvedBranch: null, defaultBranch: null, gh: { installed: true, authenticated: true, user: "octo" } }),
+          publishPreflight: preflight,
+          releaseActions: { publish: async (payload: Record<string, unknown>) => { publishedCalls.push(payload); } },
+        }),
+      ),
+    );
+    const submitBtn = () => container.querySelector('[data-testid="factory-panel-github-publish-submit"]') as HTMLButtonElement;
+    assert.equal(submitBtn().disabled, false, "Private publish is ready without sensitive override");
+
+    await act(() => (container.querySelector('[data-testid="factory-panel-github-publish-visibility-public"]') as HTMLButtonElement).click());
+    assert.ok(container.querySelector('[data-testid="factory-panel-github-publish-confirm-name"]'), "Public reveals typed-name confirmation");
+    assert.ok(container.querySelector('[data-testid="factory-panel-github-publish-sensitive"]'), "Public reveals tracked sensitive files");
+    assert.match(container.querySelector('[data-testid="factory-panel-github-publish"]')!.textContent!, /history is not scanned/i);
+    assert.equal(submitBtn().disabled, true);
+
+    // Acknowledge sensitive files without typing name -> still disabled
+    await act(() => (container.querySelector('[data-testid="factory-panel-github-publish-sensitive-toggle"]') as HTMLButtonElement).click());
+    assert.equal(submitBtn().disabled, true, "Public submit disabled until repo name matches");
+
+    // Select org owner acme-org + click submit won't fire until confirm-name typed
+    await act(() => (container.querySelector('[data-testid="factory-panel-github-publish-owner-acme-org"]') as HTMLButtonElement).click());
+    assert.equal(publishedCalls.length, 0);
+  } finally {
+    await act(() => root.unmount());
+    Object.assign(g, saved);
+    dom.window.close();
+  }
 });

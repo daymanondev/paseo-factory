@@ -2089,3 +2089,27 @@ test("Peer launch and reopen isolate Task Pi homes and Contract skills with matc
   const reopened = injectSessionEnv({ agentId: "peer-1", cwd: root, env: { ...env }, provider: "pi" }, stateDir, userHome);
   assert.equal(reopened?.env?.PI_CODING_AGENT_DIR, expectedHome);
 });
+
+test("Lead and Supervisor role laws teach three-mode Release ownership, semver rules, and panel-only publish boundaries", () => {
+  const leadLaws = LEAD_WAVE_LAWS.join("\n");
+  const leadContract = renderRoleContract("lead");
+  for (const surface of [leadLaws, leadContract]) {
+    assert.match(surface, /lead_release/);
+    assert.match(surface, /\boff\b/);
+    assert.match(surface, /\bon-request\b/);
+    assert.match(surface, /\bauto\b/);
+    assert.match(surface, /engineer.*wave|prep.*engineer/i);
+    assert.match(surface, /## \[Unreleased\]/);
+    assert.match(surface, /never bump major/i);
+    assert.match(surface, /0\.x\s*(?:->|→|to)\s*1\.0/);
+  }
+
+  const supContract = renderRoleContract("supervisor");
+  for (const surface of [SUPERVISOR_OUTCOME_BOUNDARY, supContract]) {
+    assert.match(surface, /supervisor_dispatch_lead/);
+    assert.match(surface, /release/i);
+    assert.match(surface, /GitHub & Release/);
+    assert.match(surface, /never.*(?:run `lead_release`|release or publish|tag or push)/i);
+  }
+  assert.doesNotMatch(supContract, /lead_release\(/);
+});

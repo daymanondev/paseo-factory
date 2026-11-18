@@ -331,6 +331,10 @@ export function renderLedgerLine(evt: AnyEvent): string {
       return `needs human — ${evt.reason}`;
     case "retro_written":
       return `retro ${evt.outcome}${evt.proposalCount === undefined ? "" : ` (${evt.proposalCount} proposals)`}`;
+    case "release_published":
+      return `release ${evt.tag} (${evt.branch})`;
+    case "release_failed":
+      return `release failed ${evt.version} [${evt.step}: ${evt.code}]`;
   }
 }
 

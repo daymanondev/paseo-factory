@@ -3,7 +3,18 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { disposeDir, makeTempDir } from "./helpers.ts";
-import { migrateLegacyExecutionState, projectSettingsPath, readProjectSettings, setProjectSkillPacks, resetProjectSkillPacks } from "../src/project-settings.ts";
+import {
+  clearReleaseRequest,
+  migrateLegacyExecutionState,
+  projectSettingsPath,
+  readProjectSettings,
+  readReleaseRequest,
+  readReleaseSettings,
+  resetProjectSkillPacks,
+  setProjectReleaseSettings,
+  setProjectSkillPacks,
+  setReleaseRequest,
+} from "../src/project-settings.ts";
 
 /** Per-Project settings (ADR 0056): defaults, skill-pack writes, and the unreadable-legacy-record safety rule. */
 
@@ -39,4 +50,52 @@ test("boot cleanup leaves a legacy execution record it cannot read in place, and
   assert.equal(readFileSync(join(state, "projects/alpha/execution.json"), "utf8"), "{broken", "unreadable data is never deleted");
   assert.equal(existsSync(projectSettingsPath(state, "alpha")), false);
   assert.equal(existsSync(join(state, "projects/alpha/scrum")), false);
+});
+
+test("release settings default to off, keep legacy settings valid, persist mode/branch/updatedAt, and drop pending requests when leaving on-request", (t) => {
+  const state = makeTempDir();
+  disposeDir(t, state);
+
+  // Absent settings read as off
+  assert.deepEqual(readReleaseSettings(state, "alpha"), { mode: "off" });
+
+  // Legacy project-settings.json without release stays valid
+  mkdirSync(join(state, "projects/legacy"), { recursive: true });
+  writeFileSync(projectSettingsPath(state, "legacy"), JSON.stringify({ schemaVersion: 1, revision: 2, skillPacks: ["expo"] }));
+  assert.deepEqual(readReleaseSettings(state, "legacy"), { mode: "off" });
+  assert.deepEqual(readProjectSettings(state, "legacy").skillPacks, ["expo"]);
+
+  // Damaged release block is refused
+  writeFileSync(projectSettingsPath(state, "legacy"), JSON.stringify({ schemaVersion: 1, revision: 3, release: { mode: "bogus", updatedAt: "x" } }));
+  assert.throws(() => readProjectSettings(state, "legacy"), /project-settings-invalid/);
+
+  // Write on-request + branch
+  setProjectReleaseSettings(state, "alpha", { mode: "on-request", branch: "release" }, () => "2026-11-18T12:00:00.000Z");
+  assert.deepEqual(readReleaseSettings(state, "alpha"), {
+    mode: "on-request",
+    branch: "release",
+    updatedAt: "2026-11-18T12:00:00.000Z",
+  });
+
+  // Pending Release request is stored separately and survives mode-preserving branch updates
+  setReleaseRequest(state, "alpha", { version: "0.14.0", requestedAt: "2026-11-18T12:05:00.000Z", requestedBy: "supervisor" });
+  assert.deepEqual(readReleaseRequest(state, "alpha"), {
+    version: "0.14.0",
+    requestedAt: "2026-11-18T12:05:00.000Z",
+    requestedBy: "supervisor",
+  });
+
+  setProjectReleaseSettings(state, "alpha", { branch: null }, () => "2026-11-18T12:06:00.000Z");
+  assert.deepEqual(readReleaseSettings(state, "alpha"), { mode: "on-request", updatedAt: "2026-11-18T12:06:00.000Z" });
+  assert.equal(readReleaseRequest(state, "alpha")?.version, "0.14.0");
+
+  // Switching mode away from on-request drops pending request
+  setProjectReleaseSettings(state, "alpha", { mode: "auto" }, () => "2026-11-18T12:07:00.000Z");
+  assert.equal(readReleaseRequest(state, "alpha"), undefined);
+  assert.equal(readReleaseSettings(state, "alpha").mode, "auto");
+
+  // Explicit clear works cleanly
+  setReleaseRequest(state, "alpha", { requestedAt: "2026-11-18T12:08:00.000Z" });
+  assert.equal(clearReleaseRequest(state, "alpha"), true);
+  assert.equal(readReleaseRequest(state, "alpha"), undefined);
 });

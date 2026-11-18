@@ -5,13 +5,15 @@
  * Desktop-only controls are gated by the host platform before mounting.
  */
 import type { PluginTheme } from "@getpaseo/plugin";
-import { useRpc } from "@getpaseo/plugin/client";
+import { openExternalUrl, useRpc } from "@getpaseo/plugin/client";
 import { Modal, ScrollView, useToast } from "@getpaseo/plugin/client/ui";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Text, View } from "react-native";
-import { skillsImport, skillsPackSave, skillsPackDelete, skillsPackReset, skillsTogglePack, lanesSet, lanesReset, lanesSetBatch, handoffStart, handoffReplaceNow, handoffCancel, handoffRetry, handoffHandover, onboardingCommit, onboardingInspect, openDesignCatalog, openDesignSync, helperMcpsSyncAndProbe, helperMcpsSetEnabled, pluginsInstall, pluginsManage, pluginsCheckUpdates, selfUpdateApply, selfUpdateStatus, profilesApply, profilesDelete, profilesSave, projectDelete, projectReset, projectRotate, snapshot, stateUpdates, supervisorAdopt, supervisorStart, vaultConfigure, vaultHydrate, vaultImport, vaultSync } from "../../shared/rpc.ts";
+import { skillsImport, skillsPackSave, skillsPackDelete, skillsPackReset, skillsTogglePack, lanesSet, lanesReset, lanesSetBatch, handoffStart, handoffReplaceNow, handoffCancel, handoffRetry, handoffHandover, onboardingCommit, onboardingInspect, openDesignCatalog, openDesignSync, helperMcpsSyncAndProbe, helperMcpsSetEnabled, pluginsInstall, pluginsManage, pluginsCheckUpdates, releaseSettingsRead, releaseSettingsWrite, githubPublishPreflight, githubPublish, selfUpdateApply, selfUpdateStatus, profilesApply, profilesDelete, profilesSave, projectDelete, projectReset, projectRotate, snapshot, stateUpdates, supervisorAdopt, supervisorStart, vaultConfigure, vaultHydrate, vaultImport, vaultSync } from "../../shared/rpc.ts";
+import { GH_LOGIN_CMD } from "./github-release-card.tsx";
+import type { GitHubPublishSubmitInput, ReleaseCardFeedback } from "./github-release-card.tsx";
 import type { ManageablePluginId } from "../../shared/companions.ts";
-import type { FactoryView, LaneName } from "../../shared/view.ts";
+import type { FactoryView, GitHubPublishPreflightView, LaneName, ReleaseSettingsView } from "../../shared/view.ts";
 import { SPACING, text } from "../kit/theme.ts";
 import { useNow, usePoll, pollEvery, PROVIDERS_LOADING_MS, QUIET_MS } from "../kit/poll.ts";
 import { isSubscriptionLive, useClientSubscription } from "../kit/subscription.ts";
@@ -103,6 +105,10 @@ export function FactoryShell({
   // The header's version + self-update (ticket 11): one status on mount, Check forces it, Update applies (the plugin reloads under us).
   const selfUpdateStatusCall = useRpc(selfUpdateStatus);
   const selfUpdateApplyCall = useRpc(selfUpdateApply);
+  const releaseReadCall = useRpc(releaseSettingsRead);
+  const releaseWriteCall = useRpc(releaseSettingsWrite);
+  const githubPublishPreflightCall = useRpc(githubPublishPreflight);
+  const githubPublishCall = useRpc(githubPublish);
   const selfUpdate = useSelfUpdate({ status: selfUpdateStatusCall, apply: selfUpdateApplyCall, enabled: surface === "panel" });
   // The Private vault RPCs (v0.0.21–v0.0.22, ADR 0014 §4): one useRpc per
   // contract, every act through act() — the plugins pair's law.
@@ -122,6 +128,12 @@ export function FactoryShell({
   const vaultResponses = useRef(createResponseOrder());
   const [vaultNote, setVaultNote] = useState<VaultNote | null>(null);
   const [laneNote, setLaneNote] = useState<string | null>(null);
+  const [panelTab, setPanelTab] = useState<"team" | "models" | "project">("team");
+  const [releaseView, setReleaseView] = useState<ReleaseSettingsView | null>(null);
+  const [publishPreflightView, setPublishPreflightView] = useState<GitHubPublishPreflightView | null>(null);
+  const [releaseBusy, setReleaseBusy] = useState(false);
+  const [releaseFeedback, setReleaseFeedback] = useState<ReleaseCardFeedback | null>(null);
+  const [releaseCopiedLogin, setReleaseCopiedLogin] = useState(false);
   const [containerWidth, setContainerWidth] = useState<number>(0);
   const lastViewRef = useRef<FactoryView | null>(null);
   const refreshRef = useRef<() => void>(() => {});
@@ -177,6 +189,97 @@ export function FactoryShell({
   const now = useNow(1000);
   const elapsedSeconds = activePluginAct === null ? 0 : Math.max(0, Math.floor((now - activePluginAct.startedAt) / 1000));
   useEffect(() => { if (view !== null) setVaultNote(null); }, [view]);
+
+  const activeReleaseRoot =
+    panelHost && panelTab === "project" && view?.panel.isProject && view.project !== null && view.project.missingRoot !== true
+      ? view.project.root
+      : null;
+
+  const releaseReadRef = useRef(releaseReadCall);
+  releaseReadRef.current = releaseReadCall;
+  const publishPreflightRef = useRef(githubPublishPreflightCall);
+  publishPreflightRef.current = githubPublishPreflightCall;
+
+  const refreshReleaseView = useCallback(async (projectRoot: string) => {
+    try {
+      const reply = await releaseReadRef.current({ projectRoot });
+      if (reply && reply.ok && reply.settings !== undefined) {
+        setReleaseView(reply.settings);
+        if (reply.settings.origin === null && !mobile) {
+          try {
+            const pre = await publishPreflightRef.current({ projectRoot });
+            if (pre && pre.ok) setPublishPreflightView(pre);
+          } catch {
+            // Preflight failure leaves publish form using release view defaults.
+          }
+        } else {
+          setPublishPreflightView(null);
+        }
+      }
+    } catch {
+      // Transient release-settings read errors leave the last good view in place.
+    }
+  }, [mobile]);
+
+  useEffect(() => {
+    if (activeReleaseRoot === null) {
+      if (view?.panel.isProject !== true) {
+        setReleaseView(null);
+        setPublishPreflightView(null);
+        setReleaseFeedback(null);
+      }
+      return;
+    }
+    void refreshReleaseView(activeReleaseRoot);
+  }, [activeReleaseRoot, view?.generatedAt, view?.panel.isProject, refreshReleaseView]);
+
+  const runReleaseAct = async (work: (projectRoot: string) => Promise<void>) => {
+    if (activeReleaseRoot === null || releaseBusy) return;
+    setReleaseBusy(true);
+    setReleaseFeedback(null);
+    try {
+      await work(activeReleaseRoot);
+    } catch (error) {
+      setReleaseFeedback({
+        text: error instanceof Error ? error.message : String(error),
+        tone: "error",
+      });
+    } finally {
+      setReleaseBusy(false);
+    }
+  };
+
+  const publishProjectRepo = (input: GitHubPublishSubmitInput) =>
+    runReleaseAct(async (projectRoot) => {
+      const reply = await githubPublishCall({ projectRoot, ...input });
+      if (!reply.ok) {
+        setReleaseFeedback({ text: reply.error, tone: "error" });
+        return;
+      }
+      setReleaseView(reply.settings);
+      setPublishPreflightView(null);
+      setReleaseFeedback({ text: `Published ${reply.slug} (${reply.visibility}).`, tone: "info" });
+      refresh();
+    });
+
+  const updateReleaseSettings = (patch: { mode?: "off" | "on-request" | "auto"; branch?: string | null }) =>
+    runReleaseAct(async (projectRoot) => {
+      const reply = await releaseWriteCall({ projectRoot, ...patch });
+      if (!reply.ok) {
+        setReleaseFeedback({ text: reply.error, tone: "error" });
+        return;
+      }
+      setReleaseView(reply.settings);
+      if (reply.droppedPendingRequest) {
+        setReleaseFeedback({ text: "Pending Release request was dropped.", tone: "info" });
+      }
+    });
+
+  const copyReleaseLoginCommand = () => {
+    const clip = (globalThis as { navigator?: { clipboard?: { writeText?: (value: string) => Promise<void> } } }).navigator?.clipboard;
+    if (clip?.writeText !== undefined) void clip.writeText(GH_LOGIN_CMD);
+    setReleaseCopiedLogin(true);
+  };
 
   const clearPluginCardError = (target: ManageablePluginId | "all"): void => {
     if (target === "all") {
@@ -749,6 +852,22 @@ export function FactoryShell({
             {...(onEditorRequestHandled === undefined ? {} : { onEditorRequestHandled })}
             width={containerWidth}
             selfUpdate={selfUpdate}
+            release={releaseView}
+            publishPreflight={publishPreflightView}
+            releaseBusy={releaseBusy}
+            releaseFeedback={releaseFeedback}
+            releaseCopiedLogin={releaseCopiedLogin}
+            releaseActions={{
+              setMode: (mode) => updateReleaseSettings({ mode }),
+              setBranch: (branch) => updateReleaseSettings({ branch }),
+              publish: publishProjectRepo,
+              openUrl: (url) => { void openExternalUrl(url); },
+              copyLoginCommand: copyReleaseLoginCommand,
+              checkLogin: async () => {
+                if (activeReleaseRoot !== null) await refreshReleaseView(activeReleaseRoot);
+              },
+            }}
+            onTabChange={setPanelTab}
             skillPacks={view.skillHub?.projectPacks ?? []}
             skillPacksExplicit={view.skillHub?.skillPacksExplicit === true}
             hasProjectLaneOverride={view.hasProjectLaneOverride}

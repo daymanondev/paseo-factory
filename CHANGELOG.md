@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-11-18
+
+**Lead-owned releases (`lead_release`), per-Project Release mode & branch settings, and one-time Owner GitHub publish (ADR 0061).**
+
+### Added
+
+- **`lead_release` MCP/Spool act & server release runner (`plugin/server/release.ts`):** Added the Lead-only `lead_release({ version })` tool backed by serialized Spool execution. Verifies mode/request preconditions, clean non-detached HEAD at the last accepted landing (allowing only seat-memory descendants), running-Gate absence, `CHANGELOG.md` `## [x.y.z]` section (or `--generate-notes` when absent), and `auto`-mode product-diff check; idempotently creates the `vX.Y.Z` annotated tag, fast-forward pushes the resolved Release branch and tag to `origin`, creates the GitHub Release, records `release_published` / `release_failed` Ledger events (preserved cleanly across `projectReset` when other tasks exist), and clears one-shot `on-request` intent on success.
+- **Per-Project Release settings & request persistence (`src/project-settings.ts`, `plugin/server/surface-rpc.ts`):** Added per-Project `mode` (`off` | `on-request` | `auto`) and `branch` override plus single-shot `release-request.json` storage, `factory.release.settings.read` / `factory.release.settings.write` RPCs (Owner-only writes with `seat-cannot-grant`), and automatic request clearing on seat rotation, project reset, and leaving `on-request`.
+- **Supervisor dispatch release intent & role law (`src/mcp/shared.ts`, `plugin/server/lead-mailbox.ts`, `src/preflight.ts`, `src/roles-contract.ts`):** Added optional `release: { version?: string }` on `supervisor_dispatch_lead` (preserving existing pending requests on unrelated dispatches), injected dynamic `- Release: mode=..., branch=...` into seat kickoff packets across deduplication, and documented three-mode release law and `## [Unreleased]` semver rules for Lead and Supervisor.
+- **"GitHub & Release" card & one-time GitHub publish (`plugin/client/factory/github-release-card.tsx`, `plugin/server/surface-rpc.ts`):** Added the Project-tab card (Origin status, `gh` login guide when unauthenticated, desktop mode/branch selectors, Last Release summary, read-only mobile view with zero repo visibility-change controls) plus Owner-only `factory.github.publish.preflight` and `factory.github.publish` (`seat-cannot-publish`, tracked sensitive-file scan & override, Public typed-name confirmation, and `gh repo create ... --remote=origin --push` without Ledger pollution).
+
+### Security
+
+- **`release-fence` & Spool write protection (`src/choke.ts`, `plugin/bin/git-shim.mjs`, `plugin/bin/exec-shim.mjs`, `plugin/bin/agy-pre-tool-hook.mjs`):** Blocked seats across Choke, OS shims, and PreToolUse hooks from running `git tag`, `git push`, `gh release`, `gh repo create`, or `gh repo edit`, and fenced writes into `<stateDir>/spool/**`.
+
 ## [0.13.0] - 2026-11-18
 
 **Push-based UI state subscriptions, idle background-process badges, and sidebar workspace row badges.**

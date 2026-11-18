@@ -14,6 +14,8 @@
   repository, npm package, and plugin id share one canonical name.
 - **Branch model: trunk-based.** Short-lived feature branches → PR into a
   protected `main`; CI must pass to merge; branches deleted after merge.
+  _(Amended 2026-11-18 by ADR 0061: `main` is not branch-protected in
+  practice; Factory landings and Lead-owned Releases fast-forward it directly.)_
 - **Versioning: semver 0.0.x while private.** `0.1.0` is the first public cut;
   before that, patch = fix, minor (0.x.0) = user-visible change. Every released
   version gets a `v{version}` git tag and a GitHub Release.

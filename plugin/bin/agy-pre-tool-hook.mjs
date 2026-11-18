@@ -99,7 +99,9 @@ var EVENT_NAMES = [
   "respawn_refused",
   "needs_human",
   "retro_written",
-  "task_closed"
+  "task_closed",
+  "release_published",
+  "release_failed"
 ];
 var PEER_DISPOSITIONS = ["engineer", "architect", "reviewer", "scout"];
 var PEER_HANDOFF_OUTCOMES = ["complete", "partial", "blocked", "reopen"];
@@ -247,6 +249,12 @@ function shapeIsValid(evt) {
   if (evt.event === "task_closed") {
     return taskIsString && typeof asRecord.reason === "string" && (asRecord.closed_by === void 0 || typeof asRecord.closed_by === "string");
   }
+  if (evt.event === "release_published") {
+    return asRecord.task === void 0 && asRecord.attempt === void 0 && typeof asRecord.version === "string" && typeof asRecord.tag === "string" && typeof asRecord.commit === "string" && typeof asRecord.branch === "string" && (asRecord.url === null || typeof asRecord.url === "string") && typeof asRecord.mode === "string" && Array.isArray(asRecord.skipped) && asRecord.skipped.every((s) => typeof s === "string");
+  }
+  if (evt.event === "release_failed") {
+    return asRecord.task === void 0 && asRecord.attempt === void 0 && typeof asRecord.version === "string" && typeof asRecord.step === "string" && typeof asRecord.code === "string" && typeof asRecord.detail === "string";
+  }
   const attempt = asRecord.attempt;
   return taskIsString && typeof attempt === "number" && Number.isInteger(attempt) && attempt >= 1;
 }
@@ -278,7 +286,7 @@ function v2PayloadIsValid(event) {
   if (event.attempt !== void 0 && !["claim_reported", "gate_started", "gate_finished", "fresh_eyes_written", "watch_written", "report_written", "attempt_accepted"].includes(event.event)) return false;
   if (event.event === "needs_human" && record(event.evidence) && !Object.values(event.evidence).every((value) => Number.isSafeInteger(value) && value > 0)) return false;
   if (event.arity !== void 0 && (!Number.isSafeInteger(event.arity) || event.arity < 1)) return false;
-  if (event.event === "ledger_schema" || event.event === "retro_written") {
+  if (event.event === "ledger_schema" || event.event === "retro_written" || event.event === "release_published" || event.event === "release_failed") {
     if (event.task !== void 0 || event.attempt !== void 0) return false;
   }
   switch (event.event) {
@@ -315,6 +323,10 @@ function v2PayloadIsValid(event) {
       return optionalString("worktree") && (event.thinking === void 0 || PEER_THINKING_LEVELS.includes(event.thinking)) && optionalString("thinkingReason");
     case "retro_written":
       return string("model") && duration() && optionalString("error") && optionalString("proposalsPath") && (event.proposalCount === void 0 || Number.isSafeInteger(event.proposalCount) && event.proposalCount >= 0) && (event.outcome === "written" ? string("proposalsPath") && event.proposalCount !== void 0 : event.outcome === "failed" && string("error"));
+    case "release_published":
+      return nonempty(event.version) && nonempty(event.tag) && nonempty(event.commit) && nonempty(event.branch) && (event.url === null || string("url")) && typeof event.mode === "string" && ["off", "on-request", "auto"].includes(event.mode) && Array.isArray(event.skipped) && event.skipped.every((item) => typeof item === "string");
+    case "release_failed":
+      return nonempty(event.version) && nonempty(event.step) && nonempty(event.code) && string("detail");
     default:
       return true;
   }
@@ -589,6 +601,10 @@ function isProtectedStatePath(resolvedCandidate, resolvedState, allowedWorktree)
     resolvedCandidate === `${resolvedState}/correlations.json` ||
     resolvedCandidate === `${resolvedState}/lanes.json`
   ) {
+    return true;
+  }
+  const spoolPrefix = `${resolvedState}/spool`;
+  if (resolvedCandidate === spoolPrefix || resolvedCandidate.startsWith(`${spoolPrefix}/`)) {
     return true;
   }
   const projectsPrefix = `${resolvedState}/projects`;
@@ -1193,6 +1209,75 @@ function isForbiddenLeadGit(command) {
     /\bgit\s+push\s+.*(?:--force|-f|--delete|-d)\b/.test(command);
 }
 
+const RELEASE_FENCE_GIT_VALUE_FLAGS = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env"]);
+const RELEASE_FENCE_GH_VALUE_FLAGS = new Set(["-R", "--repo", "--hostname", "-C"]);
+const RELEASE_FENCE_TAG_MUTATE_LONG = new Set(["--annotate", "--sign", "--delete", "--force", "--message", "--file", "--local-user", "--cleanup", "--edit", "--create-reflog"]);
+const RELEASE_FENCE_TAG_MUTATE_SHORT = new Set(["a", "s", "d", "f", "m", "F", "u", "e"]);
+const RELEASE_FENCE_TAG_QUERY_LONG = new Set(["--list", "--contains", "--no-contains", "--points-at", "--merged", "--no-merged", "--verify", "--help"]);
+const RELEASE_FENCE_TAG_READ_VALUE = new Set(["--sort", "--format", "--color", "--column"]);
+
+function releaseFenceReason(command) {
+  for (const segment of splitShellSegments(command)) {
+    const tokens = shellTokens(segment);
+    const words = tokens.filter((t, idx) => {
+      const prev = idx > 0 ? tokens[idx - 1] : undefined;
+      if (prev !== undefined && (RELEASE_FENCE_GIT_VALUE_FLAGS.has(prev) || RELEASE_FENCE_GH_VALUE_FLAGS.has(prev))) return true;
+      return t !== "export" && !PROCESS_KILL_WRAPPER_PREFIXES.has(t) && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(t);
+    });
+    for (let i = 0; i < words.length; i++) {
+      const word = words[i];
+      if (word === "git" || word.endsWith("/git")) {
+        const argv = words.slice(i + 1);
+        let j = 0;
+        while (j < argv.length && argv[j] !== undefined && argv[j].startsWith("-")) {
+          j += RELEASE_FENCE_GIT_VALUE_FLAGS.has(argv[j]) ? 2 : 1;
+        }
+        const sub = argv[j];
+        if (sub === "push") return "git push is forbidden inside a factory seat (release-fence) — Lead releases via lead_release";
+        if (sub === "tag") {
+          let hasQuery = false;
+          let hasPositional = false;
+          let afterDd = false;
+          for (let k = j + 1; k < argv.length; k++) {
+            const tok = argv[k];
+            if (afterDd) { hasPositional = true; continue; }
+            if (tok === "--") { afterDd = true; continue; }
+            const eq = tok.indexOf("=");
+            const flag = eq === -1 ? tok : tok.slice(0, eq);
+            if (RELEASE_FENCE_TAG_MUTATE_LONG.has(flag)) return "git tag creation or deletion is forbidden inside a factory seat (release-fence) — Lead releases via lead_release";
+            if (tok.length >= 2 && tok[0] === "-" && tok[1] !== "-") {
+              for (const ch of tok.slice(1)) {
+                if (RELEASE_FENCE_TAG_MUTATE_SHORT.has(ch)) return "git tag creation or deletion is forbidden inside a factory seat (release-fence) — Lead releases via lead_release";
+                if (ch === "l" || ch === "v" || ch === "h") hasQuery = true;
+              }
+              continue;
+            }
+            if (RELEASE_FENCE_TAG_QUERY_LONG.has(flag)) { hasQuery = true; continue; }
+            if (RELEASE_FENCE_TAG_READ_VALUE.has(tok)) { k += 1; continue; }
+            if (tok.startsWith("-")) continue;
+            hasPositional = true;
+          }
+          if (!hasQuery && hasPositional) return "git tag creation or deletion is forbidden inside a factory seat (release-fence) — Lead releases via lead_release";
+        }
+      } else if (word === "gh" || word.endsWith("/gh")) {
+        const argv = words.slice(i + 1);
+        const pos = [];
+        for (let k = 0; k < argv.length; k++) {
+          const tok = argv[k];
+          if (tok === "--") { pos.push(...argv.slice(k + 1)); break; }
+          if (RELEASE_FENCE_GH_VALUE_FLAGS.has(tok)) { k += 1; continue; }
+          if (tok.startsWith("-")) continue;
+          pos.push(tok);
+        }
+        if (pos[0] === "release" || (pos[0] === "repo" && (pos[1] === "create" || pos[1] === "edit"))) {
+          return `'gh ${[pos[0], pos[1]].filter(Boolean).join(" ")}' is forbidden inside a factory seat (release-fence)`;
+        }
+      }
+    }
+  }
+  return null;
+}
+
 function extractLeadGitStageTargets(command) {
   const targets = [];
   for (const segment of command.split(/(?:&&|\|\||;|\n)/)) {
@@ -1376,6 +1461,10 @@ process.stdin.on("end", () => {
       if (isProcessKillAgainstFactory(cmd)) {
         deny(PROCESS_KILL_FENCE_MESSAGE);
       }
+      const relFence = releaseFenceReason(cmd);
+      if (relFence) {
+        deny(relFence);
+      }
       if (heredocs.interpreter || heredocs.commandSubstitution) {
         deny("Seat write fence: Supervisor and Lead may only write project memory/docs (AGENTS.md, CONTEXT.md, docs/**, .scratch/**); dispatch implementation work to Lead / Task Agents");
       }
@@ -1452,6 +1541,10 @@ process.stdin.on("end", () => {
       const cmd = heredocs.command;
       if (isProcessKillAgainstFactory(cmd)) {
         deny(PROCESS_KILL_FENCE_MESSAGE);
+      }
+      const relFence = releaseFenceReason(cmd);
+      if (relFence) {
+        deny(relFence);
       }
       if (heredocs.commandSubstitution) deny("Executable command substitution in an expanding heredoc cannot be treated as literal text (seat-write-fence).");
       for (const target of extractShellWriteTargets(cmd)) {

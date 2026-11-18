@@ -4,6 +4,7 @@ import { resolveVaultUserHome } from "./core/vault-materialization.ts";
 import { liveSeatCandidates } from "./seats.ts";
 import { withProjectIngressLock } from "./core/project-ingress-lock.ts";
 import { atomicJson, readOptionalJson } from "./core/json-store.ts";
+import { setReleaseRequest } from "./core/project-settings.ts";
 import { commitSeatMemoryOnRoot } from "./core/workspace.ts";
 /**
  * The Lead mailbox runtime (v0.0.20, ADR 0013 Decisions 3–5): the plugin-side
@@ -1703,6 +1704,13 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
         }
         if (!ensured.ok) return ensured;
         const from = request.from ?? "owner";
+        if (request.release !== undefined && from !== "peer") {
+          setReleaseRequest(deps.stateDir, slug, {
+            ...(request.release.version !== undefined ? { version: request.release.version } : {}),
+            requestedBy: from === "supervisor" ? "supervisor" : "owner",
+            directive: request.message,
+          });
+        }
         // ADR 0053 Decision 2 / spec Decision 6: a Peer challenge
         // (`REOPEN_REQUEST` / `DEPENDENCY_REQUEST` / `BLOCKED` via
         // `agent_escalate_blocker`) is a technical reconciliation turn between
@@ -1752,6 +1760,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
         ...(request.workspace === undefined ? {} : { workspace: request.workspace }),
         from: "supervisor",
         message: request.message,
+        ...(request.release === undefined ? {} : { release: request.release }),
         seat: "supervisor",
       });
       if (!leadReply.ok) return leadReply;

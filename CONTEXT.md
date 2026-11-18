@@ -73,6 +73,14 @@ _Avoid_: result, status, pass/fail
 **Accepted** (`attempt_accepted`, refused while a `Gate` runs) lands a green `Attempt` locally into `<project-root>` (or closes commit-less read-only Tasks without merge; never pushes externally) — `Lead` accepts clean green waves after bounded diff review without test-polish re-contracting. **Task closed** (`task_closed` via `lead_close_task` / `lead_retire_task` / `factory close`) retires an unaccepted superseded/split Task, archiving its `Peer` and removing its `Task worktree` without merging.
 _Avoid_: done, finished, passed, leaving superseded Tasks open, merging incomplete worktrees
 
+**Release**, **Release mode**, **Release branch** & **Release request**:
+**Release** (`lead_release`, run by the plugin server, never the seat shell) publishes an already-landed, Gate-verified `<project-root>` commit as `vX.Y.Z`: annotated tag, fast-forward push to the **Release branch** on `origin`, and a GitHub Release (notes from `CHANGELOG.md` `## [x.y.z]`, else generated). It edits no file and publishes no package (registries/stores belong to the Project's CI and `factory-release-lab`; loading a plugin build into Paseo stays the Owner's); version bump + changelog land first as an ordinary `engineer` wave. **Release mode** is the Owner-only per-Project setting `off` (default) | `on-request` (needs a **Release request** — release intent carried by `supervisor_dispatch_lead`, optionally pinning the version) | `auto` (`Lead` releases once at the end of a directive that landed product changes, choosing semver but never a major bump). **Release branch** defaults to the GitHub default branch. Only `Lead` releases — never `Supervisor` or `Peer`; seat shells cannot push, tag, or `gh release` (`release-fence`).
+_Avoid_: deploy, ship (for the act), Release grant, Lead releasing in `off` / without a request in `on-request`, Owner hand-running tag/push/`gh release` as the normal path
+
+**GitHub publish**:
+Owner-only, one-time panel act that creates the Project's GitHub repository (account/org, name, description, Private by default or Public) and pushes it as `origin`. Visibility is chosen only here and never changed by the Factory afterwards; Public requires typing the repo name and passing a tracked sensitive-file check. No seat can publish.
+_Avoid_: making a repo public/private later from the Factory, seat-driven repo creation
+
 **Watch** & **Watch question**:
 Optional off-by-default record-only post-verdict headless pass on the `watch` lane scoring five **Watch question**s (`destructive-writes`, `test-weakened`, `stuck-loop`, `scope-creep`, `secret-leak`) as `name: probability` in `[0, 1]` into one `watch_written` line without affecting `Verdict`.
 _Avoid_: watcher, monitor, alarm, "Jev", heuristic
@@ -92,7 +100,7 @@ Plugin-answered `agent.permission_asked` hook (`deny-only` in `ledger.jsonl` for
 _Avoid_: permission prompt, sandbox, warden, allowlist, parsing doc heredoc prose as commands
 
 **Seat write fence** & **Git shim**:
-3-layer boundary keeping `Supervisor`, `Lead`, and dispatchers off product code and protected `<stateDir>`: (1) provider tool/mode locks on `agent.create`, (2) `Choke policy` whitelisting only `AGENTS.md`, `CLAUDE.md`, `CONTEXT.md`, `GLOSSARY.md`, `.gitignore`, `.worktreeinclude`, `docs/**`, `.scratch/**`, and (3) `<stateDir>/bin` **Git shim** + package/process shims blocking destructive git globally, `supervisor-git-fence`, `lead-git-fence`, and un-scoped Peer `memory-write-fenced` commits (allowing worktree restores, worktree test-process cleanup, and read-only `npx` MCPs).
+3-layer boundary keeping `Supervisor`, `Lead`, and dispatchers off product code and protected `<stateDir>` (`spool/**`, correlation/registration state): (1) provider tool/mode locks on `agent.create`, (2) `Choke policy` whitelisting only `AGENTS.md`, `CLAUDE.md`, `CONTEXT.md`, `GLOSSARY.md`, `.gitignore`, `.worktreeinclude`, `docs/**`, `.scratch/**`, plus `release-fence` blocking shell `git tag`, `git push`, `gh release`, and `gh repo create|edit` across all seats, and (3) `<stateDir>/bin` **Git shim** + package/process shims blocking destructive git globally, `release-fence`, `supervisor-git-fence`, `lead-git-fence`, and un-scoped Peer `memory-write-fenced` commits (allowing worktree restores, worktree test-process cleanup, and read-only `npx` MCPs).
 _Avoid_: prompt-only rule, advisory boundary, git wrapper, git hook
 
 ### Records

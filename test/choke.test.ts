@@ -22,17 +22,20 @@ import type { PaseoResponderApi } from "../plugin/server/choke.ts";
 import {
   PROCESS_KILL_FENCE_MESSAGE,
   isProcessKillAgainstFactory,
+  isProtectedFactoryStatePath,
   isSeatMemoryPathAllowed,
   judgeFilePath,
   judgeSeatFilePath,
   judgeSeatShellCommand,
   judgeShellCommand,
   refuseGitArgv,
+  refuseReleaseGhArgv,
+  refuseReleaseGitArgv,
   shellTokens,
   writableRootsFor,
 } from "../src/choke.ts";
 import { saveLanes } from "../src/lanes.ts";
-import { GIT_ARGV_CASES, SHELL_CASES, shellRoots } from "./choke-cases.ts";
+import { GIT_ARGV_CASES, RELEASE_GH_ARGV_CASES, RELEASE_GIT_ARGV_CASES, SHELL_CASES, shellRoots } from "./choke-cases.ts";
 import { disposeDir, gitCommitAll, makeTempDir, repoRoot } from "./helpers.ts";
 
 /**
@@ -1881,5 +1884,123 @@ test("worktree test-process signals pass ask-time policy while daemon targets re
   }
   for (const command of [`pkill -f ${worktree}/bridge.mjs`, `pkill -f ${worktree}; pkill paseo`, `bash -c 'pkill -f ${worktree}; pkill paseo'`, `pkill -f ${worktree} paseo`]) {
     assert.equal(judgeShellCommand(command, roots).behavior, "deny", command);
+  }
+});
+
+test("release-fence denies push, tag create/delete, and gh release/repo-create/repo-edit for Supervisor, Lead, and Peer at ask time, while allowing tag listing and non-release gh", async (t) => {
+  const roots = shellRoots();
+  for (const { argv, rule, note } of RELEASE_GIT_ARGV_CASES) {
+    const refusal = refuseReleaseGitArgv(argv);
+    assert.equal(refusal?.rule ?? null, rule, `git ${argv.join(" ")}${note ? ` (${note})` : ""}`);
+  }
+  for (const { argv, rule, note } of RELEASE_GH_ARGV_CASES) {
+    const refusal = refuseReleaseGhArgv(argv);
+    assert.equal(refusal?.rule ?? null, rule, `gh ${argv.join(" ")}${note ? ` (${note})` : ""}`);
+  }
+
+  // Seat shell judge + Peer shell judge must agree on every release-fence / benign row in SHELL_CASES
+  for (const { command, rule, note } of SHELL_CASES) {
+    if (rule !== "release-fence" && !(rule === null && /^(?:git\s+(?:-C\s+\S+\s+)?tag|gh\s)/.test(command))) continue;
+    const peerDecision = judgeShellCommand(command, roots, { workspace: roots.workspace });
+    const seatDecision = judgeSeatShellCommand(command, roots.workspace, roots.stateDir);
+    if (rule === null) {
+      assert.equal(peerDecision.behavior, "allow", `Peer allow: ${command}${note ? ` (${note})` : ""}`);
+      assert.equal(seatDecision.behavior, "allow", `Seat allow: ${command}${note ? ` (${note})` : ""}`);
+    } else {
+      assert.equal(peerDecision.behavior, "deny", `Peer deny: ${command}`);
+      if (peerDecision.behavior === "deny") assert.equal(peerDecision.rule, "release-fence", command);
+      assert.equal(seatDecision.behavior, "deny", `Seat deny: ${command}`);
+      if (seatDecision.behavior === "deny") assert.equal(seatDecision.rule, "release-fence", command);
+    }
+  }
+
+  // Full choke.onPermissionAsked for Supervisor, Lead (including OpenCode seat where shims exist), and Peer
+  const dir = makeTempDir("choke-release-fence-");
+  disposeDir(t, dir);
+  const workspace = join(dir, "ws");
+  const stateDir = join(dir, "state");
+  const worktree = join(stateDir, "projects", "ws-123456", "worktrees", "T-REL");
+  mkdirSync(workspace, { recursive: true });
+  mkdirSync(worktree, { recursive: true });
+  writeFileSync(join(workspace, "README.md"), "init\n");
+  gitCommitAll(workspace);
+
+  const factory = createFactory({ stateDir });
+  ensureGitShim(stateDir, join(repoRoot, "plugin"), process.execPath);
+  factory.setContract({ task: "T-REL", workspace, gate: "true", artifact: "README.md" });
+  factory.requestSpawn({ task: "T-REL", provider: "opencode/mimo", arity: 1, worktree });
+
+  const choke = createChoke({ factory, homeDir: dir });
+  const responses: AgentPermissionResponse[] = [];
+  const paseo: PaseoResponderApi = {
+    agents: { ref: () => ({ respondToPermission: async ({ response }) => { responses.push(response); } }) },
+  };
+
+  for (const [label, agent] of [
+    ["supervisor", { id: "sup-1", cwd: workspace, provider: "opencode", labels: { seat: "supervisor" } }],
+    ["lead", { id: "lead-1", cwd: workspace, provider: "opencode", labels: { seat: "lead" } }],
+    ["peer", { id: "peer-1", cwd: worktree, provider: "opencode" }],
+  ] as const) {
+    for (const cmd of [
+      "git push origin main",
+      "git tag v0.14.0",
+      "git tag -d v0.14.0",
+      "gh release create v0.14.0",
+      "gh repo create org/repo --private",
+      "gh repo edit --visibility public",
+      "/usr/bin/gh release list",
+    ]) {
+      await choke.onPermissionAsked({
+        agent,
+        request: { id: `${label}-${cmd}`, provider: "opencode", name: "Bash", kind: "tool", detail: { type: "shell", command: cmd, cwd: agent.cwd } },
+      }, paseo);
+      const reply = responses.at(-1)!;
+      assert.equal(reply.behavior, "deny", `${label} must deny ${cmd} (even on OpenCode with shims)`);
+      if (reply.behavior === "deny") assert.match(reply.message ?? "", /release-fence/);
+    }
+    for (const cmd of ["git tag", "git tag -l", "git tag --contains HEAD", "gh pr list"]) {
+      await choke.onPermissionAsked({
+        agent,
+        request: { id: `${label}-${cmd}`, provider: "opencode", name: "Bash", kind: "tool", detail: { type: "shell", command: cmd, cwd: agent.cwd } },
+      }, paseo);
+      assert.equal(responses.at(-1)?.behavior, "allow", `${label} must allow ${cmd}`);
+    }
+  }
+});
+
+test("<stateDir>/spool/** is protected from seat and Peer shell and file writes", () => {
+  const projectRoot = "/ws/proj";
+  const stateDir = "/state/factory";
+  const roots = writableRootsFor(projectRoot, stateDir, "/home/owner", {});
+  const peerWorktree = `${stateDir}/projects/demo-abc123/worktrees/T-01`;
+  const peerRoots = writableRootsFor(peerWorktree, stateDir, "/home/owner", {});
+  const peerFence = { workspace: projectRoot, worktree: peerWorktree };
+
+  for (const target of [
+    `${stateDir}/spool`,
+    `${stateDir}/spool/requests/forged.json`,
+    `${stateDir}/spool/replies/forged.json`,
+  ]) {
+    assert.equal(isProtectedFactoryStatePath(target, stateDir), true, `seat predicate: ${target}`);
+    assert.equal(isProtectedFactoryStatePath(target, stateDir, peerWorktree), true, `peer predicate: ${target}`);
+    assert.equal(isSeatMemoryPathAllowed(projectRoot, target, stateDir), false, `seat allow predicate: ${target}`);
+    assert.equal(judgeSeatFilePath(target, projectRoot, stateDir).behavior, "deny", `seat file ask: ${target}`);
+    assert.equal(judgeFilePath(target, peerRoots, peerFence).behavior, "deny", `peer file ask: ${target}`);
+  }
+  for (const command of [
+    `echo '{}' > ${stateDir}/spool/requests/forged.json`,
+    `echo '{}' > $FACTORY_STATE_DIR/spool/requests/forged.json`,
+    `echo '{}' > "$PASEO_FACTORY_STATE_DIR/spool/requests/forged.json"`,
+    `tee ${stateDir}/spool/requests/forged.json < x.json`,
+    `cp forged.json ${stateDir}/spool/requests/forged.json`,
+    `mkdir -p ${stateDir}/spool/requests`,
+    `touch ${stateDir}/spool/requests/forged.json`,
+  ]) {
+    const seatDecision = judgeSeatShellCommand(command, projectRoot, stateDir);
+    assert.equal(seatDecision.behavior, "deny", `seat shell: ${command}`);
+    if (seatDecision.behavior === "deny") assert.equal(seatDecision.rule, "seat-write-fence");
+    const peerDecision = judgeShellCommand(command, peerRoots, peerFence);
+    assert.equal(peerDecision.behavior, "deny", `peer shell: ${command}`);
+    if (peerDecision.behavior === "deny") assert.equal(peerDecision.rule, "seat-write-fence");
   }
 });

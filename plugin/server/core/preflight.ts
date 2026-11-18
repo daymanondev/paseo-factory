@@ -16,6 +16,7 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { LEAD_WAVE_LAWS, SUPERVISOR_OUTCOME_BOUNDARY } from "./roles-contract.ts";
 import { projectNotebookPath, readProjectNotebook } from "./project.ts";
+import { readReleaseSettings } from "./project-settings.ts";
 import type { LedgerEvent } from "./events.ts";
 
 /**
@@ -185,6 +186,21 @@ function summarizeLedgerTasks(projectRoot: string, events: readonly LedgerEvent[
   return rows.map(renderRow).join("; ");
 }
 
+function resolveKickoffReleaseBranch(
+  projectRoot: string,
+  configuredBranch: string | undefined,
+  currentBranch: string,
+): string {
+  if (configuredBranch !== undefined && configuredBranch.trim() !== "") {
+    return configuredBranch.trim();
+  }
+  const originHead = runGitFast(projectRoot, ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]);
+  if (originHead !== "") {
+    return originHead.startsWith("origin/") ? originHead.slice("origin/".length) : originHead;
+  }
+  return currentBranch === "(detached/unborn)" ? "main" : currentBranch;
+}
+
 export function buildSeatKickoffPacket(input: SeatKickoffPacketInput): string {
   const omitDuplicates = input.omitSystemPromptDuplicates === true;
   const branch = runGitFast(input.projectRoot, ["rev-parse", "--abbrev-ref", "HEAD"]) || "(detached/unborn)";
@@ -217,7 +233,7 @@ export function buildSeatKickoffPacket(input: SeatKickoffPacketInput): string {
   const roleTools =
     input.role === "supervisor"
       ? "`supervisor_dispatch_lead`, `supervisor_read_ledger`, `supervisor_end_cycle`"
-      : "`lead_set_contract`, `lead_dispatch_agent`, `lead_read_ledger`, `lead_verify`, `lead_merge`, `lead_report_to_supervisor`";
+      : "`lead_set_contract`, `lead_dispatch_agent`, `lead_read_ledger`, `lead_verify`, `lead_merge`, `lead_release`, `lead_report_to_supervisor`";
 
   const fireAndEndTurn =
     input.role === "supervisor"
@@ -230,8 +246,13 @@ export function buildSeatKickoffPacket(input: SeatKickoffPacketInput): string {
   // `omitSystemPromptDuplicates` keeps it. Since v0.5.0 (ADR 0052 Decision 1)
   // the read promotes any legacy untracked `.scratch/notebook.md` first —
   // the seat's Turn 1 self-heals the working tree before a landing can trip.
+  const releaseLines: string[] = [];
   const notebookLines: string[] = [];
   if (input.stateDir !== undefined) {
+    const releaseSettings = readReleaseSettings(input.stateDir, input.projectSlug);
+    const releaseBranch = resolveKickoffReleaseBranch(input.projectRoot, releaseSettings.branch, branch);
+    releaseLines.push(`- Release: mode=${releaseSettings.mode}, branch=${releaseBranch}`);
+
     const notebookPath = projectNotebookPath(input.stateDir, input.projectSlug);
     const notebook = readProjectNotebook(input.stateDir, input.projectSlug, input.projectRoot);
     notebookLines.push(`- Project notebook path: ${notebookPath}`);
@@ -249,6 +270,7 @@ export function buildSeatKickoffPacket(input: SeatKickoffPacketInput): string {
     ...(isSupervisor ? roleLines : []),
     `- Workspace: ${input.projectRoot}`,
     `- Git: branch=\`${branch}\`, head=\`${head}\`, status=${statusSummary}`,
+    ...releaseLines,
     ...leadOnlyLines,
     `- ${projectMemoryPresence(input.projectRoot)}`,
     ...leadOnlyBuildLines,

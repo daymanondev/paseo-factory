@@ -12,7 +12,7 @@ import { OpenDesignProjectLinkSchema } from "./view.ts";
  */
 import * as paseoPlugin from "@getpaseo/plugin";
 import { z } from "zod";
-import { HelperMcpViewSchema, ImportMaterializationSchema, ImportStatusSchema, FactoryViewSchema, LaneNameSchema, LaneProfileViewSchema, LanesSchema, LanesUpdateSchema, ProjectDirectoryEntrySchema, ProjectViewSchema, SeatDirectoryEntrySchema, VaultStatusViewSchema } from "./view.ts";
+import { GitHubPublishPreflightViewSchema, HelperMcpViewSchema, ImportMaterializationSchema, ImportStatusSchema, FactoryViewSchema, LaneNameSchema, LaneProfileViewSchema, LanesSchema, LanesUpdateSchema, ProjectDirectoryEntrySchema, ProjectViewSchema, ReleaseModeSchema, ReleaseSettingsViewSchema, SeatDirectoryEntrySchema, VaultStatusViewSchema } from "./view.ts";
 
 const { defineRpc } = paseoPlugin;
 
@@ -654,6 +654,70 @@ export const skillsTogglePack = defineRpc({
 export const skillsPackSave = defineRpc({ name: 'factory.skills.pack.save', input: z.object({ id: z.string().optional(), name: z.string().min(1), description: z.string().optional(), skills: z.array(z.string()) }), output: z.union([z.object({ok: z.literal(true), pack: z.object({ id: z.string(), name: z.string(), description: z.string().optional(), skills: z.array(z.string()), updatedAt: z.string() })}), Failure]) });
 export const skillsPackDelete = defineRpc({ name: 'factory.skills.pack.delete', input: z.object({id: z.string()}), output: z.union([z.object({ok: z.literal(true), summary: z.string()}), Failure]) });
 export const skillsPackReset = defineRpc({ name: 'factory.skills.pack.reset', input: z.object({projectRoot: z.string()}), output: z.union([z.object({ok: z.literal(true), summary: z.string()}), Failure]) });
+
+export const releaseSettingsRead = defineRpc({
+  name: "factory.release.settings.read",
+  input: z.object({
+    projectRoot: z.string().optional(),
+    project: z.string().optional(),
+  }),
+  output: z.union([z.object({ ok: z.literal(true), settings: ReleaseSettingsViewSchema }), Failure]),
+});
+
+export const releaseSettingsWrite = defineRpc({
+  name: "factory.release.settings.write",
+  input: z.object({
+    projectRoot: z.string().optional(),
+    project: z.string().optional(),
+    mode: ReleaseModeSchema.optional(),
+    branch: z.string().nullable().optional(),
+  }),
+  output: z.union([
+    z.object({
+      ok: z.literal(true),
+      droppedPendingRequest: z.boolean(),
+      settings: ReleaseSettingsViewSchema,
+    }),
+    Failure,
+  ]),
+});
+
+export const githubPublishPreflight = defineRpc({
+  name: "factory.github.publish.preflight",
+  input: z.object({
+    projectRoot: z.string().optional(),
+    project: z.string().optional(),
+  }),
+  output: z.union([
+    z.object({ ok: z.literal(true) }).merge(GitHubPublishPreflightViewSchema),
+    Failure,
+  ]),
+});
+
+export const githubPublish = defineRpc({
+  name: "factory.github.publish",
+  input: z.object({
+    projectRoot: z.string().optional(),
+    project: z.string().optional(),
+    owner: z.string().min(1),
+    name: z.string().min(1),
+    description: z.string().optional(),
+    visibility: z.enum(["private", "public"]),
+    confirmPublicName: z.string().optional(),
+    allowSensitiveFiles: z.boolean().optional(),
+  }),
+  output: z.union([
+    z.object({
+      ok: z.literal(true),
+      slug: z.string(),
+      remoteUrl: z.string(),
+      visibility: z.enum(["private", "public"]),
+      url: z.string().nullable(),
+      settings: ReleaseSettingsViewSchema,
+    }),
+    Failure,
+  ]),
+});
 
 const defineSubscriptionFn =
   typeof (paseoPlugin as { defineSubscription?: unknown }).defineSubscription === "function"

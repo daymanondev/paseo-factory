@@ -11,6 +11,9 @@ import { resolveProject } from "../plugin/server/core/project.ts";
 import { taskWorktreePath } from "../plugin/server/core/workspace.ts";
 import { projectStateDir } from "../src/index.ts";
 import { saveLanes } from "../src/lanes.ts";
+import { setProjectReleaseSettings, setReleaseRequest } from "../src/project-settings.ts";
+import { builtinVaultRunner } from "../src/vault-transport.ts";
+import type { VaultRunner, VaultRunnerCall } from "../src/vault-transport.ts";
 import { readProjectRegistration, writeProjectRegistration } from "../plugin/server/projects.ts";
 import { createSurfaceHandlers } from "../plugin/server/surface-rpc.ts";
 import type { SurfaceAgentSnapshot, SurfaceDaemonApi } from "../plugin/server/surface-rpc.ts";
@@ -2427,4 +2430,191 @@ test("factory.supervisor.adopt refuses an agent outside the Project workspace an
   assert.equal(asLead.code, "agent-bound-elsewhere");
   assert.equal(readProjectRegistration(stateDir, slug)?.supervisor ?? null, null, "a refused adopt binds nothing");
   assert.equal(fake.sent.length, 0);
+});
+
+test("spool kind release enforces preconditions, seat-memory vs product commits, auto mode, tag-conflict, push failures, and generated notes", async (t) => {
+  const dir = makeTempDir("spool-release-");
+  disposeDir(t, dir);
+  const stateDir = join(dir, "state");
+  const repo = join(dir, "repo");
+  const bareOrigin = join(dir, "origin.git");
+  mkdirSync(repo, { recursive: true });
+  writeFileSync(join(repo, "src.ts"), "export const v = 1;\n");
+  gitCommitAll(repo, "init");
+
+  const ghCalls: VaultRunnerCall[] = [];
+  let ghMode: "ok" | "missing" | "unauthed" = "ok";
+  const runner: VaultRunner = async (call) => {
+    if (call.command === "gh") {
+      ghCalls.push(call);
+      if (ghMode === "missing") throw Object.assign(new Error("spawn gh ENOENT"), { code: "ENOENT" });
+      if (ghMode === "unauthed") throw new Error("You are not logged into any GitHub hosts.");
+      if (call.args[0] === "auth" && call.args[1] === "status") {
+        return Buffer.from(JSON.stringify({ hosts: { "github.com": [{ active: true, login: "owner", state: "success" }] } }));
+      }
+      if (call.args[0] === "repo" && call.args[1] === "view") {
+        return Buffer.from(JSON.stringify({ nameWithOwner: "owner/demo", isPrivate: true, defaultBranchRef: { name: "main" } }));
+      }
+      if (call.args[0] === "release" && call.args[1] === "view") {
+        throw new Error("release not found");
+      }
+      if (call.args[0] === "release" && call.args[1] === "create") {
+        return Buffer.from(`https://github.com/owner/demo/releases/tag/${call.args[2]}\n`);
+      }
+    }
+    return builtinVaultRunner(call);
+  };
+
+  const factory = createFactory({ stateDir });
+  const proj = resolveProject(repo);
+  assert.ok(proj.ok);
+  if (!proj.ok) return;
+  writeProjectRegistration(stateDir, proj.slug, { root: proj.root });
+  setProjectReleaseSettings(stateDir, proj.slug, { mode: "auto", branch: "main" });
+
+  const callRelease = (version: string, seat: "lead" | "supervisor" | "agent" = "lead") =>
+    handleSpoolRequest(factory, {
+      id: `rel-${Math.random().toString(36).slice(2)}`,
+      kind: "release",
+      version,
+      workspace: repo,
+      projectSlug: proj.slug,
+      seat,
+    }, { vaultRunner: runner });
+
+  const failCode = async (version: string, seat: "lead" | "supervisor" | "agent" = "lead") => {
+    const reply = await callRelease(version, seat);
+    assert.equal(reply.ok, false, `expected failure for ${version} (${seat})`);
+    return reply.ok ? "" : reply.code;
+  };
+
+  // 1. Supervisor and Agent seats are refused on spool kind release
+  assert.equal(await failCode("0.1.0", "supervisor"), "supervisor-cannot-release");
+  assert.equal(await failCode("0.1.0", "agent"), "agent-cannot-orchestrate");
+
+  // 2. no-origin
+  assert.equal(await failCode("0.1.0"), "no-origin");
+
+  // Add real bare origin
+  execFileSync("git", ["init", "--bare", bareOrigin], { stdio: "pipe" });
+  execFileSync("git", ["remote", "add", "origin", bareOrigin], { cwd: repo, stdio: "pipe" });
+  const initBranch = execFileSync("git", ["symbolic-ref", "--short", "HEAD"], { cwd: repo, encoding: "utf8" }).trim();
+  if (initBranch !== "main") {
+    execFileSync("git", ["branch", "-M", "main"], { cwd: repo, stdio: "pipe" });
+  }
+  execFileSync("git", ["push", "origin", "HEAD:refs/heads/main"], { cwd: repo, stdio: "pipe" });
+
+  // 3. root-dirty
+  writeFileSync(join(repo, "dirty.txt"), "x\n");
+  assert.equal(await failCode("0.1.0"), "root-dirty");
+  execFileSync("rm", ["-f", join(repo, "dirty.txt")]);
+
+  // 4. root-detached
+  const headSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim();
+  execFileSync("git", ["checkout", "--detach", "HEAD"], { cwd: repo, stdio: "pipe" });
+  assert.equal(await failCode("0.1.0"), "root-detached");
+  execFileSync("git", ["checkout", "main"], { cwd: repo, stdio: "pipe" });
+
+  // 5. gate-running
+  factory.setContract({ task: "T-GATE", workspace: repo, gate: "true", artifact: "src.ts" });
+  factory.ledger.append({ event: "claim_reported", task: "T-GATE", attempt: 1, sha: headSha });
+  factory.ledger.append({ event: "gate_started", task: "T-GATE", attempt: 1, cmd: "true" });
+  assert.equal(await failCode("0.1.0"), "gate-running");
+  factory.ledger.append({ event: "gate_finished", task: "T-GATE", attempt: 1, exit: 0, verdict: "green", note: "ok", sha: headSha });
+  factory.ledger.append({ event: "report_written", task: "T-GATE", attempt: 1, path: "report-T-GATE-1.md" });
+
+  // 6. head-not-accepted before acceptance, and after a post-landing product commit
+  assert.equal(await failCode("0.1.0"), "head-not-accepted");
+  await factory.accept({ task: "T-GATE", attempt: 1, accepted_by: "lead" });
+
+  // Seat-memory-only commit after last landing IS allowed; product commit is refused head-not-accepted
+  writeFileSync(join(repo, "CONTEXT.md"), "# Context\n");
+  execFileSync("git", ["add", "CONTEXT.md"], { cwd: repo });
+  execFileSync("git", ["commit", "-m", "docs: update context"], { cwd: repo });
+
+  // 7. changelog-missing-section when CHANGELOG.md lacks ## [0.1.0]
+  writeFileSync(join(repo, "CHANGELOG.md"), "# Changelog\n\n## [Unreleased]\n- Pending\n");
+  execFileSync("git", ["add", "CHANGELOG.md"], { cwd: repo });
+  execFileSync("git", ["commit", "-m", "chore: changelog"], { cwd: repo });
+  // CHANGELOG.md is not a seat-memory path, so an unaccepted CHANGELOG commit fails head-not-accepted first
+  assert.equal(await failCode("0.1.0"), "head-not-accepted");
+
+  // Land CHANGELOG.md properly via a wave, then test changelog-missing-section
+  const clSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim();
+  factory.setContract({ task: "T-CL", workspace: repo, gate: "true", artifact: "CHANGELOG.md" });
+  factory.ledger.append({ event: "claim_reported", task: "T-CL", attempt: 1, sha: clSha });
+  factory.ledger.append({ event: "gate_started", task: "T-CL", attempt: 1, cmd: "true" });
+  factory.ledger.append({ event: "gate_finished", task: "T-CL", attempt: 1, exit: 0, verdict: "green", note: "ok", sha: clSha });
+  factory.ledger.append({ event: "report_written", task: "T-CL", attempt: 1, path: "report-T-CL-1.md" });
+  await factory.accept({ task: "T-CL", attempt: 1, accepted_by: "lead" });
+  assert.equal(await failCode("0.1.0"), "changelog-missing-section");
+
+  // Remove CHANGELOG.md via accepted wave to test --generate-notes when no CHANGELOG.md exists
+  execFileSync("git", ["rm", "CHANGELOG.md"], { cwd: repo, stdio: "pipe" });
+  execFileSync("git", ["commit", "-m", "chore: remove changelog"], { cwd: repo });
+  const noClSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim();
+  factory.setContract({ task: "T-NOCL", workspace: repo, gate: "true", artifact: "src.ts" });
+  factory.ledger.append({ event: "claim_reported", task: "T-NOCL", attempt: 1, sha: noClSha });
+  factory.ledger.append({ event: "gate_started", task: "T-NOCL", attempt: 1, cmd: "true" });
+  factory.ledger.append({ event: "gate_finished", task: "T-NOCL", attempt: 1, exit: 0, verdict: "green", note: "ok", sha: noClSha });
+  factory.ledger.append({ event: "report_written", task: "T-NOCL", attempt: 1, path: "report-T-NOCL-1.md" });
+  await factory.accept({ task: "T-NOCL", attempt: 1, accepted_by: "lead" });
+
+  // Seat-memory commit after T-NOCL stays allowed
+  mkdirSync(join(repo, "docs"), { recursive: true });
+  writeFileSync(join(repo, "docs/note.md"), "note\n");
+  execFileSync("git", ["add", "docs/note.md"], { cwd: repo });
+  execFileSync("git", ["commit", "-m", "docs: add note"], { cwd: repo });
+
+  const genOk = await callRelease("0.1.0");
+  assert.equal(genOk.ok, true, JSON.stringify(genOk));
+  const lastCreate = ghCalls.findLast((c) => c.args[0] === "release" && c.args[1] === "create");
+  assert.ok(lastCreate?.args.includes("--generate-notes"));
+
+  // 8. auto mode nothing-to-release when only seat-memory changed since v0.1.0
+  writeFileSync(join(repo, "docs/note2.md"), "note2\n");
+  execFileSync("git", ["add", "docs/note2.md"], { cwd: repo });
+  execFileSync("git", ["commit", "-m", "docs: note2"], { cwd: repo });
+  assert.equal(await failCode("0.1.1"), "nothing-to-release");
+
+  // 9. tag-conflict when v0.1.0 already exists on another commit (here HEAD moved ahead of v0.1.0)
+  assert.equal(await failCode("0.1.0"), "tag-conflict");
+  assert.ok(factory.ledger.events.some((e) => e.event === "release_failed" && e.step === "tag" && e.code === "tag-conflict"));
+
+  // 10. gh-unauthenticated & gh-unavailable on a fresh product release
+  writeFileSync(join(repo, "src.ts"), "export const v = 2;\n");
+  execFileSync("git", ["add", "src.ts"], { cwd: repo });
+  execFileSync("git", ["commit", "-m", "feat: v2"], { cwd: repo });
+  const v2Sha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim();
+  factory.setContract({ task: "T-V2", workspace: repo, gate: "true", artifact: "src.ts" });
+  factory.ledger.append({ event: "claim_reported", task: "T-V2", attempt: 1, sha: v2Sha });
+  factory.ledger.append({ event: "gate_started", task: "T-V2", attempt: 1, cmd: "true" });
+  factory.ledger.append({ event: "gate_finished", task: "T-V2", attempt: 1, exit: 0, verdict: "green", note: "ok", sha: v2Sha });
+  factory.ledger.append({ event: "report_written", task: "T-V2", attempt: 1, path: "report-T-V2-1.md" });
+  await factory.accept({ task: "T-V2", attempt: 1, accepted_by: "lead" });
+
+  ghMode = "unauthed";
+  assert.equal(await failCode("0.2.0"), "gh-unauthenticated");
+  ghMode = "missing";
+  assert.equal(await failCode("0.2.0"), "gh-unavailable");
+
+  // 11. release-not-fast-forward when bareOrigin's main has an unpulled commit
+  const otherClone = join(dir, "other");
+  execFileSync("git", ["clone", "-b", "main", bareOrigin, otherClone], { stdio: "pipe" });
+  execFileSync("git", ["config", "user.name", "Other"], { cwd: otherClone });
+  execFileSync("git", ["config", "user.email", "other@example.com"], { cwd: otherClone });
+  writeFileSync(join(otherClone, "other.txt"), "ahead\n");
+  execFileSync("git", ["add", "other.txt"], { cwd: otherClone });
+  execFileSync("git", ["commit", "-m", "ahead"], { cwd: otherClone });
+  execFileSync("git", ["push", "origin", "HEAD:refs/heads/main"], { cwd: otherClone, stdio: "pipe" });
+
+  ghMode = "ok";
+  assert.equal(await failCode("0.2.0"), "release-not-fast-forward");
+
+  // 12. push-rejected when push fails for non-ff-unrelated reason (pre-receive hook)
+  const hookPath = join(bareOrigin, "hooks", "pre-receive");
+  writeFileSync(hookPath, "#!/bin/sh\necho 'branch protected' >&2\nexit 1\n", { mode: 0o755 });
+  // Reset origin main back to noClSha (strictly behind v2Sha) so push-branch runs and the hook rejects
+  execFileSync("git", ["update-ref", "refs/heads/main", noClSha], { cwd: bareOrigin });
+  assert.equal(await failCode("0.2.0"), "push-rejected");
 });

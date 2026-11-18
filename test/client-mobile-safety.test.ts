@@ -803,7 +803,7 @@ test('W14: iOS and Android expose exactly the Project model, handoff and adoptio
           await click('factory-panel-open-lead');
           assert.ok(calls.some(c => c.method === 'factory.self.update.status'), `${platform} checks the version on mount`);
           assert.equal(calls.some(c => c.method === 'factory.self.update.apply'), false, `${platform} never applies an update`);
-          assert.deepEqual(calls.filter(c => c.method !== 'factory.snapshot' && c.method !== 'factory.handoff.handover' && c.method !== 'factory.self.update.status'), [
+          assert.deepEqual(calls.filter(c => c.method !== 'factory.snapshot' && c.method !== 'factory.handoff.handover' && c.method !== 'factory.self.update.status' && c.method !== 'factory.release.settings.read'), [
             { method: 'factory.lanes.set', input: { projectRoot: '/project', lane: 'supervisor', value: 'codex/gpt-live:high' } },
             { method: 'factory.handoff.start', input: { projectRoot: '/project', seat: 'lead' } },
             { method: 'factory.handoff.start', input: { projectRoot: '/project', seat: 'peer:task-1', lane: 'codex/gpt-live:high' } },
@@ -1191,6 +1191,7 @@ test('Project Shell scopes dynamic pack and profile writes to the snapshot Proje
   g.__factoryClientRpc = async (method: string, input: any) => {
     if (method === 'factory.snapshot') return { ok: true, view };
     if (method === 'factory.self.update.status') return { ok: true, current: '0.10.3', latest: '0.10.3', updateAvailable: false };
+    if (method === 'factory.release.settings.read') return { ok: false, code: 'stub', error: 'stub' };
     calls.push({ method, input });
     return { ok: true };
   };
@@ -1221,6 +1222,198 @@ test('Project Shell scopes dynamic pack and profile writes to the snapshot Proje
           { method: 'factory.lanes.reset', input: { projectRoot: '/snapshot-project' } },
         ]);
         assert.equal(settings, 1);
+      } finally { await act(() => root.unmount()); }
+    });
+  } finally { g.__factoryClientRpc = prior; }
+});
+
+test("GitHub & Release card dispatches releaseSettingsWrite on mode/branch clicks, shows dropped-request and failure feedback", async () => {
+  const { FactoryShell } = await load("plugin/client/factory/shell.tsx");
+  const { testTheme } = await import("./client-markup.ts");
+  const { createElement } = await import("react");
+  const view = {
+    ...modelPickerFixture,
+    machineLanes: modelPickerFixture.lanes,
+    hasProjectLaneOverride: false,
+    panel: modelPanelFixture(),
+    project: { root: "/snapshot-project", slug: "my-app", missingRoot: false },
+    kpis: { running: 0, needsHuman: 0 },
+    companionTools: [],
+    corePlugin: {},
+    vault: {},
+    skillHub: { skillPacksExplicit: false, projectPacks: [] },
+    daemonError: null,
+  };
+  let releaseState = {
+    project: "my-app",
+    projectRoot: "/snapshot-project",
+    mode: "on-request" as const,
+    branch: null as string | null,
+    resolvedBranch: "main" as string | null,
+    defaultBranch: "main" as string | null,
+    branchCandidates: ["main", "release"],
+    updatedAt: null,
+    pendingRequest: { version: "0.14.0", requestedAt: "2026-11-18T00:00:00Z" } as { version?: string; requestedAt: string } | null,
+    origin: { remoteUrl: "git@github.com:acme/my-app.git", slug: "acme/my-app", visibility: "private" as const, defaultBranch: "main" },
+    gh: { installed: true, authenticated: true, user: "octocat" },
+    lastRelease: null,
+  };
+  let failNextWrite = false;
+  const g = globalThis as Record<string, any>, prior = g.__factoryClientRpc;
+  g.__factoryClientRpc = async (method: string, input: any) => {
+    if (method === "factory.snapshot") return { ok: true, view };
+    if (method === "factory.self.update.status") return { ok: true, current: "0.14.0", latest: "0.14.0", updateAvailable: false };
+    if (method === "factory.release.settings.read") return { ok: true, settings: releaseState };
+    if (method === "factory.release.settings.write") {
+      if (failNextWrite) return { ok: false, code: "seat-cannot-grant", error: "Only the Owner can change Release settings." };
+      const dropped = releaseState.mode === "on-request" && input.mode !== undefined && input.mode !== "on-request" && releaseState.pendingRequest !== null;
+      releaseState = {
+        ...releaseState,
+        mode: input.mode ?? releaseState.mode,
+        branch: input.branch === null ? null : (input.branch ?? releaseState.branch),
+        resolvedBranch: input.branch === null ? releaseState.defaultBranch : (input.branch ?? releaseState.resolvedBranch),
+        pendingRequest: dropped ? null : releaseState.pendingRequest,
+      };
+      return { ok: true, settings: releaseState, droppedPendingRequest: dropped };
+    }
+    return { ok: true };
+  };
+  try {
+    await mountUnderNativeWindow(async (createRoot, container, act) => {
+      const root = createRoot(container);
+      const byId = (id: string) => container.querySelector(`[data-testid="${id}"]`) as HTMLElement;
+      const click = (id: string) => act(() => byId(id).click());
+      try {
+        await act(() => root.render(createElement(FactoryShell, { theme: testTheme, dir: "/snapshot-project", layout: { compact: false, platform: "web" } })));
+        await click("factory-tab-project");
+        assert.ok(byId("factory-panel-github-release"));
+        // 1. Switch away from on-request -> drops pending request and shows feedback
+        await click("factory-panel-release-mode-auto");
+        assert.equal(byId("factory-panel-release-mode-auto").getAttribute("data-selected"), "true");
+        assert.match(byId("factory-panel-release-feedback").textContent!, /pending/i);
+        // 2. Select Release branch -> updates branch; Use default resets branch to null
+        await click("factory-panel-release-branch-option-release");
+        assert.equal(byId("factory-panel-release-branch-option-release").getAttribute("data-selected"), "true");
+        await click("factory-panel-release-branch-reset");
+        assert.equal(byId("factory-panel-release-branch-option-main").getAttribute("data-selected"), "true");
+        assert.equal(releaseState.branch, null);
+        // 3. Failed write keeps displayed value unchanged and surfaces error feedback
+        failNextWrite = true;
+        await click("factory-panel-release-mode-off");
+        assert.equal(byId("factory-panel-release-mode-auto").getAttribute("data-selected"), "true", "failed write leaves shown mode unchanged");
+        assert.match(byId("factory-panel-release-feedback").textContent!, /Only the Owner/);
+      } finally { await act(() => root.unmount()); }
+    });
+  } finally { g.__factoryClientRpc = prior; }
+});
+
+test("FactoryShell GitHub Publish dispatches githubPublish with Public confirm + sensitive override and transitions into Origin view", async () => {
+  const { FactoryShell } = await load("plugin/client/factory/shell.tsx");
+  const { testTheme } = await import("./client-markup.ts");
+  const { createElement } = await import("react");
+  const view = {
+    ...modelPickerFixture,
+    machineLanes: modelPickerFixture.lanes,
+    hasProjectLaneOverride: false,
+    panel: modelPanelFixture(),
+    project: { root: "/tmp/cool-widget", slug: "cool-widget", missingRoot: false },
+    kpis: { running: 0, needsHuman: 0 },
+    companionTools: [],
+    corePlugin: {},
+    vault: {},
+    skillHub: { skillPacksExplicit: false, projectPacks: [] },
+    daemonError: null,
+  };
+  let publishedOrigin: { remoteUrl: string; slug: string; visibility: "public" | "private"; defaultBranch: string } | null = null;
+  const publishedCalls: any[] = [];
+  const makeReleaseState = () => ({
+    project: "cool-widget",
+    projectRoot: "/tmp/cool-widget",
+    mode: "off" as const,
+    branch: null,
+    resolvedBranch: publishedOrigin ? "main" : null,
+    defaultBranch: publishedOrigin ? "main" : null,
+    branchCandidates: ["main"],
+    updatedAt: null,
+    pendingRequest: null,
+    origin: publishedOrigin,
+    gh: { installed: true, authenticated: true, user: "octo" },
+    lastRelease: null,
+  });
+  const g = globalThis as Record<string, any>, prior = g.__factoryClientRpc;
+  g.__factoryClientRpc = async (method: string, input: any) => {
+    if (method === "factory.snapshot") return { ok: true, view };
+    if (method === "factory.self.update.status") return { ok: true, current: "0.14.0", latest: "0.14.0", updateAvailable: false };
+    if (method === "factory.release.settings.read") return { ok: true, settings: makeReleaseState() };
+    if (method === "factory.github.publish.preflight") {
+      return {
+        ok: true,
+        project: "cool-widget",
+        projectRoot: "/tmp/cool-widget",
+        originPresent: false,
+        gh: { installed: true, authenticated: true, user: "octo" },
+        owners: ["octo", "acme-org"],
+        defaultOwner: "octo",
+        defaultName: "cool-widget",
+        sensitiveFiles: [".env"],
+        hasUncommittedChanges: false,
+        commitHistoryNotScannedNote: "Commit history is not scanned for past secrets — only tracked files at HEAD are checked.",
+      };
+    }
+    if (method === "factory.github.publish") {
+      publishedCalls.push(input);
+      publishedOrigin = {
+        remoteUrl: `https://github.com/${input.owner}/${input.name}.git`,
+        slug: `${input.owner}/${input.name}`,
+        visibility: input.visibility,
+        defaultBranch: "main",
+      };
+      return {
+        ok: true,
+        slug: publishedOrigin.slug,
+        remoteUrl: publishedOrigin.remoteUrl,
+        visibility: publishedOrigin.visibility,
+        url: `https://github.com/${publishedOrigin.slug}`,
+        settings: makeReleaseState(),
+      };
+    }
+    return { ok: true };
+  };
+  try {
+    await mountUnderNativeWindow(async (createRoot, container, act) => {
+      const root = createRoot(container);
+      const byId = (id: string) => container.querySelector(`[data-testid="${id}"]`) as HTMLElement;
+      const click = (id: string) => act(() => byId(id).click());
+      const typeInto = (id: string, val: string) => {
+        const input = byId(id) as HTMLInputElement;
+        const setter = Object.getOwnPropertyDescriptor(input.ownerDocument.defaultView!.HTMLInputElement.prototype, "value")!.set!;
+        return act(() => {
+          setter.call(input, val);
+          input.dispatchEvent(new input.ownerDocument.defaultView!.Event("input", { bubbles: true }));
+        });
+      };
+      try {
+        await act(() => root.render(createElement(FactoryShell, { theme: testTheme, dir: "/tmp/cool-widget", layout: { compact: false, platform: "web" } })));
+        await click("factory-tab-project");
+        assert.ok(byId("factory-panel-github-publish"));
+        await click("factory-panel-github-publish-owner-acme-org");
+        await typeInto("factory-panel-github-publish-description", "Demo widget repo");
+        await click("factory-panel-github-publish-visibility-public");
+        await click("factory-panel-github-publish-sensitive-toggle");
+        await typeInto("factory-panel-github-publish-confirm-name", "cool-widget");
+        await click("factory-panel-github-publish-submit");
+        assert.equal(publishedCalls.length, 1);
+        assert.deepEqual(publishedCalls[0], {
+          projectRoot: "/tmp/cool-widget",
+          owner: "acme-org",
+          name: "cool-widget",
+          description: "Demo widget repo",
+          visibility: "public",
+          confirmPublicName: "cool-widget",
+          allowSensitiveFiles: true,
+        });
+        assert.equal(container.querySelector('[data-testid="factory-panel-github-publish"]'), null, "publish form disappears once origin exists");
+        assert.match(byId("factory-panel-github-origin").textContent!, /acme-org\/cool-widget/);
       } finally { await act(() => root.unmount()); }
     });
   } finally { g.__factoryClientRpc = prior; }

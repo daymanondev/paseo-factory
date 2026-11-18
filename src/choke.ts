@@ -100,7 +100,7 @@ const WRAPPER_WORDS = new Set(["env", "command", "nohup", "timeout"]);
 // ---- the git refusal list (a) ----------------------------------------------------------------
 
 /** Global flags that consume the following token as their value (skip it: `-C`-proof). */
-const GIT_GLOBAL_VALUE_FLAGS = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace"]);
+const GIT_GLOBAL_VALUE_FLAGS = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env"]);
 
 /** True for a short-flag cluster like `-f`, `-fd`, `-fdx` (never long `--force…`). */
 function shortCluster(token: string): boolean {
@@ -235,6 +235,136 @@ export function refuseSupervisorGitArgv(argv: readonly string[]): GitRefusal | u
   return undefined;
 }
 
+const RELEASE_FENCE_GIT_PUSH_REASON =
+  "git push is forbidden inside a factory seat (release-fence) — Lead releases via lead_release";
+const RELEASE_FENCE_GIT_TAG_REASON =
+  "git tag creation or deletion is forbidden inside a factory seat (release-fence) — Lead releases via lead_release";
+
+const TAG_MUTATE_LONG_FLAGS = new Set([
+  "--annotate",
+  "--sign",
+  "--delete",
+  "--force",
+  "--message",
+  "--file",
+  "--local-user",
+  "--cleanup",
+  "--edit",
+  "--create-reflog",
+]);
+const TAG_MUTATE_SHORT_LETTERS = new Set(["a", "s", "d", "f", "m", "F", "u", "e"]);
+const TAG_QUERY_LONG_FLAGS = new Set([
+  "--list",
+  "--contains",
+  "--no-contains",
+  "--points-at",
+  "--merged",
+  "--no-merged",
+  "--verify",
+  "--help",
+]);
+const TAG_READ_VALUE_FLAGS = new Set(["--sort", "--format", "--color", "--column"]);
+
+/**
+ * `release-fence` over git argv tokens following the `git` word (v0.14.0, ADR 0061 §5):
+ * refuses any `git push` and any `git tag` that creates or deletes a tag while keeping
+ * bare `git tag`, `-l`/`--list`, `--contains`, `--points-at`, `--merged`, and `-v`/`--verify` allowed.
+ */
+export function refuseReleaseGitArgv(argv: readonly string[]): GitRefusal | undefined {
+  let i = 0;
+  while (i < argv.length && argv[i] !== undefined && argv[i]!.startsWith("-")) {
+    i += GIT_GLOBAL_VALUE_FLAGS.has(argv[i]!) ? 2 : 1;
+  }
+  const sub = argv[i];
+  if (sub === undefined) return undefined;
+  const args = argv.slice(i + 1);
+
+  if (sub === "push") {
+    return { rule: "release-fence", reason: RELEASE_FENCE_GIT_PUSH_REASON };
+  }
+  if (sub !== "tag") return undefined;
+
+  let hasQueryMode = false;
+  let hasPositional = false;
+  let afterDoubleDash = false;
+  for (let j = 0; j < args.length; j++) {
+    const token = args[j]!;
+    if (afterDoubleDash) {
+      hasPositional = true;
+      continue;
+    }
+    if (token === "--") {
+      afterDoubleDash = true;
+      continue;
+    }
+    const eq = token.indexOf("=");
+    const flagName = eq === -1 ? token : token.slice(0, eq);
+    if (TAG_MUTATE_LONG_FLAGS.has(flagName)) {
+      return { rule: "release-fence", reason: RELEASE_FENCE_GIT_TAG_REASON };
+    }
+    if (shortCluster(token)) {
+      const letters = token.slice(1);
+      for (const ch of letters) {
+        if (TAG_MUTATE_SHORT_LETTERS.has(ch)) {
+          return { rule: "release-fence", reason: RELEASE_FENCE_GIT_TAG_REASON };
+        }
+        if (ch === "l" || ch === "v" || ch === "h") {
+          hasQueryMode = true;
+        }
+      }
+      continue;
+    }
+    if (TAG_QUERY_LONG_FLAGS.has(flagName)) {
+      hasQueryMode = true;
+      continue;
+    }
+    if (TAG_READ_VALUE_FLAGS.has(token)) {
+      j += 1;
+      continue;
+    }
+    if (token.startsWith("-")) {
+      continue;
+    }
+    hasPositional = true;
+  }
+  if (!hasQueryMode && hasPositional) {
+    return { rule: "release-fence", reason: RELEASE_FENCE_GIT_TAG_REASON };
+  }
+  return undefined;
+}
+
+const GH_GLOBAL_VALUE_FLAGS = new Set(["-R", "--repo", "--hostname", "-C"]);
+
+/**
+ * `release-fence` over `gh` argv tokens following the `gh` word (v0.14.0, ADR 0061 §5):
+ * refuses `gh release`, `gh repo create`, and `gh repo edit`.
+ */
+export function refuseReleaseGhArgv(argv: readonly string[]): GitRefusal | undefined {
+  const positional: string[] = [];
+  for (let i = 0; i < argv.length; i++) {
+    const tok = argv[i]!;
+    if (tok === "--") {
+      positional.push(...argv.slice(i + 1));
+      break;
+    }
+    if (GH_GLOBAL_VALUE_FLAGS.has(tok)) {
+      i += 1;
+      continue;
+    }
+    if (tok.startsWith("-")) continue;
+    positional.push(tok);
+  }
+  const [sub1, sub2] = positional;
+  if (sub1 === "release" || (sub1 === "repo" && (sub2 === "create" || sub2 === "edit"))) {
+    const verb = [sub1, sub2].filter(Boolean).join(" ");
+    return {
+      rule: "release-fence",
+      reason: `'gh ${verb}' is forbidden inside a factory seat (release-fence) — Lead releases via lead_release and Owner publishes via the panel`,
+    };
+  }
+  return undefined;
+}
+
 function pushRefusal(what: string): GitRefusal {
   return { rule: "git:force-push", reason: `push that rewinds or deletes remote refs (${what}) — bare remotes keep no reflog` };
 }
@@ -304,6 +434,34 @@ function refuseRestore(args: readonly string[]): GitRefusal | undefined {
 
 function isGitWord(token: string): boolean {
   return token === "git" || token.endsWith("/git");
+}
+
+function isGhWord(token: string): boolean {
+  return token === "gh" || token.endsWith("/gh");
+}
+
+function judgeReleaseFenceSegment(tokens: readonly string[]): ChokeDecision {
+  const words = tokens.filter((t, idx) => {
+    const prev = idx > 0 ? tokens[idx - 1] : undefined;
+    if (prev !== undefined && (GIT_GLOBAL_VALUE_FLAGS.has(prev) || GH_GLOBAL_VALUE_FLAGS.has(prev))) return true;
+    return (
+      t !== "export" &&
+      !WRAPPER_WORDS.has(t) &&
+      !PROCESS_KILL_WRAPPER_PREFIXES.has(t) &&
+      !/^[A-Za-z_][A-Za-z0-9_]*=/.test(t)
+    );
+  });
+  for (let i = 0; i < words.length; i++) {
+    const word = words[i]!;
+    if (isGitWord(word)) {
+      const refusal = refuseReleaseGitArgv(words.slice(i + 1));
+      if (refusal) return { behavior: "deny", rule: refusal.rule, reason: refusal.reason };
+    } else if (isGhWord(word)) {
+      const refusal = refuseReleaseGhArgv(words.slice(i + 1));
+      if (refusal) return { behavior: "deny", rule: refusal.rule, reason: refusal.reason };
+    }
+  }
+  return { behavior: "allow" };
 }
 
 /**
@@ -505,6 +663,10 @@ export function isProtectedFactoryStatePath(
     resolvedCandidate === `${resolvedState}/ledger.jsonl` ||
     resolvedCandidate === `${resolvedState}/correlations.json`
   ) {
+    return true;
+  }
+  const spoolPrefix = `${resolvedState}/spool`;
+  if (resolvedCandidate === spoolPrefix || resolvedCandidate.startsWith(`${spoolPrefix}/`)) {
     return true;
   }
   const projectsPrefix = `${resolvedState}/projects`;
@@ -866,6 +1028,10 @@ export function judgeSeatShellCommand(
     if (s1.behavior === "deny") {
       return { behavior: "deny", rule: "dangerous-git", reason: s1.reason };
     }
+    const releaseFence = judgeReleaseFenceSegment(segTokens);
+    if (releaseFence.behavior === "deny") {
+      return releaseFence;
+    }
     if (isPackageMutationSegment(segTokens)) {
       return { behavior: "deny", rule: "seat-write-fence", reason: SEAT_WRITE_FENCE_MESSAGE };
     }
@@ -1015,6 +1181,10 @@ export function judgeShellCommand(command: string, roots: WritableRoots, memory?
     /\/projects\/[^/]+\/worktrees\/[^/]+(?:\/|$)/.test(roots.workspace);
   const s1 = judgeS1(tokens, inIsolatedWorktree);
   if (s1.behavior === "deny") return s1;
+  for (const segment of splitShellSegments(expandedCommand)) {
+    const releaseFence = judgeReleaseFenceSegment(shellTokens(segment));
+    if (releaseFence.behavior === "deny") return releaseFence;
+  }
   const s2 = judgeS2(tokens, roots);
   if (s2.behavior === "deny") return s2;
   if (roots.stateDir !== "") {

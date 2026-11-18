@@ -36,7 +36,8 @@ import { foldCompanions, foldCorePlugin, foldTasks } from "../plugin/server/view
 import { factoryEnvFor, injectRoleOnCreate, injectSessionEnv, renderAgentContract, renderSeatBootstrap, renderSeatContract } from "../plugin/server/roles.ts";
 import type { AgentCreateRequest } from "../plugin/server/roles.ts";
 import { discoverProjects, listProjectRegistrations, readProjectRegistration, writeProjectRegistration } from "../plugin/server/projects.ts";
-import { readProjectSettings, writeProjectSettings } from "../plugin/server/core/project-settings.ts";
+import { readProjectSettings, readReleaseRequest, readReleaseSettings, setReleaseRequest, writeProjectSettings } from "../plugin/server/core/project-settings.ts";
+import { builtinVaultRunner, clearGhAuthCache } from "../plugin/server/core/vault-transport.ts";
 import { DatabaseSync } from "node:sqlite";
 import { lanesPath, loadLanes, saveLanes } from "../src/lanes.ts";
 import { CORE_FACTORY_SKILLS } from "../plugin/server/core/companion-tools.ts";
@@ -255,8 +256,8 @@ function makeSurface(t: TestContext, agents: FakeAgent[] = [], plugins: DaemonPl
  * mailbox's own state (`rotateProjectMailbox`), so its tests run against the runtime
  * that owns it, not a stub.
  */
-function makeRotateSurface(t: TestContext, agents: FakeAgent[] = [], options: { registry?: boolean } = {}) {
-  const base = makeSurface(t, agents);
+function makeRotateSurface(t: TestContext, agents: FakeAgent[] = [], options: { registry?: boolean; vaultRunner?: VaultRunner } = {}) {
+  const base = makeSurface(t, agents, [], options.vaultRunner);
   const registry = options.registry === true ? createFactoryRegistry({ stateDir: base.stateDir, root: base.factory }) : undefined;
   if (registry !== undefined) t.after(() => registry.stop());
   const handlers = createSurfaceHandlers({
@@ -271,6 +272,7 @@ function makeRotateSurface(t: TestContext, agents: FakeAgent[] = [], options: { 
     },
     onLeadRetired: (input) => leadMail.settleLeadRotation(input.slug),
     rotateProjectMailbox: (slug) => leadMail.rotateProjectMailbox(slug),
+    ...(options.vaultRunner === undefined ? {} : { vaultRunner: options.vaultRunner }),
   });
   const leadMail = createLeadMailRuntime({
     factory: base.factory,
@@ -7806,4 +7808,290 @@ test('Skill Hub groups source skills and custom memberships with installed count
   const disabled = await handlers.snapshot({projectRoot:repo}); assert.ok(disabled.ok); if (!disabled.ok) return;
   assert.equal(disabled.view.skillHub?.projectPacks.find(p => p.id === saved.pack.id)?.enabled, false);
   const invalid = await handlers.skillsTogglePack({projectRoot:repo, pack:'../escape', enabled:true}); assert.equal(invalid.ok,false);
+});
+
+test("ADR 0061 (Wave 02): releaseSettingsRead / releaseSettingsWrite enforce Owner-only writes, resolve default branch, and drop Release requests on Rotate/Reset/mode-leave", async (t) => {
+  const dir = makeTempDir("surface-release-settings-");
+  disposeDir(t, dir);
+  const repo = join(dir, "repo");
+  const bareOrigin = join(dir, "origin.git");
+  mkdirSync(repo, { recursive: true });
+  writeFileSync(join(repo, "README.md"), "# Demo\n");
+  gitCommitAll(repo);
+
+  const fakeGhCalls: VaultRunnerCall[] = [];
+  let ghAuthed = true;
+  let ghDefaultBranch = "trunk";
+  let ghPrivate = true;
+  const runner: VaultRunner = async (call) => {
+    if (call.command === "gh") {
+      fakeGhCalls.push(call);
+      if (call.args[0] === "auth" && call.args[1] === "status") {
+        if (!ghAuthed) throw new Error("You are not logged into any GitHub hosts.");
+        return Buffer.from(JSON.stringify({ hosts: { "github.com": [{ active: true, login: "andrewpham", state: "success" }] } }));
+      }
+      if (call.args[0] === "repo" && call.args[1] === "view") {
+        if (!ghAuthed) throw new Error("not logged in");
+        return Buffer.from(JSON.stringify({
+          nameWithOwner: "andrewpham/demo",
+          isPrivate: ghPrivate,
+          defaultBranchRef: { name: ghDefaultBranch },
+        }));
+      }
+      throw new Error(`unexpected gh call: ${call.args.join(" ")}`);
+    }
+    return builtinVaultRunner(call);
+  };
+
+  // Helper surface with rotate wired + fake gh runner
+  const { stateDir, factory, handlers } = makeRotateSurface(t, [], { vaultRunner: runner });
+  const project = resolveProject(repo);
+  assert.ok(project.ok);
+  if (!project.ok) return;
+  writeProjectRegistration(stateDir, project.slug, { root: project.root });
+
+  // 1. No origin: reads as mode "off", origin null ("not on GitHub"), resolvedBranch = checked-out branch
+  const checkedOut = execFileSync("git", ["symbolic-ref", "--short", "HEAD"], { cwd: repo, encoding: "utf8" }).trim();
+  const noOrigin = await handlers.releaseSettingsRead({ projectRoot: repo });
+  assert.ok(noOrigin.ok, JSON.stringify(noOrigin));
+  assert.equal(noOrigin.settings.mode, "off");
+  assert.equal(noOrigin.settings.origin, null);
+  assert.equal(noOrigin.settings.resolvedBranch, checkedOut);
+  assert.deepEqual(noOrigin.settings.branchCandidates, []);
+  assert.equal(noOrigin.settings.lastRelease, null);
+  assert.equal(noOrigin.settings.gh.authenticated, true);
+
+  // 2. Add origin bare repo with branches main and trunk: defaultBranchRef ("trunk") wins over checked-out branch
+  execFileSync("git", ["init", "--bare", bareOrigin], { stdio: "pipe" });
+  execFileSync("git", ["remote", "add", "origin", bareOrigin], { cwd: repo, stdio: "pipe" });
+  execFileSync("git", ["push", "origin", `HEAD:refs/heads/${checkedOut}`], { cwd: repo, stdio: "pipe" });
+  execFileSync("git", ["push", "origin", "HEAD:refs/heads/trunk"], { cwd: repo, stdio: "pipe" });
+  execFileSync("git", ["fetch", "origin"], { cwd: repo, stdio: "pipe" });
+
+  const withOrigin = await handlers.releaseSettingsRead({ projectRoot: repo });
+  assert.ok(withOrigin.ok, JSON.stringify(withOrigin));
+  assert.equal(withOrigin.settings.origin?.slug, "andrewpham/demo");
+  assert.equal(withOrigin.settings.origin?.visibility, "private");
+  assert.equal(withOrigin.settings.defaultBranch, "trunk");
+  assert.equal(withOrigin.settings.resolvedBranch, "trunk");
+  assert.ok(withOrigin.settings.branchCandidates.includes("trunk"));
+  assert.ok(withOrigin.settings.branchCandidates.includes(checkedOut));
+
+  // 3. Stamped seat is refused seat-cannot-grant and changes nothing
+  for (const seat of ["supervisor", "lead", "agent"]) {
+    const refused = await handlers.releaseSettingsWrite({ projectRoot: repo, mode: "auto" }, { seat });
+    assert.ok(!refused.ok);
+    assert.equal(refused.code, "seat-cannot-grant");
+    assert.equal(readReleaseSettings(stateDir, project.slug).mode, "off");
+  }
+
+  // 4. Owner write persists mode + branch + updatedAt
+  const written = await handlers.releaseSettingsWrite({ projectRoot: repo, mode: "on-request", branch: checkedOut });
+  assert.ok(written.ok, JSON.stringify(written));
+  assert.equal(written.settings.mode, "on-request");
+  assert.equal(written.settings.branch, checkedOut);
+  assert.equal(written.settings.resolvedBranch, checkedOut);
+  assert.ok(written.settings.updatedAt !== null);
+
+  // 5. Pending Release request survives Rotate seats? NO — Rotate drops request, keeps settings!
+  setReleaseRequest(stateDir, project.slug, { version: "0.14.0", requestedAt: "2026-11-18T12:00:00.000Z" });
+  const rotated = await handlers.projectRotate({ projectRoot: repo });
+  assert.ok(rotated.ok, JSON.stringify(rotated));
+  assert.equal(readReleaseRequest(stateDir, project.slug), undefined, "Rotate seats drops Release request");
+  assert.equal(readReleaseSettings(stateDir, project.slug).mode, "on-request", "Rotate seats keeps Release settings");
+  assert.equal(readReleaseSettings(stateDir, project.slug).branch, checkedOut);
+
+  // 6. Leaving on-request drops pending request
+  setReleaseRequest(stateDir, project.slug, { version: "0.15.0", requestedAt: "2026-11-18T12:01:00.000Z" });
+  const leftOnRequest = await handlers.releaseSettingsWrite({ projectRoot: repo, mode: "auto" });
+  assert.ok(leftOnRequest.ok, JSON.stringify(leftOnRequest));
+  assert.equal(leftOnRequest.droppedPendingRequest, true);
+  assert.equal(readReleaseRequest(stateDir, project.slug), undefined);
+
+  // 7. Project reset drops pending request and keeps Release settings
+  setReleaseRequest(stateDir, project.slug, { requestedAt: "2026-11-18T12:02:00.000Z" });
+  const reset = await handlers.projectReset({ projectRoot: repo });
+  assert.ok(reset.ok, JSON.stringify(reset));
+  assert.equal(readReleaseRequest(stateDir, project.slug), undefined, "Project reset drops Release request");
+  assert.equal(readReleaseSettings(stateDir, project.slug).mode, "auto", "Project reset keeps Release settings");
+
+  // 8. Unauthenticated gh degrades gracefully to checked-out branch
+  ghAuthed = false;
+  clearGhAuthCache();
+  await handlers.releaseSettingsWrite({ projectRoot: repo, branch: null });
+  const unauthedRead = await handlers.releaseSettingsRead({ projectRoot: repo });
+  assert.ok(unauthedRead.ok, JSON.stringify(unauthedRead));
+  assert.equal(unauthedRead.settings.gh.authenticated, false);
+  assert.equal(unauthedRead.settings.resolvedBranch, checkedOut);
+});
+
+test("githubPublishPreflight & githubPublish enforce Owner-only seat check, public typed-name, sensitive-file scan & override, and gh repo create with zero Ledger events", async (t) => {
+  const rootParent = makeTempDir("gh-publish-parent-");
+  disposeDir(t, rootParent);
+  const repo = join(rootParent, "cool-widget");
+  mkdirSync(repo, { recursive: true });
+  writeFileSync(join(repo, "README.md"), "# Cool Widget\n");
+  writeFileSync(join(repo, ".env"), "SECRET=1\n");
+  writeFileSync(join(repo, "key.pem"), "PEM\n");
+  writeFileSync(join(repo, "AuthKey.p8"), "P8\n");
+  writeFileSync(join(repo, "app.keystore"), "KS\n");
+  writeFileSync(join(repo, "id_rsa"), "RSA\n");
+  writeFileSync(join(repo, "google-services.json"), "{}\n");
+  writeFileSync(join(repo, "GoogleService-Info.plist"), "<plist/>\n");
+  writeFileSync(join(repo, ".env.untracked"), "UNTRACKED=1\n");
+  execFileSync("git", ["init"], { cwd: repo, stdio: "pipe" });
+  execFileSync("git", ["config", "user.name", "Tester"], { cwd: repo });
+  execFileSync("git", ["config", "user.email", "tester@example.com"], { cwd: repo });
+  execFileSync("git", ["add", "README.md", ".env", "key.pem", "AuthKey.p8", "app.keystore", "id_rsa", "google-services.json", "GoogleService-Info.plist"], { cwd: repo });
+  execFileSync("git", ["commit", "-m", "initial"], { cwd: repo });
+
+  const project = resolveProject(repo);
+  assert.ok(project.ok);
+  if (!project.ok) return;
+
+  let ghInstalled = true;
+  let ghAuthed = true;
+  const ghCalls: string[][] = [];
+  clearGhAuthCache();
+
+  const { stateDir, factory, handlers } = makeRotateSurface(t, [], {
+    vaultRunner: async (call: VaultRunnerCall) => {
+      if (call.command === "gh") {
+        ghCalls.push([...call.args]);
+        if (!ghInstalled) {
+          const err = new Error("spawn gh ENOENT") as Error & { code?: string };
+          err.code = "ENOENT";
+          throw err;
+        }
+        if (call.args[0] === "auth" && call.args[1] === "status") {
+          if (!ghAuthed) throw new Error("not logged in");
+          return Buffer.from(JSON.stringify({ hosts: { "github.com": [{ active: true, login: "octo", state: "success" }] } }));
+        }
+        if (call.args[0] === "api" && call.args[1] === "user") {
+          return Buffer.from("octo\n");
+        }
+        if (call.args[0] === "api" && call.args[1] === "user/orgs") {
+          return Buffer.from("acme-org\n");
+        }
+        if (call.args[0] === "repo" && call.args[1] === "create") {
+          const targetSlug = call.args[2]!;
+          execFileSync("git", ["remote", "add", "origin", `https://github.com/${targetSlug}.git`], { cwd: repo, stdio: "pipe" });
+          return Buffer.from(`https://github.com/${targetSlug}\n`);
+        }
+        if (call.args[0] === "repo" && call.args[1] === "view") {
+          return Buffer.from(JSON.stringify({ nameWithOwner: "acme-org/cool-widget", isPrivate: true, defaultBranchRef: { name: "main" } }));
+        }
+      }
+      return builtinVaultRunner(call);
+    },
+  });
+  writeProjectRegistration(stateDir, project.slug, { root: project.root });
+
+  // 1. Preflight discovers owners, folder basename, and tracked sensitive files (excluding untracked)
+  const pre = await (handlers as any).githubPublishPreflight({ projectRoot: repo });
+  assert.equal(pre.ok, true, JSON.stringify(pre));
+  assert.equal(pre.originPresent, false);
+  assert.equal(pre.gh.authenticated, true);
+  assert.deepEqual(pre.owners, ["octo", "acme-org"]);
+  assert.equal(pre.defaultOwner, "octo");
+  assert.equal(pre.defaultName, "cool-widget");
+  assert.deepEqual([...pre.sensitiveFiles].sort(), [
+    ".env",
+    "AuthKey.p8",
+    "GoogleService-Info.plist",
+    "app.keystore",
+    "google-services.json",
+    "id_rsa",
+    "key.pem",
+  ].sort());
+  assert.equal(pre.sensitiveFiles.includes(".env.untracked"), false);
+  assert.match(pre.commitHistoryNotScannedNote, /not scanned/i);
+
+  // 2. Seat caller is refused with seat-cannot-publish
+  for (const seat of ["supervisor", "lead", "agent"] as const) {
+    const denied = await (handlers as any).githubPublish({
+      projectRoot: repo,
+      owner: "octo",
+      name: "cool-widget",
+      visibility: "private",
+      allowSensitiveFiles: true,
+      seat,
+    });
+    assert.equal(denied.ok, false);
+    assert.equal(denied.code, "seat-cannot-publish");
+  }
+
+  // 3. Unauthenticated gh is refused loudly
+  ghAuthed = false;
+  clearGhAuthCache();
+  const unauthed = await (handlers as any).githubPublish({
+    projectRoot: repo,
+    owner: "octo",
+    name: "cool-widget",
+    visibility: "private",
+    allowSensitiveFiles: true,
+  });
+  assert.equal(unauthed.ok, false);
+  assert.equal(unauthed.code, "gh-unauthenticated");
+  ghAuthed = true;
+  clearGhAuthCache();
+
+  // 4. Sensitive files present without override is refused on Public publish
+  const blockedSensitive = await (handlers as any).githubPublish({
+    projectRoot: repo,
+    owner: "acme-org",
+    name: "cool-widget",
+    visibility: "public",
+    confirmPublicName: "cool-widget",
+  });
+  assert.equal(blockedSensitive.ok, false);
+  assert.equal(blockedSensitive.code, "sensitive-files-present");
+
+  // 5. Public visibility without typed-name confirmation is refused server-side
+  const blockedPublic = await (handlers as any).githubPublish({
+    projectRoot: repo,
+    owner: "acme-org",
+    name: "cool-widget",
+    visibility: "public",
+    confirmPublicName: "wrong-name",
+    allowSensitiveFiles: true,
+  });
+  assert.equal(blockedPublic.ok, false);
+  assert.equal(blockedPublic.code, "public-confirmation-required");
+
+  // 6. Private publish executes gh repo create ... --description --source=<root> --remote=origin --push without needing sensitive override and appends NO Ledger events
+  const eventsBefore = factory.ledger.events.length;
+  const published = await (handlers as any).githubPublish({
+    projectRoot: repo,
+    owner: "acme-org",
+    name: "cool-widget",
+    description: "Small demo widget",
+    visibility: "private",
+  });
+  assert.equal(published.ok, true, JSON.stringify(published));
+  assert.equal(published.slug, "acme-org/cool-widget");
+  assert.equal(published.visibility, "private");
+  assert.equal(published.url, "https://github.com/acme-org/cool-widget");
+  assert.equal(published.settings.origin.slug, "acme-org/cool-widget");
+  const createCmd = ghCalls.find((args) => args[0] === "repo" && args[1] === "create");
+  assert.ok(createCmd !== undefined);
+  assert.ok(createCmd.includes("acme-org/cool-widget"));
+  assert.ok(createCmd.includes("--private"));
+  const descIdx = createCmd.indexOf("--description");
+  assert.ok(descIdx !== -1 && createCmd[descIdx + 1] === "Small demo widget");
+  assert.ok(createCmd.some((a) => a.startsWith("--source=")));
+  assert.ok(createCmd.includes("--remote=origin"));
+  assert.ok(createCmd.includes("--push"));
+  assert.equal(factory.ledger.events.length, eventsBefore, "GitHub publish writes no Ledger event");
+
+  // 7. Re-publishing once origin exists refuses origin-already-configured
+  const already = await (handlers as any).githubPublish({
+    projectRoot: repo,
+    owner: "acme-org",
+    name: "cool-widget",
+    visibility: "private",
+    allowSensitiveFiles: true,
+  });
+  assert.equal(already.ok, false);
+  assert.equal(already.code, "origin-already-configured");
 });

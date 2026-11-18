@@ -712,3 +712,66 @@ export const FactoryViewSchema = z.object({
   projectUsage: ProjectUsageViewSchema.nullable().optional(),
 });
 export type FactoryView = z.infer<typeof FactoryViewSchema>;
+
+export const ReleaseModeSchema = z.enum(["off", "on-request", "auto"]);
+export type ReleaseMode = z.infer<typeof ReleaseModeSchema>;
+
+export const ReleaseOriginSchema = z.object({
+  remoteUrl: z.string(),
+  slug: z.string().nullable(),
+  visibility: z.enum(["private", "public"]).nullable(),
+  defaultBranch: z.string().nullable(),
+});
+export type ReleaseOriginView = z.infer<typeof ReleaseOriginSchema>;
+
+export const LastReleaseSchema = z.object({
+  version: z.string(),
+  tag: z.string(),
+  commit: z.string(),
+  branch: z.string(),
+  url: z.string().nullable(),
+  mode: ReleaseModeSchema,
+  ts: z.string(),
+});
+export type LastReleaseView = z.infer<typeof LastReleaseSchema>;
+
+export const ReleaseSettingsViewSchema = z.object({
+  project: z.string(),
+  projectRoot: z.string(),
+  mode: ReleaseModeSchema,
+  branch: z.string().nullable(),
+  resolvedBranch: z.string().nullable(),
+  defaultBranch: z.string().nullable(),
+  branchCandidates: z.array(z.string()),
+  updatedAt: z.string().nullable(),
+  pendingRequest: z.object({
+    version: z.string().optional(),
+    requestedAt: z.string(),
+  }).nullable(),
+  origin: ReleaseOriginSchema.nullable(),
+  gh: z.object({
+    installed: z.boolean(),
+    authenticated: z.boolean(),
+    user: z.string().nullable(),
+  }),
+  lastRelease: LastReleaseSchema.nullable(),
+});
+export type ReleaseSettingsView = z.infer<typeof ReleaseSettingsViewSchema>;
+
+export const GitHubPublishPreflightViewSchema = z.object({
+  project: z.string(),
+  projectRoot: z.string(),
+  originPresent: z.boolean(),
+  gh: z.object({
+    installed: z.boolean(),
+    authenticated: z.boolean(),
+    user: z.string().nullable(),
+  }),
+  owners: z.array(z.string()),
+  defaultOwner: z.string().nullable(),
+  defaultName: z.string(),
+  sensitiveFiles: z.array(z.string()),
+  hasUncommittedChanges: z.boolean(),
+  commitHistoryNotScannedNote: z.string(),
+});
+export type GitHubPublishPreflightView = z.infer<typeof GitHubPublishPreflightViewSchema>;
