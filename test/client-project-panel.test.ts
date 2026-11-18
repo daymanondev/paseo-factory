@@ -905,6 +905,96 @@ test("11: the Shell mounts the self-update hook for the panel and hands it to th
   assert.match(shell, /selfUpdate=\{selfUpdate\}/);
 });
 
+test("11: useSelfUpdate polls status while reloading, tolerates transient errors, and transitions to idle once the new version answers", async () => {
+  const { useSelfUpdate, SelfUpdateControls, SelfUpdateNote } = await loadModule("plugin/client/factory/self-update.tsx");
+  const { createElement, act } = await import("react");
+  const { JSDOM } = await import(["jsdom"].join(""));
+  const dom = new JSDOM("<!doctype html><div id=root></div>");
+  const g = globalThis as Record<string, any>;
+  const saved = { window: g.window, document: g.document, IS_REACT_ACT_ENVIRONMENT: g.IS_REACT_ACT_ENVIRONMENT };
+  g.window = dom.window; g.document = dom.window.document; g.IS_REACT_ACT_ENVIRONMENT = true;
+  const { createRoot } = await import("react-dom/client");
+  const container = dom.window.document.getElementById("root")!;
+  const root = createRoot(container);
+
+  let statusCallCount = 0;
+  let phaseStep: "before" | "disconnect" | "old-during-clone" | "restarted" = "before";
+  let resolveApply!: (reply: { ok: true; from: string; to: string }) => void;
+
+  const Harness = ({ reloadTimeoutMs = 5_000 }: { reloadTimeoutMs?: number }) => {
+    const view = useSelfUpdate({
+      enabled: true,
+      reloadPollMs: 15,
+      reloadTimeoutMs,
+      status: async () => {
+        statusCallCount++;
+        if (phaseStep === "before" || phaseStep === "old-during-clone") {
+          return { ok: true, current: "0.12.5", latest: "0.14.0", updateAvailable: true, checkedAt: "2026-11-18T00:00:00Z" };
+        }
+        if (phaseStep === "disconnect") {
+          throw new Error("socket closed");
+        }
+        return { ok: true, current: "0.14.0", latest: "0.14.0", updateAvailable: false, checkedAt: "2026-11-18T00:02:00Z" };
+      },
+      apply: () => new Promise<{ ok: true; from: string; to: string }>((r) => { resolveApply = r; }),
+    });
+    return createElement("div", {}, createElement(SelfUpdateControls, { theme, view, mobile: false }), createElement(SelfUpdateNote, { theme, view }));
+  };
+
+  try {
+    await act(() => root.render(createElement(Harness)));
+    await act(async () => { await new Promise((r) => setTimeout(r, 15)); });
+    assert.match(container.querySelector('[data-testid="factory-version"]')!.textContent!, /v0\.12\.5/);
+    assert.match(container.querySelector('[data-testid="factory-update-apply"]')!.textContent!, /Update to v0\.14\.0/);
+
+    // Trigger apply; simulate plugin restart disconnect/reply -> enters reloading
+    await act(() => (container.querySelector('[data-testid="factory-update-apply"]') as HTMLButtonElement).click());
+    phaseStep = "disconnect";
+    await act(async () => { resolveApply({ ok: true, from: "0.12.5", to: "0.14.0" }); });
+    assert.match(container.querySelector('[data-testid="factory-update-note"]')!.textContent!, /Paseo is reloading/);
+
+    // Even when status transiently throws during restart, UI stays calmly in reloading (no flash error)
+    await act(async () => { await new Promise((r) => setTimeout(r, 35)); });
+    assert.equal(container.querySelector('[data-testid="factory-update-error"]'), null);
+    assert.match(container.querySelector('[data-testid="factory-update-note"]')!.textContent!, /Paseo is reloading/);
+    assert.ok(statusCallCount >= 2, "status polled while reloading");
+
+    // Once new daemon responds with v0.14.0, UI clears reloading state and displays updated version + note
+    phaseStep = "restarted";
+    await act(async () => { await new Promise((r) => setTimeout(r, 40)); });
+    assert.match(container.querySelector('[data-testid="factory-version"]')!.textContent!, /v0\.14\.0/);
+    assert.equal(container.querySelector('[data-testid="factory-update-apply"]'), null);
+    assert.ok(container.querySelector('[data-testid="factory-update-check"]'));
+    assert.match(container.querySelector('[data-testid="factory-update-note"]')!.textContent!, /v0\.14\.0/);
+
+    // Timeout case: if reloading never sees the new version within reloadTimeoutMs, surfaces an error & exits reloading
+    await act(() => root.unmount());
+    const container2 = dom.window.document.createElement("div");
+    const stuckRoot = createRoot(container2);
+    phaseStep = "before";
+    await act(() => stuckRoot.render(createElement(() => {
+      const view = useSelfUpdate({
+        enabled: true,
+        reloadPollMs: 10,
+        reloadTimeoutMs: 35,
+        status: async () => phaseStep === "disconnect"
+          ? (() => { throw new Error("offline"); })()
+          : { ok: true, current: "0.12.5", latest: "0.14.0", updateAvailable: true, checkedAt: "2026-11-18T00:00:00Z" },
+        apply: async () => { phaseStep = "disconnect"; return { ok: true as const, from: "0.12.5", to: "0.14.0" }; },
+      });
+      return createElement("div", {}, createElement(SelfUpdateControls, { theme, view, mobile: false }), createElement(SelfUpdateNote, { theme, view }));
+    })));
+    await act(async () => { await new Promise((r) => setTimeout(r, 15)); });
+    await act(() => (container2.querySelector('[data-testid="factory-update-apply"]') as HTMLButtonElement).click());
+    await act(async () => { await new Promise((r) => setTimeout(r, 70)); });
+    assert.match(container2.querySelector('[data-testid="factory-update-error"]')!.textContent!, /timed out/i);
+    await act(() => stuckRoot.unmount());
+  } finally {
+    Object.assign(g, saved);
+    dom.window.close();
+  }
+});
+
 
 test("Project skill packs show dynamic kinds, installed counts and the always-on Core baseline", async () => {
   const html = await render(makePanel(), {

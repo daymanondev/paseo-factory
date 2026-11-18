@@ -4,8 +4,11 @@
  * two RPCs (the Shell mounts it); `SelfUpdateControls` and `SelfUpdateNote`
  * are pure renders of that state, so tests can mount them to static markup.
  * Applying the update reloads this very plugin, so no reply after pressing is
- * the expected outcome, not an error. Mobile keeps its write limits: it shows
- * the version and can check, but never presses Update.
+ * the expected outcome, not an error. While `phase === "reloading"`, the hook
+ * polls `status({ force: true })` until the restarted plugin answers with the
+ * updated version (tolerating transient disconnect errors) or times out.
+ * Mobile keeps its write limits: it shows the version and can check, but never
+ * presses Update.
  */
 import type { PluginTheme } from "@getpaseo/plugin";
 import { useEffect, useRef, useState } from "react";
@@ -18,6 +21,10 @@ import { isCoreSelfRestartError } from "./plugin-feedback.ts";
 export const UP_TO_DATE_MS = 4_000;
 /** Without a reply this long after pressing Update, assume the plugin is reloading. */
 export const NO_REPLY_RELOADING_MS = 20_000;
+/** How often to probe `status` while waiting for the restarted plugin to return. */
+export const RELOAD_POLL_MS = 2_000;
+/** Maximum wait across slow git clone + plugin restart before returning to idle with an error. */
+export const RELOAD_TIMEOUT_MS = 300_000;
 
 export type SelfUpdatePhase = "checking" | "idle" | "updating" | "reloading";
 
@@ -68,14 +75,30 @@ export function useSelfUpdate(input: {
   apply: (input: Record<string, never>) => Promise<ApplyReply>;
   /** False hides the whole control (the Settings screen never mounts the Factory header). */
   enabled: boolean;
+  /** Override reload polling interval in tests; defaults to `RELOAD_POLL_MS`. */
+  reloadPollMs?: number;
+  /** Override reload timeout in tests; defaults to `RELOAD_TIMEOUT_MS`. */
+  reloadTimeoutMs?: number;
 }): SelfUpdateView {
   const [state, setState] = useState<SelfUpdateState>(INITIAL_SELF_UPDATE);
   const calls = useRef(input);
   calls.current = input;
+  const stateRef = useRef(state);
+  stateRef.current = state;
   const mounted = useRef(true);
   const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
+  const noReplyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reloadOriginRef = useRef<{ from: string | null; startedAt: number } | null>(null);
   const later = (fn: () => void, ms: number) => {
-    timers.current.push(setTimeout(fn, ms));
+    const t = setTimeout(fn, ms);
+    timers.current.push(t);
+    return t;
+  };
+  const clearNoReplyTimer = () => {
+    if (noReplyTimerRef.current !== null) {
+      clearTimeout(noReplyTimerRef.current);
+      noReplyTimerRef.current = null;
+    }
   };
   const patch = (next: Partial<SelfUpdateState>) => {
     if (mounted.current) setState((prev) => ({ ...prev, ...next }));
@@ -100,20 +123,30 @@ export function useSelfUpdate(input: {
   };
 
   const apply = () => {
-    patch({ phase: "updating", error: null });
-    later(() => {
+    clearNoReplyTimer();
+    reloadOriginRef.current = { from: stateRef.current.current, startedAt: Date.now() };
+    patch({ phase: "updating", error: null, note: null });
+    noReplyTimerRef.current = later(() => {
+      noReplyTimerRef.current = null;
       if (mounted.current) setState((prev) => (prev.phase === "updating" ? { ...prev, phase: "reloading" } : prev));
     }, NO_REPLY_RELOADING_MS);
     const reloading = (message: string) => isCoreSelfRestartError({ target: "paseo-factory", action: "update", errorMessage: message });
     calls.current
       .apply({})
       .then((reply) => {
-        if (reply.ok) patch({ phase: "reloading", error: null });
-        else if (reloading(reply.error)) patch({ phase: "reloading", error: null });
-        else patch({ phase: "idle", error: reply.error });
+        clearNoReplyTimer();
+        if (reply.ok || reloading(reply.error)) {
+          patch({ phase: "reloading", error: null });
+        } else {
+          reloadOriginRef.current = null;
+          patch({ phase: "idle", error: reply.error });
+        }
       })
       // A dropped connection is the plugin reloading underneath us.
-      .catch(() => patch({ phase: "reloading", error: null }));
+      .catch(() => {
+        clearNoReplyTimer();
+        patch({ phase: "reloading", error: null });
+      });
   };
 
   useEffect(() => {
@@ -125,6 +158,58 @@ export function useSelfUpdate(input: {
       timers.current = [];
     };
   }, [input.enabled]);
+
+  const reloadPollMs = input.reloadPollMs ?? RELOAD_POLL_MS;
+  const reloadTimeoutMs = input.reloadTimeoutMs ?? RELOAD_TIMEOUT_MS;
+
+  useEffect(() => {
+    if (!input.enabled || state.phase !== "reloading") return;
+    let cancelled = false;
+    let probing = false;
+    const startedAt = reloadOriginRef.current?.startedAt ?? Date.now();
+    const fromVersion = reloadOriginRef.current?.from ?? null;
+
+    const probe = () => {
+      if (cancelled || !mounted.current) return;
+      if (Date.now() - startedAt >= reloadTimeoutMs) {
+        reloadOriginRef.current = null;
+        patch({ phase: "idle", error: "Reload timed out — reopen Factory or reload window to check the active version." });
+        return;
+      }
+      if (probing) return;
+      probing = true;
+      calls.current
+        .status({ force: true })
+        .then((reply) => {
+          if (cancelled || !mounted.current || stateRef.current.phase !== "reloading") return;
+          if (!reply.ok || typeof reply.current !== "string") return;
+          const versionChanged = fromVersion !== null && reply.current !== fromVersion;
+          if (!versionChanged && reply.updateAvailable) return;
+          reloadOriginRef.current = null;
+          patch({
+            phase: "idle",
+            current: reply.current,
+            latest: reply.latest,
+            updateAvailable: reply.updateAvailable,
+            upToDate: false,
+            error: null,
+            note: versionChanged ? `Updated to v${reply.current} — reopen tab or reload window to refresh UI.` : (reply.note ?? null),
+          });
+        })
+        .catch(() => {
+          // Transient socket/plugin errors during restart keep waiting in `reloading`.
+        })
+        .finally(() => {
+          probing = false;
+        });
+    };
+
+    const timer = setInterval(probe, reloadPollMs);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [input.enabled, state.phase, reloadPollMs, reloadTimeoutMs]);
 
   return { state, actions: { check: () => check(true), apply } };
 }

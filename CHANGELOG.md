@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.1] - 2026-11-18
+
+### Fixed
+
+- `useSelfUpdate` ([plugin/client/factory/self-update.tsx](plugin/client/factory/self-update.tsx)) now polls `factory.self.update.status` (`RELOAD_POLL_MS = 2s`, timeout `RELOAD_TIMEOUT_MS = 300s`) while `phase === "reloading"`, tolerating transient socket/plugin disconnects until the restarted plugin answers with the updated version so the header transitions cleanly out of `Paseo is reloading the Factory plugin…` instead of staying stuck after slow updates.
+
 ## [0.14.0] - 2026-11-18
 
 **Lead-owned releases (`lead_release`), per-Project Release mode & branch settings, and one-time Owner GitHub publish (ADR 0061).**
