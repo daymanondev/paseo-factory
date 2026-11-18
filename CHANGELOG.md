@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-11-18
+
+**Push-based UI state subscriptions, idle background-process badges, and sidebar workspace row badges.**
+
+### Added
+
+- **Coalesced `factory.state.updates` subscription & `StateHub` (`T-23a-1`, `T-23a-2`, `T-23b-1`, `T-23b-2`):** added the `stateUpdates` subscription contract (`plugin/shared/rpc.ts`) and `StateHub` (`plugin/server/state-hub.ts`) with reference-counted daemon listeners (`agents`, `workspaces`, `projects`, `providers`), per-Project coalescing, and direct emitters from ledger updates, surface RPC mutations, handoff progress, and Lead mailbox writes. Wired `useClientSubscription` and `subscribeClientUpdates` (`plugin/client/kit/subscription.ts`) into `FactoryShell`, `usePoll` (using `QUIET_MS` while live), and `startSeatDirectory`, falling back transparently to polling on `< 0.16.0` hosts without `defineSubscription`.
+- **Idle background-process flagging (`T-24a`, `T-24b`):** projected daemon-reported `backgroundWorkCount` into `AgentView`, `PanelSeatRow`, `PanelPeerRow`, and `SeatDirectoryEntry`, and surfaced an `IdleBackgroundWork` warning pill (`N background process/processes running`) on idle seats and open Peers in `ProjectPanel`.
+- **Sidebar `WorkspaceRowBadge` (`T-24c-1`, `T-24c-2`):** projected `handoffActive`, `activeWorkCount`, and `backgroundWorkCount` onto `ProjectDirectoryEntry`, added the pure `workspaceRowBadgePlan()` priority planner (`Needs you · N` > `Handing off` > `N active` > `N background`), and wired the `factory-workspace-badge` contribution into `startSeatDirectory` backed by a shared project store.
+
 ## [0.12.5] - 2026-11-17
 
 ### Fixed
