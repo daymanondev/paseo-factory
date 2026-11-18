@@ -118,19 +118,24 @@ test("installed cards show the state-correct action bar — Disable/Enable by en
   assert.match(plugins, /actions\.manage\(id, "(enable|disable|reload|update|remove)"\)/);
 });
 
-test("the one FactoryShell hosts the two remaining entries — the workspace panel and the settings screen; no global screen, no sidebar row", () => {
+test("the one FactoryShell hosts only the workspace panel and the settings screen; the global Onboarding screen mounts OnboardingScreen (ADR 0056 / ADR 0063)", () => {
   const entries = read("plugin/client/factory/entries.tsx");
   assert.equal((entries.match(/<FactoryShell/g) ?? []).length, 2, "settings screen and workspace panel render the one shell");
-  assert.doesNotMatch(entries, /FactoryScreen|FactorySidebarItem|SidebarRow|SCREEN_ID/, "the global screen and the sidebar row are deleted");
+  assert.match(entries, /FactoryOnboardScreen/, "desktop-only global Onboarding screen is exported");
+  assert.match(entries, /FactoryOnboardSidebarItem/, "desktop-only sidebar footer item is exported");
+  assert.doesNotMatch(entries, /FactoryScreen|addSidebarHeaderItem/, "the old All-projects dashboard and sidebar header item stay deleted");
 });
 
-test("v0.6.0 W4 (ADR 0056): the surface registers only the Workspace panel, the Settings screen, and one Command Center action", () => {
+test("v0.6.0 W4 + ADR 0063: the surface registers the Workspace panel, Settings screen, desktop-only Onboarding screen/footer item, and two Command Center actions", () => {
   const index = read("plugin/index.client.tsx");
   assert.equal((index.match(/client\.addWorkspacePanel\(/g) ?? []).length, 1);
   assert.equal((index.match(/client\.addSettingsScreen\(/g) ?? []).length, 1);
-  assert.equal((index.match(/client\.addCommandCenterItem\(/g) ?? []).length, 1, "one Command Center action");
+  assert.equal((index.match(/client\.addSidebarFooterItem\(/g) ?? []).length, 1);
+  assert.equal((index.match(/client\.addScreen\(/g) ?? []).length, 1);
+  assert.equal((index.match(/client\.addCommandCenterItem\(/g) ?? []).length, 2, "workspace panel and global onboard Command Center actions");
   assert.match(index, /title: "Open Factory Panel"/);
-  assert.doesNotMatch(index, /client\.addScreen\(|addSidebarHeaderItem|retro|Retro|vaultSync/, "no global screen, sidebar row, Retro or Vault palette entry");
+  assert.match(index, /title: "Factory: Onboard Project"/);
+  assert.doesNotMatch(index, /addSidebarHeaderItem|retro|Retro|vaultSync/, "no sidebar header row, Retro or Vault palette entry");
 });
 
 // ---- native seat starts & live seat states (v0.0.27, ADR 0017 §3) ---------------------------
@@ -796,6 +801,7 @@ test("v0.0.39 (ADR 0027): index.client.tsx Command Center items and client contr
   assert.deepEqual(ids, [
     "paseo-factory",
     "factory-open-panel",
+    "factory-onboard-project",
   ]);
   for (const id of ids) {
     assert.match(id, idPattern, `client contribution id "${id}" must match /^[a-z][a-z0-9-]*$/ (no dots)`);

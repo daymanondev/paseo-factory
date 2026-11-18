@@ -107,11 +107,19 @@ test("the mobile Settings body is a read-only summary — values, no write contr
   for (const section of SECTION_IDS) assert.doesNotMatch(lines(section), /<button|<input/, `${section} mounts no write control on mobile`);
 });
 
-test("the surface registers exactly the Workspace panel, the Settings screen and one Command Center action", () => {
+test("the surface registers the Workspace panel, the Settings screen, the desktop Onboarding screen/footer item, and Command Center actions", () => {
   const index = read("plugin/index.client.tsx");
   const registrations = [...index.matchAll(/client\.(add[A-Za-z]+)\(/g)].map((m) => m[1]);
-  assert.deepEqual([...registrations].sort(), ["addCommandCenterItem", "addSettingsScreen", "addWorkspacePanel"]);
+  assert.deepEqual([...registrations].sort(), [
+    "addCommandCenterItem",
+    "addCommandCenterItem",
+    "addScreen",
+    "addSettingsScreen",
+    "addSidebarFooterItem",
+    "addWorkspacePanel",
+  ]);
   assert.match(index, /title: "Open Factory Panel"/);
+  assert.match(index, /title: "Factory: Onboard Project"/);
 });
 
 test("the Project panel shell carries no machine-wide panes — they live on the Settings screen only", () => {
