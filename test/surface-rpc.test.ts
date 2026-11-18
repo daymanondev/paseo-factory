@@ -8095,3 +8095,116 @@ test("githubPublishPreflight & githubPublish enforce Owner-only seat check, publ
   assert.equal(already.ok, false);
   assert.equal(already.code, "origin-already-configured");
 });
+
+function makeBrowseSurface(t: TestContext, onStateChange?: (event: { handler: string }) => void) {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const userHome = join(dir, "user-home");
+  const paseoHome = join(userHome, ".paseo");
+  const stateDir = join(paseoHome, "plugin-state", "paseo-factory");
+  mkdirSync(userHome, { recursive: true });
+  const factory = createFactory({ stateDir, eyeCliProbe: () => false });
+  const handlers = createSurfaceHandlers({
+    factory,
+    stateDir,
+    home: paseoHome,
+    userHome,
+    daemon: fakeDaemon([]).daemon,
+    ...(onStateChange === undefined ? {} : { onStateChange }),
+  });
+  return { userHome, factory, handlers };
+}
+
+test("onboarding.browse: omitted or empty path defaults to $HOME, lists sorted visible subdirectories with gitRepo hints, and is read-only", async (t) => {
+  const stateChanges: string[] = [];
+  const { userHome, factory, handlers } = makeBrowseSurface(t, (event) => { stateChanges.push(event.handler); });
+  mkdirSync(join(userHome, "zeta-app"), { recursive: true });
+  mkdirSync(join(userHome, "AlphaRepo", ".git"), { recursive: true });
+  mkdirSync(join(userHome, ".hidden-dir"), { recursive: true });
+  writeFileSync(join(userHome, "notes.txt"), "hi");
+  const expectedHome = realpathSync(userHome);
+  const eventsBefore = factory.ledger.events.length;
+
+  const omitted = await handlers.onboardingBrowse({});
+  assert.ok(omitted.ok, omitted.ok ? "" : omitted.error);
+  assert.equal(omitted.home, expectedHome);
+  assert.equal(omitted.path, expectedHome);
+  assert.equal(omitted.parent, dirname(expectedHome));
+  assert.deepEqual(omitted.entries, [
+    { name: "AlphaRepo", path: join(expectedHome, "AlphaRepo"), gitRepo: true },
+    { name: "zeta-app", path: join(expectedHome, "zeta-app"), gitRepo: false },
+  ]);
+
+  const empty = await handlers.onboardingBrowse({ path: "   " });
+  assert.ok(empty.ok, empty.ok ? "" : empty.error);
+  assert.equal(empty.path, expectedHome);
+  assert.deepEqual(empty.entries, omitted.entries);
+  assert.deepEqual(stateChanges, [], "onboardingBrowse is read-only and never triggers onStateChange");
+  assert.equal(factory.ledger.events.length, eventsBefore, "onboardingBrowse writes no ledger events");
+});
+
+test("onboarding.browse: normalizes ~ paths, traverses subdirectories and parents cleanly up to filesystem root", async (t) => {
+  const { userHome, handlers } = makeBrowseSurface(t);
+  const nested = join(userHome, "workspace", "nested-repo");
+  mkdirSync(join(nested, ".git"), { recursive: true });
+  const expectedHome = realpathSync(userHome);
+  const expectedWorkspace = realpathSync(join(userHome, "workspace"));
+
+  const tildeOnly = await handlers.onboardingBrowse({ path: "~" });
+  assert.ok(tildeOnly.ok, tildeOnly.ok ? "" : tildeOnly.error);
+  assert.equal(tildeOnly.path, expectedHome);
+
+  const tildeSlash = await handlers.onboardingBrowse({ path: "~/" });
+  assert.ok(tildeSlash.ok, tildeSlash.ok ? "" : tildeSlash.error);
+  assert.equal(tildeSlash.path, expectedHome);
+
+  const tildeSub = await handlers.onboardingBrowse({ path: "~/workspace" });
+  assert.ok(tildeSub.ok, tildeSub.ok ? "" : tildeSub.error);
+  assert.equal(tildeSub.path, expectedWorkspace);
+  assert.equal(tildeSub.parent, expectedHome);
+  assert.deepEqual(tildeSub.entries, [
+    { name: "nested-repo", path: join(expectedWorkspace, "nested-repo"), gitRepo: true },
+  ]);
+
+  // Parent traversal back to home, and quick jump to filesystem root where parent is null.
+  assert.ok(tildeSub.parent !== null);
+  const backHome = await handlers.onboardingBrowse({ path: tildeSub.parent });
+  assert.ok(backHome.ok, backHome.ok ? "" : backHome.error);
+  assert.equal(backHome.path, expectedHome);
+
+  const rootDir = await handlers.onboardingBrowse({ path: "/" });
+  assert.ok(rootDir.ok, rootDir.ok ? "" : rootDir.error);
+  assert.equal(rootDir.path, "/");
+  assert.equal(rootDir.parent, null);
+  assert.ok(Array.isArray(rootDir.entries));
+});
+
+test("onboarding.browse: returns structured Failure for missing, non-directory, and unreadable paths", async (t) => {
+  const { userHome, handlers } = makeBrowseSurface(t);
+  const filePath = join(userHome, "file.txt");
+  writeFileSync(filePath, "hello");
+  const lockedDir = join(userHome, "locked");
+  mkdirSync(lockedDir, { recursive: true });
+
+  const missing = await handlers.onboardingBrowse({ path: join(userHome, "does-not-exist") });
+  assert.equal(missing.ok, false);
+  assert.equal(missing.code, "missing-directory");
+  assert.match(missing.error, /does not exist/i);
+
+  const notDir = await handlers.onboardingBrowse({ path: filePath });
+  assert.equal(notDir.ok, false);
+  assert.equal(notDir.code, "not-a-directory");
+  assert.match(notDir.error, /not a folder/i);
+
+  if (process.getuid?.() !== 0) {
+    chmodSync(lockedDir, 0o000);
+    try {
+      const unreadable = await handlers.onboardingBrowse({ path: lockedDir });
+      assert.equal(unreadable.ok, false);
+      assert.equal(unreadable.code, "unreadable-directory");
+      assert.match(unreadable.error, /cannot be read/i);
+    } finally {
+      chmodSync(lockedDir, 0o755);
+    }
+  }
+});
