@@ -315,6 +315,30 @@ export const OnboardingPrerequisiteSchema = z.object({
 });
 export type OnboardingPrerequisite = z.infer<typeof OnboardingPrerequisiteSchema>;
 
+export const OnboardingBrowseEntrySchema = z.object({
+  name: z.string(),
+  path: z.string(),
+  gitRepo: z.boolean(),
+});
+export type OnboardingBrowseEntry = z.infer<typeof OnboardingBrowseEntrySchema>;
+
+export const onboardingBrowse = defineRpc({
+  name: "factory.onboarding.browse",
+  input: z.object({
+    path: z.string().optional(),
+  }),
+  output: z.union([
+    z.object({
+      ok: z.literal(true),
+      path: z.string(),
+      parent: z.string().nullable(),
+      home: z.string(),
+      entries: z.array(OnboardingBrowseEntrySchema),
+    }),
+    Failure,
+  ]),
+});
+
 export const onboardingInspect = defineRpc({
   name: "factory.onboarding.inspect",
   input: z.object({
