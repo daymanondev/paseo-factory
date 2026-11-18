@@ -4,7 +4,13 @@
  * directory via useWorkspace), the Settings screen (machine-wide, unscoped),
  * and the desktop-only global Onboarding screen + sidebar footer item.
  */
-import type { PluginScreenProps, PluginSidebarItemProps, PluginSurfaceProps, PluginWorkspacePanelProps } from "@getpaseo/plugin/client";
+import type {
+  PluginClientOpenPanelOptions,
+  PluginScreenProps,
+  PluginSidebarItemProps,
+  PluginSurfaceProps,
+  PluginWorkspacePanelProps,
+} from "@getpaseo/plugin/client";
 import { useWorkspace } from "@getpaseo/plugin/client";
 import * as pluginUi from "@getpaseo/plugin/client/ui";
 import { useSyncExternalStore } from "react";
@@ -41,8 +47,12 @@ export function FactoryOnboardSidebarItem({ layout, currentScreen, openScreen }:
   );
 }
 
+export type FactoryOnboardScreenProps = PluginScreenProps & {
+  openPanel?: (id: string, options: PluginClientOpenPanelOptions) => void;
+};
+
 /** Desktop-only global Onboarding screen for unregistered Paseo Projects and host folders. */
-export function FactoryOnboardScreen(props: PluginScreenProps) {
+export function FactoryOnboardScreen(props: FactoryOnboardScreenProps) {
   if (props.layout.platform === "ios" || props.layout.platform === "android") return null;
   return (
     <FactoryTabErrorBoundary theme={props.theme} section="Onboarding">

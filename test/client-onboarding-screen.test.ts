@@ -75,6 +75,10 @@ async function loadScreenModule(entry: string, options: LoadOptions = {}): Promi
               exports.Modal = Modal;
               exports.useRpc = (contract) => (input) => globalThis.__onboardScreenTestRpc(contract.name, input);
               exports.useWorkspace = () => '/project';
+              exports.useWorkspaces = (query) => {
+                const fn = globalThis.__onboardScreenTestWorkspaces;
+                return fn ? fn(query) : [];
+              };
               exports.useProjects = (query) => {
                 const fn = globalThis.__onboardScreenTestProjects;
                 return fn ? fn(query) : [];
@@ -82,6 +86,18 @@ async function loadScreenModule(entry: string, options: LoadOptions = {}): Promi
               exports.useProject = (ref) => {
                 const fn = globalThis.__onboardScreenTestProject;
                 return fn ? fn(ref) : null;
+              };
+              exports.usePaseo = () => {
+                const fn = globalThis.__onboardScreenTestPaseo;
+                return fn ? fn() : {
+                  workspaces: {
+                    list: async () => ({ entries: [] }),
+                    create: async () => ({ id: 'ws-created-default' }),
+                  },
+                  projects: {
+                    ref: () => ({ createWorkspace: async () => ({ id: 'ws-project-default' }) }),
+                  },
+                };
               };
               exports.useToast = () => ({
                 show(msg, opts) { globalThis.__onboardScreenTestToasts?.push({ msg, opts }); },
@@ -586,5 +602,552 @@ test("OnboardingScreen mounts safely under an RN-like window on iOS/Android with
       delete (globalThis as any).__onboardScreenTestProject;
     }
   });
+});
+
+test("05-commit: isReusableLocalWorkspace reuses active non-worktree local workspaces and excludes worktrees, archiving workspaces, and mismatched roots", async () => {
+  const { isReusableLocalWorkspace } = await loadScreenModule("plugin/client/factory/onboarding-screen.tsx", { platformOs: "web" });
+  assert.equal(typeof isReusableLocalWorkspace, "function");
+  assert.equal(
+    isReusableLocalWorkspace(
+      { id: "ws-local", directory: "/Users/owner/work/app/", kind: "local_checkout", archivingAt: null },
+      "/Users/owner/work/app",
+    ),
+    true,
+  );
+  assert.equal(
+    isReusableLocalWorkspace(
+      { id: "ws-dir", workspaceDirectory: "/Users/owner/work/app", workspaceKind: "directory", archivingAt: null },
+      "/Users/owner/work/app/",
+    ),
+    true,
+  );
+  assert.equal(
+    isReusableLocalWorkspace(
+      { id: "ws-wt", directory: "/Users/owner/work/app", kind: "worktree", archivingAt: null },
+      "/Users/owner/work/app",
+    ),
+    false,
+    "worktree workspace is never reused as the local workspace",
+  );
+  assert.equal(
+    isReusableLocalWorkspace(
+      { id: "ws-arch", directory: "/Users/owner/work/app", kind: "local_checkout", archivingAt: "2026-11-18T00:00:00Z" },
+      "/Users/owner/work/app",
+    ),
+    false,
+    "archiving workspace is not reused",
+  );
+  assert.equal(
+    isReusableLocalWorkspace(
+      { id: "ws-internal", directory: "/Users/owner/work/app", kind: "directory", archivingAt: null, internal: true },
+      "/Users/owner/work/app",
+    ),
+    false,
+  );
+  assert.equal(
+    isReusableLocalWorkspace(
+      { id: "ws-other", directory: "/Users/owner/work/other", kind: "local_checkout", archivingAt: null },
+      "/Users/owner/work/app",
+    ),
+    false,
+  );
+});
+
+async function runWizardStepsToCommit(
+  container: HTMLElement,
+  act: (fn: () => void | Promise<void>) => Promise<void>,
+  options: {
+    initGit?: boolean;
+    profileId?: string;
+    directive?: string;
+  } = {},
+) {
+  const click = async (testId: string) => {
+    const el = container.querySelector(`[data-testid="${testId}"]`) as HTMLElement | null;
+    assert.ok(el, `missing ${testId}`);
+    await act(() => el.click());
+    await act(() => new Promise<void>((r) => setTimeout(r, 10)));
+  };
+
+  if (options.initGit) {
+    await click("factory-onboarding-init-git");
+  }
+  await click("factory-onboarding-next"); // -> Step 2
+  await click("factory-onboarding-next"); // -> Step 3
+  if (options.profileId) {
+    await click(`factory-onboarding-profile-${options.profileId}`);
+  }
+  await click("factory-onboarding-next"); // -> Step 4
+  if (options.directive !== undefined) {
+    const textarea = container.querySelector('[data-testid="factory-onboarding-directive"]') as HTMLInputElement | HTMLTextAreaElement;
+    assert.ok(textarea, "missing directive input");
+    const proto = textarea.tagName === "TEXTAREA"
+      ? textarea.ownerDocument.defaultView!.HTMLTextAreaElement.prototype
+      : textarea.ownerDocument.defaultView!.HTMLInputElement.prototype;
+    const setter = Object.getOwnPropertyDescriptor(proto, "value")!.set!;
+    await act(() => {
+      setter.call(textarea, options.directive!);
+      textarea.dispatchEvent(new textarea.ownerDocument.defaultView!.Event("input", { bubbles: true }));
+    });
+  }
+  await click("factory-onboarding-start");
+}
+
+test("05-commit: Step 4 Start reuses an existing active local workspace and opens workspace + Factory panel when no directive is entered", async () => {
+  const desktop = await loadScreenModule("plugin/index.client.tsx", { platformOs: "web" });
+  const { createElement } = await import("react");
+
+  const projects = [
+    {
+      ref: { kind: "project", key: "h1:p-new", hostId: "h1", id: "p-new" },
+      hostId: "h1",
+      displayName: "New App",
+      rootPath: "/Users/owner/work/new-app",
+      kind: "non_git",
+      iconRevision: null,
+    },
+  ];
+  const workspaces = [
+    { id: "ws-wt-1", hostId: "h1", directory: "/Users/owner/work/new-app", kind: "worktree", archivingAt: null },
+    { id: "ws-arch-1", hostId: "h1", directory: "/Users/owner/work/new-app", kind: "local_checkout", archivingAt: "2026-11-18T00:00:00Z" },
+    { id: "ws-active-local", hostId: "h1", directory: "/Users/owner/work/new-app/", kind: "local_checkout", archivingAt: null },
+  ];
+
+  const rpcCalls: { name: string; input: any }[] = [];
+  const createWorkspaceCalls: any[] = [];
+  const openedPanels: any[] = [];
+  const openedWorkspaces: any[] = [];
+  const openedAgents: any[] = [];
+  let RegisteredScreen: any;
+
+  const off = desktop.default({
+    addWorkspacePanel: () => () => {},
+    addSettingsScreen: () => () => {},
+    addSidebarFooterItem: () => () => {},
+    addScreen: (c: any) => { RegisteredScreen = c.Component; return () => {}; },
+    addCommandCenterItem: () => () => {},
+    addHeaderButton: () => ({ update() {}, remove() {} }),
+    addComposerPill: () => ({ update() {}, remove() {} }),
+    addWorkspaceRowBadgeItem: () => () => {},
+    subscribe: () => ({ unsubscribe() {} }),
+    rpc: async () => ({ ok: true, daemonError: null, projects: [], seats: [] }),
+    openPanel: (id: string, options: any) => openedPanels.push({ id, options }),
+    openSettings: () => {},
+    openScreen: () => {},
+  });
+
+  (globalThis as any).__onboardScreenTestProjects = (query: any) =>
+    projects.filter((p) => (!query?.hosts || query.hosts.includes(p.hostId)) && (!query?.where || query.where(p))).map((p) => p.ref);
+  (globalThis as any).__onboardScreenTestProject = (ref: any) =>
+    projects.find((p) => p.ref.key === ref.key) ?? null;
+  (globalThis as any).__onboardScreenTestWorkspaces = (query: any) =>
+    workspaces
+      .filter((w) => (!query?.hosts || query.hosts.includes(w.hostId)) && (!query?.where || query.where(w)))
+      .map((w) => ({ kind: "workspace", key: `h1:${w.id}`, hostId: w.hostId, id: w.id }));
+  (globalThis as any).__onboardScreenTestPaseo = () => ({
+    workspaces: {
+      list: async () => ({ entries: [] }),
+      create: async (opts: any) => {
+        createWorkspaceCalls.push({ kind: "workspaces.create", opts });
+        return { id: "ws-should-not-create" };
+      },
+    },
+    projects: {
+      ref: (ref: any) => ({
+        createWorkspace: async (opts: any) => {
+          createWorkspaceCalls.push({ kind: "projects.ref.createWorkspace", ref, opts });
+          return { id: "ws-should-not-create" };
+        },
+      }),
+    },
+  });
+  (globalThis as any).__onboardScreenTestToasts = [];
+  (globalThis as any).__onboardScreenTestRpc = async (name: string, input: any) => {
+    rpcCalls.push({ name, input });
+    if (name === "factory.seats.directory") return { ok: true, daemonError: null, seats: [], projects: [] };
+    if (name === "factory.snapshot") {
+      return {
+        ok: true,
+        view: {
+          ...makeSnapshotView(),
+          profiles: [
+            {
+              id: "fast",
+              name: "Fast",
+              description: null,
+              lanes: {
+                supervisor: "claude/sonnet-4-6",
+                lead: "pi/zcode/glm-5.3:low",
+                worker: "pi/zcode/glm-5.3:off",
+                watch: "claude/haiku-4-5",
+                freshEyes: "claude/sonnet-4-6",
+              },
+              updatedAt: "2026-11-18T00:00:00Z",
+            },
+          ],
+        },
+      };
+    }
+    if (name === "factory.onboarding.browse") {
+      return { ok: true, path: "/Users/owner", parent: "/Users", home: "/Users/owner", entries: [] };
+    }
+    if (name === "factory.onboarding.inspect") {
+      return {
+        ok: true,
+        folder: input.folder,
+        gitRepo: false,
+        hasCommits: false,
+        registered: false,
+        existingLead: false,
+        existingSupervisor: false,
+        prerequisites: [],
+        missingPrerequisites: [],
+      };
+    }
+    if (name === "factory.onboarding.commit") {
+      return {
+        ok: true,
+        agentId: "agent-sup-1",
+        projectRoot: "/Users/owner/work/new-app",
+        slug: "new-app-123456",
+        bootstrapped: true,
+        summary: "Initialised Git and set up new-app",
+      };
+    }
+    return { ok: false, error: `unexpected rpc ${name}` };
+  };
+
+  try {
+    await mountDom(async (createRoot, container, act) => {
+      const root = createRoot(container);
+      try {
+        await act(() =>
+          root.render(
+            createElement(RegisteredScreen, {
+              theme: testTheme,
+              host: { id: "h1", label: "Local" },
+              layout: { compact: false, platform: "web" },
+              params: {},
+              navigation: {
+                openAgent: (input: any) => openedAgents.push(input),
+                openWorkspace: (input: any) => openedWorkspaces.push(input),
+              },
+            }),
+          ),
+        );
+        await act(() => new Promise<void>((r) => setTimeout(r, 10)));
+
+        await act(() => (container.querySelector('[data-testid="factory-onboard-project-p-new"]') as HTMLElement).click());
+        await act(() => new Promise<void>((r) => setTimeout(r, 10)));
+
+        await runWizardStepsToCommit(container, act, { initGit: true, profileId: "fast" });
+
+        const commit = rpcCalls.find((c) => c.name === "factory.onboarding.commit");
+        assert.ok(commit, "onboardingCommit called");
+        assert.deepEqual(commit!.input, {
+          folder: "/Users/owner/work/new-app",
+          initGit: true,
+          profileId: "fast",
+          models: {
+            supervisor: "claude/sonnet-4-6",
+            lead: "pi/zcode/glm-5.3:low",
+            worker: "pi/zcode/glm-5.3:off",
+          },
+        });
+        assert.deepEqual(createWorkspaceCalls, [], "reuses existing active local workspace without creating a duplicate");
+        assert.deepEqual(openedAgents, []);
+        assert.deepEqual(openedWorkspaces, [{ workspaceId: "ws-active-local", serverId: "h1" }]);
+        assert.deepEqual(openedPanels, [{ id: "paseo-factory", options: { workspaceId: "ws-active-local", location: "workspace" } }]);
+      } finally {
+        await act(() => root.unmount());
+      }
+    });
+  } finally {
+    off();
+    delete (globalThis as any).__onboardScreenTestRpc;
+    delete (globalThis as any).__onboardScreenTestProjects;
+    delete (globalThis as any).__onboardScreenTestProject;
+    delete (globalThis as any).__onboardScreenTestWorkspaces;
+    delete (globalThis as any).__onboardScreenTestPaseo;
+    delete (globalThis as any).__onboardScreenTestToasts;
+  }
+});
+
+test("05-commit: Step 4 Start creates a clean local workspace via projects.ref(ref).createWorkspace (zero dummy agent) when a ProjectRef exists, or workspaces.create for arbitrary folders", async () => {
+  const { OnboardingScreen } = await loadScreenModule("plugin/client/factory/onboarding-screen.tsx", { platformOs: "web" });
+  const { createElement } = await import("react");
+
+  const projectRef = { kind: "project", key: "h1:p-zero", hostId: "h1", id: "p-zero" };
+  const projects = [
+    {
+      ref: projectRef,
+      hostId: "h1",
+      displayName: "Zero Workspace App",
+      rootPath: "/Users/owner/work/zero-ws",
+      kind: "git",
+      iconRevision: null,
+    },
+  ];
+
+  // Case A: Unregistered Paseo Project with zero active local workspaces (only a worktree exists).
+  {
+    const createCalls: any[] = [];
+    const openedWorkspaces: any[] = [];
+    const openedPanels: any[] = [];
+
+    (globalThis as any).__onboardScreenTestProjects = (query: any) =>
+      projects.filter((p) => (!query?.hosts || query.hosts.includes(p.hostId)) && (!query?.where || query.where(p))).map((p) => p.ref);
+    (globalThis as any).__onboardScreenTestProject = (ref: any) =>
+      projects.find((p) => p.ref.key === ref.key) ?? null;
+    (globalThis as any).__onboardScreenTestWorkspaces = () => [];
+    (globalThis as any).__onboardScreenTestPaseo = () => ({
+      workspaces: {
+        list: async () => ({
+          entries: [{ id: "ws-only-wt", workspaceDirectory: "/Users/owner/work/zero-ws", workspaceKind: "worktree", archivingAt: null }],
+        }),
+        create: async (opts: any) => {
+          createCalls.push({ via: "workspaces.create", opts });
+          return { id: "ws-fallback" };
+        },
+      },
+      projects: {
+        ref: (ref: any) => ({
+          createWorkspace: async (opts: any) => {
+            createCalls.push({ via: "projects.ref.createWorkspace", ref, opts });
+            return { id: "ws-created-via-project" };
+          },
+        }),
+      },
+    });
+    (globalThis as any).__onboardScreenTestToasts = [];
+    (globalThis as any).__onboardScreenTestRpc = async (name: string, input: any) => {
+      if (name === "factory.seats.directory") return { ok: true, daemonError: null, seats: [], projects: [] };
+      if (name === "factory.snapshot") return { ok: true, view: makeSnapshotView() };
+      if (name === "factory.onboarding.browse") return { ok: true, path: "/Users/owner", parent: "/Users", home: "/Users/owner", entries: [] };
+      if (name === "factory.onboarding.inspect") {
+        return { ok: true, folder: input.folder, gitRepo: true, hasCommits: true, registered: false, existingLead: false, existingSupervisor: false, prerequisites: [], missingPrerequisites: [] };
+      }
+      if (name === "factory.onboarding.commit") {
+        return { ok: true, agentId: "agent-sup-zero", projectRoot: "/Users/owner/work/zero-ws", slug: "zero-ws-111111", bootstrapped: false, summary: "Set up zero-ws" };
+      }
+      return { ok: false, error: `unexpected ${name}` };
+    };
+
+    try {
+      await mountDom(async (createRoot, container, act) => {
+        const root = createRoot(container);
+        try {
+          await act(() =>
+            root.render(
+              createElement(OnboardingScreen, {
+                theme: testTheme,
+                host: { id: "h1", label: "Local" },
+                layout: { compact: false, platform: "web" },
+                params: {},
+                navigation: {
+                  openAgent: () => {},
+                  openWorkspace: (input: any) => openedWorkspaces.push(input),
+                },
+                openPanel: (id: string, options: any) => openedPanels.push({ id, options }),
+              }),
+            ),
+          );
+          await act(() => new Promise<void>((r) => setTimeout(r, 10)));
+          await act(() => (container.querySelector('[data-testid="factory-onboard-project-p-zero"]') as HTMLElement).click());
+          await act(() => new Promise<void>((r) => setTimeout(r, 10)));
+          await runWizardStepsToCommit(container, act);
+
+          assert.equal(createCalls.length, 1);
+          assert.equal(createCalls[0].via, "projects.ref.createWorkspace");
+          assert.deepEqual(createCalls[0].ref, projectRef);
+          assert.equal("agent" in (createCalls[0].opts ?? {}), false, "creates workspace with zero dummy agent session");
+          assert.deepEqual(openedWorkspaces, [{ workspaceId: "ws-created-via-project", serverId: "h1" }]);
+          assert.deepEqual(openedPanels, [{ id: "paseo-factory", options: { workspaceId: "ws-created-via-project", location: "workspace" } }]);
+        } finally {
+          await act(() => root.unmount());
+        }
+      });
+    } finally {
+      delete (globalThis as any).__onboardScreenTestRpc;
+      delete (globalThis as any).__onboardScreenTestProjects;
+      delete (globalThis as any).__onboardScreenTestProject;
+      delete (globalThis as any).__onboardScreenTestWorkspaces;
+      delete (globalThis as any).__onboardScreenTestPaseo;
+      delete (globalThis as any).__onboardScreenTestToasts;
+    }
+  }
+
+  // Case B: Arbitrary folder selected via Folder Browser (no matching ProjectRef) -> workspaces.create({ source: { kind: "directory", path } }).
+  {
+    const createCalls: any[] = [];
+    const openedWorkspaces: any[] = [];
+    const openedPanels: any[] = [];
+
+    (globalThis as any).__onboardScreenTestProjects = () => [];
+    (globalThis as any).__onboardScreenTestProject = () => null;
+    (globalThis as any).__onboardScreenTestWorkspaces = () => [];
+    (globalThis as any).__onboardScreenTestPaseo = () => ({
+      workspaces: {
+        list: async () => ({ entries: [] }),
+        create: async (opts: any) => {
+          createCalls.push({ via: "workspaces.create", opts });
+          return { id: "ws-created-folder" };
+        },
+      },
+      projects: {
+        ref: () => ({
+          createWorkspace: async () => {
+            throw new Error("should not call projects.ref.createWorkspace without matching ProjectRef");
+          },
+        }),
+      },
+    });
+    (globalThis as any).__onboardScreenTestToasts = [];
+    (globalThis as any).__onboardScreenTestRpc = async (name: string, input: any) => {
+      if (name === "factory.seats.directory") return { ok: true, daemonError: null, seats: [], projects: [] };
+      if (name === "factory.snapshot") return { ok: true, view: makeSnapshotView() };
+      if (name === "factory.onboarding.browse") {
+        return { ok: true, path: "/Users/owner/folder-app", parent: "/Users/owner", home: "/Users/owner", entries: [] };
+      }
+      if (name === "factory.onboarding.inspect") {
+        return { ok: true, folder: input.folder, gitRepo: true, hasCommits: true, registered: false, existingLead: false, existingSupervisor: false, prerequisites: [], missingPrerequisites: [] };
+      }
+      if (name === "factory.onboarding.commit") {
+        return { ok: true, agentId: "agent-sup-folder", projectRoot: "/Users/owner/folder-app", slug: "folder-app-222222", bootstrapped: false, summary: "Set up folder-app" };
+      }
+      return { ok: false, error: `unexpected ${name}` };
+    };
+
+    try {
+      await mountDom(async (createRoot, container, act) => {
+        const root = createRoot(container);
+        try {
+          await act(() =>
+            root.render(
+              createElement(OnboardingScreen, {
+                theme: testTheme,
+                host: { id: "h1", label: "Local" },
+                layout: { compact: false, platform: "web" },
+                params: {},
+                navigation: {
+                  openAgent: () => {},
+                  openWorkspace: (input: any) => openedWorkspaces.push(input),
+                },
+                openPanel: (id: string, options: any) => openedPanels.push({ id, options }),
+              }),
+            ),
+          );
+          await act(() => new Promise<void>((r) => setTimeout(r, 10)));
+          await act(() => (container.querySelector('[data-testid="factory-onboard-select-folder"]') as HTMLElement).click());
+          await act(() => new Promise<void>((r) => setTimeout(r, 10)));
+          await runWizardStepsToCommit(container, act);
+
+          assert.equal(createCalls.length, 1);
+          assert.equal(createCalls[0].via, "workspaces.create");
+          assert.deepEqual(createCalls[0].opts, { source: { kind: "directory", path: "/Users/owner/folder-app" } });
+          assert.equal("agent" in createCalls[0].opts, false, "no dummy agent session");
+          assert.deepEqual(openedWorkspaces, [{ workspaceId: "ws-created-folder", serverId: "h1" }]);
+          assert.deepEqual(openedPanels, [{ id: "paseo-factory", options: { workspaceId: "ws-created-folder", location: "workspace" } }]);
+        } finally {
+          await act(() => root.unmount());
+        }
+      });
+    } finally {
+      delete (globalThis as any).__onboardScreenTestRpc;
+      delete (globalThis as any).__onboardScreenTestProjects;
+      delete (globalThis as any).__onboardScreenTestProject;
+      delete (globalThis as any).__onboardScreenTestWorkspaces;
+      delete (globalThis as any).__onboardScreenTestPaseo;
+      delete (globalThis as any).__onboardScreenTestToasts;
+    }
+  }
+});
+
+test("05-commit: Step 4 Start with a directive navigates via openAgent without opening workspace/panel, and handles workspace errors gracefully", async () => {
+  const { OnboardingScreen } = await loadScreenModule("plugin/client/factory/onboarding-screen.tsx", { platformOs: "web" });
+  const { createElement } = await import("react");
+
+  const openedAgents: any[] = [];
+  const openedWorkspaces: any[] = [];
+  const openedPanels: any[] = [];
+  const toasts: any[] = [];
+  let commitCount = 0;
+
+  (globalThis as any).__onboardScreenTestProjects = () => [];
+  (globalThis as any).__onboardScreenTestProject = () => null;
+  (globalThis as any).__onboardScreenTestWorkspaces = () => [];
+  (globalThis as any).__onboardScreenTestPaseo = () => ({
+    workspaces: {
+      list: async () => { throw new Error("list unavailable"); },
+      create: async () => { throw new Error("create unavailable"); },
+    },
+    projects: {
+      ref: () => ({ createWorkspace: async () => { throw new Error("create unavailable"); } }),
+    },
+  });
+  (globalThis as any).__onboardScreenTestToasts = toasts;
+  (globalThis as any).__onboardScreenTestRpc = async (name: string, input: any) => {
+    if (name === "factory.seats.directory") return { ok: true, daemonError: null, seats: [], projects: [] };
+    if (name === "factory.snapshot") return { ok: true, view: makeSnapshotView() };
+    if (name === "factory.onboarding.browse") return { ok: true, path: "/Users/owner/dir-app", parent: "/Users/owner", home: "/Users/owner", entries: [] };
+    if (name === "factory.onboarding.inspect") {
+      return { ok: true, folder: input.folder, gitRepo: true, hasCommits: true, registered: false, existingLead: false, existingSupervisor: false, prerequisites: [], missingPrerequisites: [] };
+    }
+    if (name === "factory.onboarding.commit") {
+      commitCount += 1;
+      return { ok: true, agentId: `agent-sup-${commitCount}`, projectRoot: "/Users/owner/dir-app", slug: "dir-app-333333", bootstrapped: false, summary: "Set up dir-app" };
+    }
+    return { ok: false, error: `unexpected ${name}` };
+  };
+
+  try {
+    await mountDom(async (createRoot, container, act) => {
+      const root = createRoot(container);
+      try {
+        // 1. With directive: even if workspace lookup/create fails, openAgent still navigates cleanly.
+        await act(() =>
+          root.render(
+            createElement(OnboardingScreen, {
+              theme: testTheme,
+              host: { id: "h1", label: "Local" },
+              layout: { compact: false, platform: "web" },
+              params: { folder: "/Users/owner/dir-app" },
+              navigation: {
+                openAgent: (input: any) => openedAgents.push(input),
+                openWorkspace: (input: any) => openedWorkspaces.push(input),
+              },
+              openPanel: (id: string, options: any) => openedPanels.push({ id, options }),
+            }),
+          ),
+        );
+        await act(() => new Promise<void>((r) => setTimeout(r, 10)));
+        await runWizardStepsToCommit(container, act, { directive: "Ship onboarding" });
+
+        assert.deepEqual(openedAgents, [{ agentId: "agent-sup-1", serverId: "h1" }]);
+        assert.deepEqual(openedWorkspaces, []);
+        assert.deepEqual(openedPanels, []);
+
+        // 2. Without directive when workspace create fails: does not throw unhandled rejection, warns via toast, returns cleanly to picker.
+        await act(() => (container.querySelector('[data-testid="factory-onboard-change-folder"]') as HTMLElement).click());
+        await act(() => (container.querySelector('[data-testid="factory-onboard-select-folder"]') as HTMLElement).click());
+        await act(() => new Promise<void>((r) => setTimeout(r, 10)));
+        await runWizardStepsToCommit(container, act);
+
+        assert.deepEqual(openedAgents, [{ agentId: "agent-sup-1", serverId: "h1" }]);
+        assert.deepEqual(openedWorkspaces, []);
+        assert.deepEqual(openedPanels, []);
+        assert.ok(toasts.some((t) => /workspace/i.test(t.msg) && (t.error || t.opts?.variant === "warning")));
+      } finally {
+        await act(() => root.unmount());
+      }
+    });
+  } finally {
+    delete (globalThis as any).__onboardScreenTestRpc;
+    delete (globalThis as any).__onboardScreenTestProjects;
+    delete (globalThis as any).__onboardScreenTestProject;
+    delete (globalThis as any).__onboardScreenTestWorkspaces;
+    delete (globalThis as any).__onboardScreenTestPaseo;
+    delete (globalThis as any).__onboardScreenTestToasts;
+  }
 });
 

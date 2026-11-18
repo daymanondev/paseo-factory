@@ -65,7 +65,12 @@ export default function contribute(client: PluginClientContext) {
         client.addScreen({
           id: ONBOARD_SCREEN_ID,
           title: "Onboard Project",
-          Component: FactoryOnboardScreen,
+          Component: (props) => (
+            <FactoryOnboardScreen
+              {...props}
+              openPanel={(id, options) => client.openPanel?.(id, options)}
+            />
+          ),
         }),
       );
     }
