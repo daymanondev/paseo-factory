@@ -115,6 +115,57 @@ test("the commit payload carries the folder, the three models, the trimmed direc
   const bare = commitInputOf(initialWizard(MACHINE_LANES), readyInspection, "/work/my-app");
   assert.equal("directive" in bare, false, "no directive, no first message");
   assert.equal("openDesignProjectId" in bare, false);
+  assert.equal("profileId" in bare, false, "no profile active, no profileId");
+});
+
+test("02-profiles: selecting a profile prefills seats and sets profileId, editing a seat marks modified, and machineDefaults clears it", async () => {
+  const { initialWizard, reduceWizard, commitInputOf } = await loadClientModule("plugin/client/factory/onboarding-state.ts");
+  const fastProfile = {
+    id: "fast",
+    lanes: { supervisor: "claude/sonnet-4-6", lead: "pi/zcode/glm-5.3:low", worker: "pi/zcode/glm-5.3:off" },
+  };
+  let state = initialWizard(MACHINE_LANES);
+  assert.equal(state.profileId, null);
+  assert.equal(state.profileModified, false);
+
+  state = reduceWizard(state, { type: "profile", profile: fastProfile });
+  assert.equal(state.profileId, "fast");
+  assert.equal(state.profileModified, false);
+  assert.deepEqual(state.lanes, fastProfile.lanes);
+  assert.deepEqual(commitInputOf(state, readyInspection, "/work/my-app"), {
+    folder: "/work/my-app",
+    profileId: "fast",
+    models: fastProfile.lanes,
+  });
+
+  // Back/Next preserves profileId and profileModified.
+  state = reduceWizard(state, { type: "next" });
+  state = reduceWizard(state, { type: "lane", lane: "lead", value: "claude/opus-4-8:high" });
+  assert.equal(state.profileId, "fast");
+  assert.equal(state.profileModified, true);
+  assert.equal(state.lanes.lead, "claude/opus-4-8:high");
+  state = reduceWizard(state, { type: "back" });
+  assert.equal(state.profileId, "fast");
+  assert.equal(state.profileModified, true);
+  assert.equal(commitInputOf(state, readyInspection, "/work/my-app").profileId, "fast");
+  assert.equal(commitInputOf(state, readyInspection, "/work/my-app").models?.lead, "claude/opus-4-8:high");
+
+  // Re-selecting the same or another profile clears modified.
+  state = reduceWizard(state, { type: "profile", profile: fastProfile });
+  assert.equal(state.profileId, "fast");
+  assert.equal(state.profileModified, false);
+  assert.deepEqual(state.lanes, fastProfile.lanes);
+
+  // Editing a seat with the exact same value does not mark modified.
+  state = reduceWizard(state, { type: "lane", lane: "lead", value: fastProfile.lanes.lead });
+  assert.equal(state.profileModified, false);
+
+  // Reverting to machine defaults clears profileId and profileModified and restores machineLanes.
+  state = reduceWizard(state, { type: "machineDefaults", machineLanes: MACHINE_LANES });
+  assert.equal(state.profileId, null);
+  assert.equal(state.profileModified, false);
+  assert.deepEqual(state.lanes, { supervisor: MACHINE_LANES.supervisor, lead: MACHINE_LANES.lead, worker: MACHINE_LANES.worker });
+  assert.equal("profileId" in commitInputOf(state, readyInspection, "/work/my-app"), false);
 });
 
 // ---- the four steps, as an Owner sees them --------------------------------------------------
@@ -280,6 +331,177 @@ test("01-badges: OnboardingWizard applies FACTORY_PALETTE to progress steps, Ste
   assert.match(summary, /pi\/zcode\/glm-5\.3/);
   assert.match(summary, /Owner screens/);
   assert.ok(summary.includes("#7459b4") && summary.includes("#2f7899") && summary.includes("#287a81"), "summary carries seat colours");
+});
+
+const SAMPLE_PROFILES = [
+  {
+    id: "fast",
+    name: "Fast",
+    description: "Quick turnaround models",
+    lanes: {
+      supervisor: "claude/sonnet-4-6",
+      lead: "pi/zcode/glm-5.3:low",
+      worker: "pi/zcode/glm-5.3:off",
+      watch: "claude/haiku-4-5",
+      freshEyes: "claude/sonnet-4-6",
+    },
+    updatedAt: "2026-11-18T00:00:00.000Z",
+  },
+  {
+    id: "quality",
+    name: "Quality",
+    description: null,
+    lanes: {
+      supervisor: "claude/opus-4-8:high",
+      lead: "claude/opus-4-8:high",
+      worker: "claude/sonnet-4-6:medium",
+      watch: "claude/haiku-4-5",
+      freshEyes: "claude/opus-4-8",
+    },
+    updatedAt: "2026-11-18T00:00:00.000Z",
+  },
+];
+
+test("02-profiles: Step 3 renders Lane profile pills + Machine defaults, highlights active selection with FACTORY_PALETTE, and shows modified badge when a seat diverges", async () => {
+  const profileView = { ...view, profiles: SAMPLE_PROFILES };
+
+  // Default state: Machine defaults is selected.
+  const defaultHtml = await render({ step: 3, inspection: readyInspection }, { view: profileView });
+  assert.ok(hasHook(defaultHtml, "factory-onboarding-profiles"));
+  assert.match(defaultHtml, /Lane profile/);
+  assert.ok(hasHook(defaultHtml, "factory-onboarding-profile-machine-defaults"));
+  assert.ok(hasHook(defaultHtml, "factory-onboarding-profile-fast"));
+  assert.ok(hasHook(defaultHtml, "factory-onboarding-profile-quality"));
+  assert.match(elementOf(defaultHtml, "factory-onboarding-profile-machine-defaults"), /data-selected="true"/);
+  assert.ok(elementOf(defaultHtml, "factory-onboarding-profile-machine-defaults").includes("#2f7899"), "active selection uses palette.lead");
+  assert.match(elementOf(defaultHtml, "factory-onboarding-profile-fast"), /data-selected="false"/);
+  assert.equal(hasHook(defaultHtml, "factory-onboarding-profile-modified"), false);
+
+  // Selected profile state: prefills profile seats and does not mark them changed.
+  const selectedHtml = await render({ step: 3, inspection: readyInspection, profileId: "fast" }, { view: profileView });
+  assert.match(elementOf(selectedHtml, "factory-onboarding-profile-fast"), /data-selected="true"/);
+  assert.ok(elementOf(selectedHtml, "factory-onboarding-profile-fast").includes("#2f7899"), "active profile uses palette.lead");
+  assert.match(elementOf(selectedHtml, "factory-onboarding-profile-machine-defaults"), /data-selected="false"/);
+  assert.match(elementOf(selectedHtml, "factory-onboarding-lane-supervisor"), /claude\/sonnet-4-6/);
+  assert.match(elementOf(selectedHtml, "factory-onboarding-lane-lead"), /pi\/zcode\/glm-5\.3:low/);
+  assert.equal(hasHook(selectedHtml, "factory-onboarding-lane-changed-supervisor"), false);
+  assert.equal(hasHook(selectedHtml, "factory-onboarding-lane-changed-lead"), false);
+  assert.equal(hasHook(selectedHtml, "factory-onboarding-profile-modified"), false);
+
+  // Modified profile state: a diverged seat shows changed and the profile shows modified with palette.wait.
+  const modifiedHtml = await render(
+    {
+      step: 3,
+      inspection: readyInspection,
+      profileId: "fast",
+      profileModified: true,
+      lanes: { ...SAMPLE_PROFILES[0]!.lanes, lead: "claude/opus-4-8:high" },
+    },
+    { view: profileView },
+  );
+  assert.ok(hasHook(modifiedHtml, "factory-onboarding-profile-modified"));
+  assert.ok(elementOf(modifiedHtml, "factory-onboarding-profile-modified").includes("#8f680218"), "modified badge uses palette.wait");
+  assert.ok(hasHook(modifiedHtml, "factory-onboarding-lane-changed-lead"));
+  assert.equal(hasHook(modifiedHtml, "factory-onboarding-lane-changed-supervisor"), false);
+
+  const darkTheme = { colors: { ...theme.colors, surface0: "#000000" } };
+  const darkModifiedHtml = await render(
+    {
+      step: 3,
+      inspection: readyInspection,
+      profileId: "fast",
+      profileModified: true,
+      lanes: { ...SAMPLE_PROFILES[0]!.lanes, lead: "claude/opus-4-8:high" },
+    },
+    { theme: darkTheme, view: profileView },
+  );
+  assert.ok(elementOf(darkModifiedHtml, "factory-onboarding-profile-fast").includes("#5fa8cc"), "dark active profile uses palette.lead");
+  assert.ok(elementOf(darkModifiedHtml, "factory-onboarding-profile-modified").includes("#cd9a2218"), "dark modified badge uses palette.wait");
+
+  // Step 4 summary names the selected profile and modified marker.
+  const step4Html = await render(
+    {
+      step: 4,
+      inspection: readyInspection,
+      profileId: "fast",
+      profileModified: true,
+      lanes: { ...SAMPLE_PROFILES[0]!.lanes, lead: "claude/opus-4-8:high" },
+    },
+    { view: profileView },
+  );
+  assert.match(elementOf(step4Html, "factory-onboarding-summary"), /Fast \(modified\)/);
+});
+
+test("02-profiles: clicking a profile pill prefills seats, Machine defaults resets, and Start submits profileId", async () => {
+  const { OnboardingWizard } = await loadClientModule("plugin/client/factory/onboarding-wizard.tsx");
+  const { createElement } = await import("react");
+  const { createRoot } = await import("react-dom/client");
+  const { act } = await import("react");
+  const { JSDOM } = (await import(["jsdom"].join(""))) as { JSDOM: new (html: string) => { window: any } };
+  const dom = new JSDOM("<!doctype html><div id=root></div>");
+  const g = globalThis as Record<string, unknown>;
+  const saved = { window: g.window, document: g.document, IS_REACT_ACT_ENVIRONMENT: g.IS_REACT_ACT_ENVIRONMENT };
+  g.window = dom.window;
+  g.document = dom.window.document;
+  g.IS_REACT_ACT_ENVIRONMENT = true;
+  const started: unknown[] = [];
+  const root = createRoot(dom.window.document.getElementById("root")!);
+  try {
+    await act(async () => {
+      root.render(
+        createElement(OnboardingWizard, {
+          theme,
+          view: { ...view, profiles: SAMPLE_PROFILES },
+          folder: "/work/my-app",
+          actions: {
+            ...noopActions,
+            start: async (input: unknown) => {
+              started.push(input);
+              return { ok: true as const };
+            },
+          },
+          initialUi: { step: 3, inspection: readyInspection },
+        }),
+      );
+    });
+    const click = async (testId: string) => {
+      const el = dom.window.document.querySelector(`[data-testid="${testId}"]`);
+      assert.ok(el, `missing ${testId}`);
+      await act(async () => {
+        el.click();
+      });
+    };
+
+    await click("factory-onboarding-profile-fast");
+    assert.equal(dom.window.document.querySelector('[data-testid="factory-onboarding-profile-fast"]')?.getAttribute("data-selected"), "true");
+    assert.match(dom.window.document.querySelector('[data-testid="factory-onboarding-lane-supervisor"]')?.textContent ?? "", /claude\/sonnet-4-6/);
+
+    await click("factory-onboarding-profile-machine-defaults");
+    assert.equal(dom.window.document.querySelector('[data-testid="factory-onboarding-profile-machine-defaults"]')?.getAttribute("data-selected"), "true");
+    assert.match(dom.window.document.querySelector('[data-testid="factory-onboarding-lane-supervisor"]')?.textContent ?? "", /claude\/opus-4-8/);
+
+    await click("factory-onboarding-profile-fast");
+    await click("factory-onboarding-next");
+    await click("factory-onboarding-start");
+    assert.equal(started.length, 1);
+    assert.deepEqual(started[0], {
+      folder: "/work/my-app",
+      profileId: "fast",
+      models: {
+        supervisor: "claude/sonnet-4-6",
+        lead: "pi/zcode/glm-5.3:low",
+        worker: "pi/zcode/glm-5.3:off",
+      },
+    });
+    await act(async () => {
+      root.unmount();
+    });
+  } finally {
+    g.window = saved.window;
+    g.document = saved.document;
+    g.IS_REACT_ACT_ENVIRONMENT = saved.IS_REACT_ACT_ENVIRONMENT;
+    dom.window.close();
+  }
 });
 
 // ---- panel integration + structural pins -----------------------------------------------------
