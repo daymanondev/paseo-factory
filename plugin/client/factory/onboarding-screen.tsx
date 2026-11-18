@@ -1,16 +1,20 @@
 /**
  * Global Onboarding screen (`paseo-factory-onboard`, ADR 0063) — desktop-only.
- * Offers 1-click selection of unregistered Paseo Projects from `useProjects()`
+ * Offers 1-click selection of unregistered Paseo Projects from `paseo.projects.list()`
  * and a visual Folder Browser backed by read-only `onboardingBrowse`, then
  * mounts the shared 4-step `<OnboardingWizard />` inline without mutating disk
  * until Step 4 Start.
  *
+ * Uses `usePaseo()` + `useRpc()` rather than `@getpaseo/plugin`'s `client-state`
+ * hooks (`useProjects` / `useWorkspaces`), because `addScreen` surfaces run
+ * under `PaseoApiProvider` + `PluginRpcProvider` without `PluginClientStateProvider`.
+ *
  * Function components only — no class syntax reaches the Hermes bundle.
  */
-import type { PluginClientOpenPanelOptions, PluginScreenProps, ProjectRef } from "@getpaseo/plugin/client";
-import { usePaseo, useProject, useProjects, useRpc, useWorkspaces } from "@getpaseo/plugin/client";
+import type { PluginClientOpenPanelOptions, PluginScreenProps } from "@getpaseo/plugin/client";
+import { usePaseo, useRpc } from "@getpaseo/plugin/client";
 import { Icon, Loading, ScrollView, TextInput, useToast } from "@getpaseo/plugin/client/ui";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import type { z } from "zod";
 import {
@@ -31,9 +35,10 @@ import {
   isFactoryRegisteredRoot,
   isReusableLocalWorkspace,
   normalizeFolderPath,
+  projectDisplayLabel,
   resolveOrCreateProjectWorkspace,
 } from "./onboarding-targets.ts";
-import type { WorkspaceCandidate } from "./onboarding-targets.ts";
+import type { PaseoProjectTarget, WorkspaceCandidate } from "./onboarding-targets.ts";
 import { OnboardingWizard } from "./onboarding-wizard.tsx";
 
 export { filterUnregisteredProjects, isFactoryRegisteredRoot, isReusableLocalWorkspace, normalizeFolderPath };
@@ -116,30 +121,26 @@ function SelectableFolderRow({
 }
 
 function UnregisteredProjectRow({
-  projectRef,
+  project,
   theme,
-  registeredProjects,
   onSelect,
 }: {
-  projectRef: ProjectRef;
+  project: PaseoProjectTarget;
   theme: PluginScreenProps["theme"];
-  registeredProjects: readonly Pick<ProjectDirectoryEntry, "root">[];
   onSelect: (folder: string) => void;
 }) {
-  const project = useProject(projectRef);
-  if (project === null || isFactoryRegisteredRoot(project.rootPath, registeredProjects)) return null;
-  const isGit = project.kind === "git";
+  const isGit = project.projectKind === "git";
   return (
     <SelectableFolderRow
       theme={theme}
-      testID={`factory-onboard-project-${project.ref.id}`}
-      title={project.displayName}
-      subtitle={project.rootPath}
+      testID={`factory-onboard-project-${project.projectId}`}
+      title={projectDisplayLabel(project)}
+      subtitle={project.projectRootPath}
       gitRepo={isGit}
       badgeLabel={isGit ? "Git" : "Folder"}
-      badgeTestID={`factory-onboard-project-badge-${project.ref.id}`}
+      badgeTestID={`factory-onboard-project-badge-${project.projectId}`}
       showChevron
-      onPress={() => onSelect(project.rootPath)}
+      onPress={() => onSelect(project.projectRootPath)}
     />
   );
 }
@@ -168,6 +169,7 @@ export function OnboardingScreen({
   const openDesignCatalogCall = useRpc(openDesignCatalog);
 
   const [registeredProjects, setRegisteredProjects] = useState<readonly ProjectDirectoryEntry[]>([]);
+  const [paseoProjects, setPaseoProjects] = useState<readonly PaseoProjectTarget[]>([]);
   const [view, setView] = useState<FactoryView | null>(null);
   const [snapshotError, setSnapshotError] = useState<string | null>(null);
   const [selectedFolder, setSelectedFolder] = useState<string | null>(() => {
@@ -215,10 +217,26 @@ export function OnboardingScreen({
     [browseCall, mobile],
   );
 
+  const refreshPaseoProjects = useCallback(async (): Promise<void> => {
+    if (mobile || typeof paseo?.projects?.list !== "function") return;
+    try {
+      const listed = await paseo.projects.list();
+      if (alive.current && Array.isArray(listed?.projects)) {
+        setPaseoProjects(listed.projects);
+      }
+    } catch {
+      // Host projects list is advisory; Folder Browser remains usable on failure.
+    }
+  }, [mobile, paseo]);
+
   const loadSnapshotAndDirectory = useCallback(async (): Promise<void> => {
     if (mobile) return;
     setSnapshotError(null);
-    const [dirResult, snapResult] = await Promise.allSettled([seatsDirectoryCall({}), snapshotCall({})]);
+    const [dirResult, snapResult] = await Promise.allSettled([
+      seatsDirectoryCall({}),
+      snapshotCall({}),
+      refreshPaseoProjects(),
+    ]);
     if (!alive.current) return;
     if (dirResult.status === "fulfilled" && dirResult.value.ok) {
       setRegisteredProjects(dirResult.value.projects);
@@ -232,30 +250,27 @@ export function OnboardingScreen({
     } else {
       setSnapshotError(snapResult.reason instanceof Error ? snapResult.reason.message : String(snapResult.reason));
     }
-  }, [mobile, seatsDirectoryCall, snapshotCall]);
+  }, [mobile, refreshPaseoProjects, seatsDirectoryCall, snapshotCall]);
 
   useEffect(() => {
     if (mobile) return;
     void loadSnapshotAndDirectory();
     void browseTo();
+    if (typeof paseo?.projects?.subscribe === "function") {
+      return paseo.projects.subscribe(() => {
+        void refreshPaseoProjects();
+      });
+    }
+    return undefined;
   }, [mobile]);
 
-  const unregisteredRefs = useProjects({
-    ...(host.id ? { hosts: [host.id] } : {}),
-    where: (project) => !isFactoryRegisteredRoot(project.rootPath, registeredProjects),
-    orderBy: "displayName",
-  });
-  const matchingProjectRefs = useProjects({
-    ...(host.id ? { hosts: [host.id] } : {}),
-    where: (project) =>
-      selectedFolder !== null &&
-      normalizeFolderPath(project.rootPath) === normalizeFolderPath(selectedFolder),
-  });
-  const activeWorkspaceRefs = useWorkspaces({
-    ...(host.id ? { hosts: [host.id] } : {}),
-    where: (workspace) =>
-      selectedFolder !== null && isReusableLocalWorkspace(workspace, selectedFolder),
-  });
+  const unregisteredProjects = useMemo(
+    () =>
+      filterUnregisteredProjects(paseoProjects, registeredProjects).sort((a, b) =>
+        projectDisplayLabel(a).localeCompare(projectDisplayLabel(b)),
+      ),
+    [paseoProjects, registeredProjects],
+  );
 
   if (mobile) {
     return (
@@ -275,9 +290,7 @@ export function OnboardingScreen({
     const workspaceResult = await resolveOrCreateProjectWorkspace({
       paseo,
       projectRoot: reply.projectRoot,
-      selectedFolder,
-      activeWorkspaceRefs,
-      matchingProjectRefs,
+      paseoProjects,
     });
     if (onCommitted !== undefined) {
       await onCommitted({ input, reply });
@@ -312,18 +325,17 @@ export function OnboardingScreen({
             <Card theme={theme}>
               <View testID="factory-onboard-projects" style={{ gap: SPACING[2] }}>
                 <Text style={text(theme, "section")}>Unregistered Paseo Projects</Text>
-                {unregisteredRefs.length === 0 ? (
+                {unregisteredProjects.length === 0 ? (
                   <Text style={text(theme, "meta")}>
                     No unregistered Paseo Projects on this host — pick any folder below.
                   </Text>
                 ) : (
                   <View style={{ gap: SPACING[1.5] }}>
-                    {unregisteredRefs.map((ref) => (
+                    {unregisteredProjects.map((project) => (
                       <UnregisteredProjectRow
-                        key={ref.key}
-                        projectRef={ref}
+                        key={project.projectId}
+                        project={project}
                         theme={theme}
-                        registeredProjects={registeredProjects}
                         onSelect={setSelectedFolder}
                       />
                     ))}

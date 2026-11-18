@@ -76,17 +76,14 @@ async function loadScreenModule(entry: string, options: LoadOptions = {}): Promi
               exports.Modal = Modal;
               exports.useRpc = (contract) => (input) => globalThis.__onboardScreenTestRpc(contract.name, input);
               exports.useWorkspace = () => '/project';
-              exports.useWorkspaces = (query) => {
-                const fn = globalThis.__onboardScreenTestWorkspaces;
-                return fn ? fn(query) : [];
+              exports.useWorkspaces = () => {
+                throw new Error('Plugin state hooks must run inside a plugin host');
               };
-              exports.useProjects = (query) => {
-                const fn = globalThis.__onboardScreenTestProjects;
-                return fn ? fn(query) : [];
+              exports.useProjects = () => {
+                throw new Error('Plugin state hooks must run inside a plugin host');
               };
-              exports.useProject = (ref) => {
-                const fn = globalThis.__onboardScreenTestProject;
-                return fn ? fn(ref) : null;
+              exports.useProject = () => {
+                throw new Error('Plugin state hooks must run inside a plugin host');
               };
               exports.usePaseo = () => {
                 const fn = globalThis.__onboardScreenTestPaseo;
@@ -96,7 +93,8 @@ async function loadScreenModule(entry: string, options: LoadOptions = {}): Promi
                     create: async () => ({ id: 'ws-created-default' }),
                   },
                   projects: {
-                    ref: () => ({ createWorkspace: async () => ({ id: 'ws-project-default' }) }),
+                    list: async () => ({ projects: [] }),
+                    subscribe: () => () => {},
                   },
                 };
               };
@@ -299,40 +297,41 @@ test("FactoryOnboardSidebarItem and FactoryOnboardScreen render on desktop and r
     } finally {
       await act(() => root.unmount());
       delete (globalThis as any).__onboardScreenTestRpc;
-      delete (globalThis as any).__onboardScreenTestProjects;
-      delete (globalThis as any).__onboardScreenTestProject;
+      delete (globalThis as any).__onboardScreenTestPaseo;
     }
   });
 });
 
-test("OnboardingScreen filters unregistered Paseo Projects, supports 1-click selection, and mounts OnboardingWizard inline without mutating disk", async () => {
+test("OnboardingScreen filters unregistered Paseo Projects via paseo.projects.list() without PluginClientStateProvider, supports 1-click selection, and mounts OnboardingWizard inline without mutating disk", async () => {
   const { OnboardingScreen } = await loadScreenModule("plugin/client/factory/onboarding-screen.tsx", { platformOs: "web" });
   const { createElement } = await import("react");
 
   const projects = [
     {
-      ref: { kind: "project", key: "h1:p-reg", hostId: "h1", id: "p-reg" },
-      hostId: "h1",
-      displayName: "Already Registered",
-      rootPath: "/Users/owner/work/registered-app/",
-      kind: "git",
-      iconRevision: null,
+      projectId: "p-reg",
+      projectDisplayName: "Already Registered",
+      projectRootPath: "/Users/owner/work/registered-app/",
+      projectKind: "git",
     },
     {
-      ref: { kind: "project", key: "h1:p-new", hostId: "h1", id: "p-new" },
-      hostId: "h1",
-      displayName: "Brand New App",
-      rootPath: "/Users/owner/work/new-app",
-      kind: "non_git",
-      iconRevision: null,
+      projectId: "p-new",
+      projectDisplayName: "Brand New App",
+      projectRootPath: "/Users/owner/work/new-app",
+      projectKind: "non_git",
     },
   ];
 
   const rpcCalls: { name: string; input: any }[] = [];
-  (globalThis as any).__onboardScreenTestProjects = (query: any) =>
-    projects.filter((p) => (!query?.hosts || query.hosts.includes(p.hostId)) && (!query?.where || query.where(p))).map((p) => p.ref);
-  (globalThis as any).__onboardScreenTestProject = (ref: any) =>
-    projects.find((p) => p.ref.key === ref.key) ?? null;
+  (globalThis as any).__onboardScreenTestPaseo = () => ({
+    projects: {
+      list: async () => ({ projects }),
+      subscribe: () => () => {},
+    },
+    workspaces: {
+      list: async () => ({ entries: [] }),
+      create: async () => ({ id: "ws-default" }),
+    },
+  });
   (globalThis as any).__onboardScreenTestRpc = async (name: string, input: any) => {
     rpcCalls.push({ name, input });
     if (name === "factory.seats.directory") {
@@ -412,8 +411,7 @@ test("OnboardingScreen filters unregistered Paseo Projects, supports 1-click sel
     } finally {
       await act(() => root.unmount());
       delete (globalThis as any).__onboardScreenTestRpc;
-      delete (globalThis as any).__onboardScreenTestProjects;
-      delete (globalThis as any).__onboardScreenTestProject;
+      delete (globalThis as any).__onboardScreenTestPaseo;
     }
   });
 });
@@ -566,8 +564,7 @@ test("Visual Folder Browser starts at $HOME, traverses subdirectories and parent
     } finally {
       await act(() => root.unmount());
       delete (globalThis as any).__onboardScreenTestRpc;
-      delete (globalThis as any).__onboardScreenTestProjects;
-      delete (globalThis as any).__onboardScreenTestProject;
+      delete (globalThis as any).__onboardScreenTestPaseo;
     }
   });
 });
@@ -608,8 +605,7 @@ test("OnboardingScreen mounts safely under an RN-like window on iOS/Android with
     } finally {
       await act(() => root.unmount());
       delete (globalThis as any).__onboardScreenTestRpc;
-      delete (globalThis as any).__onboardScreenTestProjects;
-      delete (globalThis as any).__onboardScreenTestProject;
+      delete (globalThis as any).__onboardScreenTestPaseo;
     }
   });
 });
@@ -789,18 +785,16 @@ test("05-commit: Step 4 Start reuses an existing active local workspace and open
 
   const projects = [
     {
-      ref: { kind: "project", key: "h1:p-new", hostId: "h1", id: "p-new" },
-      hostId: "h1",
-      displayName: "New App",
-      rootPath: "/Users/owner/work/new-app",
-      kind: "non_git",
-      iconRevision: null,
+      projectId: "p-new",
+      projectDisplayName: "New App",
+      projectRootPath: "/Users/owner/work/new-app",
+      projectKind: "non_git",
     },
   ];
   const workspaces = [
-    { id: "ws-wt-1", hostId: "h1", directory: "/Users/owner/work/new-app", kind: "worktree", archivingAt: null },
-    { id: "ws-arch-1", hostId: "h1", directory: "/Users/owner/work/new-app", kind: "local_checkout", archivingAt: "2026-11-18T00:00:00Z" },
-    { id: "ws-active-local", hostId: "h1", directory: "/Users/owner/work/new-app/", kind: "local_checkout", archivingAt: null },
+    { id: "ws-wt-1", workspaceDirectory: "/Users/owner/work/new-app", workspaceKind: "worktree", archivingAt: null },
+    { id: "ws-arch-1", workspaceDirectory: "/Users/owner/work/new-app", workspaceKind: "local_checkout", archivingAt: "2026-11-18T00:00:00Z" },
+    { id: "ws-active-local", workspaceDirectory: "/Users/owner/work/new-app/", workspaceKind: "local_checkout", archivingAt: null },
   ];
 
   const rpcCalls: { name: string; input: any }[] = [];
@@ -826,29 +820,17 @@ test("05-commit: Step 4 Start reuses an existing active local workspace and open
     openScreen: () => {},
   });
 
-  (globalThis as any).__onboardScreenTestProjects = (query: any) =>
-    projects.filter((p) => (!query?.hosts || query.hosts.includes(p.hostId)) && (!query?.where || query.where(p))).map((p) => p.ref);
-  (globalThis as any).__onboardScreenTestProject = (ref: any) =>
-    projects.find((p) => p.ref.key === ref.key) ?? null;
-  (globalThis as any).__onboardScreenTestWorkspaces = (query: any) =>
-    workspaces
-      .filter((w) => (!query?.hosts || query.hosts.includes(w.hostId)) && (!query?.where || query.where(w)))
-      .map((w) => ({ kind: "workspace", key: `h1:${w.id}`, hostId: w.hostId, id: w.id }));
   (globalThis as any).__onboardScreenTestPaseo = () => ({
     workspaces: {
-      list: async () => ({ entries: [] }),
+      list: async () => ({ entries: workspaces }),
       create: async (opts: any) => {
         createWorkspaceCalls.push({ kind: "workspaces.create", opts });
         return { id: "ws-should-not-create" };
       },
     },
     projects: {
-      ref: (ref: any) => ({
-        createWorkspace: async (opts: any) => {
-          createWorkspaceCalls.push({ kind: "projects.ref.createWorkspace", ref, opts });
-          return { id: "ws-should-not-create" };
-        },
-      }),
+      list: async () => ({ projects }),
+      subscribe: () => () => {},
     },
   });
   (globalThis as any).__onboardScreenTestToasts = [];
@@ -963,19 +945,16 @@ test("05-commit: Step 4 Start reuses an existing active local workspace and open
   }
 });
 
-test("05-commit: Step 4 Start creates a clean local workspace via projects.ref(ref).createWorkspace (zero dummy agent) when a ProjectRef exists, or workspaces.create for arbitrary folders", async () => {
+test("05-commit: Step 4 Start creates a clean local workspace via workspaces.create (zero dummy agent) with projectId when matching Paseo project exists, or without for arbitrary folders", async () => {
   const { OnboardingScreen } = await loadScreenModule("plugin/client/factory/onboarding-screen.tsx", { platformOs: "web" });
   const { createElement } = await import("react");
 
-  const projectRef = { kind: "project", key: "h1:p-zero", hostId: "h1", id: "p-zero" };
   const projects = [
     {
-      ref: projectRef,
-      hostId: "h1",
-      displayName: "Zero Workspace App",
-      rootPath: "/Users/owner/work/zero-ws",
-      kind: "git",
-      iconRevision: null,
+      projectId: "p-zero",
+      projectDisplayName: "Zero Workspace App",
+      projectRootPath: "/Users/owner/work/zero-ws",
+      projectKind: "git",
     },
   ];
 
@@ -985,11 +964,6 @@ test("05-commit: Step 4 Start creates a clean local workspace via projects.ref(r
     const openedWorkspaces: any[] = [];
     const openedPanels: any[] = [];
 
-    (globalThis as any).__onboardScreenTestProjects = (query: any) =>
-      projects.filter((p) => (!query?.hosts || query.hosts.includes(p.hostId)) && (!query?.where || query.where(p))).map((p) => p.ref);
-    (globalThis as any).__onboardScreenTestProject = (ref: any) =>
-      projects.find((p) => p.ref.key === ref.key) ?? null;
-    (globalThis as any).__onboardScreenTestWorkspaces = () => [];
     (globalThis as any).__onboardScreenTestPaseo = () => ({
       workspaces: {
         list: async () => ({
@@ -997,16 +971,12 @@ test("05-commit: Step 4 Start creates a clean local workspace via projects.ref(r
         }),
         create: async (opts: any) => {
           createCalls.push({ via: "workspaces.create", opts });
-          return { id: "ws-fallback" };
+          return { id: "ws-created-via-project" };
         },
       },
       projects: {
-        ref: (ref: any) => ({
-          createWorkspace: async (opts: any) => {
-            createCalls.push({ via: "projects.ref.createWorkspace", ref, opts });
-            return { id: "ws-created-via-project" };
-          },
-        }),
+        list: async () => ({ projects }),
+        subscribe: () => () => {},
       },
     });
     (globalThis as any).__onboardScreenTestToasts = [];
@@ -1048,8 +1018,10 @@ test("05-commit: Step 4 Start creates a clean local workspace via projects.ref(r
           await runWizardStepsToCommit(container, act);
 
           assert.equal(createCalls.length, 1);
-          assert.equal(createCalls[0].via, "projects.ref.createWorkspace");
-          assert.deepEqual(createCalls[0].ref, projectRef);
+          assert.equal(createCalls[0].via, "workspaces.create");
+          assert.deepEqual(createCalls[0].opts, {
+            source: { kind: "directory", path: "/Users/owner/work/zero-ws", projectId: "p-zero" },
+          });
           assert.equal("agent" in (createCalls[0].opts ?? {}), false, "creates workspace with zero dummy agent session");
           assert.deepEqual(openedWorkspaces, [{ workspaceId: "ws-created-via-project", serverId: "h1" }]);
           assert.deepEqual(openedPanels, [{ id: "paseo-factory", options: { workspaceId: "ws-created-via-project", location: "workspace" } }]);
@@ -1073,9 +1045,6 @@ test("05-commit: Step 4 Start creates a clean local workspace via projects.ref(r
     const openedWorkspaces: any[] = [];
     const openedPanels: any[] = [];
 
-    (globalThis as any).__onboardScreenTestProjects = () => [];
-    (globalThis as any).__onboardScreenTestProject = () => null;
-    (globalThis as any).__onboardScreenTestWorkspaces = () => [];
     (globalThis as any).__onboardScreenTestPaseo = () => ({
       workspaces: {
         list: async () => ({ entries: [] }),
@@ -1085,11 +1054,8 @@ test("05-commit: Step 4 Start creates a clean local workspace via projects.ref(r
         },
       },
       projects: {
-        ref: () => ({
-          createWorkspace: async () => {
-            throw new Error("should not call projects.ref.createWorkspace without matching ProjectRef");
-          },
-        }),
+        list: async () => ({ projects: [] }),
+        subscribe: () => () => {},
       },
     });
     (globalThis as any).__onboardScreenTestToasts = [];
@@ -1163,16 +1129,14 @@ test("05-commit: Step 4 Start with a directive navigates via openAgent without o
   const toasts: any[] = [];
   let commitCount = 0;
 
-  (globalThis as any).__onboardScreenTestProjects = () => [];
-  (globalThis as any).__onboardScreenTestProject = () => null;
-  (globalThis as any).__onboardScreenTestWorkspaces = () => [];
   (globalThis as any).__onboardScreenTestPaseo = () => ({
     workspaces: {
       list: async () => { throw new Error("list unavailable"); },
       create: async () => { throw new Error("create unavailable"); },
     },
     projects: {
-      ref: () => ({ createWorkspace: async () => { throw new Error("create unavailable"); } }),
+      list: async () => { throw new Error("projects list unavailable"); },
+      subscribe: () => () => {},
     },
   });
   (globalThis as any).__onboardScreenTestToasts = toasts;

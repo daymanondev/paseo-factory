@@ -3,15 +3,24 @@
  * (`paseo-factory-onboard`, ADR 0063). No React or DOM imports; function-style
  * only so nothing class-shaped enters the Hermes bundle.
  */
-import type { PluginProjectSnapshot, PluginWorkspaceSnapshot } from "@getpaseo/plugin";
-import type { PluginPaseoApi, ProjectRef, WorkspaceRef } from "@getpaseo/plugin/client";
+import type { PluginWorkspaceSnapshot } from "@getpaseo/plugin";
+import type { PluginPaseoApi } from "@getpaseo/plugin/client";
 import type { ProjectDirectoryEntry } from "../../shared/view.ts";
 
 export type PaseoWorkspaceKind = PluginWorkspaceSnapshot["kind"];
 
+/** Minimal Paseo project fields from `paseo.projects.list()`. */
+export interface PaseoProjectTarget {
+  projectId: string;
+  projectDisplayName: string;
+  projectCustomName?: string | null | undefined;
+  projectRootPath: string;
+  projectKind: "directory" | "git" | "non_git";
+}
+
 /**
- * Minimal workspace fields from either `useWorkspaces()` (`PluginWorkspaceSnapshot`)
- * or `paseo.workspaces.list()` (`PaseoWorkspace`).
+ * Minimal workspace fields from `paseo.workspaces.list()` (`PaseoWorkspace`)
+ * or `PluginWorkspaceSnapshot`.
  */
 export type WorkspaceCandidate =
   | {
@@ -89,27 +98,43 @@ export function isFactoryRegisteredRoot(
   return registeredProjects.some((project) => normalizeFolderPath(project.root) === normalized);
 }
 
-/** Pure filter helper for unregistered Paseo project snapshots. */
-export function filterUnregisteredProjects<T extends Pick<PluginProjectSnapshot, "rootPath">>(
+function projectRootOf(project: { rootPath: string } | { projectRootPath: string }): string {
+  return "projectRootPath" in project ? project.projectRootPath : project.rootPath;
+}
+
+/** Display label for a Paseo project (`projectCustomName` overrides `projectDisplayName`). */
+export function projectDisplayLabel(project: Pick<PaseoProjectTarget, "projectDisplayName" | "projectCustomName">): string {
+  const custom = project.projectCustomName?.trim();
+  return custom ? custom : project.projectDisplayName;
+}
+
+/** Pure filter helper for unregistered Paseo projects. */
+export function filterUnregisteredProjects<T extends { rootPath: string } | { projectRootPath: string }>(
   projects: readonly T[],
   registeredProjects: readonly Pick<ProjectDirectoryEntry, "root">[],
 ): T[] {
-  return projects.filter((project) => !isFactoryRegisteredRoot(project.rootPath, registeredProjects));
+  return projects.filter((project) => !isFactoryRegisteredRoot(projectRootOf(project), registeredProjects));
+}
+
+async function listProjectsSafely(paseo: PluginPaseoApi | undefined): Promise<readonly PaseoProjectTarget[]> {
+  if (typeof paseo?.projects?.list !== "function") return [];
+  try {
+    const res = await paseo.projects.list();
+    return Array.isArray(res?.projects) ? res.projects : [];
+  } catch {
+    return [];
+  }
 }
 
 /** Reuses an existing active local workspace for `projectRoot`, or creates a clean one without a dummy agent. */
 export async function resolveOrCreateProjectWorkspace({
   paseo,
   projectRoot,
-  selectedFolder,
-  activeWorkspaceRefs,
-  matchingProjectRefs,
+  paseoProjects = [],
 }: {
   paseo: PluginPaseoApi | undefined;
   projectRoot: string;
-  selectedFolder: string | null;
-  activeWorkspaceRefs: readonly WorkspaceRef[];
-  matchingProjectRefs: readonly ProjectRef[];
+  paseoProjects?: readonly PaseoProjectTarget[];
 }): Promise<{ workspaceId: string | null; error: string | null }> {
   if (typeof paseo?.workspaces?.list === "function") {
     try {
@@ -119,27 +144,25 @@ export async function resolveOrCreateProjectWorkspace({
         return { workspaceId: reusable.id, error: null };
       }
     } catch {
-      // Fall through to client state lookup and workspace creation.
+      // Fall through to workspace creation.
     }
   }
 
-  const sameSelectedFolder =
-    selectedFolder !== null && normalizeFolderPath(selectedFolder) === normalizeFolderPath(projectRoot);
-  if (sameSelectedFolder && activeWorkspaceRefs.length > 0) {
-    return { workspaceId: activeWorkspaceRefs[0]!.id, error: null };
+  const normalizedRoot = normalizeFolderPath(projectRoot);
+  let matchingProject = paseoProjects.find((p) => normalizeFolderPath(p.projectRootPath) === normalizedRoot);
+  if (matchingProject === undefined) {
+    const freshProjects = await listProjectsSafely(paseo);
+    matchingProject = freshProjects.find((p) => normalizeFolderPath(p.projectRootPath) === normalizedRoot);
   }
 
-  const matchingProjectRef = sameSelectedFolder ? matchingProjectRefs[0] : undefined;
   try {
-    if (matchingProjectRef !== undefined && typeof paseo?.projects?.ref === "function") {
-      const created = await paseo.projects.ref(matchingProjectRef).createWorkspace({
-        source: { kind: "directory", path: projectRoot, projectId: matchingProjectRef.id },
-      });
-      return { workspaceId: created.id, error: null };
-    }
     if (typeof paseo?.workspaces?.create === "function") {
       const created = await paseo.workspaces.create({
-        source: { kind: "directory", path: projectRoot },
+        source: {
+          kind: "directory",
+          path: projectRoot,
+          ...(matchingProject !== undefined ? { projectId: matchingProject.projectId } : {}),
+        },
       });
       return { workspaceId: created.id, error: null };
     }

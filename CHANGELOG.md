@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-11-18
+
+### Fixed
+
+- `OnboardingScreen` ([plugin/client/factory/onboarding-screen.tsx](plugin/client/factory/onboarding-screen.tsx), [plugin/client/factory/onboarding-targets.ts](plugin/client/factory/onboarding-targets.ts)) now reads Paseo Projects and Workspaces via `usePaseo()` (`paseo.projects.list()`, `paseo.projects.subscribe()`, `paseo.workspaces.list()`, `paseo.workspaces.create()`) instead of `@getpaseo/plugin`'s `client-state` hooks (`useProjects` / `useProject` / `useWorkspaces`), fixing `"Onboarding could not render: Plugin state hooks must run inside a plugin host"` on `addScreen` surfaces where `PluginClientStateProvider` is not mounted.
+
 ## [0.16.0] - 2026-11-18
 
 **Desktop-only global Onboarding screen, Step 3 `Lane profile` selection, and unified `FACTORY_PALETTE` badges across the panel and wizard (ADR 0063).**
