@@ -128,8 +128,10 @@ async function loadHarness(t: TestContext, opts: LoadHarnessOptions = {}): Promi
                 join(repoRoot, "node_modules/@getpaseo/plugin/dist/client/rpc-context.js"),
               )};
               export const useWorkspace = () => "/project";
+              export const useWorkspaces = () => [];
               export const useProjects = () => [];
               export const useProject = () => null;
+              export const usePaseo = () => ({ workspaces: { list: async () => ({ entries: [] }), create: async () => ({ id: "ws-1" }) }, projects: { ref: () => ({ createWorkspace: async () => ({ id: "ws-1" }) }) } });
               export const useToast = () => ({ show() {}, error() {} });
               export const openExternalUrl = async () => {};
             `,
@@ -139,8 +141,10 @@ async function loadHarness(t: TestContext, opts: LoadHarnessOptions = {}): Promi
             contents: `
               exports.useRpc = (contract) => (input) => globalThis.__factoryClientRpc(contract.name, input);
               exports.useWorkspace = () => "/project";
+              exports.useWorkspaces = () => [];
               exports.useProjects = () => [];
               exports.useProject = () => null;
+              exports.usePaseo = () => ({ workspaces: { list: async () => ({ entries: [] }), create: async () => ({ id: "ws-1" }) }, projects: { ref: () => ({ createWorkspace: async () => ({ id: "ws-1" }) }) } });
               exports.useToast = () => ({ show() {}, error() {} });
               exports.openExternalUrl = async () => {};
             `,

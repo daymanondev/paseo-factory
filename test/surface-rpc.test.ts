@@ -7353,6 +7353,51 @@ test("02-profiles: onboarding.commit applies profileId first (preserving watch l
   assert.equal(modSnap.view.activeProfileModified, true);
 });
 
+test("05-commit: onboarding.commit handles initGit + profileId + model override + directive end-to-end and returns agentId and resolved projectRoot", async (t) => {
+  const { readLaneProfilesFile, saveLaneProfile } = await import("../plugin/server/core/lanes.ts");
+  const { handlers, fake, stateDir, dir } = makeSurface(t, []);
+  const folder = join(dir, "global-non-git");
+  mkdirSync(folder, { recursive: true });
+  saveLaneProfile(stateDir, {
+    id: "balanced",
+    name: "Balanced",
+    lanes: {
+      supervisor: "claude/claude-sonnet-4-6",
+      lead: "codex/gpt-5.4:medium",
+      worker: "opencode/glm-5.1",
+      watch: "claude/claude-haiku-4-5",
+      freshEyes: "claude/claude-sonnet-4-6",
+    },
+  });
+
+  const reply = await handlers.onboardingCommit({
+    folder,
+    initGit: true,
+    profileId: "balanced",
+    models: {
+      supervisor: "claude/claude-opus-4-8:high",
+      lead: "codex/gpt-5.4:medium",
+      worker: "opencode/glm-5.1",
+    },
+    directive: "Bootstrap and inspect.",
+  });
+  assert.ok(reply.ok, reply.ok ? "" : reply.error);
+  assert.equal(reply.bootstrapped, true);
+  assert.ok(reply.agentId);
+  assert.equal(reply.projectRoot, realpathSync(folder));
+  const reg = readProjectRegistration(stateDir, reply.slug);
+  assert.equal(reg?.root, reply.projectRoot);
+  assert.equal(reg?.supervisor, reply.agentId);
+  const lanes = loadLanes(stateDir, reply.slug);
+  assert.ok(lanes.ok);
+  assert.equal(lanes.lanes.supervisor, "claude/claude-opus-4-8:high");
+  assert.equal(lanes.lanes.lead, "codex/gpt-5.4:medium");
+  assert.equal(lanes.lanes.watch, "claude/claude-haiku-4-5");
+  assert.equal(readLaneProfilesFile(stateDir).activeProfileByScope?.[reply.slug], "balanced");
+  assert.equal(fake.sent.length, 1);
+  assert.ok(fake.sent[0]!.text.endsWith("Bootstrap and inspect."));
+});
+
 // ---- the seat directory (v0.6.1 W4 spike, ADR 0057 §8/§11) ---------------------------------------
 //
 // `factory.seats.directory` is the spike's one read: every live seat across

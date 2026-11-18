@@ -8,8 +8,8 @@
  * Function components only — no class syntax reaches the Hermes bundle.
  */
 import type { PluginProjectSnapshot } from "@getpaseo/plugin";
-import type { PluginScreenProps, ProjectRef } from "@getpaseo/plugin/client";
-import { useProject, useProjects, useRpc } from "@getpaseo/plugin/client";
+import type { PluginClientOpenPanelOptions, PluginScreenProps, ProjectRef } from "@getpaseo/plugin/client";
+import { usePaseo, useProject, useProjects, useRpc, useWorkspaces } from "@getpaseo/plugin/client";
 import { Icon, Loading, ScrollView, TextInput, useToast } from "@getpaseo/plugin/client/ui";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Pressable, Text, View } from "react-native";
@@ -32,11 +32,64 @@ import { OnboardingWizard } from "./onboarding-wizard.tsx";
 type BrowseView = Extract<z.output<typeof onboardingBrowse.output>, { ok: true }>;
 export type OnboardingCommitSuccess = Extract<z.output<typeof onboardingCommit.output>, { ok: true }>;
 
+const FACTORY_PANEL_ID = "paseo-factory";
+
+export interface WorkspaceCandidate {
+  id: string;
+  directory?: string | null;
+  workspaceDirectory?: string | null;
+  kind?: string | null;
+  workspaceKind?: string | null;
+  archivingAt?: string | null;
+  internal?: boolean | null;
+  background?: boolean | null;
+}
+
 /** Trims trailing slashes (preserving `"/"`) so host project roots match Factory roots reliably. */
 export function normalizeFolderPath(folder: string): string {
   const trimmed = folder.trim();
   if (trimmed === "" || trimmed === "/") return trimmed;
   return trimmed.replace(/\/+$/, "");
+}
+
+/** True when `workspace` is an active non-worktree local Paseo workspace rooted at `projectRoot`. */
+export function isReusableLocalWorkspace(workspace: WorkspaceCandidate, projectRoot: string): boolean {
+  if (workspace.archivingAt !== undefined && workspace.archivingAt !== null && workspace.archivingAt !== "") {
+    return false;
+  }
+  if (workspace.internal === true || workspace.background === true) {
+    return false;
+  }
+  const kind = workspace.kind ?? workspace.workspaceKind;
+  if (kind === "worktree") {
+    return false;
+  }
+  if (
+    kind !== undefined &&
+    kind !== null &&
+    kind !== "directory" &&
+    kind !== "local_checkout" &&
+    kind !== "checkout" &&
+    kind !== "local"
+  ) {
+    return false;
+  }
+  const dir = workspace.directory ?? workspace.workspaceDirectory ?? "";
+  if (dir.trim() === "") return false;
+  const normalizedTarget = normalizeFolderPath(projectRoot);
+  if (normalizedTarget === "") return false;
+  return normalizeFolderPath(dir) === normalizedTarget;
+}
+
+function selectReusableWorkspace(
+  entries: readonly WorkspaceCandidate[],
+  projectRoot: string,
+): WorkspaceCandidate | undefined {
+  const matches = entries.filter((entry) => isReusableLocalWorkspace(entry, projectRoot));
+  return (
+    matches.find((entry) => (entry.kind ?? entry.workspaceKind) === "local_checkout") ??
+    matches[0]
+  );
 }
 
 /** True when `rootPath` matches any Project root already registered in Factory. */
@@ -128,12 +181,15 @@ export function OnboardingScreen({
   host,
   navigation,
   params,
+  openPanel,
   onCommitted,
 }: PluginScreenProps & {
+  openPanel?: (id: string, options: PluginClientOpenPanelOptions) => void;
   onCommitted?: (result: { input: CommitInput; reply: OnboardingCommitSuccess }) => Promise<void> | void;
 }) {
   const mobile = layout.platform === "ios" || layout.platform === "android";
   const toast = useToast();
+  const paseo = usePaseo();
   const seatsDirectoryCall = useRpc(seatsDirectory);
   const snapshotCall = useRpc(snapshot);
   const browseCall = useRpc(onboardingBrowse);
@@ -220,6 +276,17 @@ export function OnboardingScreen({
     where: (project) => !isFactoryRegisteredRoot(project.rootPath, registeredProjects),
     orderBy: "displayName",
   });
+  const matchingProjectRefs = useProjects({
+    ...(host.id ? { hosts: [host.id] } : {}),
+    where: (project) =>
+      selectedFolder !== null &&
+      normalizeFolderPath(project.rootPath) === normalizeFolderPath(selectedFolder),
+  });
+  const activeWorkspaceRefs = useWorkspaces({
+    ...(host.id ? { hosts: [host.id] } : {}),
+    where: (workspace) =>
+      selectedFolder !== null && isReusableLocalWorkspace(workspace, selectedFolder),
+  });
 
   if (mobile) {
     return (
@@ -231,15 +298,72 @@ export function OnboardingScreen({
 
   const palette = factoryPalette(theme);
 
+  const resolveOrCreateProjectWorkspace = async (
+    projectRoot: string,
+  ): Promise<{ workspaceId: string | null; error: string | null }> => {
+    if (typeof paseo?.workspaces?.list === "function") {
+      try {
+        const listed = await paseo.workspaces.list();
+        const reusable = selectReusableWorkspace(listed.entries, projectRoot);
+        if (reusable !== undefined) {
+          return { workspaceId: reusable.id, error: null };
+        }
+      } catch {
+        // Fall through to client state lookup and workspace creation.
+      }
+    }
+
+    if (
+      selectedFolder !== null &&
+      normalizeFolderPath(selectedFolder) === normalizeFolderPath(projectRoot) &&
+      activeWorkspaceRefs.length > 0
+    ) {
+      return { workspaceId: activeWorkspaceRefs[0]!.id, error: null };
+    }
+
+    const matchingProjectRef =
+      selectedFolder !== null && normalizeFolderPath(selectedFolder) === normalizeFolderPath(projectRoot)
+        ? matchingProjectRefs[0]
+        : undefined;
+    try {
+      if (matchingProjectRef !== undefined && typeof paseo?.projects?.ref === "function") {
+        const created = await paseo.projects.ref(matchingProjectRef).createWorkspace({
+          source: { kind: "directory", path: projectRoot, projectId: matchingProjectRef.id },
+        });
+        return { workspaceId: created.id, error: null };
+      }
+      if (typeof paseo?.workspaces?.create === "function") {
+        const created = await paseo.workspaces.create({
+          source: { kind: "directory", path: projectRoot },
+        });
+        return { workspaceId: created.id, error: null };
+      }
+      return { workspaceId: null, error: "Paseo workspace API is unavailable." };
+    } catch (error) {
+      return { workspaceId: null, error: error instanceof Error ? error.message : String(error) };
+    }
+  };
+
   const startOnboarding = async (input: CommitInput): Promise<{ ok: true } | { ok: false; error: string }> => {
     const reply = await commitCall(input);
     if (!reply.ok) return { ok: false, error: reply.error };
     toast.show(reply.summary, { variant: "success" });
     await loadSnapshotAndDirectory();
+    const workspaceResult = await resolveOrCreateProjectWorkspace(reply.projectRoot);
     if (onCommitted !== undefined) {
       await onCommitted({ input, reply });
-    } else if ((input.directive ?? "") !== "") {
+    }
+    if ((input.directive ?? "").trim() !== "") {
       navigation?.openAgent({ agentId: reply.agentId, serverId: host.id });
+    } else if (workspaceResult.workspaceId !== null) {
+      navigation?.openWorkspace({ workspaceId: workspaceResult.workspaceId, serverId: host.id });
+      openPanel?.(FACTORY_PANEL_ID, { workspaceId: workspaceResult.workspaceId, location: "workspace" });
+    } else {
+      toast.show(
+        `Supervisor started, but workspace could not be opened: ${workspaceResult.error ?? "unknown error"}`,
+        { variant: "warning" },
+      );
+      if (alive.current) setSelectedFolder(null);
     }
     return { ok: true };
   };

@@ -134,8 +134,8 @@ _Avoid_: fixed 128k rule, blank successors, stale notes passed as fresh, auto-ro
 ### Surface and configuration
 
 **Factory surface**:
-React Native Paseo UI scoped to one Project per workspace via the single writer: header Needs-you badge + update check, alert stack, **Team** / **Models** / **Project** tabs, `Hand off…` modal and model picker, composer seat pill, desktop **onboarding wizard**, and **Settings screen** (`docs/adr/0056-*`, `0057-*`).
-_Avoid_: dashboard, room panel, Project switcher, Start Lead button, UI Task acceptance, Kanban/Timeline/Seat-graph, mobile settings writes
+React Native Paseo UI scoped to one Project per workspace via the single writer: header Needs-you badge + update check, alert stack, **Team** / **Models** / **Project** tabs (with unified `FACTORY_PALETTE` status pill badges, seat colors, and Peer disposition badges), `Hand off…` modal and model picker, composer seat pill, **Settings screen**, and desktop-only **onboarding wizard** — mounted both in unconfigured workspace panels and on the global **Onboarding screen** (`paseo-factory-onboard`, via sidebar footer item + global Command Center action, with unregistered Paseo Projects picker, `onboardingBrowse` host folder browser, Step 3 `Lane profile` selection, and post-commit workspace reuse/create + navigation) (`docs/adr/0056-*`, `0057-*`, `0063-*`).
+_Avoid_: dashboard ("All projects"), room panel, Project switcher, Start Lead button, UI Task acceptance, Kanban/Timeline/Seat-graph, mobile onboarding/settings writes
 
 **Open Design project link**, **Design provenance note**, **Design catalog**, & **Design source**:
 Per-Project Open Design sync into `<project-root>/design/` (`project-settings.json` + plugin-owned `design/open-design-link.json`, never overwritten by a Peer **Design provenance note**, `docs/adr/0040-*`, `0041-*`). `Lead` reads only **Design catalog** (`design-manifest.json`, `screens-data.js`, `app-data.js`, `screens.html`), never **Design source** (`index.html`, `app.js`, `*.css`) or batch screenshot/storyboard images (`*.png/*.jpg/*.webp`, delegating multi-screen visual parity checks to a read-only `reviewer`/`scout` Peer).
@@ -173,4 +173,4 @@ _Avoid_: vendoring third-party skills in repo, dumping all domain skills into ev
 - **Retro** _(ADR 0056)_ — Daily Retro CLI/pass and `retro` lane deleted; `Recurrence Guard` → `Wave Hardening` is the live loop.
 - **Fresh-eyes review** _(ADR 0030)_ — Pre-Lead headless review (`fresh_eyes_written`) retired for `Lead` diff review.
 - **Zcode harness home** _(ADR 0055)_ — `zcode-acp-server` / `<stateDir>/zcode-home` retired; GLM runs on `Pi harness home` (`pi/zcode/*`).
-- **Web Console**, **Console sidecar**, **Design detector gate**, **Project switcher**, **All projects**, Task Kanban, Timeline swimlane, Ledger stream, Seat graph, global Factory screen _(ADR 0056)_ — deleted; Paseo plugin client is the sole `Factory surface`.
+- **Web Console**, **Console sidecar**, **Design detector gate**, **Project switcher**, **All projects**, Task Kanban, Timeline swimlane, Ledger stream, Seat graph, global Factory dashboard _(ADR 0056; zero-workspace onboarding lives on the desktop-only Onboarding screen per ADR 0063)_ — deleted; Paseo plugin client is the sole `Factory surface`.
