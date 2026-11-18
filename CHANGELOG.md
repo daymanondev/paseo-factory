@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-11-18
+
+**Desktop-only global Onboarding screen, Step 3 `Lane profile` selection, and unified `FACTORY_PALETTE` badges across the panel and wizard (ADR 0063).**
+
+### Added
+
+- **Desktop-only global Onboarding entry & screen (`plugin/index.client.tsx`, `plugin/client/factory/onboarding-screen.tsx`, `plugin/client/factory/onboarding-targets.ts`):** Registered a desktop-only sidebar footer item (`Onboard Project`), global Command Center item (`Factory: Onboard Project`), and `paseo-factory-onboard` screen (hidden/no-op on `ios` and `android`). Lists unregistered Paseo Projects from `useProjects()` (filtered against Factory-registered roots from `seatsDirectory`) alongside a visual Folder Browser backed by the read-only `onboardingBrowse` (`factory.onboarding.browse`) RPC (`$HOME` default, parent traversal, subdirectory clicks, quick path jump), and mounts `<OnboardingWizard />` inline without mutating disk until Step 4 `Start Supervisor`.
+- **Step 4 workspace reuse/creation & navigation (`plugin/client/factory/onboarding-screen.tsx`):** On global Step 4 commit, reuses an existing active non-worktree local Paseo workspace for the onboarded folder or creates a clean local workspace via `projects.ref(...).createWorkspace` / `workspaces.create` with zero dummy agent session, then navigates via `openAgent` (when a directive was entered) or `openWorkspace` + `openPanel` (without a directive).
+- **Step 3 `Lane profile` selection (`plugin/client/factory/onboarding-state.ts`, `plugin/client/factory/onboarding-wizard.tsx`, `plugin/shared/rpc.ts`, `plugin/server/surface-rpc.ts`):** Added 1-click `view.profiles` selection and `Machine defaults` reset at the top of `OnboardingWizard` Step 3, non-sticky `modified` tracking across individual seat edits/reverts, and optional `profileId` on `onboardingCommit` (validating profile lanes up front and applying `applyLaneProfile` first to preserve `watch` and `activeProfileByScope` before applying overridden `models`).
+
+### Changed
+
+- **Unified `FACTORY_PALETTE` badges & seat colors (`plugin/client/kit/theme.ts`, `plugin/client/kit/pill.tsx`, `plugin/client/factory/project-panel.tsx`, `plugin/client/factory/onboarding-wizard.tsx`):** Replaced plain Team-tab status text (on `SeatRow`, `PeerRowView`, and `SupervisorCandidateRow`) with `ToneBadge` + `statusBadgeColour` mapped strictly 1:1 from `statusLabel` (independent of `handoff` and `pendingLane`); replaced plain `· <disposition>` text on `PeerRowView` with fixed-color disposition badges (`engineer`, `architect`, `scout`, `reviewer`); applied `<RoleName />` (`supervisor`, `lead`, `peer`) consistently across Team, Models (`Default worker` → `peer`), and Onboarding Step 3 (`Worker` → `peer`); and applied `FACTORY_PALETTE` across the Onboarding 4-step progress indicator, Step 1–2 badges, Step 3 thinking pills, and Step 4 summary.
+- **Domain documentation (`docs/adr/0063-global-onboarding-screen-profile-selection-and-panel-badges.md`, `CONTEXT.md`):** Recorded ADR 0063 amending ADRs 0056 and 0057 and synced the `Factory surface` and `Retired terms` sections in `CONTEXT.md`.
+
 ## [0.15.0] - 2026-11-18
 
 **Same-base sibling model resolution for per-dispatch thinking effort and auto Peer handoff thinking continuity (ADR 0062).**
