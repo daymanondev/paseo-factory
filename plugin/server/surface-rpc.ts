@@ -3446,7 +3446,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
      * with the directive as its first message. It never creates a Lead.
      */
     async onboardingCommit(
-      input: { folder: string; initGit?: boolean; models?: { supervisor?: string; lead?: string; worker?: string }; openDesignProjectId?: string; directive?: string },
+      input: { folder: string; initGit?: boolean; profileId?: string; models?: { supervisor?: string; lead?: string; worker?: string }; openDesignProjectId?: string; directive?: string },
       context?: SurfaceCallContext,
     ) {
       const inspected = await this.onboardingInspect({ folder: input.folder }, context);
@@ -3460,6 +3460,30 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       }
       if (!inspected.gitRepo && input.initGit !== true) {
         return failure("not-a-git-repo", `${inspected.folder} is not a Git repository — choose "Initialise Git" in step 1 (worktrees and the Gate need one), then Start again`);
+      }
+      let profileId: string | undefined;
+      if (input.profileId !== undefined) {
+        profileId = input.profileId.trim();
+        if (profileId === "") {
+          return failure("profile-not-found", "Lane profile id must be non-empty — pick a saved Lane profile or Machine defaults in step 3");
+        }
+        let profile: LaneProfile | undefined;
+        try {
+          profile = getLaneProfile(deps.stateDir, profileId);
+        } catch (err) {
+          return failure(codeOf(err), messageOf(err));
+        }
+        if (profile === undefined) {
+          return failure("profile-not-found", `no Lane profile "${profileId}" under ${deps.stateDir} — save one first`);
+        }
+        for (const name of LANE_NAMES) {
+          const value = profile.lanes[name];
+          if (typeof value !== "string") {
+            return failure("invalid-profile", `profile lane ${name} is missing — a profile carries all six lanes whole`);
+          }
+          const problem = laneError(name, value.trim());
+          if (problem !== undefined) return failure("invalid-lane", problem);
+        }
       }
       let providers: ProviderEntry[] = [];
       try {
@@ -3481,6 +3505,14 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
 
       const registered = await registerProjectFolder(inspected.folder, context);
       if (!registered.ok) return registered;
+
+      if (profileId !== undefined) {
+        try {
+          applyLaneProfile(deps.stateDir, profileId, registered.slug);
+        } catch (err) {
+          return failure(codeOf(err), `${messageOf(err)} — the Project is registered; fix the Lane profile in step 3 and Start again`);
+        }
+      }
 
       const effective = loadLanes(deps.stateDir, registered.slug);
       if (!effective.ok) return failure("lanes-unreadable", `${effective.reason} — repair lanes.json, then Start again`);

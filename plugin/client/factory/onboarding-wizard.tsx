@@ -17,22 +17,23 @@
  * after Start (open the conversation, or finish on the Project panel); this
  * component never mounts on mobile. Test hooks: `factory-onboarding`,
  * `-progress`, `-next`, `-back`, `-start`, `-retry`, `-recheck`, `-init-git`,
- * `-install-all`, `-directive`, `-od`, `-error`, `-blocked`, `-lane-<seat>`,
- * `-lane-change-<seat>`. Function components only — no class syntax reaches the
+ * `-install-all`, `-directive`, `-od`, `-error`, `-blocked`, `-profiles`,
+ * `-profile-<id>`, `-profile-machine-defaults`, `-profile-modified`,
+ * `-lane-<seat>`, `-lane-change-<seat>`. Function components only — no class syntax reaches the
  * Hermes bundle.
  */
 import type { PluginTheme } from "@getpaseo/plugin";
 import { Modal, TextInput } from "@getpaseo/plugin/client/ui";
 import { useEffect, useReducer, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { Text, View } from "react-native";
+import { Pressable, Text, View } from "react-native";
 import type { FactoryView } from "../../shared/view.ts";
 import { Btn, RoleName, ToneBadge } from "../kit/pill.tsx";
-import { CONTROL_H, RADIUS, SPACING, factoryPalette, text, thinkingColour } from "../kit/theme.ts";
+import { CONTROL_H, CONTROL_SM, RADIUS, SPACING, factoryPalette, hoveredOf, text, thinkingColour, tint } from "../kit/theme.ts";
 import type { Colour } from "../kit/theme.ts";
 import { LaneModalBody, PROJECT_OVERRIDE_CARDS, splitLaneParts } from "./lane-editor.tsx";
 import type { LaneCard } from "./lane-editor.tsx";
-import { ONBOARDING_STEPS, blockerOf, canAdvance, commitInputOf, describeThrown, initialWizard, reduceWizard, stepLabel } from "./onboarding-state.ts";
+import { ONBOARDING_LANES, ONBOARDING_STEPS, blockerOf, canAdvance, commitInputOf, describeThrown, initialWizard, reduceWizard, stepLabel } from "./onboarding-state.ts";
 import type { CommitInput, DesignChoice, Inspection, OnboardingLaneName, WizardInput } from "./onboarding-state.ts";
 
 type Failed = { ok: false; error: string };
@@ -63,11 +64,71 @@ export interface OnboardingInitialUi {
   inspectError?: string;
   initGit?: boolean;
   lanes?: Record<OnboardingLaneName, string>;
+  profileId?: string | null;
+  profileModified?: boolean;
   directive?: string;
   design?: DesignChoice;
   installError?: string;
   startError?: string;
   designs?: DesignOption[];
+}
+
+function ProfilePill({
+  theme,
+  label,
+  active,
+  colour,
+  disabled,
+  testID,
+  onPress,
+}: {
+  theme: PluginTheme;
+  label: string;
+  active: boolean;
+  colour: string;
+  disabled: boolean;
+  testID: string;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityState={{ selected: active, disabled }}
+      testID={testID}
+      disabled={disabled}
+      onPress={onPress}
+      style={(state) => {
+        const isHovered = hoveredOf(state);
+        return {
+          minHeight: CONTROL_SM,
+          paddingHorizontal: SPACING[2.5],
+          paddingVertical: 3,
+          borderRadius: RADIUS.md,
+          borderWidth: 1,
+          borderColor: active ? colour : isHovered ? theme.colors.foregroundMuted : theme.colors.border,
+          backgroundColor: active
+            ? tint(colour, "18")
+            : state.pressed || isHovered
+              ? theme.colors.surface2
+              : theme.colors.surface1,
+          flexDirection: "row",
+          alignItems: "center",
+          alignSelf: "flex-start",
+        };
+      }}
+    >
+      <Text
+        style={{
+          ...text(theme, "label"),
+          fontWeight: active ? "600" : "500",
+          color: active ? colour : theme.colors.foreground,
+        }}
+        numberOfLines={1}
+      >
+        {label}
+      </Text>
+    </Pressable>
+  );
 }
 
 function Note({ theme, tone, testID, children }: { theme: PluginTheme; tone?: Colour; testID?: string; children: ReactNode }) {
@@ -95,22 +156,37 @@ export function OnboardingWizard({
   initialUi,
 }: {
   theme: PluginTheme;
-  /** The snapshot — the lane picker reads its provider catalog; step 3 prefills from `machineLanes`. */
-  view: Pick<FactoryView, "lanes" | "machineLanes" | "providers">;
+  /** The snapshot — the lane picker reads its provider catalog; step 3 prefills from `machineLanes` or `profiles`. */
+  view: Pick<FactoryView, "lanes" | "machineLanes" | "providers"> & { profiles?: FactoryView["profiles"] };
   /** The workspace panel's folder; null when the panel is not bound to one. */
   folder: string | null;
   actions: OnboardingActions;
   initialUi?: OnboardingInitialUi;
 }) {
+  const profiles = view.profiles ?? [];
   const [input, dispatch] = useReducer(
     reduceWizard,
     undefined,
     (): WizardInput => {
       const base = initialWizard(view.machineLanes);
+      const profileId = initialUi?.profileId ?? base.profileId;
+      const matched = profileId === null ? null : (profiles.find((p) => p.id === profileId) ?? null);
+      const lanes =
+        initialUi?.lanes ??
+        (matched !== null
+          ? { supervisor: matched.lanes.supervisor, lead: matched.lanes.lead, worker: matched.lanes.worker }
+          : base.lanes);
+      const profileModified =
+        initialUi?.profileModified ??
+        (matched !== null && initialUi?.lanes !== undefined
+          ? ONBOARDING_LANES.some((lane) => lanes[lane] !== matched.lanes[lane])
+          : false);
       return {
         step: initialUi?.step ?? base.step,
         initGit: initialUi?.initGit ?? base.initGit,
-        lanes: initialUi?.lanes ?? base.lanes,
+        lanes,
+        profileId,
+        profileModified,
         directive: initialUi?.directive ?? base.directive,
         design: initialUi?.design ?? base.design,
       };
@@ -225,6 +301,7 @@ export function OnboardingWizard({
   const advance = canAdvance(step, inspection, input.initGit);
   const busy = checking || installing || starting;
   const palette = factoryPalette(theme);
+  const selectedProfile = input.profileId === null ? null : (profiles.find((p) => p.id === input.profileId) ?? null);
 
   return (
     <View testID="factory-onboarding" style={{ gap: SPACING[3] }}>
@@ -358,12 +435,63 @@ export function OnboardingWizard({
 
       {step === 3 ? (
         <View testID="factory-onboarding-step-models" style={{ gap: SPACING[1.5] }}>
-          <Note theme={theme}>Prefilled from your machine defaults — usually you just press Next.</Note>
+          {profiles.length > 0 ? (
+            <View
+              testID="factory-onboarding-profiles"
+              style={{
+                gap: SPACING[1.5],
+                padding: SPACING[2],
+                borderRadius: RADIUS.md,
+                borderWidth: 1,
+                borderColor: theme.colors.border,
+                backgroundColor: theme.colors.surface1,
+              }}
+            >
+              <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[1.5] }}>
+                <Text style={text(theme, "label")}>Lane profile</Text>
+                {selectedProfile !== null && input.profileModified ? (
+                  <ToneBadge theme={theme} label="modified" colour={palette.wait} dot={false} testID="factory-onboarding-profile-modified" />
+                ) : null}
+              </View>
+              <View style={{ flexDirection: "row", flexWrap: "wrap", gap: SPACING[1.5] }}>
+                <ProfilePill
+                  theme={theme}
+                  label="Machine defaults"
+                  active={input.profileId === null}
+                  colour={palette.lead}
+                  disabled={busy}
+                  testID="factory-onboarding-profile-machine-defaults"
+                  onPress={() => dispatch({ type: "machineDefaults", machineLanes: view.machineLanes })}
+                />
+                {profiles.map((profile) => (
+                  <ProfilePill
+                    key={profile.id}
+                    theme={theme}
+                    label={profile.name}
+                    active={input.profileId === profile.id}
+                    colour={palette.lead}
+                    disabled={busy}
+                    testID={`factory-onboarding-profile-${profile.id}`}
+                    onPress={() => dispatch({ type: "profile", profile })}
+                  />
+                ))}
+              </View>
+              {selectedProfile?.description ? <Note theme={theme}>{selectedProfile.description}</Note> : null}
+            </View>
+          ) : null}
+          <Note theme={theme}>
+            {profiles.length === 0
+              ? "Prefilled from your machine defaults — usually you just press Next."
+              : selectedProfile === null
+                ? "Prefilled from your machine defaults — pick a Lane profile or adjust seats below."
+                : `Prefilled from "${selectedProfile.name}" — individual seat edits stay local to this Project.`}
+          </Note>
           {PROJECT_OVERRIDE_CARDS.map((card) => {
             const lane = card.id as OnboardingLaneName;
             const role = lane === "worker" ? "peer" : lane;
             const label = lane === "worker" ? "Worker" : card.title;
-            const changed = input.lanes[lane] !== view.machineLanes[lane];
+            const baseline = selectedProfile !== null ? selectedProfile.lanes[lane] : view.machineLanes[lane];
+            const changed = input.lanes[lane] !== baseline;
             const thinking = splitLaneParts(input.lanes[lane]).thinking || "off";
             return (
               <View key={card.id} testID={`factory-onboarding-lane-${card.id}`} style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[2] }}>
@@ -436,6 +564,7 @@ export function OnboardingWizard({
               ))}
             </View>
             <Text style={text(theme, "meta")}>
+              {selectedProfile !== null ? `Profile: ${selectedProfile.name}${input.profileModified ? " (modified)" : ""} · ` : ""}
               Open Design: {input.design === null ? "Not linked" : input.design.projectName}
               {inspection !== null ? ` · Prerequisites: ${inspection.missingPrerequisites.length === 0 ? "all ready" : `${inspection.missingPrerequisites.length} missing`}` : ""}
             </Text>
