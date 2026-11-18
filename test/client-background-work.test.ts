@@ -237,11 +237,13 @@ test("idle Peers with backgroundWorkCount > 0 surface warning indicators in wide
     const html = await renderPanel(panel, layout);
     const peer10 = elementOf(html, "factory-seat-peer-T-10");
     assert.match(elementOf(peer10, "factory-seat-background-work-peer-T-10"), /2 background processes running/);
-    assert.match(elementOf(peer10, "factory-seat-line-peer-T-10"), /idle<span[^>]*> · engineer<\/span>/);
+    assert.match(elementOf(peer10, "factory-seat-status-peer-T-10"), />idle</);
+    assert.match(elementOf(peer10, "factory-peer-disposition-T-10"), />engineer</);
 
     const peer11 = elementOf(html, "factory-seat-peer-T-11");
     assert.match(elementOf(peer11, "factory-seat-background-work-peer-T-11"), /1 background process running/);
-    assert.match(elementOf(peer11, "factory-seat-line-peer-T-11"), /idle<span[^>]*> · reviewer<\/span>/);
+    assert.match(elementOf(peer11, "factory-seat-status-peer-T-11"), />idle</);
+    assert.match(elementOf(peer11, "factory-peer-disposition-T-11"), />reviewer</);
 
     // isClosedPeer still hides closed Peers behind the Closed toggle.
     assert.equal(hasHook(html, "factory-panel-seat-peer-T-closed"), false);

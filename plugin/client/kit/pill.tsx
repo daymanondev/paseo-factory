@@ -8,7 +8,7 @@ import { Icon } from "@getpaseo/plugin/client/ui";
 import type { ReactNode } from "react";
 import { Pressable, Text, View } from "react-native";
 import type { ViewStyle } from "react-native";
-import { CONTROL_H, CONTROL_SM, PILL_H, RADIUS, SPACING, hoveredOf, text, tint } from "./theme.ts";
+import { CONTROL_H, CONTROL_SM, PILL_H, RADIUS, SPACING, factoryPalette, hoveredOf, text, tint } from "./theme.ts";
 import type { Colour } from "./theme.ts";
 
 /** One Evidence Pill — Gate / Choke / Eye / Watch / Cost and the status chips. */
@@ -360,6 +360,70 @@ export function SegmentedControl<T extends string>({
           </Pressable>
         );
       })}
+    </View>
+  );
+}
+
+/** Fixed-colour seat identity (dot + name) backed by `FACTORY_PALETTE`. */
+export function RoleName({
+  theme,
+  role,
+  label,
+  testID,
+}: {
+  theme: PluginTheme;
+  role: "supervisor" | "lead" | "peer";
+  label: string;
+  testID?: string;
+}) {
+  const colour = factoryPalette(theme)[role];
+  return (
+    <View testID={testID} style={{ flexDirection: "row", alignItems: "center", gap: SPACING[1.5] }}>
+      <View style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: colour }} />
+      <Text style={{ ...text(theme, "rowTitle"), color: colour, flexShrink: 1 }} numberOfLines={1}>
+        {label}
+      </Text>
+    </View>
+  );
+}
+
+/** Compact tinted badge backed by a `FACTORY_PALETTE` colour (optional leading dot). */
+export function ToneBadge({
+  theme,
+  label,
+  colour,
+  dot = true,
+  pill = true,
+  testID,
+}: {
+  theme: PluginTheme;
+  label: string;
+  colour: string;
+  dot?: boolean;
+  pill?: boolean;
+  testID?: string;
+}) {
+  return (
+    <View
+      testID={testID}
+      style={{
+        flexDirection: "row",
+        alignItems: "center",
+        alignSelf: "flex-start",
+        maxWidth: "100%",
+        gap: SPACING[1],
+        paddingHorizontal: SPACING[2],
+        paddingVertical: 2,
+        borderRadius: pill ? 999 : RADIUS.sm,
+        borderWidth: 1,
+        borderColor: tint(colour, "66"),
+        backgroundColor: tint(colour, "18"),
+      }}
+    >
+      {dot ? <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: colour, flexShrink: 0 }} /> : null}
+      <Text style={{ ...text(theme, "badge"), color: colour, flexShrink: 1 }} numberOfLines={1}>
+        {label}
+      </Text>
     </View>
   );
 }

@@ -13,9 +13,9 @@ import { Pressable, Text, View } from "react-native";
 import type { GitHubPublishPreflightView, PanelNeedsYouItem, PanelOpenDesign, PanelPeerRow, PanelSeatRow, PanelSupervisorCandidateRow, PanelTone, PanelView, Lanes, ReleaseSettingsView } from "../../shared/view.ts";
 import { GitHubReleaseCard } from "./github-release-card.tsx";
 import type { GitHubReleaseActions, ReleaseCardFeedback } from "./github-release-card.tsx";
-import { Btn } from "../kit/pill.tsx";
+import { Btn, RoleName, ToneBadge } from "../kit/pill.tsx";
 import { Tabs } from "../kit/tabs.tsx";
-import { CONTROL_H, RADIUS, SPACING, factoryPalette, hoveredOf, text, thinkingColour, tint } from "../kit/theme.ts";
+import { CONTROL_H, RADIUS, SPACING, dispositionColour, factoryPalette, hoveredOf, statusBadgeColour, text, thinkingColour, tint } from "../kit/theme.ts";
 import type { Colour } from "../kit/theme.ts";
 import type { SeatEditorRequest } from "./editor-request.ts";
 import { SelfUpdateControls, SelfUpdateNote } from "./self-update.tsx";
@@ -85,8 +85,8 @@ const PANEL_TABS: readonly { id: ProjectPanelTab; label: string }[] = [
 
 /** Measured width (px) from which a seat is one grid line and an alert puts its actions beside its title. */
 const WIDE = 720;
-/** The seat grid's fixed columns; the model chip takes the rest. The status column is wider than a bare word so a Peer's `closed · implementation` fits. */
-const COL = { name: 150, status: 128, context: 170 } as const;
+/** The seat grid's fixed columns; the model chip takes the rest. The status column fits a status pill and Peer disposition badge side by side. */
+const COL = { name: 150, status: 164, context: 170 } as const;
 
 /** Items the Owner must resolve themselves are red; items that wait on the Owner's attention are amber. */
 const NEEDS_YOU_TONE: Record<PanelNeedsYouItem["kind"], "wait" | "bad"> = {
@@ -223,22 +223,6 @@ function ContextBar({ theme, context }: { theme: PluginTheme; context: PanelSeat
   </View>;
 }
 
-function seatStateColour(theme: PluginTheme, row: PanelSeatRow | PanelPeerRow): string {
-  const p = factoryPalette(theme);
-  if (row.tone === "error" || row.handoff?.state === "failed") return p.bad;
-  if (row.pendingLane !== null || (row.handoff !== null && row.handoff.state !== "done")) return p.move;
-  if (row.tone === "waiting") return p.wait;
-  return /idle|vacant|offline/i.test(row.statusLabel) ? p.idle : p.ok;
-}
-
-function RoleName({ theme, role, label }: { theme: PluginTheme; role: "supervisor" | "lead" | "peer"; label: string }) {
-  const colour = factoryPalette(theme)[role];
-  return <View style={{ flexDirection: "row", alignItems: "center", gap: SPACING[1.5] }}>
-    <View style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: colour }} />
-    <Text style={{ ...text(theme, "rowTitle"), color: colour, flexShrink: 1 }} numberOfLines={1}>{label}</Text>
-  </View>;
-}
-
 /** A seat's hairline-separated row: padded, no card. */
 const seatRowStyle = (theme: PluginTheme, divider: boolean) => ({ gap: SPACING[1], paddingVertical: SPACING[2.5], borderTopWidth: divider ? 1 : 0, borderTopColor: theme.colors.border });
 
@@ -337,7 +321,7 @@ function SeatRow({
         testID={`factory-seat-line-${row.role}`}
         wide={wide}
         name={<RoleName theme={theme} role={row.role} label={name} />}
-        status={<Text style={{ ...text(theme, "label"), color: seatStateColour(theme, row) }} numberOfLines={1}>{row.statusLabel}</Text>}
+        status={<ToneBadge theme={theme} label={row.statusLabel} colour={statusBadgeColour(theme, row.statusLabel)} testID={`factory-seat-status-${row.role}`} />}
         chip={<SeatModelChip theme={theme} seat={row.role} lane={row.lane} pendingLane={row.pendingLane} live={live} viewHandover={row.allowedActions.includes("view-handover")} editable={seatChipEditable(row)} />}
         context={<ContextBar theme={theme} context={row.context} />}
         actions={<>
@@ -395,7 +379,12 @@ function PeerRowView({ theme, row, wide, actions }: { theme: PluginTheme; row: P
         testID={`factory-seat-line-peer-${row.task}`}
         wide={wide}
         name={<RoleName theme={theme} role="peer" label={row.title} />}
-        status={<Text style={{ ...text(theme, "label"), color: seatStateColour(theme, row) }} numberOfLines={1}>{row.statusLabel}<Text style={text(theme, "meta")}>{` · ${row.disposition}`}</Text></Text>}
+        status={
+          <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[1] }}>
+            <ToneBadge theme={theme} label={row.statusLabel} colour={statusBadgeColour(theme, row.statusLabel)} testID={`factory-seat-status-peer-${row.task}`} />
+            <ToneBadge theme={theme} label={row.disposition} colour={dispositionColour(theme, row.disposition)} dot={false} pill={false} testID={`factory-peer-disposition-${row.task}`} />
+          </View>
+        }
         chip={<SeatModelChip theme={theme} seat={`peer-${row.task}`} target={`peer:${row.task}`} lane={row.lane} pendingLane={row.pendingLane} viewHandover={row.allowedActions.includes("view-handover")} editable={row.allowedActions.includes("switch-model") || canHandOff} />}
         context={<ContextBar theme={theme} context={row.context} />}
         actions={<>
@@ -742,10 +731,12 @@ export function SkillPacks({ theme, packs, onToggle, onReset, onManage, explicit
 }
 
 /** One Models-tab row: role name, the seat's chip (opens the modal), and where the value comes from. */
-function ModelRow({ theme, testID, name, scope, divider, children }: { theme: PluginTheme; testID?: string; name: string; scope: ScopedLaneRef["scope"]; divider: boolean; children: ReactNode }) {
+function ModelRow({ theme, testID, role, name, scope, divider, children }: { theme: PluginTheme; testID?: string; role: "supervisor" | "lead" | "peer"; name: string; scope: ScopedLaneRef["scope"]; divider: boolean; children: ReactNode }) {
   return (
     <View testID={testID} style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[3], paddingVertical: SPACING[2.5], borderTopWidth: divider ? 1 : 0, borderTopColor: theme.colors.border }}>
-      <Text style={{ ...text(theme, "rowTitle"), width: COL.name, flexShrink: 0 }} numberOfLines={1}>{name}</Text>
+      <View style={{ width: COL.name, flexShrink: 0 }}>
+        <RoleName theme={theme} role={role} label={name} />
+      </View>
       {children}
       <Text style={text(theme, "meta")}>{scope === "project" ? "Project override" : "Machine default"}</Text>
     </View>
@@ -812,13 +803,13 @@ function ModelsTab({ theme, panel, mobile, actions, modelView, machineLanes, has
         <SectionTitle theme={theme} label="Seat models" />
         <View>
           {standing.map(([role, name, row], index) => (
-            <ModelRow key={role} theme={theme} testID={`factory-models-row-${role}`} name={name} scope={row.lane.scope} divider={index > 0}>
+            <ModelRow key={role} theme={theme} testID={`factory-models-row-${role}`} role={role} name={name} scope={row.lane.scope} divider={index > 0}>
               {/* seat `models-<role>` keeps this chip's hook unique beside the Team tab's; the edit target is still the seat. */}
               <SeatModelChip theme={theme} seat={`models-${role}`} target={role} lane={row.lane} pendingLane={row.pendingLane} live={seatIsLive(row)} viewHandover={row.allowedActions.includes("view-handover")} editable={seatChipEditable(row)} />
             </ModelRow>
           ))}
           {defaultWorker === null ? null : (
-            <ModelRow theme={theme} testID="factory-default-worker" name="Default worker" scope={defaultWorker.lane.scope} divider={standing.length > 0}>
+            <ModelRow theme={theme} testID="factory-default-worker" role="peer" name="Default worker" scope={defaultWorker.lane.scope} divider={standing.length > 0}>
               <SeatModelChip theme={theme} seat="worker" lane={defaultWorker.lane} pendingLane={null} />
             </ModelRow>
           )}

@@ -27,12 +27,12 @@ import { useEffect, useReducer, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { Text, View } from "react-native";
 import type { FactoryView } from "../../shared/view.ts";
-import { Btn } from "../kit/pill.tsx";
-import { CONTROL_H, RADIUS, SPACING, text } from "../kit/theme.ts";
+import { Btn, RoleName, ToneBadge } from "../kit/pill.tsx";
+import { CONTROL_H, RADIUS, SPACING, factoryPalette, text, thinkingColour } from "../kit/theme.ts";
 import type { Colour } from "../kit/theme.ts";
-import { LaneModalBody, PROJECT_OVERRIDE_CARDS } from "./lane-editor.tsx";
+import { LaneModalBody, PROJECT_OVERRIDE_CARDS, splitLaneParts } from "./lane-editor.tsx";
 import type { LaneCard } from "./lane-editor.tsx";
-import { blockerOf, canAdvance, commitInputOf, describeThrown, initialWizard, reduceWizard, stepLabel } from "./onboarding-state.ts";
+import { ONBOARDING_STEPS, blockerOf, canAdvance, commitInputOf, describeThrown, initialWizard, reduceWizard, stepLabel } from "./onboarding-state.ts";
 import type { CommitInput, DesignChoice, Inspection, OnboardingLaneName, WizardInput } from "./onboarding-state.ts";
 
 type Failed = { ok: false; error: string };
@@ -82,7 +82,7 @@ function Note({ theme, tone, testID, children }: { theme: PluginTheme; tone?: Co
 function ErrorLine({ theme, children }: { theme: PluginTheme; children: ReactNode }) {
   return (
     <View testID="factory-onboarding-error" accessibilityRole="alert" style={{ gap: SPACING[1] }}>
-      <Text style={text(theme, "label", "statusDanger")}>{children}</Text>
+      <Text style={{ ...text(theme, "label"), color: factoryPalette(theme).bad }}>{children}</Text>
     </View>
   );
 }
@@ -224,12 +224,30 @@ export function OnboardingWizard({
   const blocker = inspection === null ? null : blockerOf(inspection);
   const advance = canAdvance(step, inspection, input.initGit);
   const busy = checking || installing || starting;
+  const palette = factoryPalette(theme);
 
   return (
     <View testID="factory-onboarding" style={{ gap: SPACING[3] }}>
-      <Text testID="factory-onboarding-progress" style={text(theme, "section")}>
-        {stepLabel(step)}
-      </Text>
+      <View style={{ gap: SPACING[1.5] }}>
+        <Text testID="factory-onboarding-progress" style={text(theme, "section")}>
+          {stepLabel(step)}
+        </Text>
+        <View testID="factory-onboarding-steps" style={{ flexDirection: "row", alignItems: "center", gap: SPACING[1.5] }}>
+          {ONBOARDING_STEPS.map((name, idx) => {
+            const num = idx + 1;
+            const state = num < step ? "done" : num === step ? "active" : "pending";
+            const colour = state === "done" ? palette.ok : state === "active" ? palette.lead : palette.idle;
+            return (
+              <View key={name} testID={`factory-onboarding-step-pill-${num}`} style={{ flex: 1, minWidth: 0, gap: SPACING[0.5] }}>
+                <View style={{ height: 3, borderRadius: 2, backgroundColor: state === "pending" ? theme.colors.surface2 : colour }} />
+                <Text style={{ ...text(theme, "badge"), color: colour }} numberOfLines={1}>
+                  {num}. {name}
+                </Text>
+              </View>
+            );
+          })}
+        </View>
+      </View>
 
       {step === 1 ? (
         <View testID="factory-onboarding-step-folder" style={{ gap: SPACING[1.5] }}>
@@ -237,6 +255,7 @@ export function OnboardingWizard({
           {checking && inspection === null ? <Note theme={theme}>Looking at the folder…</Note> : null}
           {inspectError !== null ? (
             <>
+              <ToneBadge theme={theme} label="Inspection failed" colour={palette.bad} testID="factory-onboarding-status-badge" />
               <ErrorLine theme={theme}>{inspectError}</ErrorLine>
               <View style={{ flexDirection: "row" }}>
                 <Btn theme={theme} small testID="factory-onboarding-retry" label="Retry" disabled={checking} onPress={() => void check()} />
@@ -245,10 +264,22 @@ export function OnboardingWizard({
           ) : null}
           {inspection !== null ? (
             <>
-              <Note theme={theme}>Git repository: {inspection.gitRepo ? "yes" : "no"}</Note>
+              <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: SPACING[1.5] }}>
+                {inspection.gitRepo ? (
+                  <>
+                    <ToneBadge theme={theme} label="Git repository" colour={palette.ok} testID="factory-onboarding-git-badge" />
+                    {!inspection.hasCommits ? <ToneBadge theme={theme} label="No commits yet" colour={palette.wait} testID="factory-onboarding-commits-badge" /> : null}
+                  </>
+                ) : (
+                  <ToneBadge theme={theme} label={input.initGit ? "Git will be initialised" : "Not a Git repository"} colour={palette.wait} testID="factory-onboarding-git-badge" />
+                )}
+                {blocker !== null ? (
+                  <ToneBadge theme={theme} label={blocker === "lead-live" ? "Lead already live" : "Supervisor already live"} colour={palette.bad} testID="factory-onboarding-blocker-badge" />
+                ) : null}
+              </View>
               {!inspection.gitRepo ? (
                 <View style={{ gap: SPACING[1.5] }}>
-                  <Note theme={theme} tone="statusWarning">This folder is not a Git repository. The Factory needs one for its worktrees and the Gate.</Note>
+                  <Text style={{ ...text(theme, "meta"), color: palette.wait }}>This folder is not a Git repository. The Factory needs one for its worktrees and the Gate.</Text>
                   <View style={{ flexDirection: "row" }}>
                     <Btn
                       theme={theme}
@@ -264,11 +295,11 @@ export function OnboardingWizard({
                 </View>
               ) : null}
               {inspection.gitRepo && !inspection.hasCommits ? (
-                <Note theme={theme} tone="statusWarning">No commits yet — worktrees may not branch until there is one. Setup will make the first commit for you.</Note>
+                <Text style={{ ...text(theme, "meta"), color: palette.wait }}>No commits yet — worktrees may not branch until there is one. Setup will make the first commit for you.</Text>
               ) : null}
               {blocker !== null ? (
                 <View testID="factory-onboarding-blocked" style={{ gap: SPACING[1.5] }}>
-                  <Text style={text(theme, "label", "statusDanger")}>
+                  <Text style={{ ...text(theme, "label"), color: palette.bad }}>
                     {blocker === "lead-live"
                       ? "A Lead is already running in this folder — onboarding stops so a second Project chain is never created over a live one. Ask that Project's Supervisor to retire the Lead (or open a different workspace), then Re-check."
                       : "A Supervisor is already live in this folder — open it from Paseo, or revoke it first, then Re-check."}
@@ -289,12 +320,18 @@ export function OnboardingWizard({
           {inspection !== null
             ? inspection.prerequisites.map((item) => (
                 <View key={item.id} testID={`factory-onboarding-prereq-${item.id}`} style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[2] }}>
-                  <Text style={{ ...text(theme, "label", item.ready ? undefined : "statusWarning"), flexShrink: 1 }}>{item.title}</Text>
-                  <Text style={{ ...text(theme, "meta", item.ready ? undefined : "statusWarning"), flexShrink: 1 }}>{item.ready ? "ready" : (item.detail ?? "missing")}</Text>
+                  <ToneBadge theme={theme} label={item.ready ? "ready" : "missing"} colour={item.ready ? palette.ok : palette.wait} testID={`factory-onboarding-prereq-badge-${item.id}`} />
+                  <Text style={{ ...text(theme, "label"), flexShrink: 1 }}>{item.title}</Text>
+                  {!item.ready && item.detail ? <Text style={{ ...text(theme, "meta"), color: palette.wait, flexShrink: 1 }}>{item.detail}</Text> : null}
                 </View>
               ))
             : null}
-          {inspection !== null && inspection.missingPrerequisites.length === 0 ? <Note theme={theme}>All required skills and tools are installed.</Note> : null}
+          {inspection !== null && inspection.missingPrerequisites.length === 0 ? (
+            <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[2] }}>
+              <ToneBadge theme={theme} label="All ready" colour={palette.ok} testID="factory-onboarding-prereqs-ok" />
+              <Note theme={theme}>All required skills and tools are installed.</Note>
+            </View>
+          ) : null}
           {inspection !== null && inspection.missingPrerequisites.length > 0 ? (
             <View style={{ gap: SPACING[1.5] }}>
               <Note theme={theme}>You can continue without them, but agents will fail on what is missing — it stays on the panel's Needs you list.</Note>
@@ -324,12 +361,18 @@ export function OnboardingWizard({
           <Note theme={theme}>Prefilled from your machine defaults — usually you just press Next.</Note>
           {PROJECT_OVERRIDE_CARDS.map((card) => {
             const lane = card.id as OnboardingLaneName;
+            const role = lane === "worker" ? "peer" : lane;
+            const label = lane === "worker" ? "Worker" : card.title;
             const changed = input.lanes[lane] !== view.machineLanes[lane];
+            const thinking = splitLaneParts(input.lanes[lane]).thinking || "off";
             return (
               <View key={card.id} testID={`factory-onboarding-lane-${card.id}`} style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[2] }}>
-                <Text style={{ ...text(theme, "label"), minWidth: 76 }}>{card.title}</Text>
+                <View style={{ minWidth: 108 }}>
+                  <RoleName theme={theme} role={role} label={label} />
+                </View>
                 <Text style={{ ...text(theme, "code"), flexShrink: 1 }} numberOfLines={1}>{input.lanes[lane]}</Text>
-                {changed ? <Text style={text(theme, "meta")}>changed</Text> : null}
+                <ToneBadge theme={theme} label={thinking} colour={thinkingColour(theme, thinking)} dot={false} testID={`factory-onboarding-lane-thinking-${card.id}`} />
+                {changed ? <ToneBadge theme={theme} label="changed" colour={palette.wait} dot={false} testID={`factory-onboarding-lane-changed-${card.id}`} /> : null}
                 <Btn theme={theme} small testID={`factory-onboarding-lane-change-${card.id}`} label="Change" tone="foregroundMuted" disabled={busy} onPress={() => setEditing(card)} />
               </View>
             );
@@ -356,6 +399,47 @@ export function OnboardingWizard({
 
       {step === 4 ? (
         <View testID="factory-onboarding-step-start" style={{ gap: SPACING[2] }}>
+          <View
+            testID="factory-onboarding-summary"
+            style={{
+              gap: SPACING[1.5],
+              padding: SPACING[2.5],
+              borderRadius: RADIUS.md,
+              borderWidth: 1,
+              borderColor: theme.colors.border,
+              backgroundColor: theme.colors.surface1,
+            }}
+          >
+            <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: SPACING[2] }}>
+              <Text style={{ ...text(theme, "badge"), textTransform: "uppercase" }}>Summary</Text>
+              <ToneBadge
+                theme={theme}
+                label={inspection === null ? "Pending" : inspection.gitRepo ? "Git ready" : input.initGit ? "Initialise Git" : "Git required"}
+                colour={inspection === null ? palette.idle : inspection.gitRepo ? palette.ok : palette.wait}
+              />
+            </View>
+            <Text style={text(theme, "code", "foregroundMuted")} numberOfLines={1}>{folder}</Text>
+            <View style={{ gap: SPACING[1] }}>
+              {(
+                [
+                  ["supervisor", "Supervisor", input.lanes.supervisor],
+                  ["lead", "Lead", input.lanes.lead],
+                  ["peer", "Worker", input.lanes.worker],
+                ] as const
+              ).map(([role, label, value]) => (
+                <View key={role} style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[2] }}>
+                  <View style={{ minWidth: 96 }}>
+                    <RoleName theme={theme} role={role} label={label} />
+                  </View>
+                  <Text style={{ ...text(theme, "code"), flexShrink: 1 }} numberOfLines={1}>{value}</Text>
+                </View>
+              ))}
+            </View>
+            <Text style={text(theme, "meta")}>
+              Open Design: {input.design === null ? "Not linked" : input.design.projectName}
+              {inspection !== null ? ` · Prerequisites: ${inspection.missingPrerequisites.length === 0 ? "all ready" : `${inspection.missingPrerequisites.length} missing`}` : ""}
+            </Text>
+          </View>
           <View style={{ gap: SPACING[1] }}>
             <Text style={text(theme, "label")}>First directive (optional)</Text>
             <TextInput

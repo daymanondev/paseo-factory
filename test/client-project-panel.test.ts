@@ -102,13 +102,13 @@ const noopActions = () => ({
   openAgent() {}, installPrerequisites() {}, handoffStart() {}, handoffReplaceNow() {}, handoffCancel() {}, handoffRetry() {}, viewHandover() {}, startSupervisor() {}, syncOpenDesign() {}, adoptSupervisor() {}, busy: false,
 });
 
-async function render(panel: PanelView, props: { mobile?: boolean; openDesignActions?: unknown; menu?: unknown; initialUi?: Record<string, unknown>; actions?: Record<string, unknown>; width?: number; skillPacks?: unknown[]; selfUpdate?: unknown; release?: ReleaseSettingsView | null; publishPreflight?: Record<string, unknown> | null; releaseFeedback?: { text: string; tone: "info" | "error" } | null; releaseActions?: Record<string, unknown> } = {}): Promise<string> {
+async function render(panel: PanelView, props: { theme?: typeof theme; mobile?: boolean; openDesignActions?: unknown; menu?: unknown; initialUi?: Record<string, unknown>; actions?: Record<string, unknown>; width?: number; skillPacks?: unknown[]; selfUpdate?: unknown; release?: ReleaseSettingsView | null; publishPreflight?: Record<string, unknown> | null; releaseFeedback?: { text: string; tone: "info" | "error" } | null; releaseActions?: Record<string, unknown> } = {}): Promise<string> {
   const { ProjectPanel } = await loadPanel();
   const { createElement } = await import("react");
   const { renderToStaticMarkup } = await import("react-dom/server");
   return renderToStaticMarkup(
     createElement(ProjectPanel, {
-      theme, panel, mobile: props.mobile ?? false, now: Date.now(), daemonError: null,
+      theme: props.theme ?? theme, panel, mobile: props.mobile ?? false, now: Date.now(), daemonError: null,
       actions: { ...noopActions(), ...(props.actions ?? {}) },
       width: props.width, skillPacks: props.skillPacks,
       ...(props.openDesignActions === undefined ? {} : { openDesignActions: props.openDesignActions }),
@@ -520,6 +520,34 @@ test("W10: Factory palette follows the host background luminance and freezes pi'
   assert.equal(factoryPalette({ colors: { ...theme.colors, surface0: "rgb(255, 255, 255)" } }).bad, "#c8253d");
 });
 
+test("01-badges: statusBadgeColour and dispositionColour map strictly 1:1 from statusLabel and disposition across light/dark", async () => {
+  const { statusBadgeTone, statusBadgeColour, dispositionColour } = await loadModule("plugin/client/kit/theme.ts");
+  const darkTheme = { colors: { ...theme.colors, surface0: "#000000" } };
+
+  for (const [label, expectedTone, lightHex, darkHex] of [
+    ["working", "ok", "#337e58", "#68b78d"],
+    ["starting", "wait", "#8f6802", "#cd9a22"],
+    ["waiting for permission", "wait", "#8f6802", "#cd9a22"],
+    ["error", "bad", "#c8253d", "#fe5462"],
+    ["idle", "idle", "#677176", "#6c767b"],
+    ["vacant", "idle", "#677176", "#6c767b"],
+  ] as const) {
+    assert.equal(statusBadgeTone(label), expectedTone, `tone for ${label}`);
+    assert.equal(statusBadgeColour(theme, label), lightHex, `light colour for ${label}`);
+    assert.equal(statusBadgeColour(darkTheme, label), darkHex, `dark colour for ${label}`);
+  }
+
+  for (const [disp, lightHex, darkHex] of [
+    ["engineer", "#4f6fc0", "#6185cc"],
+    ["architect", "#7459b4", "#9776e5"],
+    ["scout", "#287a81", "#5db3ba"],
+    ["reviewer", "#b23a98", "#de54c1"],
+  ] as const) {
+    assert.equal(dispositionColour(theme, disp), lightHex, `light disposition ${disp}`);
+    assert.equal(dispositionColour(darkTheme, disp), darkHex, `dark disposition ${disp}`);
+  }
+});
+
 const at = (html: string, id: string): number => html.indexOf(`data-testid="${id}"`);
 
 /** The balanced `<div>` that carries `data-testid="<id>"` — the harness renders every View as a div. */
@@ -811,12 +839,77 @@ test("04: a seat row on a wide panel is one line — role, status, chip, context
   assert.ok(narrow.indexOf("factory-panel-open-lead") < narrow.indexOf("factory-seat-chip-lead"), "narrow: actions on line 1, chip on line 2");
 });
 
-test("04: a Peer's disposition is a muted suffix on its status, and a vacant seat's hint sits on a second line", async () => {
+test("04: a Peer's disposition is a fixed-colour badge beside its status pill, and a vacant seat's hint sits on a second line", async () => {
   const html = await render(makePanel({ seats: { ...healthySeats, lead: { ...healthySeats.lead, vacant: true, agentId: null, statusLabel: "vacant", model: null, hint: "No Lead is running — ask your Supervisor.", context: null, handoff: null } } }), { width: 900 });
-  assert.match(elementOf(html, "factory-seat-line-peer-T-08"), /working<span[^>]*> · reviewer<\/span>/);
+  const peerLine = elementOf(html, "factory-seat-line-peer-T-08");
+  assert.doesNotMatch(peerLine, /· reviewer/, "plain '· disposition' suffix is replaced by a badge");
+  const statusPill = elementOf(peerLine, "factory-seat-status-peer-T-08");
+  assert.match(statusPill, />working</);
+  assert.ok(statusPill.includes("#337e5818") && statusPill.includes("#337e5866"), "working status renders as ok pill badge");
+  const dispBadge = elementOf(peerLine, "factory-peer-disposition-T-08");
+  assert.match(dispBadge, />reviewer</);
+  assert.ok(dispBadge.includes("#b23a9818") && dispBadge.includes("#b23a9866"), "reviewer disposition renders with fixed light badge colour");
   const row = elementOf(html, "factory-seat-lead");
   assert.equal(elementOf(html, "factory-seat-line-lead").includes("No Lead is running"), false, "the hint is not on the grid line");
   assert.ok(row.includes("No Lead is running"), "the hint is on the row's second line");
+});
+
+test("01-badges: Team-tab status pills stay strictly 1:1 on statusLabel (never overridden by handoff or pendingLane), Peer disposition badges use fixed colours, and Models tab uses RoleName", async () => {
+  const darkTheme = { colors: { ...theme.colors, surface0: "#000000" } };
+  const panel = makePanel({
+    defaultWorker: { role: "worker", title: "Default worker", lane: { provider: "pi", model: "worker-model", scope: "project" } },
+    seats: {
+      supervisor: { ...healthySeats.supervisor, statusLabel: "idle", handoff: { ...handoffFixture, seat: "supervisor", state: "scheduled", waitingPeers: 1 }, pendingLane: { provider: "codex", model: "next", scope: "project" } },
+      lead: { ...healthySeats.lead, statusLabel: "starting", handoff: { ...handoffFixture, seat: "lead", state: "failed", failure: "boom" }, pendingLane: { provider: "codex", model: "next", scope: "project" } },
+      peers: [
+        peerOf("T-eng", "working", { disposition: "engineer" }),
+        peerOf("T-arch", "waiting for permission", { disposition: "architect" }),
+        peerOf("T-scout", "error", { disposition: "scout" }),
+        peerOf("T-rev", "idle", { disposition: "reviewer", handoff: { ...handoffFixture, seat: "peer:T-rev", state: "handing-over" }, pendingLane: { provider: "codex", model: "next", scope: "project" } }),
+      ],
+      supervisorCandidates: [],
+    },
+  });
+
+  const lightTeam = await render(panel, { width: 900 });
+  const supStatus = elementOf(lightTeam, "factory-seat-status-supervisor");
+  assert.ok(supStatus.includes("#67717618") && supStatus.includes("#67717666"), "idle status stays idle even with scheduled handoff and pendingLane");
+  assert.equal(supStatus.includes("#b23a98"), false, "handoff/pendingLane never override status pill colour");
+  assert.match(elementOf(lightTeam, "factory-seat-supervisor"), /Handoff: Scheduled/);
+  assert.ok(elementOf(lightTeam, "factory-seat-supervisor").includes("#b23a98"), "dedicated handoff line keeps move colour");
+
+  const leadStatus = elementOf(lightTeam, "factory-seat-status-lead");
+  assert.ok(leadStatus.includes("#8f680218") && leadStatus.includes("#8f680266"), "starting status stays wait even with failed handoff");
+
+  assert.ok(elementOf(lightTeam, "factory-seat-status-peer-T-eng").includes("#337e5818"));
+  assert.ok(elementOf(lightTeam, "factory-seat-status-peer-T-arch").includes("#8f680218"));
+  assert.ok(elementOf(lightTeam, "factory-seat-status-peer-T-scout").includes("#c8253d18"));
+  assert.ok(elementOf(lightTeam, "factory-seat-status-peer-T-rev").includes("#67717618"));
+
+  assert.ok(elementOf(lightTeam, "factory-peer-disposition-T-eng").includes("#4f6fc0"));
+  assert.ok(elementOf(lightTeam, "factory-peer-disposition-T-arch").includes("#7459b4"));
+  assert.ok(elementOf(lightTeam, "factory-peer-disposition-T-scout").includes("#287a81"));
+  assert.ok(elementOf(lightTeam, "factory-peer-disposition-T-rev").includes("#b23a98"));
+
+  const darkTeam = await render(panel, { theme: darkTheme, width: 900 });
+  assert.ok(elementOf(darkTeam, "factory-seat-status-supervisor").includes("#6c767b18"));
+  assert.ok(elementOf(darkTeam, "factory-seat-status-lead").includes("#cd9a2218"));
+  assert.ok(elementOf(darkTeam, "factory-seat-status-peer-T-eng").includes("#68b78d18"));
+  assert.ok(elementOf(darkTeam, "factory-seat-status-peer-T-scout").includes("#fe546218"));
+  assert.ok(elementOf(darkTeam, "factory-peer-disposition-T-eng").includes("#6185cc"));
+  assert.ok(elementOf(darkTeam, "factory-peer-disposition-T-arch").includes("#9776e5"));
+  assert.ok(elementOf(darkTeam, "factory-peer-disposition-T-scout").includes("#5db3ba"));
+  assert.ok(elementOf(darkTeam, "factory-peer-disposition-T-rev").includes("#de54c1"));
+
+  const lightModels = await render(panel, { initialUi: { tab: "models" } });
+  assert.ok(elementOf(lightModels, "factory-models-row-supervisor").includes("#7459b4"), "Models tab Supervisor uses RoleName");
+  assert.ok(elementOf(lightModels, "factory-models-row-lead").includes("#2f7899"), "Models tab Lead uses RoleName");
+  assert.ok(elementOf(lightModels, "factory-default-worker").includes("#287a81"), "Models tab Default worker uses peer RoleName");
+
+  const darkModels = await render(panel, { theme: darkTheme, initialUi: { tab: "models" } });
+  assert.ok(elementOf(darkModels, "factory-models-row-supervisor").includes("#a798d7"));
+  assert.ok(elementOf(darkModels, "factory-models-row-lead").includes("#5fa8cc"));
+  assert.ok(elementOf(darkModels, "factory-default-worker").includes("#5db3ba"));
 });
 
 test("04: the model chip is a quiet pill — no border, surface fill, code-style model, muted scope", async () => {
