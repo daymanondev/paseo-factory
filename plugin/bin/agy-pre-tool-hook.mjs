@@ -592,7 +592,7 @@ const SHELL_TOOL_NAMES = new Set([
 
 const READ_TOOL_NAMES = new Set(["read_file", "view_file"]);
 
-function extractReadTargetPath(toolInput) {
+function extractTargetPath(toolInput) {
   for (const key of ["Path", "AbsolutePath", "TargetFile", "file_path", "filePath", "path"]) {
     const value = toolInput[key];
     if (typeof value === "string" && value.trim() !== "") return value.trim();
@@ -1173,10 +1173,7 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 // src/agy-mcp-schema-heal.ts
 var agy_mcp_schema_heal_exports = {};
 __export(agy_mcp_schema_heal_exports, {
-  healAgyMcpSchemaFile: () => healAgyMcpSchemaFile,
-  resolveAllowedToolForSeat: () => resolveAllowedToolForSeat,
-  resolveHealTarget: () => resolveHealTarget,
-  serializeAgyMcpSchema: () => serializeAgyMcpSchema
+  healAgyMcpSchemaFile: () => healAgyMcpSchemaFile
 });
 module.exports = __toCommonJS(agy_mcp_schema_heal_exports);
 var import_node_crypto = require("node:crypto");
@@ -1469,11 +1466,11 @@ var catalog = slpCatalog;
 var ALLOWED_ROLES = /* @__PURE__ */ new Set(["supervisor", "lead", "agent"]);
 var AGY_APP_DATA_NAMES = ["antigravity", "antigravity-cli"];
 var AGY_SERVER_DIR_NAME = "paseo-factory_paseo_factory";
-function resolveHealTarget(targetPath, userHome) {
+function resolveHealTarget(targetPath) {
   const raw = typeof targetPath === "string" ? targetPath.trim() : "";
   if (raw === "" || !(0, import_node_path.isAbsolute)(raw) || raw.endsWith("/") || raw.endsWith("\\")) return null;
   if (raw.split(/[/\\]/).some((seg) => seg === "." || seg === "..")) return null;
-  const effectiveHome = typeof userHome === "string" && userHome.trim() !== "" ? userHome.trim() : process.env.HOME?.trim() || (0, import_node_os.homedir)();
+  const effectiveHome = process.env.HOME?.trim() || (0, import_node_os.homedir)();
   if (!effectiveHome) return null;
   const resolvedHome = (0, import_node_path.resolve)(effectiveHome);
   const resolvedTarget = (0, import_node_path.resolve)(raw);
@@ -1520,7 +1517,7 @@ function removeQuietly(path) {
 function healAgyMcpSchemaFile(options) {
   let tempPath = null;
   try {
-    const target = resolveHealTarget(options.targetPath, options.userHome);
+    const target = resolveHealTarget(options.targetPath);
     if (target === null) return false;
     const tool = resolveAllowedToolForSeat(options.seat, target.toolName);
     if (tool === null) return false;
@@ -1543,10 +1540,7 @@ function healAgyMcpSchemaFile(options) {
 }
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
-  healAgyMcpSchemaFile,
-  resolveAllowedToolForSeat,
-  resolveHealTarget,
-  serializeAgyMcpSchema
+  healAgyMcpSchemaFile
 });
 
 return module.exports;
@@ -1865,7 +1859,7 @@ process.stdin.on("end", () => {
     try {
       agyMcpSchemaHeal.healAgyMcpSchemaFile({
         seat: ctx.seat,
-        targetPath: extractReadTargetPath(toolInput),
+        targetPath: extractTargetPath(toolInput),
       });
     } catch {
       // Fail open: schema cache healing must never block read_file or view_file.
@@ -1875,9 +1869,7 @@ process.stdin.on("end", () => {
 
   if (ctx.seat === "supervisor" || ctx.seat === "lead") {
     if (WRITE_TOOL_NAMES.has(toolName)) {
-      const targetPath = String(
-        toolInput.Path ?? toolInput.TargetFile ?? toolInput.file_path ?? toolInput.filePath ?? toolInput.path ?? "",
-      ).trim();
+      const targetPath = extractTargetPath(toolInput);
       if (!isSeatWriteAllowed(ctx.projectRoot, targetPath, ctx.stateDir)) {
         deny(
           "Seat write fence: Supervisor and Lead may only write project memory/docs (AGENTS.md, CONTEXT.md, docs/**, .scratch/**); dispatch implementation work to Lead / Task Agents",
@@ -1958,9 +1950,7 @@ process.stdin.on("end", () => {
     };
 
     if (WRITE_TOOL_NAMES.has(toolName)) {
-      const targetPath = String(
-        toolInput.Path ?? toolInput.TargetFile ?? toolInput.file_path ?? toolInput.filePath ?? toolInput.path ?? "",
-      ).trim();
+      const targetPath = extractTargetPath(toolInput);
       const err = checkAgentPath(targetPath);
       if (err) deny(err);
       allow();

@@ -44,7 +44,7 @@ test("agy-pre-tool-hook self-heals missing schemas for supervisor, lead, and age
   const dir = makeTempDir("agy-schema-roles-");
   disposeDir(t, dir);
   const homeDir = join(dir, "home");
-  const repoDir = join(dir, "repo");
+  const workspaceDir = join(dir, "workspace");
   const stateDir = join(dir, "state");
 
   const cases = [
@@ -63,13 +63,13 @@ test("agy-pre-tool-hook self-heals missing schemas for supervisor, lead, and age
     const res = runHook(
       {
         toolCall: { name: "read_file", args: { Path: schemaPath } },
-        workspacePaths: [repoDir],
+        workspacePaths: [workspaceDir],
       },
       {
         HOME: homeDir,
         PASEO_FACTORY_SEAT: seat,
         PASEO_FACTORY_STATE_DIR: stateDir,
-        PASEO_FACTORY_PROJECT_ROOT: repoDir,
+        PASEO_FACTORY_PROJECT_ROOT: workspaceDir,
       },
     );
 
@@ -82,7 +82,7 @@ test("agy-pre-tool-hook self-heals missing schemas for supervisor, lead, and age
 test("agy-pre-tool-hook supports read_file, view_file, nested/flat payloads, and all path keys", (t) => {
   const dir = makeTempDir("agy-schema-shapes-");
   disposeDir(t, dir);
-  const repoDir = join(dir, "repo");
+  const workspaceDir = join(dir, "workspace");
   const stateDir = join(dir, "state");
 
   const leadTools = [
@@ -100,22 +100,22 @@ test("agy-pre-tool-hook supports read_file, view_file, nested/flat payloads, and
     const argsObj = { [entry.key]: schemaPath };
     let payload: unknown;
     if (entry.format === "nestedArgs") {
-      payload = { toolCall: { name: entry.toolCallName, args: argsObj }, workspacePaths: [repoDir] };
+      payload = { toolCall: { name: entry.toolCallName, args: argsObj }, workspacePaths: [workspaceDir] };
     } else if (entry.format === "nestedArguments") {
-      payload = { toolCall: { name: entry.toolCallName, arguments: argsObj }, workspacePaths: [repoDir] };
+      payload = { toolCall: { name: entry.toolCallName, arguments: argsObj }, workspacePaths: [workspaceDir] };
     } else if (entry.format === "flatToolInput") {
-      payload = { tool_name: entry.toolCallName, tool_input: argsObj, cwd: repoDir };
+      payload = { tool_name: entry.toolCallName, tool_input: argsObj, cwd: workspaceDir };
     } else if (entry.format === "flatToolInputCamel") {
-      payload = { toolName: entry.toolCallName, toolInput: argsObj, cwd: repoDir };
+      payload = { toolName: entry.toolCallName, toolInput: argsObj, cwd: workspaceDir };
     } else {
-      payload = { name: entry.toolCallName, input: argsObj, cwd: repoDir };
+      payload = { name: entry.toolCallName, input: argsObj, cwd: workspaceDir };
     }
 
     const res = runHook(payload, {
       HOME: caseHome,
       PASEO_FACTORY_SEAT: "lead",
       PASEO_FACTORY_STATE_DIR: stateDir,
-      PASEO_FACTORY_PROJECT_ROOT: repoDir,
+      PASEO_FACTORY_PROJECT_ROOT: workspaceDir,
     });
     assert.equal(res.status, 0, res.stderr);
     assert.equal(res.output.decision, "allow");
@@ -127,12 +127,12 @@ test("agy-pre-tool-hook heals via correlation-resolved seat when PASEO_FACTORY_S
   const dir = makeTempDir("agy-schema-corr-");
   disposeDir(t, dir);
   const homeDir = join(dir, "home");
-  const repoDir = join(dir, "repo");
+  const workspaceDir = join(dir, "workspace");
   const stateDir = join(dir, "state");
   mkdirSync(stateDir, { recursive: true });
   writeFileSync(
     join(stateDir, "correlations.json"),
-    JSON.stringify([{ correlationId: "corr-lead-1", role: "lead", projectRoot: repoDir, projectSlug: "demo" }]),
+    JSON.stringify([{ correlationId: "corr-lead-1", role: "lead", projectRoot: workspaceDir, projectSlug: "demo" }]),
   );
 
   const schemaPath = join(homeDir, ".gemini", "antigravity-cli", "mcp", "paseo-factory_paseo_factory", "lead_close_task.json");
@@ -153,7 +153,7 @@ test("agy-pre-tool-hook schema healing is strictly additive and never overwrites
   const dir = makeTempDir("agy-schema-additive-");
   disposeDir(t, dir);
   const homeDir = join(dir, "home");
-  const repoDir = join(dir, "repo");
+  const workspaceDir = join(dir, "workspace");
   const stateDir = join(dir, "state");
   const serverDir = join(homeDir, ".gemini", "antigravity-cli", "mcp", "paseo-factory_paseo_factory");
   mkdirSync(serverDir, { recursive: true });
@@ -167,8 +167,8 @@ test("agy-pre-tool-hook schema healing is strictly additive and never overwrites
 
   // Reading existing schema must not overwrite it
   const resExisting = runHook(
-    { toolCall: { name: "read_file", args: { Path: existingLeadSchema } }, workspacePaths: [repoDir] },
-    { HOME: homeDir, PASEO_FACTORY_SEAT: "lead", PASEO_FACTORY_STATE_DIR: stateDir, PASEO_FACTORY_PROJECT_ROOT: repoDir },
+    { toolCall: { name: "read_file", args: { Path: existingLeadSchema } }, workspacePaths: [workspaceDir] },
+    { HOME: homeDir, PASEO_FACTORY_SEAT: "lead", PASEO_FACTORY_STATE_DIR: stateDir, PASEO_FACTORY_PROJECT_ROOT: workspaceDir },
   );
   assert.equal(resExisting.output.decision, "allow");
   assert.equal(readFileSync(existingLeadSchema, "utf8"), existingSentinel);
@@ -176,8 +176,8 @@ test("agy-pre-tool-hook schema healing is strictly additive and never overwrites
   // Healing missing lead_merge.json must leave both existing and sibling files untouched
   const missingLeadSchema = join(serverDir, "lead_merge.json");
   const resMissing = runHook(
-    { toolCall: { name: "read_file", args: { Path: missingLeadSchema } }, workspacePaths: [repoDir] },
-    { HOME: homeDir, PASEO_FACTORY_SEAT: "lead", PASEO_FACTORY_STATE_DIR: stateDir, PASEO_FACTORY_PROJECT_ROOT: repoDir },
+    { toolCall: { name: "read_file", args: { Path: missingLeadSchema } }, workspacePaths: [workspaceDir] },
+    { HOME: homeDir, PASEO_FACTORY_SEAT: "lead", PASEO_FACTORY_STATE_DIR: stateDir, PASEO_FACTORY_PROJECT_ROOT: workspaceDir },
   );
   assert.equal(resMissing.output.decision, "allow");
   assertHealedSchemaMatchesCatalog(missingLeadSchema, "lead_merge");
@@ -189,7 +189,7 @@ test("agy-pre-tool-hook enforces role fences and path safety: cross-role, unknow
   const dir = makeTempDir("agy-schema-negatives-");
   disposeDir(t, dir);
   const homeDir = join(dir, "home");
-  const repoDir = join(dir, "repo");
+  const workspaceDir = join(dir, "workspace");
   const stateDir = join(dir, "state");
   const serverDir = join(homeDir, ".gemini", "antigravity-cli", "mcp", "paseo-factory_paseo_factory");
 
@@ -207,21 +207,21 @@ test("agy-pre-tool-hook enforces role fences and path safety: cross-role, unknow
     { seat: "lead", target: join(serverDir, "lead_merge.txt"), desc: "non-.json extension rejected" },
     { seat: "lead", target: join(homeDir, ".gemini", "antigravity-cli", "mcp", "other_server", "lead_merge.json"), desc: "unrelated MCP server rejected" },
     { seat: "lead", target: join(homeDir, ".gemini", "antigravity-ide", "mcp", "paseo-factory_paseo_factory", "lead_merge.json"), desc: "unrelated antigravity-ide dir rejected" },
-    { seat: "lead", target: join(repoDir, "lead_merge.json"), desc: "non-MCP repo path rejected" },
+    { seat: "lead", target: join(workspaceDir, "lead_merge.json"), desc: "non-MCP workspace path rejected" },
     { seat: "lead", target: "lead_merge.json", desc: "relative path rejected" },
   ];
 
   for (const { seat, target, desc } of negatives) {
     const res = runHook(
-      { toolCall: { name: "read_file", args: { Path: target } }, workspacePaths: [repoDir] },
-      { HOME: homeDir, PASEO_FACTORY_SEAT: seat, PASEO_FACTORY_STATE_DIR: stateDir, PASEO_FACTORY_PROJECT_ROOT: repoDir },
+      { toolCall: { name: "read_file", args: { Path: target } }, workspacePaths: [workspaceDir] },
+      { HOME: homeDir, PASEO_FACTORY_SEAT: seat, PASEO_FACTORY_STATE_DIR: stateDir, PASEO_FACTORY_PROJECT_ROOT: workspaceDir },
     );
     assert.equal(res.status, 0, `${desc}: ${res.stderr}`);
     assert.equal(res.output.decision, "allow", desc);
   }
 
   assert.equal(existsSync(join(homeDir, ".gemini")), false, "no .gemini directory or file should be created for rejected requests");
-  assert.equal(existsSync(join(repoDir, "lead_merge.json")), false, "non-MCP repo target must not be created");
+  assert.equal(existsSync(join(workspaceDir, "lead_merge.json")), false, "non-MCP workspace target must not be created");
 });
 
 test("agy-pre-tool-hook preserves unbound non-factory fast-path without reading stdin or touching disk", (t) => {
@@ -242,7 +242,7 @@ test("agy-pre-tool-hook preserves unbound non-factory fast-path without reading 
 test("agy-pre-tool-hook fails open with allow when schema directory is unwritable or blocked by a file", (t) => {
   const dir = makeTempDir("agy-schema-failopen-");
   disposeDir(t, dir);
-  const repoDir = join(dir, "repo");
+  const workspaceDir = join(dir, "workspace");
   const stateDir = join(dir, "state");
 
   // Case A: unwritable server directory
@@ -260,8 +260,8 @@ test("agy-pre-tool-hook fails open with allow when schema directory is unwritabl
 
   const roTarget = join(serverDir, "lead_merge.json");
   const resRo = runHook(
-    { toolCall: { name: "read_file", args: { Path: roTarget } }, workspacePaths: [repoDir] },
-    { HOME: homeReadOnly, PASEO_FACTORY_SEAT: "lead", PASEO_FACTORY_STATE_DIR: stateDir, PASEO_FACTORY_PROJECT_ROOT: repoDir },
+    { toolCall: { name: "read_file", args: { Path: roTarget } }, workspacePaths: [workspaceDir] },
+    { HOME: homeReadOnly, PASEO_FACTORY_SEAT: "lead", PASEO_FACTORY_STATE_DIR: stateDir, PASEO_FACTORY_PROJECT_ROOT: workspaceDir },
   );
   assert.equal(resRo.status, 0, resRo.stderr);
   assert.equal(resRo.output.decision, "allow");
@@ -273,8 +273,8 @@ test("agy-pre-tool-hook fails open with allow when schema directory is unwritabl
   writeFileSync(join(homeBlocked, ".gemini"), "blocker-file");
   const blockedTarget = join(homeBlocked, ".gemini", "antigravity-cli", "mcp", "paseo-factory_paseo_factory", "lead_merge.json");
   const resBlocked = runHook(
-    { toolCall: { name: "read_file", args: { Path: blockedTarget } }, workspacePaths: [repoDir] },
-    { HOME: homeBlocked, PASEO_FACTORY_SEAT: "lead", PASEO_FACTORY_STATE_DIR: stateDir, PASEO_FACTORY_PROJECT_ROOT: repoDir },
+    { toolCall: { name: "read_file", args: { Path: blockedTarget } }, workspacePaths: [workspaceDir] },
+    { HOME: homeBlocked, PASEO_FACTORY_SEAT: "lead", PASEO_FACTORY_STATE_DIR: stateDir, PASEO_FACTORY_PROJECT_ROOT: workspaceDir },
   );
   assert.equal(resBlocked.status, 0, resBlocked.stderr);
   assert.equal(resBlocked.output.decision, "allow");
@@ -290,18 +290,18 @@ test("agy-pre-tool-hook works when copied alone into an empty directory with zer
   assert.deepEqual(readdirSync(standaloneDir), ["agy-pre-tool-hook.mjs"]);
 
   const homeDir = join(dir, "home");
-  const repoDir = join(dir, "repo");
+  const workspaceDir = join(dir, "workspace");
   const stateDir = join(dir, "state");
   const schemaPath = join(homeDir, ".gemini", "antigravity-cli", "mcp", "paseo-factory_paseo_factory", "supervisor_dispatch_lead.json");
 
   const res = runHook(
-    { toolCall: { name: "read_file", args: { Path: schemaPath } }, workspacePaths: [repoDir] },
+    { toolCall: { name: "read_file", args: { Path: schemaPath } }, workspacePaths: [workspaceDir] },
     {
       HOME: homeDir,
       NODE_PATH: "",
       PASEO_FACTORY_SEAT: "supervisor",
       PASEO_FACTORY_STATE_DIR: stateDir,
-      PASEO_FACTORY_PROJECT_ROOT: repoDir,
+      PASEO_FACTORY_PROJECT_ROOT: workspaceDir,
     },
     { hookPath: copiedHook, cwd: standaloneDir },
   );

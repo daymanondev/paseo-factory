@@ -9,7 +9,7 @@ const ALLOWED_ROLES = new Set(["supervisor", "lead", "agent"]);
 const AGY_APP_DATA_NAMES = ["antigravity", "antigravity-cli"] as const;
 const AGY_SERVER_DIR_NAME = "paseo-factory_paseo_factory";
 
-export interface HealTarget {
+interface HealTarget {
   serverDir: string;
   targetFile: string;
   toolName: string;
@@ -18,19 +18,15 @@ export interface HealTarget {
 export interface HealSchemaOptions {
   seat: string;
   targetPath: string;
-  userHome?: string;
 }
 
 /** Resolve and validate a candidate Antigravity `paseo_factory` MCP schema file path. */
-export function resolveHealTarget(targetPath: string, userHome?: string): HealTarget | null {
+function resolveHealTarget(targetPath: string): HealTarget | null {
   const raw = typeof targetPath === "string" ? targetPath.trim() : "";
   if (raw === "" || !isAbsolute(raw) || raw.endsWith("/") || raw.endsWith("\\")) return null;
   if (raw.split(/[/\\]/).some((seg) => seg === "." || seg === "..")) return null;
 
-  const effectiveHome =
-    typeof userHome === "string" && userHome.trim() !== ""
-      ? userHome.trim()
-      : process.env.HOME?.trim() || homedir();
+  const effectiveHome = process.env.HOME?.trim() || homedir();
   if (!effectiveHome) return null;
 
   const resolvedHome = resolve(effectiveHome);
@@ -52,7 +48,7 @@ export function resolveHealTarget(targetPath: string, userHome?: string): HealTa
 }
 
 /** Look up an MCP tool definition only if it belongs to the calling seat's role allowlist. */
-export function resolveAllowedToolForSeat(seat: string, toolName: string): ToolDefinition | null {
+function resolveAllowedToolForSeat(seat: string, toolName: string): ToolDefinition | null {
   if (!ALLOWED_ROLES.has(seat)) return null;
   const allowedTools = catalog.roles[seat];
   if (!Array.isArray(allowedTools) || !allowedTools.includes(toolName)) return null;
@@ -60,7 +56,7 @@ export function resolveAllowedToolForSeat(seat: string, toolName: string): ToolD
 }
 
 /** Format a tool definition in Antigravity's on-disk lazy schema JSON layout (omitting `_meta`). */
-export function serializeAgyMcpSchema(tool: ToolDefinition): string {
+function serializeAgyMcpSchema(tool: ToolDefinition): string {
   return JSON.stringify({
     name: tool.name,
     description: tool.description,
@@ -89,7 +85,7 @@ function removeQuietly(path: string): void {
 export function healAgyMcpSchemaFile(options: HealSchemaOptions): boolean {
   let tempPath: string | null = null;
   try {
-    const target = resolveHealTarget(options.targetPath, options.userHome);
+    const target = resolveHealTarget(options.targetPath);
     if (target === null) return false;
 
     const tool = resolveAllowedToolForSeat(options.seat, target.toolName);
