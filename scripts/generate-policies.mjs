@@ -49,6 +49,7 @@ const sections = [
   ["src/process-policy.ts", "plugin/bin/agy-pre-tool-hook.mjs", "GENERATED PROCESS TARGET POLICY", "processTargetPolicy"],
   ["src/ledger-project.ts", "plugin/bin/bridge.mjs", "GENERATED LEDGER PROJECT POLICY", "ledgerProject"],
   ["src/ledger-project.ts", "plugin/bin/agy-pre-tool-hook.mjs", "GENERATED LEDGER PROJECT POLICY", "ledgerProject"],
+  ["src/agy-mcp-schema-heal.ts", "plugin/bin/agy-pre-tool-hook.mjs", "GENERATED AGY MCP SCHEMA HEAL POLICY", "agyMcpSchemaHeal"],
 ];
 const updates = new Map(await Promise.all(targets.map(async ([source, target]) => [target, await compile(source)])));
 for (const [source, target, section, globalName] of sections) {
