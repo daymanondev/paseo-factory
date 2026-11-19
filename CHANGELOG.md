@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.2] - 2026-11-19
+
+### Fixed
+
+- **Self-healing Antigravity MCP schema cache (`src/agy-mcp-schema-heal.ts`, `scripts/generate-policies.mjs`, `plugin/bin/agy-pre-tool-hook.mjs`, ADR 0064):** Bundled role-scoped, single-file lazy MCP schema restoration from `src/mcp/catalog.ts` into Antigravity's self-contained `PreToolUse` hook (`agy-pre-tool-hook.mjs`). When an Antigravity `Supervisor`, `Lead`, or `Peer` seat calls `read_file` or `view_file` for a missing `paseo-factory_paseo_factory/<toolName>.json` schema under `~/.gemini/{antigravity,antigravity-cli}/mcp/` that belongs to its own role, the hook atomically materializes that JSON file (`name`, `description`, `parameters` without `_meta`) before returning `allow`—preserving strict role-scoped `tools/list` isolation, additive non-overwrite semantics, the `<5ms` non-factory fast-path, and fail-open behavior on I/O errors, with zero changes to `bridge.mjs` or non-Antigravity providers.
+
 ## [0.16.1] - 2026-11-18
 
 ### Fixed
