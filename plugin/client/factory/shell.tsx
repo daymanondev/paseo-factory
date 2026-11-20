@@ -465,7 +465,7 @@ export function FactoryShell({
     });
   };
   /** Start Supervisor on a vacant seat; success opens the conversation it created (desktop only). */
-  const startSupervisor = (directive: string): void => {
+  const startSupervisor = (directive = ""): void => {
     if (projectRoot === undefined || mobile) return;
     const trimmed = directive.trim();
     void act("Start Supervisor", async () => {
