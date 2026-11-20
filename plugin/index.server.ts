@@ -359,7 +359,7 @@ export default function contribute(server: PluginServerContext) {
               ...(projectSlug !== undefined ? { projectSlug } : {}),
               ...(projectRoot !== undefined ? { projectRoot } : {}),
             };
-      stateHub.emit(`surface.${handler}`, target);
+      stateHub.emit(handler.includes(".") ? handler : `surface.${handler}`, target);
     },
   });
   // The Lead mailbox runtime (v0.0.20, ADR 0013 §4–§5): the single writer
