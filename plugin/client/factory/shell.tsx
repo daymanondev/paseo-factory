@@ -206,13 +206,25 @@ export function FactoryShell({
       : !freshView.panel.isProject ||
         onboardingHoldFolder === onboardingFolder ||
         freshView.panel.seats?.supervisor.vacant === true);
+  const startOnboardingRun = async (input: Parameters<typeof onboardingStartCall>[0]) => {
+    try {
+      const reply = await onboardingStartCall(input);
+      if (reply.ok && reply.run?.status !== "failed") {
+        setOnboardingHoldFolder(input.folder);
+      } else {
+        setOnboardingHoldFolder((prev) => (prev === input.folder ? null : prev));
+      }
+      return reply;
+    } catch (error) {
+      setOnboardingHoldFolder((prev) => (prev === input.folder ? null : prev));
+      throw error;
+    }
+  };
+
   const onboardingTracker = useOnboardingRunTracker({
     activeFolder: onboardingCanBeActive ? onboardingFolder : null,
     subscriptionLive,
-    start: async (input) => {
-      setOnboardingHoldFolder(input.folder);
-      return onboardingStartCall(input);
-    },
+    start: startOnboardingRun,
     status: (input) => onboardingStatusCall(input),
     onActiveComplete: async (result) => {
       toast.show(result.summary, { variant: "success" });
@@ -528,11 +540,10 @@ export function FactoryShell({
     });
   };
   /** Start Supervisor on a vacant seat; success opens the conversation it created (desktop only). */
-  const startSupervisor = (directive = ""): void => {
+  const startSupervisor = (): void => {
     if (projectRoot === undefined || mobile) return;
-    const trimmed = directive.trim();
     void act("Start Supervisor", async () => {
-      const reply = await supervisorStartCall({ projectRoot, ...(trimmed === "" ? {} : { directive: trimmed }) });
+      const reply = await supervisorStartCall({ projectRoot });
       if (reply.ok) navigation?.openAgent({ agentId: reply.agentId, serverId });
       return reply;
     });
@@ -904,23 +915,11 @@ export function FactoryShell({
             (!view.panel.isProject ||
               onboardingHoldFolder === onboardingFolder ||
               (onboardingTracker.activeRun !== null && onboardingTracker.openWorkspace.status !== "done"));
-          const effectivePanel =
-            holdOnboardingWizard && view.panel.isProject
-              ? {
-                  ...view.panel,
-                  isProject: false as const,
-                  onboarding: view.panel.onboarding ?? {
-                    folder: onboardingFolder,
-                    gitRepo: true,
-                    hasCommits: true,
-                    existingLead: false,
-                  },
-                }
-              : view.panel;
           return (
           <ProjectPanel
             theme={theme}
-            panel={effectivePanel}
+            panel={view.panel}
+            holdOnboarding={holdOnboardingWizard}
             modelView={view}
             {...(editorRequest === undefined ? {} : { editorRequest })}
             {...(onEditorRequestHandled === undefined ? {} : { onEditorRequestHandled })}
@@ -975,14 +974,14 @@ export function FactoryShell({
                         ? { ok: true as const, projects: reply.projects.map((p) => ({ projectId: p.projectId, projectName: p.projectName, screenCount: p.screenCount })) }
                         : { ok: false as const, error: reply.error };
                     },
-                    start: (input) => onboardingStartCall(input),
+                    start: startOnboardingRun,
                     status: (input) => onboardingStatusCall(input),
                   }}
                 />
               ) : null
             }
             menu={
-              effectivePanel.isProject && view.project !== null ? (
+              !holdOnboardingWizard && view.panel.isProject && view.project !== null ? (
                 <ProjectMenu
                   theme={theme}
                   mobile={mobile}

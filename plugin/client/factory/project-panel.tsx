@@ -40,7 +40,7 @@ export interface ProjectPanelActions {
   handoffRetry(seat: string): void;
   viewHandover(seat: string): void;
   /** Start the Supervisor on a vacant seat and open its conversation directly (desktop only). */
-  startSupervisor(directive?: string): void;
+  startSupervisor(): void;
   /** Sync the linked Open Design project again from the host — a broken link's primary action (desktop only). */
   syncOpenDesign(): void;
   /** "Use this chat as Supervisor" (v0.6.1, ADR 0057 §5) — adopt a candidate chat; available on mobile (ADR 0057 §10). */
@@ -855,6 +855,7 @@ export function ProjectPanel({
   openDesignActions = null,
   menu = null,
   onboarding = null,
+  holdOnboarding = false,
   initialUi,
   editorRequest,
   onEditorRequestHandled,
@@ -903,6 +904,8 @@ export function ProjectPanel({
   menu?: ReactNode;
   /** The onboarding wizard (onboarding-wizard.tsx) for a workspace that is not a Project — supplied by the Shell on desktop only; mobile never mounts it. */
   onboarding?: ReactNode;
+  /** Desktop-only: keeps the onboarding wizard mounted while an async onboarding run finishes after registration flips `panel.isProject`. */
+  holdOnboarding?: boolean;
   /** Seeds UI-only state (open menus, active tab) — hosts and tests; never data. */
   initialUi?: ProjectPanelInitialUi;
 }) {
@@ -916,7 +919,8 @@ export function ProjectPanel({
     edit(editorRequest.target);
     onEditorRequestHandled?.();
   }, [editorRequest, onEditorRequestHandled]);
-  const hasMenu = panel.isProject && menu !== null;
+  const showProject = panel.isProject && (mobile || !holdOnboarding);
+  const hasMenu = showProject && menu !== null;
   const wide = width >= WIDE;
   const boundary = (section: string, children: ReactNode) => <FactoryTabErrorBoundary theme={theme} section={section}>{children}</FactoryTabErrorBoundary>;
   const needsYouItems = withoutShownHandoffFailures(panel.needsYou, panel.handoffs);
@@ -942,14 +946,14 @@ export function ProjectPanel({
         <View style={{ flexShrink: 1, alignItems: "flex-end", gap: SPACING[1] }}>
           <View style={{ flexDirection: "row", flexWrap: "wrap", justifyContent: "flex-end", alignItems: "center", gap: SPACING[1.5] }}>
             {selfUpdate === undefined ? null : <SelfUpdateControls theme={theme} view={selfUpdate} mobile={mobile} />}
-            {panel.isProject ? (!mobile && actions.applyProfile !== undefined ? <Btn theme={theme} small variant="secondary" testID="factory-profile-chip" label={`${profileLabel} ▾`} onPress={() => setTab("models")} /> : <View testID="factory-profile-chip"><Text style={text(theme, "label")}>{profileLabel}</Text></View>) : null}
+            {showProject ? (!mobile && actions.applyProfile !== undefined ? <Btn theme={theme} small variant="secondary" testID="factory-profile-chip" label={`${profileLabel} ▾`} onPress={() => setTab("models")} /> : <View testID="factory-profile-chip"><Text style={text(theme, "label")}>{profileLabel}</Text></View>) : null}
             {hasMenu ? <Btn theme={theme} small variant="ghost" testID="factory-panel-menu-toggle" label="⋯" onPress={() => setMenuOpen(!menuOpen)} /> : null}
           </View>
           {selfUpdate === undefined ? null : <SelfUpdateNote theme={theme} view={selfUpdate} />}
         </View>
       </View>
       {hasMenu && menuOpen ? <Block theme={theme} testID="factory-panel-menu">{menu}</Block> : null}
-      {panel.isProject ? (
+      {showProject ? (
         <>
           {/* One alert stack, full width above the tabs: what needs the Owner, then handoff progress. */}
           {needsYouItems.length > 0 || panel.handoffs.length > 0 ? <View testID="factory-alert-stack" style={{ gap: SPACING[1.5] }}>{boundary("Needs you", needsYou)}{boundary("Handoff", handoff)}</View> : null}

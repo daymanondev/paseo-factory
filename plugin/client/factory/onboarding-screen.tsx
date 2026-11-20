@@ -17,6 +17,7 @@ import { Icon, Loading, ScrollView, TextInput, useToast } from "@getpaseo/plugin
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import type { z } from "zod";
+import type { OnboardingRunResult } from "../../shared/rpc.ts";
 import {
   onboardingBrowse,
   onboardingCommit,
@@ -278,6 +279,14 @@ export function OnboardingScreen({
   );
 
   const toastedRunIdsRef = useRef<Set<string>>(new Set());
+  const toastRunOnce = useCallback(
+    (result: OnboardingRunResult, runId: string): void => {
+      if (toastedRunIdsRef.current.has(runId)) return;
+      toastedRunIdsRef.current.add(runId);
+      toast.show(result.summary, { variant: "success" });
+    },
+    [toast],
+  );
   const [liveSubscriptionRuns, setLiveSubscriptionRuns] = useState<Readonly<Record<string, boolean>>>({});
   const subscriptionLive = Object.values(liveSubscriptionRuns).some(Boolean);
   const handleSubscriberLiveChange = useCallback((runId: string, live: boolean) => {
@@ -295,17 +304,16 @@ export function OnboardingScreen({
     subscriptionLive,
     start: (input) => startCall(input),
     status: (input) => statusCall(input),
-    onActiveComplete: async (result, input, runId) => {
-      if (!toastedRunIdsRef.current.has(runId)) {
-        toastedRunIdsRef.current.add(runId);
-        toast.show(result.summary, { variant: "success" });
-      }
+    onActiveComplete: async (result, input, runId, isActive) => {
+      toastRunOnce(result, runId);
       await loadSnapshotAndDirectory();
+      if (!isActive()) return { ok: true as const };
       const workspaceResult = await resolveOrCreateProjectWorkspace({
         paseo,
         projectRoot: result.projectRoot,
         paseoProjects,
       });
+      if (!isActive()) return { ok: true as const };
       if (workspaceResult.workspaceId === null) {
         toast.show(
           `Supervisor started, but workspace could not be opened: ${workspaceResult.error ?? "unknown error"}`,
@@ -322,10 +330,7 @@ export function OnboardingScreen({
       return { ok: true as const };
     },
     onBackgroundComplete: (result, _input, runId) => {
-      if (!toastedRunIdsRef.current.has(runId)) {
-        toastedRunIdsRef.current.add(runId);
-        toast.show(result.summary, { variant: "success" });
-      }
+      toastRunOnce(result, runId);
       void loadSnapshotAndDirectory();
     },
   });

@@ -1648,3 +1648,93 @@ test("FactoryShell (< 0.16.0 host without useSubscription) re-attaches to in-fli
     dom.window.close();
   }
 });
+
+test("FactoryShell clears/avoids stale onboardingHoldFolder when factory.onboarding.start synchronously refuses", async () => {
+  const { FactoryShell, PluginRpcProvider } = await loadShellHarness({ withSubscription: true });
+  const { createElement, act } = await import("react");
+  const { createRoot } = await import("react-dom/client");
+  const { JSDOM } = (await import(["jsdom"].join(""))) as { JSDOM: new (html: string) => { window: any } };
+  const dom = new JSDOM("<!doctype html><div id=root></div>");
+  const g = globalThis as Record<string, unknown>;
+  const saved = { window: g.window, document: g.document, IS_REACT_ACT_ENVIRONMENT: g.IS_REACT_ACT_ENVIRONMENT };
+  g.window = dom.window;
+  g.document = dom.window.document;
+  g.IS_REACT_ACT_ENVIRONMENT = true;
+
+  (g as any).__shellTestToasts = [];
+  let subObserver: { event: (e: any) => void; closed: (err?: Error) => void } | null = null;
+  let currentView = makeShellOnboardingView({ isProject: false, folder: "/work/my-app" });
+  let snapshotCount = 0;
+
+  const invoke = async (method: string) => {
+    if (method === "factory.snapshot") {
+      snapshotCount += 1;
+      return { ok: true, view: currentView };
+    }
+    if (method === "factory.self.update.status") return { ok: true, current: "0.16.2", latest: "0.16.2", updateAvailable: false };
+    if (method === "factory.open_design.status") return { ok: true, link: null, updateAvailable: false, sourceAvailable: false };
+    if (method === "factory.onboarding.inspect") return { ...readyInspection, folder: "/work/my-app" };
+    if (method === "factory.onboarding.status") return { ok: true, run: null };
+    if (method === "factory.onboarding.start") {
+      return { ok: false, code: "lead-live", error: "A Lead is already live in /work/my-app" };
+    }
+    return { ok: true };
+  };
+  const subscribe = (_method: string, _input: unknown, observer: { event: (e: any) => void; closed: (err?: Error) => void }) => {
+    subObserver = observer;
+    const stop = () => {};
+    return Object.assign(stop, { ready: Promise.resolve(), release: async () => {} });
+  };
+
+  const root = createRoot(dom.window.document.getElementById("root")!);
+  const q = (testId: string) => dom.window.document.querySelector(`[data-testid="${testId}"]`) as HTMLElement | null;
+
+  try {
+    await act(async () => {
+      root.render(
+        createElement(
+          PluginRpcProvider,
+          { invoke, subscribe },
+          createElement(FactoryShell, {
+            theme,
+            dir: "/work/my-app",
+            serverId: "srv-1",
+            layout: { compact: false, platform: "web" },
+          }),
+        ),
+      );
+    });
+    for (let i = 0; i < 10 && !q("factory-onboarding-next"); i++) {
+      await act(async () => { await new Promise((r) => setTimeout(r, 10)); });
+    }
+    assert.ok(q("factory-onboarding"), "renders OnboardingWizard initially");
+
+    for (let s = 0; s < 3; s++) {
+      await act(async () => { q("factory-onboarding-next")!.click(); });
+    }
+    await act(async () => { q("factory-onboarding-start")!.click(); });
+
+    assert.match(q("factory-onboarding-error")?.textContent ?? "", /A Lead is already live/);
+
+    // Subsequent snapshot flip to a live Project must transition out of the wizard cleanly (no stale hold state).
+    currentView = makeShellOnboardingView({ isProject: true, folder: "/work/my-app", supervisorVacant: false });
+    const beforeRefresh = snapshotCount;
+    await act(async () => {
+      subObserver!.event({ seq: 1, reasons: ["snapshot"], projectRoot: "/work/my-app", at: new Date().toISOString() });
+    });
+    for (let i = 0; i < 10 && snapshotCount === beforeRefresh; i++) {
+      await act(async () => { await new Promise((r) => setTimeout(r, 10)); });
+    }
+    await act(async () => { await new Promise((r) => setTimeout(r, 15)); });
+
+    assert.equal(q("factory-onboarding"), null, "does NOT keep wizard held after synchronous start refusal");
+    assert.ok(q("factory-panel-seat-supervisor"), "renders ProjectPanel once snapshot shows active Project");
+  } finally {
+    await act(async () => { root.unmount(); });
+    delete (g as any).__shellTestToasts;
+    g.window = saved.window;
+    g.document = saved.document;
+    g.IS_REACT_ACT_ENVIRONMENT = saved.IS_REACT_ACT_ENVIRONMENT;
+    dom.window.close();
+  }
+});

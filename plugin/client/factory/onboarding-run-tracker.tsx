@@ -53,7 +53,12 @@ export interface OnboardingRunTrackerOptions {
   /** Status RPC (`factory.onboarding.status`). */
   status?: (input: { runId?: string; folder?: string }) => Promise<{ ok: true; run: OnboardingRun | null } | Failed>;
   /** Client-side `open-workspace` finalization when the Owner is still active on the folder's onboarding view. */
-  onActiveComplete?: (result: OnboardingRunResult, input: CommitInput | null, runId: string) => Promise<{ ok: true } | Failed>;
+  onActiveComplete?: (
+    result: OnboardingRunResult,
+    input: CommitInput | null,
+    runId: string,
+    isActive: () => boolean,
+  ) => Promise<{ ok: true } | Failed>;
   /** Background completion when the Owner navigated away / switched folders before the run succeeded. */
   onBackgroundComplete?: (result: OnboardingRunResult, input: CommitInput | null, runId: string) => Promise<void> | void;
   /** True when the host's `factory.state.updates` subscription is currently live. */
@@ -159,6 +164,12 @@ export function useOnboardingRunTracker(options: OnboardingRunTrackerOptions): O
     setRunningRuns((prev) => (sameRunningSet(prev, next) ? prev : next));
   }, []);
 
+  const isViewingFolder = useCallback((folder: string): boolean => {
+    if (!alive.current || activeFolderRef.current === null) return false;
+    const target = normalizeFolderPath(folder);
+    return target !== "" && normalizeFolderPath(activeFolderRef.current) === target;
+  }, []);
+
   const isActiveViewFor = useCallback((watched: WatchedRun): boolean => {
     if (!alive.current) return false;
     const currentFolder = activeFolderRef.current;
@@ -167,6 +178,16 @@ export function useOnboardingRunTracker(options: OnboardingRunTrackerOptions): O
     return norm !== "" && watched.folders.has(norm);
   }, []);
 
+  const recordPollFailure = useCallback(
+    (watched: WatchedRun): void => {
+      watched.pollFailures += 1;
+      if (isActiveViewFor(watched) && watched.pollFailures >= TRANSIENT_POLL_WARNING_THRESHOLD) {
+        setPollWarning(POLL_WARNING_TEXT);
+      }
+    },
+    [isActiveViewFor],
+  );
+
   const runFinalize = useCallback(
     async (runId: string, result: OnboardingRunResult, commitInput: CommitInput | null): Promise<void> => {
       const watched = watchedRunsRef.current.get(runId);
@@ -174,6 +195,8 @@ export function useOnboardingRunTracker(options: OnboardingRunTrackerOptions): O
         if (watched.finalized) return;
         watched.finalized = true;
       }
+      const isActive = (): boolean =>
+        watched !== undefined ? isActiveViewFor(watched) : isViewingFolder(result.projectRoot);
       const finalize = optionsRef.current.onActiveComplete;
       const startedAt = new Date().toISOString();
       if (finalize === undefined) {
@@ -188,10 +211,15 @@ export function useOnboardingRunTracker(options: OnboardingRunTrackerOptions): O
       setStartError(null);
       setStarting(true);
       try {
-        const reply = await finalize(result, commitInput, runId);
+        const reply = await finalize(result, commitInput, runId, isActive);
         if (!alive.current) return;
-        const stillSameView = watched === undefined || isActiveViewFor(watched);
-        if (!stillSameView) return;
+        if (!isActive()) {
+          if (watched !== undefined) {
+            watchedRunsRef.current.delete(runId);
+            syncRunningList();
+          }
+          return;
+        }
         const finishedAt = new Date().toISOString();
         if (reply.ok) {
           setOpenWorkspace({ status: "done", startedAt, finishedAt, error: null });
@@ -208,15 +236,14 @@ export function useOnboardingRunTracker(options: OnboardingRunTrackerOptions): O
         if (!alive.current) return;
         if (watched !== undefined) watched.finalized = false;
         const msg = describeThrown(error);
-        const stillSameView = watched === undefined || isActiveViewFor(watched);
-        if (stillSameView) {
+        if (isActive()) {
           setOpenWorkspace({ status: "failed", startedAt, finishedAt: new Date().toISOString(), error: msg });
           setStartError(msg);
           setStarting(false);
         }
       }
     },
-    [isActiveViewFor, syncRunningList],
+    [isActiveViewFor, isViewingFolder, syncRunningList],
   );
 
   const registerWatchedRun = useCallback(
@@ -314,10 +341,7 @@ export function useOnboardingRunTracker(options: OnboardingRunTrackerOptions): O
         const reply = await statusFn({ runId });
         if (!alive.current) return;
         if (!reply.ok) {
-          watched.pollFailures += 1;
-          if (isActiveViewFor(watched) && watched.pollFailures >= TRANSIENT_POLL_WARNING_THRESHOLD) {
-            setPollWarning(POLL_WARNING_TEXT);
-          }
+          recordPollFailure(watched);
           return;
         }
         watched.pollFailures = 0;
@@ -327,10 +351,7 @@ export function useOnboardingRunTracker(options: OnboardingRunTrackerOptions): O
         }
       } catch {
         if (!alive.current) return;
-        watched.pollFailures += 1;
-        if (isActiveViewFor(watched) && watched.pollFailures >= TRANSIENT_POLL_WARNING_THRESHOLD) {
-          setPollWarning(POLL_WARNING_TEXT);
-        }
+        recordPollFailure(watched);
       } finally {
         watched.inFlight = false;
         const current = watchedRunsRef.current.get(runId);
@@ -342,7 +363,7 @@ export function useOnboardingRunTracker(options: OnboardingRunTrackerOptions): O
         }
       }
     },
-    [applyServerRun, isActiveViewFor],
+    [applyServerRun, isActiveViewFor, recordPollFailure],
   );
 
   // Sync UI state when switching activeFolder (keep running background watchers alive!).
@@ -400,11 +421,8 @@ export function useOnboardingRunTracker(options: OnboardingRunTrackerOptions): O
       try {
         const reply = await optionsRef.current.start(payload);
         if (!alive.current) return;
-        const stillSameFolder =
-          activeFolderRef.current !== null &&
-          normalizeFolderPath(activeFolderRef.current) === normalizeFolderPath(payload.folder);
         if (!reply.ok) {
-          if (stillSameFolder) {
+          if (isViewingFolder(payload.folder)) {
             setStartError(reply.error);
             setStarting(false);
           }
@@ -412,21 +430,18 @@ export function useOnboardingRunTracker(options: OnboardingRunTrackerOptions): O
         }
         if (reply.run !== undefined) {
           await applyServerRun(reply.run, payload, payload.folder);
-        } else if (stillSameFolder) {
+        } else if (isViewingFolder(payload.folder)) {
           setStarting(false);
         }
       } catch (error) {
         if (!alive.current) return;
-        const stillSameFolder =
-          activeFolderRef.current !== null &&
-          normalizeFolderPath(activeFolderRef.current) === normalizeFolderPath(payload.folder);
-        if (stillSameFolder) {
+        if (isViewingFolder(payload.folder)) {
           setStartError(describeThrown(error));
           setStarting(false);
         }
       }
     },
-    [applyServerRun],
+    [applyServerRun, isViewingFolder],
   );
 
   const retryRun = useCallback(
