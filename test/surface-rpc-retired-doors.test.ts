@@ -109,3 +109,11 @@ test("v0.7.0 Lead replacement uses handoff doors; the retired rotate method is u
   assert.equal(names.includes("factory.lead.rotate"), false);
   for (const name of ["factory.handoff.start", "factory.handoff.replace.now", "factory.handoff.cancel", "factory.handoff.retry", "factory.handoff.handover"]) assert.ok(names.includes(name), name);
 });
+
+test("ADR 0065: onboardingStart and onboardingStatus are registered alongside onboardingBrowse, onboardingInspect, and onboardingCommit", (t) => {
+  const names = registeredMethods(t);
+  assert.ok(names.includes("factory.onboarding.start"), "factory.onboarding.start must be registered");
+  assert.ok(names.includes("factory.onboarding.status"), "factory.onboarding.status must be registered");
+  assert.ok(names.includes("factory.onboarding.commit"), "factory.onboarding.commit remains registered");
+  assert.equal(names.includes("factory.lead.start"), false);
+});

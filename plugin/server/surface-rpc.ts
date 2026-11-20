@@ -110,6 +110,8 @@ import {
   onboardingBrowse,
   onboardingCommit,
   onboardingInspect,
+  onboardingStart,
+  onboardingStatus,
   projectDelete,
   projectReset,
   projectRotate,
@@ -129,6 +131,7 @@ import {
   vaultPush,
   vaultSync,
 } from "../shared/rpc.ts";
+import type { OnboardingPhase, OnboardingPhaseId, OnboardingRun, OnboardingRunResult } from "../shared/rpc.ts";
 import type { CompanionPluginView, AgentView, LaneName, LaneProfileView, Lanes, ProjectDirectoryEntry, ProjectView, SeatDirectoryEntry, VaultStatusView } from "../shared/view.ts";
 import type { UsageRuntime } from "./usage-rollup.ts";
 import type { TurnTimelineSource } from "./turn-timeline.ts";
@@ -441,6 +444,8 @@ export interface SurfaceDeps {
   rotateProjectMailbox?: (slug: string) => void;
   /** Optional hook notified after a non-read surface handler completes. */
   onStateChange?: (event: { handler: string; projectSlug?: string; projectRoot?: string }) => void;
+  /** Optional override for the `start-supervisor` watchdog timeout during async onboarding runs (defaults to 120s). */
+  onboardingSupervisorTimeoutMs?: number;
   onLog?: (message: string) => void;
 }
 
@@ -2425,18 +2430,23 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
    * written; and, when the daemon exposes it, Paseo's workspace registry is
    * synchronised so the Supervisor seat lands in the folder's own workspace.
    */
-  const registerProjectFolder = async (
+  const bootstrapProjectFolder = (
     folder: string,
-    context?: SurfaceCallContext,
     refusalHint = "open the Factory panel from a different workspace folder",
-  ): Promise<
-    | { ok: true; slug: string; root: string; name: string; bootstrapped: boolean }
-    | { ok: false; code: string; error: string }
-  > => {
+  ):
+    | { ok: true; slug: string; root: string; gitCommonDir: string; name: string; bootstrapped: boolean }
+    | { ok: false; code: string; error: string } => {
     const resolved = resolveOrBootstrapProject(folder, { stateDir: deps.stateDir, paseoHome: deps.home });
     if (!resolved.ok) {
       return failure(resolved.code, `${resolved.reason} — ${refusalHint}`);
     }
+    return resolved;
+  };
+
+  const finalizeProjectRegistration = async (
+    resolved: { slug: string; root: string; gitCommonDir: string; name: string; bootstrapped: boolean },
+    context?: SurfaceCallContext,
+  ): Promise<{ ok: true; slug: string; root: string; name: string; bootstrapped: boolean }> => {
     ensureProjectRegistered(deps.stateDir, resolved);
     const daemon = resolveDaemon(context);
     const existingReg = readProjectRegistration(deps.stateDir, resolved.slug);
@@ -2461,6 +2471,354 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     return { ok: true, slug: resolved.slug, root: resolved.root, name: resolved.name, bootstrapped: resolved.bootstrapped };
   };
 
+  const registerProjectFolder = async (
+    folder: string,
+    context?: SurfaceCallContext,
+    refusalHint = "open the Factory panel from a different workspace folder",
+  ): Promise<
+    | { ok: true; slug: string; root: string; name: string; bootstrapped: boolean }
+    | { ok: false; code: string; error: string }
+  > => {
+    const boot = bootstrapProjectFolder(folder, refusalHint);
+    if (!boot.ok) return boot;
+    return finalizeProjectRegistration(boot, context);
+  };
+
+  const runOpenDesignSync = async (input: {
+    projectRoot: string;
+    projectId?: string;
+    bundle?: import("./core/open-design/open-design-link.ts").OpenDesignBundle;
+    syncRequestId?: string;
+    expectedDigest?: string;
+  }) => {
+    try {
+      const project = projectOrRefusal(input.projectRoot); if (!project.ok) return project;
+      return await withProjectIngressLock(deps.stateDir, project.slug, async () => {
+        ensureProjectRegistered(deps.stateDir, { root: project.root, slug: project.slug });
+        const link = syncOpenDesignLink({ ...input, root: project.root, slug: project.slug, state: deps.stateDir, userHome: resolveSurfaceUserHome() });
+        return { ok: true as const, link };
+      });
+    } catch (error) { return failure(codeOf(error), messageOf(error)); }
+  };
+
+  type OnboardingCommitInput = {
+    folder: string;
+    initGit?: boolean;
+    profileId?: string;
+    models?: { supervisor?: string; lead?: string; worker?: string };
+    openDesignProjectId?: string;
+    directive?: string;
+  };
+  type OnboardingPlan = {
+    ok: true;
+    folder: string;
+    needsGitInit: boolean;
+    profileId?: string;
+    chosen: Partial<Record<LaneName, string>>;
+    openDesignProjectId?: string;
+    directive?: string;
+  };
+
+  const onboardingRunsById = new Map<string, OnboardingRun>();
+  const latestOnboardingRunIdByFolder = new Map<string, string>();
+  const cloneOnboardingRun = (run: OnboardingRun): OnboardingRun => ({
+    ...run,
+    phases: run.phases.map((phase) => ({ ...phase })),
+    result: run.result === null ? null : { ...run.result },
+  });
+
+  const emitOnboardingProgress = (projectRoot: string): void => {
+    deps.onStateChange?.({ handler: "onboarding.progress", projectRoot });
+  };
+
+  const buildOnboardingPhases = (plan: OnboardingPlan, now: string): OnboardingPhase[] => {
+    const phases: OnboardingPhase[] = [
+      {
+        id: "checking",
+        label: "Checking folder & preconditions",
+        status: "done",
+        startedAt: now,
+        finishedAt: now,
+        error: null,
+      },
+    ];
+    let firstBackgroundAssigned = false;
+    const nextPhase = (id: OnboardingPhaseId, label: string): OnboardingPhase => {
+      const isFirst = !firstBackgroundAssigned;
+      firstBackgroundAssigned = true;
+      return {
+        id,
+        label,
+        status: isFirst ? "running" : "pending",
+        startedAt: isFirst ? now : null,
+        finishedAt: null,
+        error: null,
+      };
+    };
+    if (plan.needsGitInit) {
+      phases.push(nextPhase("init-git", "Initialising Git repository"));
+    }
+    phases.push(nextPhase("register-and-lanes", "Registering Project & saving model lanes"));
+    if (plan.openDesignProjectId !== undefined) {
+      phases.push(nextPhase("open-design", "Linking Open Design"));
+    }
+    phases.push(nextPhase("start-supervisor", "Starting Supervisor"));
+    return phases;
+  };
+
+  const startSupervisorWithWatchdog = async (
+    input: { projectRoot: string; directive?: string },
+    context: SurfaceCallContext | undefined,
+    timeoutMs: number | undefined,
+  ) => {
+    if (timeoutMs === undefined) {
+      return startSupervisor(input, context);
+    }
+    const clampedMs = Math.max(1, timeoutMs);
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    return await new Promise<Awaited<ReturnType<typeof startSupervisor>>>((resolvePromise) => {
+      timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        const timeoutLabel = clampedMs >= 1000 ? `${Math.round(clampedMs / 1000)}s` : `${clampedMs}ms`;
+        resolvePromise({
+          ok: false as const,
+          code: "supervisor-start-timeout",
+          error: `Starting Supervisor timed out after ${timeoutLabel} while waiting on Paseo or the model provider — check Paseo and provider health, then press Retry`,
+        });
+      }, clampedMs);
+      timer.unref?.();
+
+      startSupervisor(input, context).then(
+        (reply) => {
+          if (settled) return;
+          settled = true;
+          if (timer !== undefined) clearTimeout(timer);
+          resolvePromise(reply);
+        },
+        (err) => {
+          if (settled) return;
+          settled = true;
+          if (timer !== undefined) clearTimeout(timer);
+          resolvePromise(failure(codeOf(err), messageOf(err)));
+        },
+      );
+    });
+  };
+
+  const executeOnboardingPlan = async (
+    plan: OnboardingPlan,
+    context: SurfaceCallContext | undefined,
+    hooks?: {
+      supervisorTimeoutMs?: number;
+      onPhaseDoneStartNext?: (doneId: OnboardingPhaseId, nextId: OnboardingPhaseId) => void;
+      onPhaseFailed?: (phaseId: OnboardingPhaseId, code: string, error: string) => void;
+      onSucceeded?: (result: OnboardingRunResult) => void;
+    },
+  ): Promise<({ ok: true } & OnboardingRunResult) | { ok: false; code: string; error: string }> => {
+    const boot = bootstrapProjectFolder(plan.folder);
+    if (!boot.ok) {
+      const failedPhase: OnboardingPhaseId = plan.needsGitInit ? "init-git" : "register-and-lanes";
+      hooks?.onPhaseFailed?.(failedPhase, boot.code, boot.error);
+      return boot;
+    }
+    if (plan.needsGitInit) {
+      hooks?.onPhaseDoneStartNext?.("init-git", "register-and-lanes");
+    }
+
+    const registered = await finalizeProjectRegistration(boot, context);
+
+    if (plan.profileId !== undefined) {
+      try {
+        applyLaneProfile(deps.stateDir, plan.profileId, registered.slug);
+      } catch (err) {
+        const msg = `${messageOf(err)} — the Project is registered; fix the Lane profile in step 3 and Start again`;
+        const code = codeOf(err);
+        hooks?.onPhaseFailed?.("register-and-lanes", code, msg);
+        return failure(code, msg);
+      }
+    }
+
+    const effective = loadLanes(deps.stateDir, registered.slug);
+    if (!effective.ok) {
+      const msg = `${effective.reason} — repair lanes.json, then Start again`;
+      hooks?.onPhaseFailed?.("register-and-lanes", "lanes-unreadable", msg);
+      return failure("lanes-unreadable", msg);
+    }
+    const changed: Partial<Record<LaneName, string>> = {};
+    for (const lane of Object.keys(plan.chosen) as LaneName[]) {
+      if (plan.chosen[lane] !== effective.lanes[lane]) changed[lane] = plan.chosen[lane];
+    }
+    if (Object.keys(changed).length > 0) {
+      try {
+        saveLanesBatch(deps.stateDir, changed, registered.slug);
+      } catch (err) {
+        const msg = `${messageOf(err)} — the Project is registered; fix the model in step 3 and Start again`;
+        const code = codeOf(err);
+        hooks?.onPhaseFailed?.("register-and-lanes", code, msg);
+        return failure(code, msg);
+      }
+    }
+
+    hooks?.onPhaseDoneStartNext?.(
+      "register-and-lanes",
+      plan.openDesignProjectId !== undefined ? "open-design" : "start-supervisor",
+    );
+
+    if (plan.openDesignProjectId !== undefined) {
+      const linked = await runOpenDesignSync({ projectRoot: registered.root, projectId: plan.openDesignProjectId });
+      if (!linked.ok) {
+        const msg = `Open Design link failed: ${linked.error} — check the design project still exists in Open Design, then Start again (or clear the Open Design choice to start without one)`;
+        hooks?.onPhaseFailed?.("open-design", "open-design-failed", msg);
+        return failure("open-design-failed", msg);
+      }
+      hooks?.onPhaseDoneStartNext?.("open-design", "start-supervisor");
+    }
+
+    const started = await startSupervisorWithWatchdog(
+      { projectRoot: registered.root, ...(plan.directive !== undefined ? { directive: plan.directive } : {}) },
+      context,
+      hooks?.supervisorTimeoutMs,
+    );
+    if (!started.ok) {
+      const msg = started.code === "supervisor-start-timeout"
+        ? started.error
+        : `${started.error} — the Project is registered, so the panel now offers Start Supervisor; or Start again here`;
+      hooks?.onPhaseFailed?.("start-supervisor", started.code, msg);
+      return failure(started.code, msg);
+    }
+
+    const summary = registered.bootstrapped
+      ? `Initialised Git and set up ${registered.name} (${registered.slug}); the Supervisor is running.`
+      : `Set up ${registered.name} (${registered.slug}); the Supervisor is running.`;
+    log(`onboarding: ${summary}`);
+    const result: OnboardingRunResult = {
+      agentId: started.agentId,
+      projectRoot: registered.root,
+      slug: registered.slug,
+      bootstrapped: registered.bootstrapped,
+      summary,
+    };
+    hooks?.onSucceeded?.(result);
+    return { ok: true as const, ...result };
+  };
+
+  const inspectOnboarding = async (input: { folder: string }, context?: SurfaceCallContext) => {
+    const raw = (input.folder ?? "").trim();
+    if (raw === "") {
+      return failure("missing-directory", "there is no folder to inspect — open the Factory panel from a workspace folder");
+    }
+    const abs = resolve(raw);
+    let isDirectory = false;
+    try {
+      isDirectory = statSync(abs).isDirectory();
+    } catch {
+      return failure("missing-directory", `${abs} does not exist on disk — open the Factory panel from an existing workspace folder`);
+    }
+    if (!isDirectory) {
+      return failure("missing-directory", `${abs} is not a folder — open the Factory panel from a workspace folder`);
+    }
+    const folder = realpathSafe(abs);
+    const git = inspectGitReadiness(folder);
+    let registered = false;
+    let existingLead = false;
+    let existingSupervisor = false;
+    const project = git.gitRepo ? resolveProject(folder) : undefined;
+    if (project !== undefined && project.ok) {
+      registered = readProjectRegistration(deps.stateDir, project.slug) !== undefined;
+      try {
+        const daemon = resolveDaemon(context);
+        existingLead = (await seatOf(daemon, "lead", project.slug)) !== undefined;
+        existingSupervisor = (await seatOf(daemon, "supervisor", project.slug)) !== undefined;
+      } catch (err) {
+        return failure("daemon-unavailable", `cannot read the daemon's agents to look for a running Lead — ${messageOf(err)}; check that Paseo is running, then try again`);
+      }
+    }
+    const prerequisites = buildCompanionToolsView().map((tool) => {
+      const ready = tool.status === "running" && tool.error === null;
+      return { id: tool.id, title: tool.title, ready, detail: ready ? null : (tool.error ?? "not installed") };
+    });
+    return {
+      ok: true as const,
+      folder,
+      gitRepo: git.gitRepo,
+      hasCommits: git.hasCommits,
+      registered,
+      existingLead,
+      existingSupervisor,
+      prerequisites,
+      missingPrerequisites: prerequisites.filter((item) => !item.ready).map((item) => item.title),
+    };
+  };
+
+  const prepareOnboardingPlan = async (
+    input: OnboardingCommitInput,
+    context?: SurfaceCallContext,
+  ): Promise<OnboardingPlan | { ok: false; code: string; error: string }> => {
+    const inspected = await inspectOnboarding({ folder: input.folder }, context);
+    if (!inspected.ok) return inspected;
+    if (inspected.existingLead) {
+      return failure("lead-live", `A Lead is already running in ${inspected.folder} — onboarding never creates a second chain over a live one; ask that Project's Supervisor to retire it, or open a different folder`);
+    }
+    // Beyond the spec's Lead-only block (story 49): the seat model is one Supervisor per Project (ADR 0017), the same rule `supervisorStart` enforces — see ADR 0056's review notes.
+    if (inspected.existingSupervisor) {
+      return failure("supervisor-live", `A Supervisor is already live in ${inspected.folder} — open it from Paseo, or revoke it first, then set the Project up again`);
+    }
+    if (!inspected.gitRepo && input.initGit !== true) {
+      return failure("not-a-git-repo", `${inspected.folder} is not a Git repository — choose "Initialise Git" in step 1 (worktrees and the Gate need one), then Start again`);
+    }
+    let profileId: string | undefined;
+    if (input.profileId !== undefined) {
+      profileId = input.profileId.trim();
+      if (profileId === "") {
+        return failure("profile-not-found", "Lane profile id must be non-empty — pick a saved Lane profile or Machine defaults in step 3");
+      }
+      let profile: LaneProfile | undefined;
+      try {
+        profile = getLaneProfile(deps.stateDir, profileId);
+      } catch (err) {
+        return failure(codeOf(err), messageOf(err));
+      }
+      if (profile === undefined) {
+        return failure("profile-not-found", `no Lane profile "${profileId}" under ${deps.stateDir} — save one first`);
+      }
+      try {
+        validatedProfileLanes(profile.lanes);
+      } catch (err) {
+        return failure(codeOf(err), messageOf(err));
+      }
+    }
+    let providers: ProviderEntry[] = [];
+    try {
+      providers = await resolveProviders(resolveDaemon(context));
+    } catch {
+      // best-effort provider catalog lookup
+    }
+    const chosen: Partial<Record<LaneName, string>> = {};
+    for (const lane of ["supervisor", "lead", "worker"] as const) {
+      const value = input.models?.[lane]?.trim();
+      if (value === undefined || value === "") continue;
+      const sanitized = migrateLegacyZcodeLane(sanitizeLaneWithProviders(value, providers));
+      const problem = laneError(lane, sanitized);
+      if (problem !== undefined) {
+        return failure("invalid-lane", `${problem} — go back to step 3 and pick a provider and model for the ${lane}`);
+      }
+      chosen[lane] = sanitized;
+    }
+    const openDesignProjectId = input.openDesignProjectId?.trim();
+    const directive = input.directive?.trim();
+    return {
+      ok: true,
+      folder: inspected.folder,
+      needsGitInit: !inspected.gitRepo && input.initGit === true,
+      ...(profileId !== undefined ? { profileId } : {}),
+      chosen,
+      ...(openDesignProjectId !== undefined && openDesignProjectId !== "" ? { openDesignProjectId } : {}),
+      ...(directive !== undefined && directive !== "" ? { directive } : {}),
+    };
+  };
+
   const handlers = {
     async openDesignCatalog(_input: {}) {
       try { return { ok: true as const, projects: discoverOpenDesignProjects(resolveSurfaceUserHome()) }; }
@@ -2479,14 +2837,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       } catch (error) { return failure(codeOf(error), messageOf(error)); }
     },
     async openDesignSync(input: { projectRoot: string; projectId?: string; bundle?: import('./core/open-design/open-design-link.ts').OpenDesignBundle; syncRequestId?: string; expectedDigest?: string }) {
-      try {
-        const project = projectOrRefusal(input.projectRoot); if (!project.ok) return project;
-        return await withProjectIngressLock(deps.stateDir, project.slug, async () => {
-          ensureProjectRegistered(deps.stateDir, { root: project.root, slug: project.slug });
-          const link = syncOpenDesignLink({ ...input, root: project.root, slug: project.slug, state: deps.stateDir, userHome: resolveSurfaceUserHome() });
-          return { ok: true as const, link };
-        });
-      } catch (error) { return failure(codeOf(error), messageOf(error)); }
+      return runOpenDesignSync(input);
     },
     async openDesignPreview(input: { projectRoot: string; operation?: 'preview.url' | 'preview.bundle' }) {
       try {
@@ -3450,51 +3801,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
      * never writes: no `git init`, no registration, no state directory.
      */
     async onboardingInspect(input: { folder: string }, context?: SurfaceCallContext) {
-      const raw = (input.folder ?? "").trim();
-      if (raw === "") {
-        return failure("missing-directory", "there is no folder to inspect — open the Factory panel from a workspace folder");
-      }
-      const abs = resolve(raw);
-      let isDirectory = false;
-      try {
-        isDirectory = statSync(abs).isDirectory();
-      } catch {
-        return failure("missing-directory", `${abs} does not exist on disk — open the Factory panel from an existing workspace folder`);
-      }
-      if (!isDirectory) {
-        return failure("missing-directory", `${abs} is not a folder — open the Factory panel from a workspace folder`);
-      }
-      const folder = realpathSafe(abs);
-      const git = inspectGitReadiness(folder);
-      let registered = false;
-      let existingLead = false;
-      let existingSupervisor = false;
-      const project = git.gitRepo ? resolveProject(folder) : undefined;
-      if (project !== undefined && project.ok) {
-        registered = readProjectRegistration(deps.stateDir, project.slug) !== undefined;
-        try {
-          const daemon = resolveDaemon(context);
-          existingLead = (await seatOf(daemon, "lead", project.slug)) !== undefined;
-          existingSupervisor = (await seatOf(daemon, "supervisor", project.slug)) !== undefined;
-        } catch (err) {
-          return failure("daemon-unavailable", `cannot read the daemon's agents to look for a running Lead — ${messageOf(err)}; check that Paseo is running, then try again`);
-        }
-      }
-      const prerequisites = buildCompanionToolsView().map((tool) => {
-        const ready = tool.status === "running" && tool.error === null;
-        return { id: tool.id, title: tool.title, ready, detail: ready ? null : (tool.error ?? "not installed") };
-      });
-      return {
-        ok: true as const,
-        folder,
-        gitRepo: git.gitRepo,
-        hasCommits: git.hasCommits,
-        registered,
-        existingLead,
-        existingSupervisor,
-        prerequisites,
-        missingPrerequisites: prerequisites.filter((item) => !item.ready).map((item) => item.title),
-      };
+      return inspectOnboarding(input, context);
     },
 
     /**
@@ -3509,112 +3816,128 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
      * with the directive as its first message. It never creates a Lead.
      */
     async onboardingCommit(
-      input: { folder: string; initGit?: boolean; profileId?: string; models?: { supervisor?: string; lead?: string; worker?: string }; openDesignProjectId?: string; directive?: string },
+      input: OnboardingCommitInput,
       context?: SurfaceCallContext,
     ) {
-      const inspected = await this.onboardingInspect({ folder: input.folder }, context);
-      if (!inspected.ok) return inspected;
-      if (inspected.existingLead) {
-        return failure("lead-live", `A Lead is already running in ${inspected.folder} — onboarding never creates a second chain over a live one; ask that Project's Supervisor to retire it, or open a different folder`);
-      }
-      // Beyond the spec's Lead-only block (story 49): the seat model is one Supervisor per Project (ADR 0017), the same rule `supervisorStart` enforces — see ADR 0056's review notes.
-      if (inspected.existingSupervisor) {
-        return failure("supervisor-live", `A Supervisor is already live in ${inspected.folder} — open it from Paseo, or revoke it first, then set the Project up again`);
-      }
-      if (!inspected.gitRepo && input.initGit !== true) {
-        return failure("not-a-git-repo", `${inspected.folder} is not a Git repository — choose "Initialise Git" in step 1 (worktrees and the Gate need one), then Start again`);
-      }
-      let profileId: string | undefined;
-      if (input.profileId !== undefined) {
-        profileId = input.profileId.trim();
-        if (profileId === "") {
-          return failure("profile-not-found", "Lane profile id must be non-empty — pick a saved Lane profile or Machine defaults in step 3");
-        }
-        let profile: LaneProfile | undefined;
-        try {
-          profile = getLaneProfile(deps.stateDir, profileId);
-        } catch (err) {
-          return failure(codeOf(err), messageOf(err));
-        }
-        if (profile === undefined) {
-          return failure("profile-not-found", `no Lane profile "${profileId}" under ${deps.stateDir} — save one first`);
-        }
-        try {
-          validatedProfileLanes(profile.lanes);
-        } catch (err) {
-          return failure(codeOf(err), messageOf(err));
-        }
-      }
-      let providers: ProviderEntry[] = [];
-      try {
-        providers = await resolveProviders(resolveDaemon(context));
-      } catch {
-        // best-effort provider catalog lookup
-      }
-      const chosen: Partial<Record<LaneName, string>> = {};
-      for (const lane of ["supervisor", "lead", "worker"] as const) {
-        const value = input.models?.[lane]?.trim();
-        if (value === undefined || value === "") continue;
-        const sanitized = migrateLegacyZcodeLane(sanitizeLaneWithProviders(value, providers));
-        const problem = laneError(lane, sanitized);
-        if (problem !== undefined) {
-          return failure("invalid-lane", `${problem} — go back to step 3 and pick a provider and model for the ${lane}`);
-        }
-        chosen[lane] = sanitized;
-      }
+      const plan = await prepareOnboardingPlan(input, context);
+      if (!plan.ok) return plan;
+      return executeOnboardingPlan(plan, context);
+    },
 
-      const registered = await registerProjectFolder(inspected.folder, context);
-      if (!registered.ok) return registered;
-
-      if (profileId !== undefined) {
-        try {
-          applyLaneProfile(deps.stateDir, profileId, registered.slug);
-        } catch (err) {
-          return failure(codeOf(err), `${messageOf(err)} — the Project is registered; fix the Lane profile in step 3 and Start again`);
+    async onboardingStart(
+      input: OnboardingCommitInput,
+      context?: SurfaceCallContext,
+    ): Promise<{ ok: true; run: OnboardingRun } | { ok: false; code: string; error: string }> {
+      const rawFolder = (input.folder ?? "").trim();
+      if (rawFolder !== "") {
+        const canonical = realpathSafe(resolve(rawFolder));
+        const activeId = latestOnboardingRunIdByFolder.get(canonical);
+        const activeRun = activeId !== undefined ? onboardingRunsById.get(activeId) : undefined;
+        if (activeRun !== undefined && activeRun.status === "running") {
+          return { ok: true as const, run: cloneOnboardingRun(activeRun) };
         }
       }
 
-      const effective = loadLanes(deps.stateDir, registered.slug);
-      if (!effective.ok) return failure("lanes-unreadable", `${effective.reason} — repair lanes.json, then Start again`);
-      const changed: Partial<Record<LaneName, string>> = {};
-      for (const lane of Object.keys(chosen) as LaneName[]) {
-        if (chosen[lane] !== effective.lanes[lane]) changed[lane] = chosen[lane];
-      }
-      if (Object.keys(changed).length > 0) {
-        try {
-          saveLanesBatch(deps.stateDir, changed, registered.slug);
-        } catch (err) {
-          return failure(codeOf(err), `${messageOf(err)} — the Project is registered; fix the model in step 3 and Start again`);
-        }
+      const plan = await prepareOnboardingPlan(input, context);
+      if (!plan.ok) return plan;
+
+      const racedId = latestOnboardingRunIdByFolder.get(plan.folder);
+      const racedRun = racedId !== undefined ? onboardingRunsById.get(racedId) : undefined;
+      if (racedRun !== undefined && racedRun.status === "running") {
+        return { ok: true as const, run: cloneOnboardingRun(racedRun) };
       }
 
-      if (input.openDesignProjectId !== undefined && input.openDesignProjectId.trim() !== "") {
-        const linked = await this.openDesignSync({ projectRoot: registered.root, projectId: input.openDesignProjectId.trim() });
-        if (!linked.ok) {
-          return failure("open-design-failed", `Open Design link failed: ${linked.error} — check the design project still exists in Open Design, then Start again (or clear the Open Design choice to start without one)`);
-        }
-      }
-
-      const directive = input.directive?.trim();
-      const started = await startSupervisor(
-        { projectRoot: registered.root, ...(directive !== undefined && directive !== "" ? { directive } : {}) },
-        context,
-      );
-      if (!started.ok) {
-        return failure(started.code, `${started.error} — the Project is registered, so the panel now offers Start Supervisor; or Start again here`);
-      }
-      const summary = registered.bootstrapped
-        ? `Initialised Git and set up ${registered.name} (${registered.slug}); the Supervisor is running.`
-        : `Set up ${registered.name} (${registered.slug}); the Supervisor is running.`;
-      log(`onboarding: ${summary}`);
-      return {
-        ok: true as const,
-        agentId: started.agentId,
-        projectRoot: registered.root,
-        slug: registered.slug,
-        bootstrapped: registered.bootstrapped,
-        summary,
+      const now = new Date().toISOString();
+      const run: OnboardingRun = {
+        runId: randomUUID(),
+        folder: plan.folder,
+        status: "running",
+        phases: buildOnboardingPhases(plan, now),
+        startedAt: now,
+        updatedAt: now,
+        result: null,
+        error: null,
+        errorCode: null,
       };
+      onboardingRunsById.set(run.runId, run);
+      latestOnboardingRunIdByFolder.set(plan.folder, run.runId);
+      emitOnboardingProgress(plan.folder);
+
+      const snapshotBeforeStart = cloneOnboardingRun(run);
+      const markPhase = (id: OnboardingPhaseId, patch: Partial<OnboardingPhase>): void => {
+        const phase = run.phases.find((item) => item.id === id);
+        if (phase !== undefined) Object.assign(phase, patch);
+      };
+
+      void (async () => {
+        // Yield a microtask so onboardingStart returns the initial snapshot cleanly before background writes begin.
+        await Promise.resolve();
+        try {
+          await executeOnboardingPlan(plan, context, {
+            supervisorTimeoutMs: deps.onboardingSupervisorTimeoutMs ?? 120_000,
+            onPhaseDoneStartNext: (doneId, nextId) => {
+              const ts = new Date().toISOString();
+              markPhase(doneId, { status: "done", finishedAt: ts, error: null });
+              markPhase(nextId, { status: "running", startedAt: ts, finishedAt: null, error: null });
+              run.updatedAt = ts;
+              emitOnboardingProgress(plan.folder);
+            },
+            onPhaseFailed: (phaseId, code, error) => {
+              const ts = new Date().toISOString();
+              markPhase(phaseId, { status: "failed", finishedAt: ts, error });
+              run.status = "failed";
+              run.errorCode = code;
+              run.error = error;
+              run.updatedAt = ts;
+              emitOnboardingProgress(plan.folder);
+            },
+            onSucceeded: (result) => {
+              const ts = new Date().toISOString();
+              markPhase("start-supervisor", { status: "done", finishedAt: ts, error: null });
+              run.status = "succeeded";
+              run.result = result;
+              run.error = null;
+              run.errorCode = null;
+              run.updatedAt = ts;
+              emitOnboardingProgress(plan.folder);
+            },
+          });
+        } catch (err) {
+          if (run.status === "running") {
+            const ts = new Date().toISOString();
+            const runningPhase = run.phases.find((item) => item.status === "running");
+            const msg = messageOf(err);
+            if (runningPhase !== undefined) {
+              runningPhase.status = "failed";
+              runningPhase.finishedAt = ts;
+              runningPhase.error = msg;
+            }
+            run.status = "failed";
+            run.errorCode = codeOf(err);
+            run.error = msg;
+            run.updatedAt = ts;
+            emitOnboardingProgress(plan.folder);
+          }
+        }
+      })();
+
+      return { ok: true as const, run: snapshotBeforeStart };
+    },
+
+    async onboardingStatus(input: { runId?: string; folder?: string } = {}): Promise<{ ok: true; run: OnboardingRun | null } | { ok: false; code: string; error: string }> {
+      const runId = typeof input?.runId === "string" ? input.runId.trim() : "";
+      const folder = typeof input?.folder === "string" ? input.folder.trim() : "";
+      if (runId !== "") {
+        const found = onboardingRunsById.get(runId);
+        return { ok: true as const, run: found === undefined ? null : cloneOnboardingRun(found) };
+      }
+      if (folder !== "") {
+        const canonical = realpathSafe(resolve(folder));
+        const latestId = latestOnboardingRunIdByFolder.get(canonical);
+        const found = latestId !== undefined ? onboardingRunsById.get(latestId) : undefined;
+        return { ok: true as const, run: found === undefined ? null : cloneOnboardingRun(found) };
+      }
+      return failure("missing-target", "pass runId or folder to check onboarding status");
     },
 
     /**
@@ -4788,7 +5111,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
   const PROJECT_ACT_HANDLERS: ReadonlySet<string> = new Set(["projectReset", "projectDelete", "projectRotate"]);
   /** The handlers that take their lane's exclusive maintenance — the Project acts plus register. The one place the set is named. */
   const EXCLUSIVE_MAINTENANCE_HANDLERS: ReadonlySet<string> = new Set([...PROJECT_ACT_HANDLERS, "projectRegister"]);
-  const reads = new Set(["cachedProviders", "sanitizeLane", "snapshot", "seatsDirectory", "onboardingBrowse", "pluginsCheckUpdates", "selfUpdateStatus", "selfUpdateApply", "historyImport", "historyImports", "historyUpgrade", "vaultHydrate", "vaultPull", "vaultPush", "vaultSync", "vaultImport", "releaseSettingsRead", "githubPublishPreflight"]);
+  const reads = new Set(["cachedProviders", "sanitizeLane", "snapshot", "seatsDirectory", "onboardingBrowse", "onboardingStatus", "pluginsCheckUpdates", "selfUpdateStatus", "selfUpdateApply", "historyImport", "historyImports", "historyUpgrade", "vaultHydrate", "vaultPull", "vaultPush", "vaultSync", "vaultImport", "releaseSettingsRead", "githubPublishPreflight"]);
   const nonEmptyString = (value: unknown): string | undefined =>
     typeof value === "string" && value.trim() !== "" ? value.trim() : undefined;
   const surfaceChangeTarget = (
@@ -4808,9 +5131,11 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     const projectRoot =
       nonEmptyString(res?.projectRoot) ??
       nonEmptyString(res?.root) ??
+      nonEmptyString((res?.run as Record<string, unknown> | undefined)?.folder) ??
       nonEmptyString(arg?.projectRoot) ??
       nonEmptyString(arg?.workspace) ??
       nonEmptyString(arg?.root) ??
+      nonEmptyString(arg?.folder) ??
       (projectCandidate !== undefined && (projectCandidate.includes("/") || projectCandidate.includes("\\")) ? projectCandidate : undefined);
     return {
       ...(projectSlug !== undefined ? { projectSlug } : {}),
@@ -4903,6 +5228,8 @@ export function registerSurfaceRpc(
   server.handle(onboardingBrowse, (input, context) => { pass(context); return handlers.onboardingBrowse(input); });
   server.handle(onboardingInspect, (input, context) => handlers.onboardingInspect(input, pass(context)));
   server.handle(onboardingCommit, (input, context) => handlers.onboardingCommit(input, pass(context)));
+  server.handle(onboardingStart, (input, context) => handlers.onboardingStart(input, pass(context)));
+  server.handle(onboardingStatus, (input, context) => { pass(context); return handlers.onboardingStatus(input); });
   server.handle(projectDelete, (input, context) => handlers.projectDelete(input, pass(context)));
   server.handle(projectReset, (input, context) => handlers.projectReset(input, pass(context)));
   server.handle(projectRotate, (input, context) => handlers.projectRotate(input, pass(context)));

@@ -589,3 +589,97 @@ test("plugin/index.server.ts: wires ledger, surface, handoff.progress, and mailb
   await wait(80);
   assert.equal(received.length, countBeforeStop);
 });
+
+test("plugin/index.server.ts: emits onboarding.progress directly on stateHub (not surface.onboarding.progress) and skips onboarding.status", async (t) => {
+  const homeDir = makeTempDir();
+  disposeDir(t, homeDir);
+  const prevHome = process.env.HOME;
+  const prevPaseoHome = process.env.PASEO_HOME;
+  process.env.HOME = homeDir;
+  process.env.PASEO_HOME = join(homeDir, ".paseo");
+  t.after(() => {
+    if (prevHome === undefined) delete process.env.HOME;
+    else process.env.HOME = prevHome;
+    if (prevPaseoHome === undefined) delete process.env.PASEO_HOME;
+    else process.env.PASEO_HOME = prevPaseoHome;
+  });
+
+  const handlers = new Map<string, (input: unknown, context: unknown) => unknown>();
+  const server = {
+    addHook: () => () => {},
+    handle: (contract: { name: string }, handler: (input: unknown, context: unknown) => unknown) => {
+      handlers.set(contract.name, handler);
+    },
+  } as unknown as Parameters<typeof contribute>[0];
+
+  const stop = contribute(server);
+  t.after(() => stop());
+
+  const projB = makeGitProject(homeDir, "repo-onboard");
+  const { daemon } = makeFakeDaemon([]);
+  // Use a real provider/model in create by updating default lanes in stateDir.
+  const stateDir = join(homeDir, ".paseo", "plugin-state", "paseo-factory");
+  mkdirSync(stateDir, { recursive: true });
+  writeFileSync(
+    join(stateDir, "lanes.json"),
+    JSON.stringify({
+      supervisor: "pi/zai/glm-5.3",
+      lead: "pi/zai/glm-5.3",
+      worker: "pi/zai/glm-5.3",
+      watch: "pi/zai/glm-5.3",
+      freshEyes: "pi/zai/glm-5.3",
+    }),
+  );
+
+  const received: StateUpdateEvent[] = [];
+  const ac = new AbortController();
+  t.after(() => ac.abort());
+
+  handlers.get("factory.state.updates")!(
+    { projectRoot: projB.root },
+    {
+      paseo: daemon,
+      signal: ac.signal,
+      push: async (event: StateUpdateEvent) => {
+        received.push(event);
+      },
+    },
+  );
+
+  // Read-only onboardingStatus does not emit stateHub updates.
+  const preStatus = await (handlers.get("factory.onboarding.status")!(
+    { folder: projB.root },
+    { paseo: daemon },
+  ) as Promise<{ ok: boolean; run: unknown }>);
+  assert.deepEqual(preStatus, { ok: true, run: null });
+  await wait(80);
+  assert.equal(
+    received.some((e) => e.reasons.some((r) => r.includes("onboarding"))),
+    false,
+  );
+
+  const started = await (handlers.get("factory.onboarding.start")!(
+    { folder: projB.root },
+    { paseo: daemon },
+  ) as Promise<{ ok: boolean; run?: { runId: string } }>);
+  assert.equal(started.ok, true);
+  assert.ok(started.run?.runId);
+
+  await waitUntil(() => received.some((e) => e.reasons.includes("onboarding.progress")));
+  assert.equal(
+    received.some((e) => e.reasons.includes("surface.onboarding.progress")),
+    false,
+    "must emit onboarding.progress directly rather than surface.onboarding.progress",
+  );
+  const deadline = Date.now() + 2_000;
+  let runStatus = "running";
+  while (runStatus === "running" && Date.now() < deadline) {
+    const res = await (handlers.get("factory.onboarding.status")!(
+      { runId: started.run!.runId },
+      { paseo: daemon },
+    ) as Promise<{ ok: boolean; run?: { status: string } }>);
+    if (res.ok && res.run) runStatus = res.run.status;
+    if (runStatus === "running") await wait(15);
+  }
+  assert.equal(runStatus, "succeeded");
+});
