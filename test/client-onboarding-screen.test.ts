@@ -745,7 +745,6 @@ async function runWizardStepsToCommit(
   options: {
     initGit?: boolean;
     profileId?: string;
-    directive?: string;
   } = {},
 ) {
   const click = async (testId: string) => {
@@ -764,18 +763,7 @@ async function runWizardStepsToCommit(
     await click(`factory-onboarding-profile-${options.profileId}`);
   }
   await click("factory-onboarding-next"); // -> Step 4
-  if (options.directive !== undefined) {
-    const textarea = container.querySelector('[data-testid="factory-onboarding-directive"]') as HTMLInputElement | HTMLTextAreaElement;
-    assert.ok(textarea, "missing directive input");
-    const proto = textarea.tagName === "TEXTAREA"
-      ? textarea.ownerDocument.defaultView!.HTMLTextAreaElement.prototype
-      : textarea.ownerDocument.defaultView!.HTMLInputElement.prototype;
-    const setter = Object.getOwnPropertyDescriptor(proto, "value")!.set!;
-    await act(() => {
-      setter.call(textarea, options.directive!);
-      textarea.dispatchEvent(new textarea.ownerDocument.defaultView!.Event("input", { bubbles: true }));
-    });
-  }
+  assert.equal(container.querySelector('[data-testid="factory-onboarding-directive"]'), null, "Step 4 omits directive input");
   await click("factory-onboarding-start");
 }
 
@@ -1119,7 +1107,7 @@ test("05-commit: Step 4 Start creates a clean local workspace via workspaces.cre
   }
 });
 
-test("05-commit: Step 4 Start with a directive navigates via openAgent without opening workspace/panel, and handles workspace errors gracefully", async () => {
+test("05-commit: Step 4 Start handles workspace errors gracefully without throwing unhandled rejection", async () => {
   const { OnboardingScreen } = await loadScreenModule("plugin/client/factory/onboarding-screen.tsx", { platformOs: "web" });
   const { createElement } = await import("react");
 
@@ -1158,7 +1146,6 @@ test("05-commit: Step 4 Start with a directive navigates via openAgent without o
     await mountDom(async (createRoot, container, act) => {
       const root = createRoot(container);
       try {
-        // 1. With directive: even if workspace lookup/create fails, openAgent still navigates cleanly.
         await act(() =>
           root.render(
             createElement(OnboardingScreen, {
@@ -1175,19 +1162,9 @@ test("05-commit: Step 4 Start with a directive navigates via openAgent without o
           ),
         );
         await act(() => new Promise<void>((r) => setTimeout(r, 10)));
-        await runWizardStepsToCommit(container, act, { directive: "Ship onboarding" });
-
-        assert.deepEqual(openedAgents, [{ agentId: "agent-sup-1", serverId: "h1" }]);
-        assert.deepEqual(openedWorkspaces, []);
-        assert.deepEqual(openedPanels, []);
-
-        // 2. Without directive when workspace create fails: does not throw unhandled rejection, warns via toast, returns cleanly to picker.
-        await act(() => (container.querySelector('[data-testid="factory-onboard-change-folder"]') as HTMLElement).click());
-        await act(() => (container.querySelector('[data-testid="factory-onboard-select-folder"]') as HTMLElement).click());
-        await act(() => new Promise<void>((r) => setTimeout(r, 10)));
         await runWizardStepsToCommit(container, act);
 
-        assert.deepEqual(openedAgents, [{ agentId: "agent-sup-1", serverId: "h1" }]);
+        assert.deepEqual(openedAgents, []);
         assert.deepEqual(openedWorkspaces, []);
         assert.deepEqual(openedPanels, []);
         assert.ok(toasts.some((t) => /workspace/i.test(t.msg) && (t.error || t.opts?.variant === "warning")));

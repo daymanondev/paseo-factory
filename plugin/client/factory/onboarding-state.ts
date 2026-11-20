@@ -43,7 +43,6 @@ export interface WizardInput {
   profileLanes: Record<OnboardingLaneName, string> | null;
   /** True when any seat currently differs from the selected Lane profile. */
   profileModified: boolean;
-  directive: string;
   design: DesignChoice | null;
 }
 
@@ -54,7 +53,6 @@ export type WizardAction =
   | { type: "lane"; lane: OnboardingLaneName; value: string }
   | { type: "profile"; profile: ProfileChoice }
   | { type: "machineDefaults"; machineLanes: Pick<Lanes, OnboardingLaneName> }
-  | { type: "directive"; value: string }
   | { type: "design"; design: DesignChoice | null };
 
 function pickOnboardingLanes(lanes: Pick<Lanes, OnboardingLaneName>): Record<OnboardingLaneName, string> {
@@ -70,7 +68,6 @@ export function initialWizard(machineLanes: Pick<Lanes, OnboardingLaneName>): Wi
     profileId: null,
     profileLanes: null,
     profileModified: false,
-    directive: "",
     design: null,
   };
 }
@@ -115,8 +112,6 @@ export function reduceWizard(state: WizardInput, action: WizardAction): WizardIn
         profileModified: false,
         lanes: pickOnboardingLanes(action.machineLanes),
       };
-    case "directive":
-      return { ...state, directive: action.value };
     case "design":
       return { ...state, design: action.design };
   }
@@ -142,16 +137,14 @@ export function canAdvance(step: OnboardingStep, inspection: Inspection | null, 
   return inspection.gitRepo || initGit;
 }
 
-/** The commit RPC's payload — `initGit` only when the folder is not a repository, `profileId` when a profile is active, the directive trimmed or absent. */
+/** The start/commit RPC's payload — `initGit` only when the folder is not a repository, `profileId` when a profile is active. */
 export function commitInputOf(state: WizardInput, inspection: Inspection, folder: string): CommitInput {
-  const directive = state.directive.trim();
   return {
     folder,
     ...(!inspection.gitRepo && state.initGit ? { initGit: true } : {}),
     ...(state.profileId === null ? {} : { profileId: state.profileId }),
     models: { supervisor: state.lanes.supervisor, lead: state.lanes.lead, worker: state.lanes.worker },
     ...(state.design === null ? {} : { openDesignProjectId: state.design.projectId }),
-    ...(directive === "" ? {} : { directive }),
   };
 }
 
@@ -160,8 +153,19 @@ export function stepLabel(step: OnboardingStep): string {
   return `Step ${step} of 4 — ${ONBOARDING_STEPS[step - 1]}`;
 }
 
-/** A thrown RPC error (the daemon unreachable) in the wizard's what-and-how-to-fix words. */
+const TIMEOUT_ERROR_RE = /timed?\s*out|timeout|ETIMEDOUT/i;
+const CONNECTION_ERROR_RE =
+  /ECONNREFUSED|ECONNRESET|ENOTFOUND|EPIPE|socket|disconnect|unreachable|network|fetch failed|closed|not connected/i;
+
+/** A thrown RPC error classified honestly: timeout, unreachable server, or underlying handler failure. */
 export function describeThrown(error: unknown): string {
   const reason = error instanceof Error ? error.message : String(error);
-  return `Could not reach the Factory server (${reason}) — check that Paseo is running, then try again`;
+  const trimmed = reason.trim();
+  if (TIMEOUT_ERROR_RE.test(trimmed)) {
+    return `Paseo was busy and the request timed out (${trimmed}) — the action may still have finished; check status or retry.`;
+  }
+  if (CONNECTION_ERROR_RE.test(trimmed)) {
+    return `Could not reach the Factory server (${trimmed}) — check that Paseo is running, then try again`;
+  }
+  return trimmed === "" ? "Request failed" : trimmed;
 }
