@@ -775,3 +775,78 @@ export const GitHubPublishPreflightViewSchema = z.object({
   commitHistoryNotScannedNote: z.string(),
 });
 export type GitHubPublishPreflightView = z.infer<typeof GitHubPublishPreflightViewSchema>;
+
+export const StoreReleaseModeSchema = z.enum(["off", "on-request", "auto-staging"]);
+export type StoreReleaseMode = z.infer<typeof StoreReleaseModeSchema>;
+
+export const StoreReleasePlatformSchema = z.enum(["android", "ios", "expo"]);
+export type StoreReleasePlatform = z.infer<typeof StoreReleasePlatformSchema>;
+
+export const StoreReleaseVaultReadinessSchema = z.object({
+  ascKey: z.boolean(),
+  appleTeamId: z.boolean(),
+  gplayJson: z.boolean(),
+});
+export type StoreReleaseVaultReadiness = z.infer<typeof StoreReleaseVaultReadinessSchema>;
+
+export const StoreReleaseRunnerStatusSchema = z.object({
+  installed: z.boolean(),
+  enabled: z.boolean(),
+  status: CompanionStatusSchema,
+  path: z.string().nullable(),
+  binPath: z.string().nullable(),
+});
+export type StoreReleaseRunnerStatus = z.infer<typeof StoreReleaseRunnerStatusSchema>;
+
+export const StoreReleaseHoleSummarySchema = z.object({
+  runId: z.string(),
+  kind: z.string(),
+  phase: z.string(),
+  pausedAt: z.string(),
+  defaultResolution: z.unknown().optional(),
+  resolutionSpec: z.unknown().optional(),
+});
+export type StoreReleaseHoleSummary = z.infer<typeof StoreReleaseHoleSummarySchema>;
+
+export const StoreReleaseFailureSummarySchema = z.object({
+  failureClass: z.enum(["app-repo", "tool-bug", "account-policy"]),
+  platform: z.enum(["android", "ios"]).optional(),
+  phase: z.string().optional(),
+  code: z.string(),
+  message: z.string(),
+  upstreamIssuePath: z.string().optional(),
+});
+export type StoreReleaseFailureSummary = z.infer<typeof StoreReleaseFailureSummarySchema>;
+
+export const StoreReleaseRunSummarySchema = z.object({
+  id: z.string(),
+  playbook: z.string(),
+  status: z.string(),
+  platforms: z.array(z.string()),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+  completedAt: z.string().nullable(),
+  error: z.string().nullable(),
+  failure: StoreReleaseFailureSummarySchema.nullable(),
+});
+export type StoreReleaseRunSummary = z.infer<typeof StoreReleaseRunSummarySchema>;
+
+export const StoreReleaseViewSchema = z.object({
+  project: z.string(),
+  projectRoot: z.string(),
+  mode: StoreReleaseModeSchema,
+  updatedAt: z.string().nullable(),
+  pendingRequest: z.object({
+    target: z.enum(["staging", "production"]),
+    platforms: z.array(z.enum(["android", "ios"])).optional(),
+    resumeRunId: z.string().optional(),
+    requestedAt: z.string(),
+  }).nullable(),
+  vault: StoreReleaseVaultReadinessSchema,
+  platforms: z.array(StoreReleasePlatformSchema),
+  isMobile: z.boolean(),
+  runner: StoreReleaseRunnerStatusSchema,
+  lastRun: StoreReleaseRunSummarySchema.nullable(),
+  activeHole: StoreReleaseHoleSummarySchema.nullable(),
+});
+export type StoreReleaseView = z.infer<typeof StoreReleaseViewSchema>;

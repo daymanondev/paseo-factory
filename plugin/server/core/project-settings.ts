@@ -30,6 +30,28 @@ export interface ReleaseRequest {
   directive?: string;
 }
 
+export const PROJECT_STORE_RELEASE_MODES = ["off", "on-request", "auto-staging"] as const;
+export type ProjectStoreReleaseMode = (typeof PROJECT_STORE_RELEASE_MODES)[number];
+
+export interface ProjectStoreReleaseSettings {
+  mode: ProjectStoreReleaseMode;
+  updatedAt: string;
+}
+
+export const STORE_RELEASE_REQUEST_TARGETS = ["staging", "production"] as const;
+export type StoreReleaseRequestTarget = (typeof STORE_RELEASE_REQUEST_TARGETS)[number];
+export type StoreReleaseRequestPlatform = "android" | "ios";
+
+export interface StoreReleaseRequest {
+  target: StoreReleaseRequestTarget;
+  platforms?: StoreReleaseRequestPlatform[];
+  resumeRunId?: string;
+  resolution?: unknown;
+  requestedAt: string;
+  requestedBy?: string;
+  directive?: string;
+}
+
 export interface OpenDesignSource {
   kind: "host" | "client";
   requestId?: string;
@@ -45,6 +67,7 @@ export interface ProjectSettings {
   openDesignSource?: OpenDesignSource;
   openDesignLink?: OpenDesignProjectLink;
   release?: ProjectReleaseSettings;
+  storeRelease?: ProjectStoreReleaseSettings;
 }
 
 export function projectSettingsPath(state: string, slug: string): string {
@@ -55,6 +78,11 @@ export function projectSettingsPath(state: string, slug: string): string {
 export function releaseRequestPath(state: string, slug: string): string {
   if (!safeId(slug)) throw new FactoryError("invalid-project-slug", slug);
   return join(state, "projects", slug, "release-request.json");
+}
+
+export function storeReleaseRequestPath(state: string, slug: string): string {
+  if (!safeId(slug)) throw new FactoryError("invalid-project-slug", slug);
+  return join(state, "projects", slug, "store-release-request.json");
 }
 
 const isStringArray = (value: unknown): value is string[] =>
@@ -69,6 +97,14 @@ export function releaseSettingsAreValid(value: unknown): value is ProjectRelease
   return true;
 }
 
+export function storeReleaseSettingsAreValid(value: unknown): value is ProjectStoreReleaseSettings {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const sr = value as Record<string, unknown>;
+  if (typeof sr.mode !== "string" || !(PROJECT_STORE_RELEASE_MODES as readonly string[]).includes(sr.mode)) return false;
+  if (typeof sr.updatedAt !== "string" || sr.updatedAt.trim() === "") return false;
+  return true;
+}
+
 export function projectSettingsAreValid(value: unknown): value is ProjectSettings {
   const v = value as ProjectSettings | null;
   return (
@@ -79,7 +115,8 @@ export function projectSettingsAreValid(value: unknown): value is ProjectSetting
     v.revision >= 0 &&
     (v.skillPacks === undefined || isStringArray(v.skillPacks)) &&
     (v.openDesignCheckpointPaths === undefined || isStringArray(v.openDesignCheckpointPaths)) &&
-    (v.release === undefined || releaseSettingsAreValid(v.release))
+    (v.release === undefined || releaseSettingsAreValid(v.release)) &&
+    (v.storeRelease === undefined || storeReleaseSettingsAreValid(v.storeRelease))
   );
 }
 
@@ -214,14 +251,134 @@ export function setReleaseRequest(
   });
 }
 
-/** Drops the Project's pending Release request if present. Returns true if one existed. */
-export function clearReleaseRequest(state: string, slug: string): boolean {
+/** Drops a single state file if present under the state mutation gate. */
+function clearStateFile(state: string, path: string): boolean {
   return stateMutation(state, () => {
-    const path = releaseRequestPath(state, slug);
     const existed = existsSync(path);
     rmSync(path, { force: true });
     return existed;
   });
+}
+
+/** Drops the Project's pending Release request if present. Returns true if one existed. */
+export function clearReleaseRequest(state: string, slug: string): boolean {
+  return clearStateFile(state, releaseRequestPath(state, slug));
+}
+
+/** Absent Store release settings default to `mode: "off"`. */
+export function readStoreReleaseSettings(state: string, slug: string): { mode: ProjectStoreReleaseMode; updatedAt?: string } {
+  const sr = readProjectSettings(state, slug).storeRelease;
+  return sr === undefined ? { mode: "off" } : { ...sr };
+}
+
+/**
+ * Updates Owner-authored Store release settings (`mode`) in `project-settings.json`.
+ * Switching away from `on-request` automatically drops any pending Store release request.
+ */
+export function setProjectStoreReleaseSettings(
+  state: string,
+  slug: string,
+  input: { mode: ProjectStoreReleaseMode },
+  now: () => string = () => new Date().toISOString(),
+): ProjectSettings {
+  return stateMutation(state, () => {
+    if (!(PROJECT_STORE_RELEASE_MODES as readonly string[]).includes(input.mode)) {
+      throw new FactoryError("invalid-store-release-mode", `Invalid store release mode: ${String(input.mode)}`);
+    }
+    const current = readProjectSettings(state, slug);
+    const updated: ProjectStoreReleaseSettings = {
+      mode: input.mode,
+      updatedAt: now(),
+    };
+    const saved = writeProjectSettings(state, slug, { ...current, revision: current.revision + 1, storeRelease: updated });
+    if (input.mode !== "on-request") {
+      clearStoreReleaseRequest(state, slug);
+    }
+    return saved;
+  });
+}
+
+function storeReleaseRequestIsValid(value: unknown): value is StoreReleaseRequest {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const req = value as Record<string, unknown>;
+  if (typeof req.target !== "string" || !(STORE_RELEASE_REQUEST_TARGETS as readonly string[]).includes(req.target)) return false;
+  if (typeof req.requestedAt !== "string" || req.requestedAt.trim() === "") return false;
+  if (
+    req.platforms !== undefined &&
+    (!Array.isArray(req.platforms) ||
+      req.platforms.length === 0 ||
+      !req.platforms.every((platform) => platform === "android" || platform === "ios"))
+  ) {
+    return false;
+  }
+  if (req.resumeRunId !== undefined && (typeof req.resumeRunId !== "string" || req.resumeRunId.trim() === "")) return false;
+  if (req.requestedBy !== undefined && typeof req.requestedBy !== "string") return false;
+  if (req.directive !== undefined && typeof req.directive !== "string") return false;
+  return true;
+}
+
+/** Reads the Project's single pending Store release request (`store-release-request.json`), or undefined when absent. */
+export function readStoreReleaseRequest(state: string, slug: string): StoreReleaseRequest | undefined {
+  const path = storeReleaseRequestPath(state, slug);
+  const value = readOptionalJson(path, "store-release-request-invalid");
+  if (value === undefined) return undefined;
+  if (!storeReleaseRequestIsValid(value)) {
+    throw new FactoryError("store-release-request-invalid", `store-release-request-invalid: ${path}`);
+  }
+  return value;
+}
+
+/** Records (replacing any prior one) the Project's single pending Store release request. */
+export function setStoreReleaseRequest(
+  state: string,
+  slug: string,
+  request: {
+    target?: StoreReleaseRequestTarget;
+    platforms?: StoreReleaseRequestPlatform[];
+    resumeRunId?: string;
+    resolution?: unknown;
+    requestedAt?: string;
+    requestedBy?: string;
+    directive?: string;
+  },
+): StoreReleaseRequest {
+  return stateMutation(state, () => {
+    const target = request.target ?? "staging";
+    if (!(STORE_RELEASE_REQUEST_TARGETS as readonly string[]).includes(target)) {
+      throw new FactoryError("invalid-store-release-target", `Invalid store release target: ${String(target)}`);
+    }
+    let platforms: StoreReleaseRequestPlatform[] | undefined;
+    if (request.platforms !== undefined) {
+      if (
+        !Array.isArray(request.platforms) ||
+        request.platforms.length === 0 ||
+        !request.platforms.every((platform) => platform === "android" || platform === "ios")
+      ) {
+        throw new FactoryError("invalid-store-release-platforms", "Store release platforms must be a non-empty list of android/ios");
+      }
+      platforms = [...new Set(request.platforms)];
+    }
+    const resumeRunId = request.resumeRunId !== undefined ? request.resumeRunId.trim() : undefined;
+    if (resumeRunId !== undefined && resumeRunId === "") {
+      throw new FactoryError("invalid-store-release-run-id", "Store release resumeRunId cannot be empty");
+    }
+    const record: StoreReleaseRequest = {
+      target,
+      ...(platforms !== undefined ? { platforms } : {}),
+      ...(resumeRunId !== undefined ? { resumeRunId } : {}),
+      ...(request.resolution !== undefined ? { resolution: request.resolution } : {}),
+      requestedAt: request.requestedAt?.trim() || new Date().toISOString(),
+      ...(request.requestedBy !== undefined ? { requestedBy: request.requestedBy } : {}),
+      ...(request.directive !== undefined ? { directive: request.directive } : {}),
+    };
+    atomicJson(storeReleaseRequestPath(state, slug), record);
+    return record;
+  });
+}
+
+/** Drops the Project's pending Store release request if present. Returns true if one existed. */
+export function clearStoreReleaseRequest(state: string, slug: string): boolean {
+  return clearStateFile(state, storeReleaseRequestPath(state, slug));
 }
 
 /** Files the pre-0.6.0 Scrum workflow left beside a Project's own state. */

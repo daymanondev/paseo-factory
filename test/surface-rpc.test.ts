@@ -36,7 +36,7 @@ import { foldCompanions, foldCorePlugin, foldTasks } from "../plugin/server/view
 import { factoryEnvFor, injectRoleOnCreate, injectSessionEnv, renderAgentContract, renderSeatBootstrap, renderSeatContract } from "../plugin/server/roles.ts";
 import type { AgentCreateRequest } from "../plugin/server/roles.ts";
 import { discoverProjects, listProjectRegistrations, readProjectRegistration, writeProjectRegistration } from "../plugin/server/projects.ts";
-import { readProjectSettings, readReleaseRequest, readReleaseSettings, setReleaseRequest, writeProjectSettings } from "../plugin/server/core/project-settings.ts";
+import { readProjectSettings, readReleaseRequest, readReleaseSettings, readStoreReleaseRequest, readStoreReleaseSettings, setReleaseRequest, setStoreReleaseRequest, writeProjectSettings } from "../plugin/server/core/project-settings.ts";
 import { builtinVaultRunner, clearGhAuthCache } from "../plugin/server/core/vault-transport.ts";
 import { DatabaseSync } from "node:sqlite";
 import { lanesPath, loadLanes, saveLanes } from "../src/lanes.ts";
@@ -256,7 +256,7 @@ function makeSurface(t: TestContext, agents: FakeAgent[] = [], plugins: DaemonPl
  * mailbox's own state (`rotateProjectMailbox`), so its tests run against the runtime
  * that owns it, not a stub.
  */
-function makeRotateSurface(t: TestContext, agents: FakeAgent[] = [], options: { registry?: boolean; vaultRunner?: VaultRunner } = {}) {
+function makeRotateSurface(t: TestContext, agents: FakeAgent[] = [], options: { registry?: boolean; vaultRunner?: VaultRunner; listPlugins?: SurfaceDeps["listPlugins"] } = {}) {
   const base = makeSurface(t, agents, [], options.vaultRunner);
   const registry = options.registry === true ? createFactoryRegistry({ stateDir: base.stateDir, root: base.factory }) : undefined;
   if (registry !== undefined) t.after(() => registry.stop());
@@ -273,6 +273,7 @@ function makeRotateSurface(t: TestContext, agents: FakeAgent[] = [], options: { 
     onLeadRetired: (input) => leadMail.settleLeadRotation(input.slug),
     rotateProjectMailbox: (slug) => leadMail.rotateProjectMailbox(slug),
     ...(options.vaultRunner === undefined ? {} : { vaultRunner: options.vaultRunner }),
+    ...(options.listPlugins === undefined ? {} : { listPlugins: options.listPlugins }),
   });
   const leadMail = createLeadMailRuntime({
     factory: base.factory,
@@ -8871,4 +8872,220 @@ test("onboarding.start: watchdog times out hung Supervisor creation and ignores 
   const inspected = await handlers.onboardingInspect({ folder: project.root });
   assert.ok(inspected.ok);
   assert.equal(inspected.existingSupervisor, true);
+});
+
+test("ADR 0066 (Ticket 03): storeReleaseRead / storeReleaseWrite enforce Owner-only writes, survive Rotate/Reset while dropping pending requests, and aggregate readiness/platforms/runner/runs", async (t) => {
+  const dir = makeTempDir("surface-store-release-");
+  disposeDir(t, dir);
+  const nonMobileRepo = join(dir, "backend-repo");
+  const mobileRepo = join(dir, "mobile-repo");
+  const otherRepo = join(dir, "other-mobile-repo");
+  for (const repoPath of [nonMobileRepo, mobileRepo, otherRepo]) {
+    mkdirSync(repoPath, { recursive: true });
+    writeFileSync(join(repoPath, "README.md"), "# Demo\n");
+    gitCommitAll(repoPath);
+  }
+  // Configure mobileRepo with Android + iOS + Expo markers
+  mkdirSync(join(mobileRepo, "android", "app"), { recursive: true });
+  writeFileSync(join(mobileRepo, "android", "app", "build.gradle"), 'android { defaultConfig { applicationId "com.example.demo" } }\n');
+  mkdirSync(join(mobileRepo, "ios", "DemoApp.xcodeproj"), { recursive: true });
+  writeFileSync(join(mobileRepo, "ios", "Podfile"), "platform :ios, '15.0'\n");
+  writeFileSync(join(mobileRepo, "app.json"), JSON.stringify({ expo: { name: "Demo", slug: "demo" } }));
+
+  let listedPlugins: DaemonPluginItem[] = [];
+  const { stateDir, home, handlers } = makeRotateSurface(t, [], {
+    listPlugins: async () => ({ ok: true, plugins: listedPlugins }),
+  });
+
+  const nonMobileProject = resolveProject(nonMobileRepo);
+  const mobileProject = resolveProject(mobileRepo);
+  assert.ok(nonMobileProject.ok && mobileProject.ok);
+  if (!nonMobileProject.ok || !mobileProject.ok) return;
+  writeProjectRegistration(stateDir, nonMobileProject.slug, { root: nonMobileProject.root });
+  writeProjectRegistration(stateDir, mobileProject.slug, { root: mobileProject.root });
+
+  // 1. Non-mobile repo reads defaults: mode=off, isMobile=false, platforms=[], runner not_installed, vault all false, lastRun/activeHole null
+  const nonMobileRead = await handlers.storeReleaseRead({ projectRoot: nonMobileRepo });
+  assert.ok(nonMobileRead.ok, JSON.stringify(nonMobileRead));
+  assert.equal(nonMobileRead.settings.mode, "off");
+  assert.equal(nonMobileRead.settings.updatedAt, null);
+  assert.equal(nonMobileRead.settings.pendingRequest, null);
+  assert.deepEqual(nonMobileRead.settings.platforms, []);
+  assert.equal(nonMobileRead.settings.isMobile, false);
+  assert.deepEqual(nonMobileRead.settings.vault, { ascKey: false, appleTeamId: false, gplayJson: false });
+  assert.equal(nonMobileRead.settings.runner.installed, false);
+  assert.equal(nonMobileRead.settings.runner.status, "not_installed");
+  assert.equal(nonMobileRead.settings.lastRun, null);
+  assert.equal(nonMobileRead.settings.activeHole, null);
+
+  // 2. Stamped seats are refused seat-cannot-grant and mutate nothing
+  for (const seat of ["supervisor", "lead", "agent"]) {
+    const refused = await handlers.storeReleaseWrite({ projectRoot: mobileRepo, mode: "auto-staging" }, { seat });
+    assert.ok(!refused.ok);
+    assert.equal(refused.code, "seat-cannot-grant");
+    assert.equal(readStoreReleaseSettings(stateDir, mobileProject.slug).mode, "off");
+  }
+
+  // 3. Owner write persists mode + updatedAt
+  const written = await handlers.storeReleaseWrite({ projectRoot: mobileRepo, mode: "on-request" });
+  assert.ok(written.ok, JSON.stringify(written));
+  assert.equal(written.droppedPendingRequest, false);
+  assert.equal(written.settings.mode, "on-request");
+  assert.ok(written.settings.updatedAt !== null);
+  assert.deepEqual(written.settings.platforms, ["android", "ios", "expo"]);
+  assert.equal(written.settings.isMobile, true);
+
+  // 4. Pending Store release request is dropped on Rotate seats, while project-settings.json survives
+  setStoreReleaseRequest(stateDir, mobileProject.slug, {
+    target: "staging",
+    platforms: ["android"],
+    requestedAt: "2026-11-20T12:00:00.000Z",
+    requestedBy: "supervisor",
+  });
+  const rotated = await handlers.projectRotate({ projectRoot: mobileRepo });
+  assert.ok(rotated.ok, JSON.stringify(rotated));
+  assert.equal(readStoreReleaseRequest(stateDir, mobileProject.slug), undefined, "Rotate seats drops Store release request");
+  assert.equal(readStoreReleaseSettings(stateDir, mobileProject.slug).mode, "on-request", "Rotate seats keeps Store release settings");
+
+  // 5. Leaving on-request drops pending Store release request
+  setStoreReleaseRequest(stateDir, mobileProject.slug, {
+    target: "production",
+    requestedAt: "2026-11-20T12:01:00.000Z",
+  });
+  const leftOnRequest = await handlers.storeReleaseWrite({ projectRoot: mobileRepo, mode: "auto-staging" });
+  assert.ok(leftOnRequest.ok, JSON.stringify(leftOnRequest));
+  assert.equal(leftOnRequest.droppedPendingRequest, true);
+  assert.equal(readStoreReleaseRequest(stateDir, mobileProject.slug), undefined);
+
+  // 6. Project reset drops pending Store release request and keeps Store release settings
+  setStoreReleaseRequest(stateDir, mobileProject.slug, {
+    target: "staging",
+    requestedAt: "2026-11-20T12:02:00.000Z",
+  });
+  const reset = await handlers.projectReset({ projectRoot: mobileRepo });
+  assert.ok(reset.ok, JSON.stringify(reset));
+  assert.equal(readStoreReleaseRequest(stateDir, mobileProject.slug), undefined, "Project reset drops Store release request");
+  assert.equal(readStoreReleaseSettings(stateDir, mobileProject.slug).mode, "auto-staging", "Project reset keeps Store release settings");
+
+  // 7. Vault runtime env readiness booleans (never secret values)
+  const runtimeDir = join(home, "vault-runtime");
+  mkdirSync(runtimeDir, { recursive: true });
+  const secretSentinelTeam = "SECRET_TEAM_999";
+  const secretSentinelAscPath = join(runtimeDir, "secrets", "shared", "asc-api-key.p8");
+  const secretSentinelGplayPath = join(runtimeDir, "secrets", "shared", "gplay-service-account.json");
+  writeFileSync(
+    join(runtimeDir, "env.json"),
+    JSON.stringify({
+      ASC_KEY_PATH: secretSentinelAscPath,
+      ASC_KEY_ID: "SECRET_KEY_ID",
+      ASC_ISSUER: "00000000-0000-0000-0000-000000000000",
+      APPLE_TEAM_ID: secretSentinelTeam,
+      GPLAY_KEY_PATH: secretSentinelGplayPath,
+    }),
+  );
+
+  // 8. Managed factory-release-lab runner directory resolution + bin/release-lab.mjs probe
+  const oldPluginDir = join(home, "plugins", "factory-release-lab", "v1", "plugin");
+  const newRootDir = join(home, "plugins", "factory-release-lab", "v2");
+  const newPluginDir = join(newRootDir, "plugin");
+  mkdirSync(oldPluginDir, { recursive: true });
+  mkdirSync(join(newRootDir, "bin"), { recursive: true });
+  mkdirSync(newPluginDir, { recursive: true });
+  writeFileSync(join(newRootDir, "bin", "release-lab.mjs"), "#!/usr/bin/env node\n");
+  listedPlugins = [
+    {
+      id: "factory-release-lab",
+      path: oldPluginDir,
+      enabled: true,
+      status: "running",
+      installation: { identity: { kind: "git", remote: "https://github.com/daymanondev/factory-release-lab", pluginPath: "plugin" } },
+    },
+  ];
+
+  // 9. Latest matching run / active Hole aggregation from <paseoHome>/release-lab/runs/
+  const runsDir = join(home, "release-lab", "runs");
+  mkdirSync(runsDir, { recursive: true });
+  // Unrelated project run (even newer timestamp) must be ignored
+  writeFileSync(
+    join(runsDir, "run-other.json"),
+    JSON.stringify({
+      id: "run-other",
+      playbook: "stage-release",
+      projectSlug: "other-mobile-repo",
+      projectRoot: otherRepo,
+      platforms: ["android"],
+      status: "failed",
+      createdAt: 9000,
+      updatedAt: 9999,
+      error: "other failure",
+      phases: [],
+    }),
+  );
+  // Older completed run for mobileRepo
+  writeFileSync(
+    join(runsDir, "run-1.json"),
+    JSON.stringify({
+      id: "run-1",
+      playbook: "preflight-audit",
+      projectSlug: "mobile-repo",
+      projectRoot: mobileRepo,
+      platforms: ["android", "ios"],
+      status: "completed",
+      createdAt: 1000,
+      updatedAt: 2000,
+      completedAt: 2000,
+      phases: [],
+    }),
+  );
+  // Newer paused-hole run for mobileRepo
+  writeFileSync(
+    join(runsDir, "run-2.json"),
+    JSON.stringify({
+      id: "run-2",
+      playbook: "full-release",
+      projectSlug: "mobile-repo",
+      projectRoot: mobileRepo,
+      platforms: ["android", "ios"],
+      status: "paused-hole",
+      createdAt: 3000,
+      updatedAt: 5000,
+      phases: [
+        { id: "preflight", state: "green", attempts: 1, history: [] },
+        {
+          id: "submit-production",
+          state: "paused-hole",
+          attempts: 1,
+          history: [],
+          hole: {
+            kind: "final-release-approval",
+            payload: { version: "1.0.0" },
+            resolutionSpec: { kind: "final-release-approval", type: "object", properties: { approved: "boolean" } },
+            defaultResolution: { approved: false },
+            pausedAt: 5000,
+          },
+        },
+      ],
+    }),
+  );
+
+  const aggregated = await handlers.storeReleaseRead({ projectRoot: mobileRepo });
+  assert.ok(aggregated.ok, JSON.stringify(aggregated));
+  assert.deepEqual(aggregated.settings.vault, { ascKey: true, appleTeamId: true, gplayJson: true });
+  const serialized = JSON.stringify(aggregated);
+  assert.equal(serialized.includes(secretSentinelTeam), false, "team ID secret value must never leak");
+  assert.equal(serialized.includes("SECRET_KEY_ID"), false, "key ID secret value must never leak");
+  assert.equal(serialized.includes("asc-api-key.p8"), false, "key path must never leak");
+  assert.equal(serialized.includes("gplay-service-account.json"), false, "gplay path must never leak");
+  assert.equal(aggregated.settings.runner.installed, true);
+  assert.equal(aggregated.settings.runner.enabled, true);
+  assert.equal(aggregated.settings.runner.status, "running");
+  assert.equal(aggregated.settings.runner.path, newPluginDir);
+  assert.equal(aggregated.settings.runner.binPath, join(newRootDir, "bin", "release-lab.mjs"));
+  assert.equal(aggregated.settings.lastRun?.id, "run-2");
+  assert.equal(aggregated.settings.lastRun?.status, "paused-hole");
+  assert.equal(aggregated.settings.lastRun?.playbook, "full-release");
+  assert.deepEqual(aggregated.settings.lastRun?.platforms, ["android", "ios"]);
+  assert.equal(aggregated.settings.activeHole?.runId, "run-2");
+  assert.equal(aggregated.settings.activeHole?.kind, "final-release-approval");
+  assert.equal(aggregated.settings.activeHole?.phase, "submit-production");
 });

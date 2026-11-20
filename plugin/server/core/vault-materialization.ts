@@ -893,6 +893,44 @@ export function buildVaultRuntimeEnv(paseoHome: string): VaultRuntimeEnv {
   return env;
 }
 
+export interface VaultStoreReadiness {
+  ascKey: boolean;
+  appleTeamId: boolean;
+  gplayJson: boolean;
+}
+
+/** Reads `<paseoHome>/vault-runtime/env.json` (when present) merged over `buildVaultRuntimeEnv(paseoHome)`. */
+export function readVaultRuntimeEnv(paseoHome: string): VaultRuntimeEnv {
+  const derived = buildVaultRuntimeEnv(paseoHome);
+  const disk = readJsonFile(join(paseoHome, "vault-runtime", "env.json"));
+  if (disk === null) return derived;
+  const merged: VaultRuntimeEnv = { ...derived };
+  for (const key of [
+    "ASC_KEY_PATH",
+    "ASC_KEY_ID",
+    "ASC_ISSUER",
+    "APPLE_TEAM_ID",
+    "GPLAY_KEY_PATH",
+    "RELEASE_LAB_KEYSTORE_STOREPASS",
+    "FIREBASE_PROJECT_ID",
+  ] as const) {
+    const val = jsonStringField(disk, key);
+    if (val !== null) merged[key] = val;
+  }
+  return merged;
+}
+
+/** Reports Store credential readiness booleans from Vault runtime env — never secret values. */
+export function readVaultStoreReadiness(paseoHome: string): VaultStoreReadiness {
+  const env = readVaultRuntimeEnv(paseoHome);
+  const present = (value: string | undefined): boolean => typeof value === "string" && value.trim() !== "";
+  return {
+    ascKey: present(env.ASC_KEY_PATH),
+    appleTeamId: present(env.APPLE_TEAM_ID),
+    gplayJson: present(env.GPLAY_KEY_PATH),
+  };
+}
+
 /** Canonical keys with any hydrated app secret — the `hydratedApps` source, sorted. */
 export function hydratedAppKeys(paseoHome: string): string[] {
   try {
