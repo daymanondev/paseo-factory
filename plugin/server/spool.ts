@@ -2728,13 +2728,14 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
       return {
         id: request.id,
         ok: true,
-        summary: `Released ${res.tag} on ${res.branch} (${res.commit.slice(0, 7)})${res.url ? ` — ${res.url}` : ""}`,
+        summary: `Released ${res.tag} on ${res.branch} (${res.commit.slice(0, 7)})${res.url ? ` — ${res.url}` : ""}${res.storeReleaseAutoStaging ? ' · Store release mode is auto-staging: call lead_store_release({ action: "stage" }) next.' : ""}`,
         version: res.version,
         tag: res.tag,
         commit: res.commit,
         branch: res.branch,
         url: res.url,
         skipped: res.skipped,
+        ...(res.storeReleaseAutoStaging ? { storeReleaseAutoStaging: true } : {}),
       };
     }
     if (request.kind === "store-release") {

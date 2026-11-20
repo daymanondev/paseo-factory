@@ -558,4 +558,4 @@ export const EXPO_SKILL_SOURCES: readonly CoreSkillSource[] = EXPO_SKILLS.map(na
 export function installOrUpdateExpoSkillPack(options?: Parameters<typeof installOrUpdateSourcesFromGit>[1]) {
   return installOrUpdateSourcesFromGit(EXPO_SKILL_SOURCES, options);
 }
-export { buildRoleSkillMatrix, resolveProjectSkillPacks, detectProjectSkillPacks, resolveRoleSkillsForProject, discoverHostEcosystems, importHostSkillOrPack, inspectSkillHub } from './skill-hub.ts';
+export { buildRoleSkillMatrix, resolveProjectSkillPacks, detectProjectSkillPacks, resolveRoleSkillsForProject, discoverHostEcosystems, importHostSkillOrPack, ensureCompanionPluginSkills, inspectSkillHub } from './skill-hub.ts';
