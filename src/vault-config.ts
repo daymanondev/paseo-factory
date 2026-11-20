@@ -23,10 +23,37 @@ export interface VaultRuntimeEnv {
   ASC_KEY_PATH?: string;
   ASC_KEY_ID?: string;
   ASC_ISSUER?: string;
+  APPLE_TEAM_ID?: string;
   GPLAY_KEY_PATH?: string;
   RELEASE_LAB_KEYSTORE_STOREPASS?: string;
   FIREBASE_PROJECT_ID?: string;
 }
+
+export interface VaultStoreReviewContact {
+  firstName?: string;
+  lastName?: string;
+  email?: string;
+  phone?: string;
+}
+
+export interface VaultStoreDefaults {
+  companyName?: string;
+  developerName?: string;
+  organizationName?: string;
+  supportEmail?: string;
+  supportUrl?: string;
+  supportUrlTemplate?: string;
+  privacyPolicyUrl?: string;
+  privacyUrlTemplate?: string;
+  marketingUrl?: string;
+  legalHostingRepo?: string;
+  copyright?: string;
+  contactPhone?: string;
+  reviewContact?: VaultStoreReviewContact;
+  [key: string]: unknown;
+}
+
+export const STORE_DEFAULTS_FILE = "store-defaults.json";
 
 export interface VaultStatusView {
   /** Durable writer admission; transport timestamps do not imply application. */
