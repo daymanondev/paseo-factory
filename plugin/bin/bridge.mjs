@@ -89,7 +89,11 @@ var EVENT_NAMES = [
   "retro_written",
   "task_closed",
   "release_published",
-  "release_failed"
+  "release_failed",
+  "store_release_started",
+  "store_release_paused",
+  "store_release_completed",
+  "store_release_failed"
 ];
 var PEER_DISPOSITIONS = ["engineer", "architect", "reviewer", "scout"];
 var PEER_HANDOFF_OUTCOMES = ["complete", "partial", "blocked", "reopen"];
@@ -114,6 +118,9 @@ function needsHumanEvidenceIsValid(evidence, reason) {
   if (reason !== void 0) return false;
   return isDenialRepoke || isAttemptGate || isSpawnRespawn;
 }
+var STORE_RELEASE_MODES = ["off", "on-request", "auto-staging"];
+var STORE_RELEASE_ACTIONS = ["probe", "stage", "submit", "resume"];
+var STORE_RELEASE_FAILURE_CLASSES = ["app-repo", "tool-bug", "account-policy"];
 
 // src/peer-thinking.ts
 var PEER_THINKING_LEVELS = ["low", "medium", "high", "xhigh", "max"];
@@ -243,6 +250,18 @@ function shapeIsValid(evt) {
   if (evt.event === "release_failed") {
     return asRecord.task === void 0 && asRecord.attempt === void 0 && typeof asRecord.version === "string" && typeof asRecord.step === "string" && typeof asRecord.code === "string" && typeof asRecord.detail === "string";
   }
+  if (evt.event === "store_release_started") {
+    return asRecord.task === void 0 && asRecord.attempt === void 0 && typeof asRecord.runId === "string" && typeof asRecord.action === "string" && Array.isArray(asRecord.platforms) && asRecord.platforms.every((p) => typeof p === "string") && typeof asRecord.mode === "string";
+  }
+  if (evt.event === "store_release_paused") {
+    return asRecord.task === void 0 && asRecord.attempt === void 0 && typeof asRecord.runId === "string" && typeof asRecord.holeKind === "string" && typeof asRecord.phase === "string";
+  }
+  if (evt.event === "store_release_completed") {
+    return asRecord.task === void 0 && asRecord.attempt === void 0 && typeof asRecord.runId === "string" && typeof asRecord.action === "string" && Array.isArray(asRecord.platforms) && asRecord.platforms.every((p) => typeof p === "string") && typeof asRecord.summary === "string";
+  }
+  if (evt.event === "store_release_failed") {
+    return asRecord.task === void 0 && asRecord.attempt === void 0 && typeof asRecord.runId === "string" && typeof asRecord.action === "string" && typeof asRecord.failureClass === "string" && typeof asRecord.code === "string" && typeof asRecord.detail === "string" && (asRecord.upstreamIssuePath === void 0 || typeof asRecord.upstreamIssuePath === "string");
+  }
   const attempt = asRecord.attempt;
   return taskIsString && typeof attempt === "number" && Number.isInteger(attempt) && attempt >= 1;
 }
@@ -274,7 +293,7 @@ function v2PayloadIsValid(event) {
   if (event.attempt !== void 0 && !["claim_reported", "gate_started", "gate_finished", "fresh_eyes_written", "watch_written", "report_written", "attempt_accepted"].includes(event.event)) return false;
   if (event.event === "needs_human" && record(event.evidence) && !Object.values(event.evidence).every((value) => Number.isSafeInteger(value) && value > 0)) return false;
   if (event.arity !== void 0 && (!Number.isSafeInteger(event.arity) || event.arity < 1)) return false;
-  if (event.event === "ledger_schema" || event.event === "retro_written" || event.event === "release_published" || event.event === "release_failed") {
+  if (event.event === "ledger_schema" || event.event === "retro_written" || event.event === "release_published" || event.event === "release_failed" || event.event === "store_release_started" || event.event === "store_release_paused" || event.event === "store_release_completed" || event.event === "store_release_failed") {
     if (event.task !== void 0 || event.attempt !== void 0) return false;
   }
   switch (event.event) {
@@ -315,6 +334,14 @@ function v2PayloadIsValid(event) {
       return nonempty(event.version) && nonempty(event.tag) && nonempty(event.commit) && nonempty(event.branch) && (event.url === null || string("url")) && typeof event.mode === "string" && ["off", "on-request", "auto"].includes(event.mode) && Array.isArray(event.skipped) && event.skipped.every((item) => typeof item === "string");
     case "release_failed":
       return nonempty(event.version) && nonempty(event.step) && nonempty(event.code) && string("detail");
+    case "store_release_started":
+      return nonempty(event.runId) && typeof event.action === "string" && STORE_RELEASE_ACTIONS.includes(event.action) && Array.isArray(event.platforms) && event.platforms.every((item) => nonempty(item)) && typeof event.mode === "string" && STORE_RELEASE_MODES.includes(event.mode);
+    case "store_release_paused":
+      return nonempty(event.runId) && nonempty(event.holeKind) && nonempty(event.phase);
+    case "store_release_completed":
+      return nonempty(event.runId) && typeof event.action === "string" && STORE_RELEASE_ACTIONS.includes(event.action) && Array.isArray(event.platforms) && event.platforms.every((item) => nonempty(item)) && string("summary");
+    case "store_release_failed":
+      return nonempty(event.runId) && typeof event.action === "string" && STORE_RELEASE_ACTIONS.includes(event.action) && typeof event.failureClass === "string" && STORE_RELEASE_FAILURE_CLASSES.includes(event.failureClass) && nonempty(event.code) && string("detail") && optionalString("upstreamIssuePath");
     default:
       return true;
   }
@@ -1280,7 +1307,11 @@ var EVENT_NAMES = [
   "retro_written",
   "task_closed",
   "release_published",
-  "release_failed"
+  "release_failed",
+  "store_release_started",
+  "store_release_paused",
+  "store_release_completed",
+  "store_release_failed"
 ];
 var PEER_DISPOSITIONS = ["engineer", "architect", "reviewer", "scout"];
 var PEER_HANDOFF_OUTCOMES = ["complete", "partial", "blocked", "reopen"];
@@ -1305,6 +1336,9 @@ function needsHumanEvidenceIsValid(evidence, reason) {
   if (reason !== void 0) return false;
   return isDenialRepoke || isAttemptGate || isSpawnRespawn;
 }
+var STORE_RELEASE_MODES = ["off", "on-request", "auto-staging"];
+var STORE_RELEASE_ACTIONS = ["probe", "stage", "submit", "resume"];
+var STORE_RELEASE_FAILURE_CLASSES = ["app-repo", "tool-bug", "account-policy"];
 
 // src/peer-thinking.ts
 var PEER_THINKING_LEVELS = ["low", "medium", "high", "xhigh", "max"];
@@ -1434,6 +1468,18 @@ function shapeIsValid(evt) {
   if (evt.event === "release_failed") {
     return asRecord.task === void 0 && asRecord.attempt === void 0 && typeof asRecord.version === "string" && typeof asRecord.step === "string" && typeof asRecord.code === "string" && typeof asRecord.detail === "string";
   }
+  if (evt.event === "store_release_started") {
+    return asRecord.task === void 0 && asRecord.attempt === void 0 && typeof asRecord.runId === "string" && typeof asRecord.action === "string" && Array.isArray(asRecord.platforms) && asRecord.platforms.every((p) => typeof p === "string") && typeof asRecord.mode === "string";
+  }
+  if (evt.event === "store_release_paused") {
+    return asRecord.task === void 0 && asRecord.attempt === void 0 && typeof asRecord.runId === "string" && typeof asRecord.holeKind === "string" && typeof asRecord.phase === "string";
+  }
+  if (evt.event === "store_release_completed") {
+    return asRecord.task === void 0 && asRecord.attempt === void 0 && typeof asRecord.runId === "string" && typeof asRecord.action === "string" && Array.isArray(asRecord.platforms) && asRecord.platforms.every((p) => typeof p === "string") && typeof asRecord.summary === "string";
+  }
+  if (evt.event === "store_release_failed") {
+    return asRecord.task === void 0 && asRecord.attempt === void 0 && typeof asRecord.runId === "string" && typeof asRecord.action === "string" && typeof asRecord.failureClass === "string" && typeof asRecord.code === "string" && typeof asRecord.detail === "string" && (asRecord.upstreamIssuePath === void 0 || typeof asRecord.upstreamIssuePath === "string");
+  }
   const attempt = asRecord.attempt;
   return taskIsString && typeof attempt === "number" && Number.isInteger(attempt) && attempt >= 1;
 }
@@ -1465,7 +1511,7 @@ function v2PayloadIsValid(event) {
   if (event.attempt !== void 0 && !["claim_reported", "gate_started", "gate_finished", "fresh_eyes_written", "watch_written", "report_written", "attempt_accepted"].includes(event.event)) return false;
   if (event.event === "needs_human" && record(event.evidence) && !Object.values(event.evidence).every((value) => Number.isSafeInteger(value) && value > 0)) return false;
   if (event.arity !== void 0 && (!Number.isSafeInteger(event.arity) || event.arity < 1)) return false;
-  if (event.event === "ledger_schema" || event.event === "retro_written" || event.event === "release_published" || event.event === "release_failed") {
+  if (event.event === "ledger_schema" || event.event === "retro_written" || event.event === "release_published" || event.event === "release_failed" || event.event === "store_release_started" || event.event === "store_release_paused" || event.event === "store_release_completed" || event.event === "store_release_failed") {
     if (event.task !== void 0 || event.attempt !== void 0) return false;
   }
   switch (event.event) {
@@ -1506,6 +1552,14 @@ function v2PayloadIsValid(event) {
       return nonempty(event.version) && nonempty(event.tag) && nonempty(event.commit) && nonempty(event.branch) && (event.url === null || string("url")) && typeof event.mode === "string" && ["off", "on-request", "auto"].includes(event.mode) && Array.isArray(event.skipped) && event.skipped.every((item) => typeof item === "string");
     case "release_failed":
       return nonempty(event.version) && nonempty(event.step) && nonempty(event.code) && string("detail");
+    case "store_release_started":
+      return nonempty(event.runId) && typeof event.action === "string" && STORE_RELEASE_ACTIONS.includes(event.action) && Array.isArray(event.platforms) && event.platforms.every((item) => nonempty(item)) && typeof event.mode === "string" && STORE_RELEASE_MODES.includes(event.mode);
+    case "store_release_paused":
+      return nonempty(event.runId) && nonempty(event.holeKind) && nonempty(event.phase);
+    case "store_release_completed":
+      return nonempty(event.runId) && typeof event.action === "string" && STORE_RELEASE_ACTIONS.includes(event.action) && Array.isArray(event.platforms) && event.platforms.every((item) => nonempty(item)) && string("summary");
+    case "store_release_failed":
+      return nonempty(event.runId) && typeof event.action === "string" && STORE_RELEASE_ACTIONS.includes(event.action) && typeof event.failureClass === "string" && STORE_RELEASE_FAILURE_CLASSES.includes(event.failureClass) && nonempty(event.code) && string("detail") && optionalString("upstreamIssuePath");
     default:
       return true;
   }

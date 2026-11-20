@@ -335,6 +335,14 @@ export function renderLedgerLine(evt: AnyEvent): string {
       return `release ${evt.tag} (${evt.branch})`;
     case "release_failed":
       return `release failed ${evt.version} [${evt.step}: ${evt.code}]`;
+    case "store_release_started":
+      return `store release ${evt.action} started [${evt.platforms.join(",")}] (${evt.mode})`;
+    case "store_release_paused":
+      return `store release paused [${evt.phase}: ${evt.holeKind}]`;
+    case "store_release_completed":
+      return `store release ${evt.action} completed [${evt.platforms.join(",")}] — ${evt.summary}`;
+    case "store_release_failed":
+      return `store release ${evt.action} failed [${evt.failureClass}: ${evt.code}]`;
   }
 }
 

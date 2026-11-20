@@ -93,6 +93,10 @@ export const EVENT_NAMES = [
   "task_closed",
   "release_published",
   "release_failed",
+  "store_release_started",
+  "store_release_paused",
+  "store_release_completed",
+  "store_release_failed",
 ] as const;
 
 export type EventName = (typeof EVENT_NAMES)[number];
@@ -760,6 +764,60 @@ export interface ReleaseFailed extends EventIdentityMetadata {
   detail: string;
 }
 
+export const STORE_RELEASE_MODES = ["off", "on-request", "auto-staging"] as const;
+export type StoreReleaseMode = (typeof STORE_RELEASE_MODES)[number];
+
+export const STORE_RELEASE_ACTIONS = ["probe", "stage", "submit", "resume"] as const;
+export type StoreReleaseAction = (typeof STORE_RELEASE_ACTIONS)[number];
+
+export const STORE_RELEASE_FAILURE_CLASSES = ["app-repo", "tool-bug", "account-policy"] as const;
+export type StoreReleaseFailureClass = (typeof STORE_RELEASE_FAILURE_CLASSES)[number];
+
+/** Task-less Project-level Store release start event (ADR 0066). */
+export interface StoreReleaseStarted extends EventIdentityMetadata {
+  seq: number;
+  ts: Timestamp;
+  event: "store_release_started";
+  runId: string;
+  action: StoreReleaseAction;
+  platforms: string[];
+  mode: StoreReleaseMode;
+}
+
+/** Task-less Project-level Store release Hole pause event (ADR 0066). */
+export interface StoreReleasePaused extends EventIdentityMetadata {
+  seq: number;
+  ts: Timestamp;
+  event: "store_release_paused";
+  runId: string;
+  holeKind: string;
+  phase: string;
+}
+
+/** Task-less Project-level Store release completion event (ADR 0066). */
+export interface StoreReleaseCompleted extends EventIdentityMetadata {
+  seq: number;
+  ts: Timestamp;
+  event: "store_release_completed";
+  runId: string;
+  action: StoreReleaseAction;
+  platforms: string[];
+  summary: string;
+}
+
+/** Task-less Project-level Store release failure event (ADR 0066). */
+export interface StoreReleaseFailed extends EventIdentityMetadata {
+  seq: number;
+  ts: Timestamp;
+  event: "store_release_failed";
+  runId: string;
+  action: StoreReleaseAction;
+  failureClass: StoreReleaseFailureClass;
+  code: string;
+  detail: string;
+  upstreamIssuePath?: string;
+}
+
 export type LedgerEvent =
   | LedgerSchema
   | ContractSet
@@ -784,7 +842,11 @@ export type LedgerEvent =
   | RetroWritten
   | TaskClosed
   | ReleasePublished
-  | ReleaseFailed;
+  | ReleaseFailed
+  | StoreReleaseStarted
+  | StoreReleasePaused
+  | StoreReleaseCompleted
+  | StoreReleaseFailed;
 
 /** What callers hand to Ledger.append — same shape, `seq` and `ts` not yet assigned. */
 type PendingOf<T> = T extends LedgerSchema ? never : T extends LedgerEvent ? Omit<T, "seq" | "ts" | keyof EventIdentityMetadata> : never;
