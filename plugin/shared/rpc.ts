@@ -393,6 +393,75 @@ export const onboardingCommit = defineRpc({
   ]),
 });
 
+export const OnboardingPhaseIdSchema = z.enum([
+  "checking",
+  "init-git",
+  "register-and-lanes",
+  "open-design",
+  "start-supervisor",
+  "open-workspace",
+]);
+export type OnboardingPhaseId = z.infer<typeof OnboardingPhaseIdSchema>;
+
+export const OnboardingPhaseStatusSchema = z.enum(["pending", "running", "done", "failed"]);
+export type OnboardingPhaseStatus = z.infer<typeof OnboardingPhaseStatusSchema>;
+
+export const OnboardingPhaseSchema = z.object({
+  id: OnboardingPhaseIdSchema,
+  label: z.string(),
+  status: OnboardingPhaseStatusSchema,
+  startedAt: z.string().nullable(),
+  finishedAt: z.string().nullable(),
+  error: z.string().nullable(),
+});
+export type OnboardingPhase = z.infer<typeof OnboardingPhaseSchema>;
+
+export const OnboardingRunStatusSchema = z.enum(["running", "succeeded", "failed"]);
+export type OnboardingRunStatus = z.infer<typeof OnboardingRunStatusSchema>;
+
+export const OnboardingRunResultSchema = z.object({
+  agentId: z.string(),
+  projectRoot: z.string(),
+  slug: z.string(),
+  bootstrapped: z.boolean(),
+  summary: z.string(),
+});
+export type OnboardingRunResult = z.infer<typeof OnboardingRunResultSchema>;
+
+export const OnboardingRunSchema = z.object({
+  runId: z.string(),
+  folder: z.string(),
+  status: OnboardingRunStatusSchema,
+  phases: z.array(OnboardingPhaseSchema),
+  startedAt: z.string(),
+  updatedAt: z.string(),
+  result: OnboardingRunResultSchema.nullable(),
+  error: z.string().nullable(),
+  errorCode: z.string().nullable(),
+});
+export type OnboardingRun = z.infer<typeof OnboardingRunSchema>;
+
+export const onboardingStart = defineRpc({
+  name: "factory.onboarding.start",
+  input: onboardingCommit.input,
+  output: z.union([
+    z.object({ ok: z.literal(true), run: OnboardingRunSchema }),
+    Failure,
+  ]),
+});
+
+export const onboardingStatus = defineRpc({
+  name: "factory.onboarding.status",
+  input: z.object({
+    runId: z.string().optional(),
+    folder: z.string().optional(),
+  }),
+  output: z.union([
+    z.object({ ok: z.literal(true), run: OnboardingRunSchema.nullable() }),
+    Failure,
+  ]),
+});
+
 export const projectDelete = defineRpc({
   name: "factory.project.delete",
   input: z.object({

@@ -9,34 +9,43 @@
  *   3 Models         — Supervisor, Lead and Worker, prefilled from the machine
  *                      defaults, changed through the lane picker the Settings
  *                      and the Project menu use.
- *   4 Start          — an optional first directive and an optional Open Design
- *                      link; Start creates the Supervisor (never a Lead).
+ *   4 Start          — optional Open Design link and live phase checklist;
+ *                      Start Supervisor sets up the Project and opens the
+ *                      Supervisor conversation directly (never a Lead).
  * Back keeps everything entered (onboarding-state.ts). A failed step says what
  * went wrong and how to fix it — the server's refusals already carry the fix —
  * and never leaves a spinner behind. The Shell owns every RPC and what happens
  * after Start (open the conversation, or finish on the Project panel); this
  * component never mounts on mobile. Test hooks: `factory-onboarding`,
  * `-progress`, `-next`, `-back`, `-start`, `-retry`, `-recheck`, `-init-git`,
- * `-install-all`, `-directive`, `-od`, `-error`, `-blocked`, `-profiles`,
+ * `-install-all`, `-od`, `-error`, `-blocked`, `-profiles`,
  * `-profile-<id>`, `-profile-machine-defaults`, `-profile-modified`,
- * `-lane-<seat>`, `-lane-change-<seat>`. Function components only — no class syntax reaches the
- * Hermes bundle.
+ * `-lane-<seat>`, `-lane-change-<seat>`, `-run-checklist`, `-phase-<id>`,
+ * `-phase-status-<id>`, `-slow-note`, `-poll-warning`, `-run-retry`.
+ * Function components only — no class syntax reaches the Hermes bundle.
  */
 import type { PluginTheme } from "@getpaseo/plugin";
-import { Modal, TextInput } from "@getpaseo/plugin/client/ui";
+import { Modal } from "@getpaseo/plugin/client/ui";
 import { useEffect, useReducer, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { Pressable, Text, View } from "react-native";
+import type { OnboardingPhase, OnboardingPhaseStatus, OnboardingRun, OnboardingRunResult } from "../../shared/rpc.ts";
 import type { FactoryView } from "../../shared/view.ts";
 import { Btn, RoleName, ToneBadge } from "../kit/pill.tsx";
-import { CONTROL_H, CONTROL_SM, RADIUS, SPACING, factoryPalette, hoveredOf, text, thinkingColour, tint } from "../kit/theme.ts";
+import { CONTROL_SM, RADIUS, SPACING, factoryPalette, hoveredOf, text, thinkingColour, tint } from "../kit/theme.ts";
 import type { Colour } from "../kit/theme.ts";
 import { LaneModalBody, PROJECT_OVERRIDE_CARDS, splitLaneParts } from "./lane-editor.tsx";
 import type { LaneCard } from "./lane-editor.tsx";
+import { INITIAL_OPEN_WORKSPACE, useOnboardingRunTracker } from "./onboarding-run-tracker.tsx";
+import type { OnboardingRunTracker, OpenWorkspaceState } from "./onboarding-run-tracker.tsx";
 import { ONBOARDING_LANES, ONBOARDING_STEPS, blockerOf, canAdvance, commitInputOf, describeThrown, initialWizard, reduceWizard, stepLabel } from "./onboarding-state.ts";
 import type { CommitInput, DesignChoice, Inspection, OnboardingLaneName, WizardInput } from "./onboarding-state.ts";
 
+export type { OpenWorkspaceState };
+
 type Failed = { ok: false; error: string };
+
+const OPEN_WORKSPACE_LABEL = "Opening workspace / Supervisor";
 
 /** An Open Design project the host catalog offers. */
 export interface DesignOption {
@@ -53,8 +62,12 @@ export interface OnboardingActions {
   installPrerequisites(): Promise<{ ok: true } | Failed>;
   /** The Open Design projects on this host. */
   listDesigns(): Promise<{ ok: true; projects: DesignOption[] } | Failed>;
-  /** The onboarding commit (`factory.onboarding.commit`); on success the Shell navigates. */
-  start(input: CommitInput): Promise<{ ok: true } | Failed>;
+  /** Start onboarding (`factory.onboarding.start` async run or legacy `factory.onboarding.commit`). */
+  start(input: CommitInput): Promise<{ ok: true; run?: OnboardingRun } | Failed>;
+  /** Query an active or recent onboarding run (`factory.onboarding.status`). */
+  status?(input: { runId?: string; folder?: string }): Promise<{ ok: true; run: OnboardingRun | null } | Failed>;
+  /** Execute the client-side `open-workspace` finalization (workspace + Factory panel + openAgent). */
+  finalize?(result: OnboardingRunResult, input: CommitInput): Promise<{ ok: true } | Failed>;
 }
 
 const SEAT_ROLE: Record<OnboardingLaneName, "supervisor" | "lead" | "peer"> = {
@@ -81,11 +94,51 @@ export interface OnboardingInitialUi {
   lanes?: Record<OnboardingLaneName, string>;
   profileId?: string | null;
   profileModified?: boolean;
-  directive?: string;
   design?: DesignChoice;
   installError?: string;
   startError?: string;
   designs?: DesignOption[];
+  run?: OnboardingRun | null;
+  openWorkspace?: Partial<OpenWorkspaceState> & { status: OnboardingPhaseStatus };
+  pollWarning?: string | null;
+  now?: number;
+  pollIntervalMs?: number;
+}
+
+function phaseElapsedSeconds(startedAt: string | null, nowMs: number): number {
+  if (startedAt === null) return 0;
+  const startedMs = Date.parse(startedAt);
+  if (!Number.isFinite(startedMs)) return 0;
+  return Math.max(0, Math.floor((nowMs - startedMs) / 1000));
+}
+
+function buildChecklistPhases(run: OnboardingRun, openWorkspace: OpenWorkspaceState): OnboardingPhase[] {
+  const hasOpenWorkspace = run.phases.some((phase) => phase.id === "open-workspace");
+  if (hasOpenWorkspace) return run.phases;
+  return [
+    ...run.phases,
+    {
+      id: "open-workspace",
+      label: OPEN_WORKSPACE_LABEL,
+      status: openWorkspace.status,
+      startedAt: openWorkspace.startedAt,
+      finishedAt: openWorkspace.finishedAt,
+      error: openWorkspace.error,
+    },
+  ];
+}
+
+function phaseStatusColour(palette: ReturnType<typeof factoryPalette>, status: OnboardingPhaseStatus): string {
+  switch (status) {
+    case "done":
+      return palette.ok;
+    case "running":
+      return palette.lead;
+    case "failed":
+      return palette.bad;
+    case "pending":
+      return palette.idle;
+  }
 }
 
 function ProfilePill({
@@ -168,6 +221,7 @@ export function OnboardingWizard({
   view,
   folder,
   actions,
+  tracker: externalTracker,
   initialUi,
 }: {
   theme: PluginTheme;
@@ -176,6 +230,8 @@ export function OnboardingWizard({
   /** The workspace panel's folder; null when the panel is not bound to one. */
   folder: string | null;
   actions: OnboardingActions;
+  /** Optional host-owned async onboarding run tracker (survives wizard unmount for background completion). */
+  tracker?: OnboardingRunTracker;
   initialUi?: OnboardingInitialUi;
 }) {
   const profiles = view.profiles ?? [];
@@ -203,7 +259,6 @@ export function OnboardingWizard({
         profileId,
         profileLanes,
         profileModified,
-        directive: initialUi?.directive ?? base.directive,
         design: initialUi?.design ?? base.design,
       };
     },
@@ -213,18 +268,52 @@ export function OnboardingWizard({
   const [checking, setChecking] = useState(false);
   const [installing, setInstalling] = useState(false);
   const [installError, setInstallError] = useState<string | null>(initialUi?.installError ?? null);
-  const [starting, setStarting] = useState(false);
-  const [startError, setStartError] = useState<string | null>(initialUi?.startError ?? null);
+  const [nowMs, setNowMs] = useState<number>(() => initialUi?.now ?? Date.now());
   const [designs, setDesigns] = useState<DesignOption[] | null>(initialUi?.designs ?? null);
   const [designError, setDesignError] = useState<string | null>(null);
   const [editing, setEditing] = useState<LaneCard | null>(null);
   const alive = useRef(true);
+  const lastCommitInputRef = useRef<CommitInput | null>(null);
+
+  const internalTracker = useOnboardingRunTracker({
+    activeFolder: externalTracker === undefined ? folder : null,
+    start: actions.start,
+    ...(actions.status === undefined ? {} : { status: actions.status }),
+    ...(actions.finalize === undefined ? {} : { onActiveComplete: (result, commitInput) => actions.finalize!(result, commitInput ?? effectiveCommitInput()) }),
+    ...(initialUi?.pollIntervalMs === undefined ? {} : { pollIntervalMs: initialUi.pollIntervalMs }),
+    ...(initialUi?.run === undefined ? {} : { initialRun: initialUi.run }),
+    ...(initialUi?.openWorkspace === undefined
+      ? {}
+      : {
+          initialOpenWorkspace: {
+            status: initialUi.openWorkspace.status,
+            startedAt: initialUi.openWorkspace.startedAt ?? null,
+            finishedAt: initialUi.openWorkspace.finishedAt ?? null,
+            error: initialUi.openWorkspace.error ?? null,
+          },
+        }),
+    ...(initialUi?.pollWarning === undefined ? {} : { initialPollWarning: initialUi.pollWarning }),
+    ...(initialUi?.startError === undefined ? {} : { initialStartError: initialUi.startError }),
+  });
+  const effectiveTracker = externalTracker ?? internalTracker;
+  const run = effectiveTracker.activeRun;
+  const openWorkspace = effectiveTracker.openWorkspace;
+  const starting = effectiveTracker.starting;
+  const startError = effectiveTracker.startError;
+  const pollWarning = effectiveTracker.pollWarning;
+
   useEffect(() => {
     alive.current = true;
     return () => {
       alive.current = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (initialUi?.step === undefined && run?.status === "running" && input.step !== 4) {
+      dispatch({ type: "step", step: 4 });
+    }
+  }, [run?.runId, run?.status, initialUi?.step, input.step]);
 
   /** Looks at the folder — on mount, on Retry / Re-check, and after an install. */
   const check = async (): Promise<Inspection | null> => {
@@ -236,6 +325,12 @@ export function OnboardingWizard({
       if (!alive.current) return null;
       if (reply.ok) {
         setInspection(reply);
+        if (initialUi?.run === undefined && effectiveTracker.activeRun === null) {
+          const attached = await effectiveTracker.probeFolder(reply.folder, folder);
+          if (alive.current && attached !== null && attached.status === "running") {
+            dispatch({ type: "step", step: 4 });
+          }
+        }
         return reply;
       }
       setInspectError(reply.error);
@@ -284,24 +379,31 @@ export function OnboardingWizard({
     }
   };
 
+  const effectiveCommitInput = (): CommitInput => {
+    if (lastCommitInputRef.current !== null) return lastCommitInputRef.current;
+    if (folder !== null && inspection !== null) return commitInputOf(input, inspection, folder);
+    return { folder: folder ?? "" };
+  };
+
+  const runActive = (run !== null && run.status === "running") || openWorkspace.status === "running";
+  useEffect(() => {
+    if (initialUi?.now !== undefined || !runActive) return;
+    setNowMs(Date.now());
+    const id = setInterval(() => {
+      if (alive.current) setNowMs(Date.now());
+    }, 1000);
+    return () => clearInterval(id);
+  }, [runActive, initialUi?.now]);
+
   const start = async (): Promise<void> => {
     if (folder === null || inspection === null) return;
-    setStarting(true);
-    setStartError(null);
-    try {
-      const reply = await actions.start(commitInputOf(input, inspection, folder));
-      if (!alive.current) return;
-      if (!reply.ok) {
-        setStartError(reply.error);
-        setStarting(false);
-      }
-      // On success the Shell navigates away (or the panel flips to the Project panel): nothing to reset.
-    } catch (error) {
-      if (alive.current) {
-        setStartError(describeThrown(error));
-        setStarting(false);
-      }
-    }
+    const payload = commitInputOf(input, inspection, folder);
+    lastCommitInputRef.current = payload;
+    await effectiveTracker.startRun(payload);
+  };
+
+  const retryRun = async (): Promise<void> => {
+    await effectiveTracker.retryRun(effectiveCommitInput());
   };
 
   if (folder === null) {
@@ -315,9 +417,19 @@ export function OnboardingWizard({
   const step = input.step;
   const blocker = inspection === null ? null : blockerOf(inspection);
   const advance = canAdvance(step, inspection, input.initGit);
-  const busy = checking || installing || starting;
+  const busy = checking || installing || starting || runActive;
   const palette = factoryPalette(theme);
   const selectedProfile = input.profileId === null ? null : (profiles.find((p) => p.id === input.profileId) ?? null);
+  const checklistPhases = run !== null ? buildChecklistPhases(run, openWorkspace) : [];
+  const runningPhase = checklistPhases.find((phase) => phase.status === "running") ?? null;
+  const showSlowNote = runningPhase !== null && phaseElapsedSeconds(runningPhase.startedAt, nowMs) >= 10;
+  const runFailed = run !== null && (run.status === "failed" || openWorkspace.status === "failed");
+  const effectiveStartError =
+    startError ??
+    (openWorkspace.status === "failed" ? (openWorkspace.error ?? "Could not open workspace") : null) ??
+    (run !== null && run.status === "failed"
+      ? (run.error ?? checklistPhases.find((phase) => phase.status === "failed")?.error ?? "Onboarding failed")
+      : null);
 
   return (
     <View testID="factory-onboarding" style={{ gap: SPACING[3] }}>
@@ -580,39 +692,16 @@ export function OnboardingWizard({
               {inspection !== null ? ` · Prerequisites: ${inspection.missingPrerequisites.length === 0 ? "all ready" : `${inspection.missingPrerequisites.length} missing`}` : ""}
             </Text>
           </View>
-          <View style={{ gap: SPACING[1] }}>
-            <Text style={text(theme, "label")}>First directive (optional)</Text>
-            <TextInput
-              testID="factory-onboarding-directive"
-              value={input.directive}
-              onChangeText={(value: string) => dispatch({ type: "directive", value })}
-              placeholder="What should the Supervisor start on?"
-              placeholderTextColor={theme.colors.foregroundMuted}
-              multiline
-              editable={!starting}
-              style={{
-                minHeight: CONTROL_H * 2,
-                paddingHorizontal: SPACING[2.5],
-                paddingVertical: SPACING[1.5],
-                color: theme.colors.foreground,
-                fontSize: 12,
-                borderWidth: 1,
-                borderColor: theme.colors.border,
-                borderRadius: RADIUS.md,
-                backgroundColor: theme.colors.surface1,
-              }}
-            />
-          </View>
           <View testID="factory-onboarding-od" style={{ gap: SPACING[1] }}>
             <Text style={text(theme, "label")}>Open Design link (optional)</Text>
             {input.design !== null ? (
               <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[2] }}>
                 <Text style={text(theme, "meta")}>Linked: {input.design.projectName}</Text>
-                <Btn theme={theme} small testID="factory-onboarding-od-clear" label="Clear" tone="foregroundMuted" disabled={starting} onPress={() => dispatch({ type: "design", design: null })} />
+                <Btn theme={theme} small testID="factory-onboarding-od-clear" label="Clear" tone="foregroundMuted" disabled={busy} onPress={() => dispatch({ type: "design", design: null })} />
               </View>
             ) : designs === null ? (
               <View style={{ flexDirection: "row" }}>
-                <Btn theme={theme} small testID="factory-onboarding-od-choose" label="Choose a design…" tone="foregroundMuted" disabled={starting} onPress={() => void loadDesigns()} />
+                <Btn theme={theme} small testID="factory-onboarding-od-choose" label="Choose a design…" tone="foregroundMuted" disabled={busy} onPress={() => void loadDesigns()} />
               </View>
             ) : designs.length === 0 ? (
               <Note theme={theme}>No Open Design projects found on this host — you can link one later from the Project menu.</Note>
@@ -625,7 +714,7 @@ export function OnboardingWizard({
                     testID={`factory-onboarding-od-pick-${design.projectId}`}
                     label={design.projectName}
                     tone="foregroundMuted"
-                    disabled={starting}
+                    disabled={busy}
                     onPress={() => dispatch({ type: "design", design: { projectId: design.projectId, projectName: design.projectName } })}
                   />
                   <Text style={text(theme, "meta")}>{design.screenCount} screens</Text>
@@ -635,19 +724,104 @@ export function OnboardingWizard({
             {designError !== null ? <Note theme={theme} tone="statusDanger">{designError}</Note> : null}
           </View>
           <Note theme={theme}>
-            Start creates the Supervisor in this workspace.{" "}
-            {input.directive.trim() === ""
-              ? "With no directive you finish on the Project panel and talk to the Supervisor when you are ready."
-              : "Your directive is sent as its first message and the conversation opens."}
+            Start Supervisor sets up the Project and opens the Supervisor conversation directly.
           </Note>
-          {startError !== null ? <ErrorLine theme={theme}>{startError}</ErrorLine> : null}
+          {run !== null ? (
+            <View
+              testID="factory-onboarding-run-checklist"
+              style={{
+                gap: SPACING[1.5],
+                padding: SPACING[2.5],
+                borderRadius: RADIUS.md,
+                borderWidth: 1,
+                borderColor: theme.colors.border,
+                backgroundColor: theme.colors.surface1,
+              }}
+            >
+              {checklistPhases.map((phase) => {
+                const colour = phaseStatusColour(palette, phase.status);
+                const elapsed = phase.status === "running" ? phaseElapsedSeconds(phase.startedAt, nowMs) : null;
+                return (
+                  <View key={phase.id} testID={`factory-onboarding-phase-${phase.id}`} style={{ gap: SPACING[0.5] }}>
+                    <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: SPACING[2] }}>
+                      <View style={{ flexDirection: "row", alignItems: "center", flex: 1, minWidth: 0, gap: SPACING[2] }}>
+                        <ToneBadge
+                          theme={theme}
+                          label={phase.status}
+                          colour={colour}
+                          testID={`factory-onboarding-phase-status-${phase.id}`}
+                        />
+                        <Text
+                          style={{
+                            ...text(theme, "label"),
+                            color: phase.status === "pending" ? theme.colors.foregroundMuted : theme.colors.foreground,
+                            flexShrink: 1,
+                          }}
+                        >
+                          {phase.label}
+                        </Text>
+                      </View>
+                      {elapsed !== null ? (
+                        <Text
+                          testID={`factory-onboarding-phase-elapsed-${phase.id}`}
+                          style={{ ...text(theme, "code", "foregroundMuted"), fontVariant: ["tabular-nums"] }}
+                        >
+                          {elapsed}s
+                        </Text>
+                      ) : null}
+                    </View>
+                    {phase.status === "failed" && phase.error ? (
+                      <Text style={{ ...text(theme, "meta"), color: palette.bad }}>{phase.error}</Text>
+                    ) : null}
+                  </View>
+                );
+              })}
+              {showSlowNote ? (
+                <Text testID="factory-onboarding-slow-note" style={text(theme, "meta")}>
+                  Still waiting on Paseo and the model provider to finish starting the Supervisor — this can take up to a minute under load. You do not need to restart.
+                </Text>
+              ) : null}
+              {pollWarning !== null ? (
+                <Text testID="factory-onboarding-poll-warning" style={{ ...text(theme, "meta"), color: palette.wait }}>
+                  {pollWarning}
+                </Text>
+              ) : null}
+            </View>
+          ) : null}
+          {effectiveStartError !== null ? <ErrorLine theme={theme}>{effectiveStartError}</ErrorLine> : null}
         </View>
       ) : null}
 
       <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[2] }}>
-        {step > 1 ? <Btn theme={theme} small testID="factory-onboarding-back" label="Back" tone="foregroundMuted" disabled={busy} onPress={() => dispatch({ type: "back" })} /> : null}
+        {step > 1 ? (
+          <Btn
+            theme={theme}
+            small
+            testID="factory-onboarding-back"
+            label="Back"
+            tone="foregroundMuted"
+            disabled={busy}
+            onPress={() => {
+              if (step === 4 && !runActive) {
+                effectiveTracker.clearActive();
+              }
+              dispatch({ type: "back" });
+            }}
+          />
+        ) : null}
         {step < 4 ? (
           <Btn theme={theme} small solid testID="factory-onboarding-next" label="Next" disabled={busy || !advance} onPress={() => dispatch({ type: "next" })} />
+        ) : runFailed ? (
+          <Btn
+            theme={theme}
+            small
+            solid
+            testID="factory-onboarding-run-retry"
+            icon="RotateCcw"
+            label="Retry"
+            disabled={busy}
+            onPress={() => void retryRun()}
+          />
         ) : (
           <Btn
             theme={theme}
@@ -655,7 +829,7 @@ export function OnboardingWizard({
             solid
             testID="factory-onboarding-start"
             icon="Play"
-            label={starting ? "Starting…" : "Start Supervisor"}
+            label={starting || runActive ? "Starting…" : "Start Supervisor"}
             disabled={busy || inspection === null}
             onPress={() => void start()}
           />

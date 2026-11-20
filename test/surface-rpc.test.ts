@@ -8358,3 +8358,515 @@ test("onboarding.browse: returns structured Failure for missing, non-directory, 
     }
   }
 });
+
+// ---- ADR 0065: async onboarding run (factory.onboarding.start + factory.onboarding.status) ----
+
+test("onboarding.start & status: RPC schemas and read-only status baseline", async (t) => {
+  const {
+    OnboardingPhaseSchema,
+    OnboardingRunSchema,
+    onboardingStart,
+    onboardingStatus,
+    onboardingCommit,
+    supervisorStart,
+  } = await import("../plugin/shared/rpc.ts");
+  assert.equal(onboardingStart.name, "factory.onboarding.start");
+  assert.equal(onboardingStatus.name, "factory.onboarding.status");
+  assert.equal(onboardingCommit.input.safeParse({ folder: "/tmp/p", directive: "hi" }).success, true);
+  assert.equal(supervisorStart.input.safeParse({ projectRoot: "/tmp/p", directive: "hi" }).success, true);
+  assert.equal(onboardingStart.input.safeParse({ folder: "/tmp/p", directive: "hi", initGit: true }).success, true);
+  assert.equal(
+    OnboardingPhaseSchema.safeParse({
+      id: "checking",
+      label: "Checking folder & preconditions",
+      status: "done",
+      startedAt: "2026-11-20T00:00:00.000Z",
+      finishedAt: "2026-11-20T00:00:00.000Z",
+      error: null,
+    }).success,
+    true,
+  );
+  assert.equal(
+    OnboardingRunSchema.safeParse({
+      runId: "run-1",
+      folder: "/tmp/p",
+      status: "running",
+      phases: [],
+      startedAt: "2026-11-20T00:00:00.000Z",
+      updatedAt: "2026-11-20T00:00:00.000Z",
+      result: null,
+      error: null,
+      errorCode: null,
+    }).success,
+    true,
+  );
+
+  const project = makeProject(t, "status-baseline");
+  const stateChanges: Array<{ handler: string }> = [];
+  const base = makeSurface(t, []);
+  const handlers = createSurfaceHandlers({
+    factory: base.factory,
+    stateDir: base.stateDir,
+    home: base.home,
+    daemon: base.fake.daemon,
+    onStateChange: (event) => stateChanges.push(event),
+  });
+
+  const missingTarget = await handlers.onboardingStatus({});
+  assert.equal(missingTarget.ok, false);
+  assert.equal(missingTarget.code, "missing-target");
+
+  const byFolder = await handlers.onboardingStatus({ folder: project.root });
+  assert.deepEqual(byFolder, { ok: true, run: null });
+  const byRunId = await handlers.onboardingStatus({ runId: "no-such-run" });
+  assert.deepEqual(byRunId, { ok: true, run: null });
+  assert.deepEqual(stateChanges, [], "onboardingStatus is read-only and never triggers onStateChange");
+});
+
+test("onboarding.start: refuses invalid setups synchronously with zero disk writes or progress emissions", async (t) => {
+  const { symlinkSync } = await import("node:fs");
+  const base = makeSurface(t, []);
+  const changes: Array<{ handler: string; projectSlug?: string; projectRoot?: string }> = [];
+  const makeTracked = (agents: FakeAgent[] = []) => {
+    const s = makeSurface(t, agents);
+    const tracked = createSurfaceHandlers({
+      factory: s.factory,
+      stateDir: s.stateDir,
+      home: s.home,
+      daemon: s.fake.daemon,
+      onStateChange: (e) => changes.push(e),
+    });
+    return { ...s, tracked };
+  };
+
+  // 1. missing-directory
+  const missingSurface = makeTracked();
+  const missing = await missingSurface.tracked.onboardingStart({ folder: join(missingSurface.dir, "missing") });
+  assert.equal(missing.ok, false);
+  assert.equal(missing.code, "missing-directory");
+  assert.equal(changes.some((e) => e.handler === "onboarding.progress"), false);
+
+  // 2. not-a-git-repo (plain folder without initGit)
+  const plainSurface = makeTracked();
+  const plainFolder = join(plainSurface.dir, "plain-folder");
+  mkdirSync(plainFolder, { recursive: true });
+  const notGit = await plainSurface.tracked.onboardingStart({ folder: plainFolder });
+  assert.equal(notGit.ok, false);
+  assert.equal(notGit.code, "not-a-git-repo");
+  assert.equal(existsSync(join(plainFolder, ".git")), false);
+  assert.deepEqual(listProjectRegistrations(plainSurface.stateDir), []);
+  assert.equal(plainSurface.fake.created.length, 0);
+  assert.equal(changes.some((e) => e.handler === "onboarding.progress"), false);
+
+  // 3. lead-live
+  const withLead = makeProject(t, "start-lead-live");
+  const leadSurface = makeTracked([{ id: "lead-1", labels: { seat: "lead", project: withLead.slug }, title: "Lead", cwd: withLead.root }]);
+  const leadRefused = await leadSurface.tracked.onboardingStart({ folder: withLead.root, models: { worker: "pi/zai/glm-5.3" } });
+  assert.equal(leadRefused.ok, false);
+  assert.equal(leadRefused.code, "lead-live");
+  assert.equal(readProjectRegistration(leadSurface.stateDir, withLead.slug), undefined);
+  assert.equal(existsSync(lanesPath(join(leadSurface.stateDir, "projects", withLead.slug))), false);
+  assert.equal(leadSurface.fake.created.length, 0);
+  assert.equal(changes.some((e) => e.handler === "onboarding.progress"), false);
+
+  // 4. supervisor-live
+  const withSup = makeProject(t, "start-sup-live");
+  const supSurface = makeTracked([{ id: "sup-1", labels: { seat: "supervisor", project: withSup.slug }, title: "Supervisor", cwd: withSup.root }]);
+  const supRefused = await supSurface.tracked.onboardingStart({ folder: withSup.root });
+  assert.equal(supRefused.ok, false);
+  assert.equal(supRefused.code, "supervisor-live");
+  assert.equal(supSurface.fake.created.length, 0);
+  assert.equal(changes.some((e) => e.handler === "onboarding.progress"), false);
+
+  // 5. profile-not-found
+  const missingProfileProj = makeProject(t, "start-missing-profile");
+  const profileSurface = makeTracked();
+  const profileRefused = await profileSurface.tracked.onboardingStart({ folder: missingProfileProj.root, profileId: "does-not-exist" });
+  assert.equal(profileRefused.ok, false);
+  assert.equal(profileRefused.code, "profile-not-found");
+  assert.equal(readProjectRegistration(profileSurface.stateDir, missingProfileProj.slug), undefined);
+  assert.equal(profileSurface.fake.created.length, 0);
+  assert.equal(changes.some((e) => e.handler === "onboarding.progress"), false);
+
+  // 6. invalid-lane
+  const badLaneProj = makeProject(t, "start-bad-lane");
+  const laneSurface = makeTracked();
+  const laneRefused = await laneSurface.tracked.onboardingStart({ folder: badLaneProj.root, models: { lead: "not a lane" } });
+  assert.equal(laneRefused.ok, false);
+  assert.equal(laneRefused.code, "invalid-lane");
+  assert.equal(readProjectRegistration(laneSurface.stateDir, badLaneProj.slug), undefined);
+  assert.equal(laneSurface.fake.created.length, 0);
+  assert.equal(changes.some((e) => e.handler === "onboarding.progress"), false);
+
+  // Clean up unused base symlink import check
+  assert.equal(typeof symlinkSync, "function");
+  assert.ok(base.stateDir);
+});
+
+test("onboarding.start: minimal git folder executes applicable phases asynchronously, emits onboarding.progress, and resolves status by runId or canonical folder", async (t) => {
+  const { symlinkSync } = await import("node:fs");
+  const project = makeProject(t, "start-minimal-async");
+  const base = makeSurface(t, []);
+  const symlinkPath = join(base.dir, "minimal-link");
+  symlinkSync(project.root, symlinkPath);
+
+  let releaseCreate: (value: { id: string }) => void = () => {};
+  let createCalls = 0;
+  const origCreate = base.fake.daemon.agents.create;
+  base.fake.daemon.agents.create = async (options) => {
+    createCalls += 1;
+    await new Promise<{ id: string }>((resolve) => {
+      releaseCreate = async (val) => {
+        const res = await origCreate(options);
+        resolve(res ?? val);
+      };
+    });
+    return { id: `agent-created-${createCalls}` };
+  };
+
+  const progressEvents: Array<{ handler: string; projectSlug?: string; projectRoot?: string }> = [];
+  const handlers = createSurfaceHandlers({
+    factory: base.factory,
+    stateDir: base.stateDir,
+    home: base.home,
+    daemon: base.fake.daemon,
+    onStateChange: (event) => {
+      if (event.handler === "onboarding.progress") progressEvents.push(event);
+    },
+  });
+
+  const started = await handlers.onboardingStart({ folder: symlinkPath });
+  assert.ok(started.ok, started.ok ? "" : started.error);
+  assert.equal(started.run.status, "running");
+  assert.equal(started.run.folder, project.root, "folder is canonicalized");
+  assert.deepEqual(
+    started.run.phases.map((p) => p.id),
+    ["checking", "register-and-lanes", "start-supervisor"],
+    "minimal git repo omits init-git and open-design",
+  );
+  assert.equal(started.run.phases[0]!.status, "done");
+
+  // Wait until background runner reaches start-supervisor (agents.create is pending).
+  const deadline = Date.now() + 2_000;
+  while (createCalls === 0 && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  assert.equal(createCalls, 1, "start-supervisor has started agents.create");
+
+  const midById = await handlers.onboardingStatus({ runId: started.run.runId });
+  assert.ok(midById.ok && midById.run !== null);
+  assert.equal(midById.run.status, "running");
+  assert.equal(midById.run.phases.find((p) => p.id === "register-and-lanes")?.status, "done");
+  assert.equal(midById.run.phases.find((p) => p.id === "start-supervisor")?.status, "running");
+
+  const midBySymlink = await handlers.onboardingStatus({ folder: symlinkPath });
+  assert.ok(midBySymlink.ok && midBySymlink.run !== null);
+  assert.equal(midBySymlink.run.runId, started.run.runId);
+
+  // Release Supervisor creation and wait for run completion.
+  releaseCreate({ id: "agent-created-1" });
+  const doneDeadline = Date.now() + 2_000;
+  let finalRun = midById.run;
+  while (finalRun.status === "running" && Date.now() < doneDeadline) {
+    await new Promise((r) => setTimeout(r, 10));
+    const poll = await handlers.onboardingStatus({ runId: started.run.runId });
+    if (poll.ok && poll.run) finalRun = poll.run;
+  }
+
+  assert.equal(finalRun.status, "succeeded");
+  assert.deepEqual(
+    finalRun.phases.map((p) => p.status),
+    ["done", "done", "done"],
+  );
+  assert.ok(finalRun.result !== null);
+  assert.equal(finalRun.result.projectRoot, project.root);
+  assert.equal(finalRun.result.slug, project.slug);
+  assert.equal(finalRun.result.bootstrapped, false);
+  assert.equal(finalRun.result.agentId, "agent-created-1");
+  assert.equal(readProjectRegistration(base.stateDir, project.slug)?.supervisor, "agent-created-1");
+  assert.ok(progressEvents.length >= 3, "emitted onboarding.progress across run creation, phase transitions, and completion");
+  assert.ok(progressEvents.every((e) => e.projectRoot === project.root));
+});
+
+test("onboarding.start: full non-git setup runs all 5 server phases (init-git, register-and-lanes, open-design, start-supervisor) in order", async (t) => {
+  const { readLaneProfilesFile, saveLaneProfile } = await import("../plugin/server/core/lanes.ts");
+  const base = makeSurface(t, []);
+  const folder = join(base.dir, "full-greenfield");
+  mkdirSync(folder, { recursive: true });
+  makeOpenDesignSource(t, base.dir, "owner-design", "Owner screens");
+  saveLaneProfile(base.stateDir, {
+    id: "fast",
+    name: "Fast",
+    lanes: {
+      supervisor: "claude/claude-sonnet-4-6",
+      lead: "codex/gpt-5.4:low",
+      worker: "opencode/glm-5.1",
+      watch: "claude/claude-haiku-4-5",
+      freshEyes: "claude/claude-sonnet-4-6",
+    },
+  });
+
+  const progressEvents: Array<{ handler: string; projectRoot?: string }> = [];
+  const handlers = createSurfaceHandlers({
+    factory: base.factory,
+    stateDir: base.stateDir,
+    home: base.home,
+    daemon: base.fake.daemon,
+    onStateChange: (event) => {
+      if (event.handler === "onboarding.progress") progressEvents.push(event);
+    },
+  });
+
+  const started = await handlers.onboardingStart({
+    folder,
+    initGit: true,
+    profileId: "fast",
+    models: { supervisor: "claude/claude-opus-4-8:high" },
+    openDesignProjectId: "owner-design",
+    directive: "Build from Open Design.",
+  });
+  assert.ok(started.ok, started.ok ? "" : started.error);
+  assert.deepEqual(
+    started.run.phases.map((p) => [p.id, p.label, p.status]),
+    [
+      ["checking", "Checking folder & preconditions", "done"],
+      ["init-git", "Initialising Git repository", "running"],
+      ["register-and-lanes", "Registering Project & saving model lanes", "pending"],
+      ["open-design", "Linking Open Design", "pending"],
+      ["start-supervisor", "Starting Supervisor", "pending"],
+    ],
+  );
+
+  const deadline = Date.now() + 3_000;
+  let current = started.run;
+  while (current.status === "running" && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 15));
+    const poll = await handlers.onboardingStatus({ runId: started.run.runId });
+    if (poll.ok && poll.run) current = poll.run;
+  }
+
+  assert.equal(current.status, "succeeded");
+  assert.deepEqual(
+    current.phases.map((p) => p.status),
+    ["done", "done", "done", "done", "done"],
+  );
+  assert.ok(current.phases.every((p) => p.startedAt !== null && p.finishedAt !== null && p.error === null));
+  assert.ok(current.result !== null);
+  assert.equal(current.result.bootstrapped, true);
+  assert.equal(existsSync(join(folder, ".git")), true);
+  assert.equal(existsSync(join(folder, "design", "index.html")), true);
+  const lanes = loadLanes(base.stateDir, current.result.slug);
+  assert.ok(lanes.ok);
+  assert.equal(lanes.lanes.supervisor, "claude/claude-opus-4-8:high");
+  assert.equal(lanes.lanes.watch, "claude/claude-haiku-4-5");
+  assert.equal(readLaneProfilesFile(base.stateDir).activeProfileByScope?.[current.result.slug], "fast");
+  assert.equal(base.fake.sent.length, 1);
+  assert.ok(base.fake.sent[0]!.text.endsWith("Build from Open Design."));
+  // 1 initial + 3 transitions + 1 succeeded = 5 progress events
+  assert.equal(progressEvents.length, 5);
+  assert.ok(progressEvents.every((e) => e.projectRoot === current.result!.projectRoot));
+});
+
+test("onboarding.start: enforces per-folder single-flight across concurrent and symlinked calls", async (t) => {
+  const { symlinkSync } = await import("node:fs");
+  const project = makeProject(t, "start-single-flight");
+  const base = makeSurface(t, []);
+  const symlinkPath = join(base.dir, "sf-link");
+  symlinkSync(project.root, symlinkPath);
+
+  let releaseCreate: () => void = () => {};
+  const gate = new Promise<void>((resolve) => { releaseCreate = resolve; });
+  let createCalls = 0;
+  const origCreate = base.fake.daemon.agents.create;
+  base.fake.daemon.agents.create = async (options) => {
+    createCalls += 1;
+    await gate;
+    return origCreate(options);
+  };
+
+  const [first, second] = await Promise.all([
+    base.handlers.onboardingStart({ folder: project.root }),
+    base.handlers.onboardingStart({ folder: symlinkPath }),
+  ]);
+  assert.ok(first.ok, first.ok ? "" : first.error);
+  assert.ok(second.ok, second.ok ? "" : second.error);
+  assert.equal(second.run.runId, first.run.runId, "concurrent calls return the same single-flight run");
+
+  const deadline = Date.now() + 2_000;
+  while (createCalls === 0 && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  assert.equal(createCalls, 1);
+
+  const third = await base.handlers.onboardingStart({ folder: symlinkPath });
+  assert.ok(third.ok, third.ok ? "" : third.error);
+  assert.equal(third.run.runId, first.run.runId, "in-flight call via symlink re-attaches to existing active run");
+  assert.equal(third.run.status, "running");
+
+  releaseCreate();
+  let finalRun = third.run;
+  const doneDeadline = Date.now() + 2_000;
+  while (finalRun.status === "running" && Date.now() < doneDeadline) {
+    await new Promise((r) => setTimeout(r, 10));
+    const poll = await base.handlers.onboardingStatus({ runId: first.run.runId });
+    if (poll.ok && poll.run) finalRun = poll.run;
+  }
+  assert.equal(finalRun.status, "succeeded");
+  assert.equal(createCalls, 1, "only one Supervisor is created");
+});
+
+test("onboarding.start: partial failures retain completed phases as done and support idempotent retry", async (t) => {
+  // 1. open-design failure after register-and-lanes succeeded, then retry with valid design
+  const projA = makeProject(t, "start-partial-od");
+  const fA = makeSurface(t, []);
+  makeOpenDesignSource(t, fA.dir, "owner-design", "Owner screens");
+
+  const failOdStart = await fA.handlers.onboardingStart({
+    folder: projA.root,
+    openDesignProjectId: "missing-design",
+  });
+  assert.ok(failOdStart.ok);
+
+  const waitForRun = async (handlers: typeof fA.handlers, runId: string) => {
+    const deadline = Date.now() + 2_000;
+    while (Date.now() < deadline) {
+      const poll = await handlers.onboardingStatus({ runId });
+      assert.ok(poll.ok && poll.run !== null);
+      if (poll.run.status !== "running") return poll.run;
+      await new Promise((r) => setTimeout(r, 15));
+    }
+    throw new Error(`run ${runId} did not settle`);
+  };
+
+  const failedOd = await waitForRun(fA.handlers, failOdStart.run.runId);
+  assert.equal(failedOd.status, "failed");
+  assert.equal(failedOd.errorCode, "open-design-failed");
+  assert.match(failedOd.error ?? "", /Open Design/);
+  assert.deepEqual(
+    failedOd.phases.map((p) => [p.id, p.status]),
+    [
+      ["checking", "done"],
+      ["register-and-lanes", "done"],
+      ["open-design", "failed"],
+      ["start-supervisor", "pending"],
+    ],
+  );
+  assert.ok(failedOd.phases[2]!.error !== null);
+  assert.ok(readProjectRegistration(fA.stateDir, projA.slug) !== undefined, "Project remains registered");
+  assert.equal(fA.fake.created.length, 0);
+
+  const retryOdStart = await fA.handlers.onboardingStart({
+    folder: projA.root,
+    openDesignProjectId: "owner-design",
+  });
+  assert.ok(retryOdStart.ok);
+  assert.notEqual(retryOdStart.run.runId, failOdStart.run.runId);
+  const succeededOd = await waitForRun(fA.handlers, retryOdStart.run.runId);
+  assert.equal(succeededOd.status, "succeeded");
+  assert.deepEqual(
+    succeededOd.phases.map((p) => p.status),
+    ["done", "done", "done", "done"],
+  );
+  const latestByFolder = await fA.handlers.onboardingStatus({ folder: projA.root });
+  assert.ok(latestByFolder.ok && latestByFolder.run !== null);
+  assert.equal(latestByFolder.run.runId, retryOdStart.run.runId);
+  assert.equal(latestByFolder.run.status, "succeeded");
+
+  // 2. start-supervisor failure after register-and-lanes succeeded, then retry cleanly
+  const projB = makeProject(t, "start-partial-sup");
+  const fB = makeSurface(t, []);
+  const origCreate = fB.fake.daemon.agents.create;
+  let shouldFailCreate = true;
+  fB.fake.daemon.agents.create = async (options) => {
+    if (shouldFailCreate) throw new Error("provider temporarily unavailable");
+    return origCreate(options);
+  };
+
+  const failSupStart = await fB.handlers.onboardingStart({ folder: projB.root });
+  assert.ok(failSupStart.ok);
+  const failedSup = await waitForRun(fB.handlers, failSupStart.run.runId);
+  assert.equal(failedSup.status, "failed");
+  assert.match(failedSup.error ?? "", /provider temporarily unavailable/);
+  assert.deepEqual(
+    failedSup.phases.map((p) => [p.id, p.status]),
+    [
+      ["checking", "done"],
+      ["register-and-lanes", "done"],
+      ["start-supervisor", "failed"],
+    ],
+  );
+  assert.ok(readProjectRegistration(fB.stateDir, projB.slug) !== undefined);
+
+  shouldFailCreate = false;
+  const retrySupStart = await fB.handlers.onboardingStart({ folder: projB.root });
+  assert.ok(retrySupStart.ok);
+  const succeededSup = await waitForRun(fB.handlers, retrySupStart.run.runId);
+  assert.equal(succeededSup.status, "succeeded");
+  assert.equal(fB.fake.created.length, 1);
+  assert.equal(readProjectRegistration(fB.stateDir, projB.slug)?.supervisor, succeededSup.result?.agentId);
+});
+
+test("onboarding.start: watchdog times out hung Supervisor creation and ignores late resolution", async (t) => {
+  const project = makeProject(t, "start-watchdog-timeout");
+  const base = makeSurface(t, []);
+  let releaseLateCreate: () => void = () => {};
+  const lateGate = new Promise<void>((resolve) => { releaseLateCreate = resolve; });
+  const origCreate = base.fake.daemon.agents.create;
+  base.fake.daemon.agents.create = async (options) => {
+    await lateGate;
+    return origCreate(options);
+  };
+
+  const progressEvents: Array<{ handler: string; projectRoot?: string }> = [];
+  const handlers = createSurfaceHandlers({
+    factory: base.factory,
+    stateDir: base.stateDir,
+    home: base.home,
+    daemon: base.fake.daemon,
+    onboardingSupervisorTimeoutMs: 40,
+    onStateChange: (event) => {
+      if (event.handler === "onboarding.progress") progressEvents.push(event);
+    },
+  });
+
+  const started = await handlers.onboardingStart({ folder: project.root });
+  assert.ok(started.ok);
+
+  const deadline = Date.now() + 2_000;
+  let timedOutRun = started.run;
+  while (timedOutRun.status === "running" && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 10));
+    const poll = await handlers.onboardingStatus({ runId: started.run.runId });
+    if (poll.ok && poll.run) timedOutRun = poll.run;
+  }
+
+  assert.equal(timedOutRun.status, "failed");
+  assert.equal(timedOutRun.errorCode, "supervisor-start-timeout");
+  assert.match(timedOutRun.error ?? "", /timed out/i);
+  assert.equal(timedOutRun.result, null);
+  assert.deepEqual(
+    timedOutRun.phases.map((p) => [p.id, p.status]),
+    [
+      ["checking", "done"],
+      ["register-and-lanes", "done"],
+      ["start-supervisor", "failed"],
+    ],
+  );
+  const eventsAtFailure = progressEvents.length;
+
+  // Late resolution of the underlying create must NOT overwrite the failed run or emit extra progress.
+  releaseLateCreate();
+  await new Promise((r) => setTimeout(r, 60));
+
+  const afterLate = await handlers.onboardingStatus({ runId: started.run.runId });
+  assert.ok(afterLate.ok && afterLate.run !== null);
+  assert.equal(afterLate.run.status, "failed");
+  assert.equal(afterLate.run.errorCode, "supervisor-start-timeout");
+  assert.equal(afterLate.run.result, null);
+  assert.equal(progressEvents.length, eventsAtFailure);
+
+  // Subsequent inspection cleanly detects the live Supervisor if it landed late.
+  const inspected = await handlers.onboardingInspect({ folder: project.root });
+  assert.ok(inspected.ok);
+  assert.equal(inspected.existingSupervisor, true);
+});
