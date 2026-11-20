@@ -15,6 +15,7 @@ import { gunzipSync } from "node:zlib";
 
 export type { VaultEnvelope } from "./vault-envelope.ts";
 export type { VaultConfig, VaultRuntimeEnv, VaultStatusView, VaultStoreDefaults, VaultStoreReviewContact } from "./vault-config.ts";
+export type { VaultStoreReadiness } from "./vault-materialization.ts";
 export type { VaultGhAuthStatus } from "./vault-transport.ts";
 export {
   STORE_LESSONS_MAX_LINES,
@@ -25,6 +26,8 @@ export {
   readStoreAppNotebook,
   readStoreDefaults,
   readStoreLessons,
+  readVaultRuntimeEnv,
+  readVaultStoreReadiness,
   storeAppNotebookPath,
   storeDefaultsPath,
   storeLessonsPath,

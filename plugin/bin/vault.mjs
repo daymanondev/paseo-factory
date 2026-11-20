@@ -4248,6 +4248,34 @@ function buildVaultRuntimeEnv(paseoHome) {
   }
   return env;
 }
+function readVaultRuntimeEnv(paseoHome) {
+  const derived = buildVaultRuntimeEnv(paseoHome);
+  const disk = readJsonFile(join16(paseoHome, "vault-runtime", "env.json"));
+  if (disk === null) return derived;
+  const merged = { ...derived };
+  for (const key of [
+    "ASC_KEY_PATH",
+    "ASC_KEY_ID",
+    "ASC_ISSUER",
+    "APPLE_TEAM_ID",
+    "GPLAY_KEY_PATH",
+    "RELEASE_LAB_KEYSTORE_STOREPASS",
+    "FIREBASE_PROJECT_ID"
+  ]) {
+    const val = jsonStringField(disk, key);
+    if (val !== null) merged[key] = val;
+  }
+  return merged;
+}
+function readVaultStoreReadiness(paseoHome) {
+  const env = readVaultRuntimeEnv(paseoHome);
+  const present = (value) => typeof value === "string" && value.trim() !== "";
+  return {
+    ascKey: present(env.ASC_KEY_PATH),
+    appleTeamId: present(env.APPLE_TEAM_ID),
+    gplayJson: present(env.GPLAY_KEY_PATH)
+  };
+}
 function hydratedAppKeys(paseoHome) {
   try {
     return readdirSync8(join16(paseoHome, "vault-runtime", "secrets", "apps"), { withFileTypes: true }).filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort();
@@ -4746,7 +4774,9 @@ export {
   readStoreAppNotebook,
   readStoreDefaults,
   readStoreLessons,
+  readVaultRuntimeEnv,
   readVaultStatus,
+  readVaultStoreReadiness,
   reconcileVaultLedgers,
   resolveVaultApps,
   saveVaultConfig,

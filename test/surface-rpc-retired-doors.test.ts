@@ -117,3 +117,9 @@ test("ADR 0065: onboardingStart and onboardingStatus are registered alongside on
   assert.ok(names.includes("factory.onboarding.commit"), "factory.onboarding.commit remains registered");
   assert.equal(names.includes("factory.lead.start"), false);
 });
+
+test("ADR 0066: storeReleaseRead and storeReleaseWrite are registered on the surface", (t) => {
+  const names = registeredMethods(t);
+  assert.ok(names.includes("factory.store_release.read"), "factory.store_release.read must be registered");
+  assert.ok(names.includes("factory.store_release.write"), "factory.store_release.write must be registered");
+});
