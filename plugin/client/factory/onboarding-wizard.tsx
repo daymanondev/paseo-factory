@@ -36,27 +36,16 @@ import { CONTROL_SM, RADIUS, SPACING, factoryPalette, hoveredOf, text, thinkingC
 import type { Colour } from "../kit/theme.ts";
 import { LaneModalBody, PROJECT_OVERRIDE_CARDS, splitLaneParts } from "./lane-editor.tsx";
 import type { LaneCard } from "./lane-editor.tsx";
+import { INITIAL_OPEN_WORKSPACE, useOnboardingRunTracker } from "./onboarding-run-tracker.tsx";
+import type { OnboardingRunTracker, OpenWorkspaceState } from "./onboarding-run-tracker.tsx";
 import { ONBOARDING_LANES, ONBOARDING_STEPS, blockerOf, canAdvance, commitInputOf, describeThrown, initialWizard, reduceWizard, stepLabel } from "./onboarding-state.ts";
 import type { CommitInput, DesignChoice, Inspection, OnboardingLaneName, WizardInput } from "./onboarding-state.ts";
+
+export type { OpenWorkspaceState };
 
 type Failed = { ok: false; error: string };
 
 const OPEN_WORKSPACE_LABEL = "Opening workspace / Supervisor";
-const TRANSIENT_POLL_WARNING_THRESHOLD = 3;
-
-export interface OpenWorkspaceState {
-  status: OnboardingPhaseStatus;
-  startedAt: string | null;
-  finishedAt: string | null;
-  error: string | null;
-}
-
-const INITIAL_OPEN_WORKSPACE: OpenWorkspaceState = {
-  status: "pending",
-  startedAt: null,
-  finishedAt: null,
-  error: null,
-};
 
 /** An Open Design project the host catalog offers. */
 export interface DesignOption {
@@ -232,6 +221,7 @@ export function OnboardingWizard({
   view,
   folder,
   actions,
+  tracker: externalTracker,
   initialUi,
 }: {
   theme: PluginTheme;
@@ -240,6 +230,8 @@ export function OnboardingWizard({
   /** The workspace panel's folder; null when the panel is not bound to one. */
   folder: string | null;
   actions: OnboardingActions;
+  /** Optional host-owned async onboarding run tracker (survives wizard unmount for background completion). */
+  tracker?: OnboardingRunTracker;
   initialUi?: OnboardingInitialUi;
 }) {
   const profiles = view.profiles ?? [];
@@ -276,36 +268,52 @@ export function OnboardingWizard({
   const [checking, setChecking] = useState(false);
   const [installing, setInstalling] = useState(false);
   const [installError, setInstallError] = useState<string | null>(initialUi?.installError ?? null);
-  const [starting, setStarting] = useState(false);
-  const [startError, setStartError] = useState<string | null>(initialUi?.startError ?? null);
-  const [run, setRun] = useState<OnboardingRun | null>(initialUi?.run ?? null);
-  const [openWorkspace, setOpenWorkspace] = useState<OpenWorkspaceState>(() =>
-    initialUi?.openWorkspace
-      ? {
-          status: initialUi.openWorkspace.status,
-          startedAt: initialUi.openWorkspace.startedAt ?? null,
-          finishedAt: initialUi.openWorkspace.finishedAt ?? null,
-          error: initialUi.openWorkspace.error ?? null,
-        }
-      : INITIAL_OPEN_WORKSPACE,
-  );
-  const [pollWarning, setPollWarning] = useState<string | null>(initialUi?.pollWarning ?? null);
   const [nowMs, setNowMs] = useState<number>(() => initialUi?.now ?? Date.now());
   const [designs, setDesigns] = useState<DesignOption[] | null>(initialUi?.designs ?? null);
   const [designError, setDesignError] = useState<string | null>(null);
   const [editing, setEditing] = useState<LaneCard | null>(null);
   const alive = useRef(true);
   const lastCommitInputRef = useRef<CommitInput | null>(null);
-  const pollFailuresRef = useRef(0);
-  const finalizingRunIdRef = useRef<string | null>(null);
-  const actionsRef = useRef(actions);
-  actionsRef.current = actions;
+
+  const internalTracker = useOnboardingRunTracker({
+    activeFolder: externalTracker === undefined ? folder : null,
+    start: actions.start,
+    ...(actions.status === undefined ? {} : { status: actions.status }),
+    ...(actions.finalize === undefined ? {} : { onActiveComplete: (result, commitInput) => actions.finalize!(result, commitInput ?? effectiveCommitInput()) }),
+    ...(initialUi?.pollIntervalMs === undefined ? {} : { pollIntervalMs: initialUi.pollIntervalMs }),
+    ...(initialUi?.run === undefined ? {} : { initialRun: initialUi.run }),
+    ...(initialUi?.openWorkspace === undefined
+      ? {}
+      : {
+          initialOpenWorkspace: {
+            status: initialUi.openWorkspace.status,
+            startedAt: initialUi.openWorkspace.startedAt ?? null,
+            finishedAt: initialUi.openWorkspace.finishedAt ?? null,
+            error: initialUi.openWorkspace.error ?? null,
+          },
+        }),
+    ...(initialUi?.pollWarning === undefined ? {} : { initialPollWarning: initialUi.pollWarning }),
+    ...(initialUi?.startError === undefined ? {} : { initialStartError: initialUi.startError }),
+  });
+  const effectiveTracker = externalTracker ?? internalTracker;
+  const run = effectiveTracker.activeRun;
+  const openWorkspace = effectiveTracker.openWorkspace;
+  const starting = effectiveTracker.starting;
+  const startError = effectiveTracker.startError;
+  const pollWarning = effectiveTracker.pollWarning;
+
   useEffect(() => {
     alive.current = true;
     return () => {
       alive.current = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (initialUi?.step === undefined && run?.status === "running" && input.step !== 4) {
+      dispatch({ type: "step", step: 4 });
+    }
+  }, [run?.runId, run?.status, initialUi?.step, input.step]);
 
   /** Looks at the folder — on mount, on Retry / Re-check, and after an install. */
   const check = async (): Promise<Inspection | null> => {
@@ -317,6 +325,12 @@ export function OnboardingWizard({
       if (!alive.current) return null;
       if (reply.ok) {
         setInspection(reply);
+        if (initialUi?.run === undefined && effectiveTracker.activeRun === null) {
+          const attached = await effectiveTracker.probeFolder(reply.folder, folder);
+          if (alive.current && attached !== null && attached.status === "running") {
+            dispatch({ type: "step", step: 4 });
+          }
+        }
         return reply;
       }
       setInspectError(reply.error);
@@ -371,43 +385,6 @@ export function OnboardingWizard({
     return { folder: folder ?? "" };
   };
 
-  const runFinalize = async (runId: string, result: OnboardingRunResult, payload: CommitInput): Promise<void> => {
-    if (finalizingRunIdRef.current === runId) return;
-    finalizingRunIdRef.current = runId;
-    const finalize = actionsRef.current.finalize;
-    const startedAt = new Date().toISOString();
-    if (finalize === undefined) {
-      if (!alive.current) return;
-      setOpenWorkspace({ status: "done", startedAt, finishedAt: startedAt, error: null });
-      setStarting(false);
-      return;
-    }
-    setOpenWorkspace({ status: "running", startedAt, finishedAt: null, error: null });
-    setStartError(null);
-    setStarting(true);
-    try {
-      const reply = await finalize(result, payload);
-      if (!alive.current) return;
-      const finishedAt = new Date().toISOString();
-      if (reply.ok) {
-        setOpenWorkspace({ status: "done", startedAt, finishedAt, error: null });
-        setStarting(false);
-      } else {
-        finalizingRunIdRef.current = null;
-        setOpenWorkspace({ status: "failed", startedAt, finishedAt, error: reply.error });
-        setStartError(reply.error);
-        setStarting(false);
-      }
-    } catch (error) {
-      if (!alive.current) return;
-      finalizingRunIdRef.current = null;
-      const msg = describeThrown(error);
-      setOpenWorkspace({ status: "failed", startedAt, finishedAt: new Date().toISOString(), error: msg });
-      setStartError(msg);
-      setStarting(false);
-    }
-  };
-
   const runActive = (run !== null && run.status === "running") || openWorkspace.status === "running";
   useEffect(() => {
     if (initialUi?.now !== undefined || !runActive) return;
@@ -418,97 +395,15 @@ export function OnboardingWizard({
     return () => clearInterval(id);
   }, [runActive, initialUi?.now]);
 
-  useEffect(() => {
-    if (run === null || run.status !== "running") return;
-    const statusFn = actionsRef.current.status;
-    if (statusFn === undefined) return;
-    let cancelled = false;
-    let inFlight = false;
-    const intervalMs = initialUi?.pollIntervalMs ?? 750;
-    const poll = async (): Promise<void> => {
-      if (cancelled || !alive.current || inFlight) return;
-      inFlight = true;
-      try {
-        const reply = await statusFn({ runId: run.runId });
-        if (cancelled || !alive.current) return;
-        if (!reply.ok) {
-          pollFailuresRef.current += 1;
-          if (pollFailuresRef.current >= TRANSIENT_POLL_WARNING_THRESHOLD) {
-            setPollWarning("Temporary connection hiccup checking onboarding status — still retrying…");
-          }
-          return;
-        }
-        pollFailuresRef.current = 0;
-        setPollWarning(null);
-        if (reply.run === null) return;
-        setRun(reply.run);
-        if (reply.run.status === "failed") {
-          setStartError(reply.run.error ?? "Onboarding failed");
-          setStarting(false);
-        } else if (reply.run.status === "succeeded" && reply.run.result !== null) {
-          await runFinalize(reply.run.runId, reply.run.result, effectiveCommitInput());
-        }
-      } catch {
-        if (cancelled || !alive.current) return;
-        pollFailuresRef.current += 1;
-        if (pollFailuresRef.current >= TRANSIENT_POLL_WARNING_THRESHOLD) {
-          setPollWarning("Temporary connection hiccup checking onboarding status — still retrying…");
-        }
-      } finally {
-        inFlight = false;
-      }
-    };
-    const id = setInterval(() => {
-      void poll();
-    }, intervalMs);
-    return () => {
-      cancelled = true;
-      clearInterval(id);
-    };
-  }, [run?.runId, run?.status, initialUi?.pollIntervalMs]);
-
   const start = async (): Promise<void> => {
     if (folder === null || inspection === null) return;
     const payload = commitInputOf(input, inspection, folder);
     lastCommitInputRef.current = payload;
-    pollFailuresRef.current = 0;
-    finalizingRunIdRef.current = null;
-    setStarting(true);
-    setStartError(null);
-    setPollWarning(null);
-    setOpenWorkspace(INITIAL_OPEN_WORKSPACE);
-    try {
-      const reply = await actions.start(payload);
-      if (!alive.current) return;
-      if (!reply.ok) {
-        setStartError(reply.error);
-        setStarting(false);
-        return;
-      }
-      if (reply.run !== undefined) {
-        setRun(reply.run);
-        if (reply.run.status === "failed") {
-          setStartError(reply.run.error ?? "Onboarding failed");
-          setStarting(false);
-        } else if (reply.run.status === "succeeded" && reply.run.result !== null) {
-          await runFinalize(reply.run.runId, reply.run.result, payload);
-        }
-      }
-      // On legacy synchronous success (reply.run === undefined) the Shell navigates away or refreshes.
-    } catch (error) {
-      if (alive.current) {
-        setStartError(describeThrown(error));
-        setStarting(false);
-      }
-    }
+    await effectiveTracker.startRun(payload);
   };
 
   const retryRun = async (): Promise<void> => {
-    if (run !== null && run.status === "succeeded" && openWorkspace.status === "failed" && run.result !== null) {
-      await runFinalize(run.runId, run.result, effectiveCommitInput());
-      return;
-    }
-    await start();
+    await effectiveTracker.retryRun(effectiveCommitInput());
   };
 
   if (folder === null) {
@@ -908,10 +803,7 @@ export function OnboardingWizard({
             disabled={busy}
             onPress={() => {
               if (step === 4 && !runActive) {
-                setRun(null);
-                setOpenWorkspace(INITIAL_OPEN_WORKSPACE);
-                setStartError(null);
-                setPollWarning(null);
+                effectiveTracker.clearActive();
               }
               dispatch({ type: "back" });
             }}
