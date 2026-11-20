@@ -102,7 +102,7 @@ const noopActions = () => ({
   openAgent() {}, installPrerequisites() {}, handoffStart() {}, handoffReplaceNow() {}, handoffCancel() {}, handoffRetry() {}, viewHandover() {}, startSupervisor() {}, syncOpenDesign() {}, adoptSupervisor() {}, busy: false,
 });
 
-async function render(panel: PanelView, props: { theme?: typeof theme; mobile?: boolean; openDesignActions?: unknown; menu?: unknown; initialUi?: Record<string, unknown>; actions?: Record<string, unknown>; width?: number; skillPacks?: unknown[]; selfUpdate?: unknown; release?: ReleaseSettingsView | null; publishPreflight?: Record<string, unknown> | null; releaseFeedback?: { text: string; tone: "info" | "error" } | null; releaseActions?: Record<string, unknown>; storeRelease?: StoreReleaseView | null; onOpenReleaseLab?: () => void } = {}): Promise<string> {
+async function render(panel: PanelView, props: { theme?: typeof theme; mobile?: boolean; openDesignActions?: unknown; menu?: unknown; initialUi?: Record<string, unknown>; actions?: Record<string, unknown>; width?: number; skillPacks?: unknown[]; selfUpdate?: unknown; release?: ReleaseSettingsView | null; publishPreflight?: Record<string, unknown> | null; releaseFeedback?: { text: string; tone: "info" | "error" } | null; releaseActions?: Record<string, unknown>; storeRelease?: StoreReleaseView | null; storeReleaseBusy?: boolean; storeReleaseFeedback?: { text: string; tone: "info" | "success" | "error" } | null; storeReleaseActions?: Record<string, unknown>; onOpenReleaseLab?: () => void } = {}): Promise<string> {
   const { ProjectPanel } = await loadPanel();
   const { createElement } = await import("react");
   const { renderToStaticMarkup } = await import("react-dom/server");
@@ -120,6 +120,9 @@ async function render(panel: PanelView, props: { theme?: typeof theme; mobile?: 
       ...(props.releaseFeedback === undefined ? {} : { releaseFeedback: props.releaseFeedback }),
       ...(props.releaseActions === undefined ? {} : { releaseActions: props.releaseActions }),
       ...(props.storeRelease === undefined ? {} : { storeRelease: props.storeRelease }),
+      ...(props.storeReleaseBusy === undefined ? {} : { storeReleaseBusy: props.storeReleaseBusy }),
+      ...(props.storeReleaseFeedback === undefined ? {} : { storeReleaseFeedback: props.storeReleaseFeedback }),
+      ...(props.storeReleaseActions === undefined ? {} : { storeReleaseActions: props.storeReleaseActions }),
       ...(props.onOpenReleaseLab === undefined ? {} : { onOpenReleaseLab: props.onOpenReleaseLab }),
     }),
   );
@@ -1835,10 +1838,12 @@ test("Store Release card renders mobile off, mobile auto-staging, missing-Vault-
   assert.ok(hasHook(hostMobileHtml, "factory-panel-store-release-hole"));
 });
 
-test("FactoryShell wires storeReleaseRead RPC and index.client.tsx threads openReleaseLab targeting factory-release-lab", () => {
+test("FactoryShell wires storeReleaseRead and storeReleaseWrite RPCs and index.client.tsx threads openReleaseLab targeting factory-release-lab", () => {
   const shell = readFileSync(join(repoRoot, "plugin/client/factory/shell.tsx"), "utf8");
   assert.match(shell, /storeReleaseRead/);
   assert.match(shell, /useRpc\(storeReleaseRead\)/);
+  assert.match(shell, /storeReleaseWrite/);
+  assert.match(shell, /useRpc\(storeReleaseWrite\)/);
   assert.match(shell, /storeRelease=\{storeReleaseView\}/);
   assert.match(shell, /onOpenReleaseLab/);
 
@@ -1848,4 +1853,135 @@ test("FactoryShell wires storeReleaseRead RPC and index.client.tsx threads openR
   const indexClient = readFileSync(join(repoRoot, "plugin/index.client.tsx"), "utf8");
   assert.match(indexClient, /openReleaseLab/);
   assert.match(indexClient, /factory-release-lab/);
+});
+
+test("Store Release card renders Owner-only mode selector chips, busy/disabled state, feedback banner, and preserves mobile read-only discipline", async () => {
+  const modeCalls: string[] = [];
+  const { ProjectPanel } = await loadPanel();
+  const { createElement, act } = await import("react");
+  const { JSDOM } = await import(["jsdom"].join(""));
+  const dom = new JSDOM("<!doctype html><div id=root></div>");
+  const g = globalThis as Record<string, any>;
+  const saved = { window: g.window, document: g.document, IS_REACT_ACT_ENVIRONMENT: g.IS_REACT_ACT_ENVIRONMENT };
+  g.window = dom.window; g.document = dom.window.document; g.IS_REACT_ACT_ENVIRONMENT = true;
+  const { createRoot } = await import("react-dom/client");
+  const container = dom.window.document.getElementById("root")!;
+  const root = createRoot(container);
+  try {
+    // 1. Desktop interactive mode chips: clicking non-active mode fires setMode, clicking active mode is a no-op
+    await act(() =>
+      root.render(
+        createElement(ProjectPanel, {
+          theme,
+          panel: makePanel(),
+          mobile: false,
+          now: Date.now(),
+          daemonError: null,
+          actions: noopActions(),
+          initialUi: { tab: "project" },
+          storeRelease: makeStoreRelease({ isMobile: true, mode: "off", platforms: ["android", "ios"] }),
+          storeReleaseBusy: false,
+          storeReleaseFeedback: null,
+          storeReleaseActions: {
+            setMode: (mode: string) => { modeCalls.push(mode); },
+          },
+        }),
+      ),
+    );
+    const chip = (mode: string) => container.querySelector(`[data-testid="factory-panel-store-release-mode-${mode}"]`) as HTMLButtonElement;
+    assert.ok(chip("off"));
+    assert.ok(chip("on-request"));
+    assert.ok(chip("auto-staging"));
+    assert.equal(chip("off").getAttribute("data-selected"), "true");
+    assert.equal(chip("on-request").getAttribute("data-selected"), "false");
+    assert.equal(chip("auto-staging").getAttribute("data-selected"), "false");
+    assert.equal(container.querySelector('[data-testid="factory-panel-store-release-pending"]'), null);
+    assert.equal(container.querySelector('[data-testid="factory-panel-store-release-feedback"]'), null);
+
+    await act(() => chip("off").click());
+    assert.equal(modeCalls.length, 0, "clicking already-selected mode does not dispatch");
+    await act(() => chip("on-request").click());
+    await act(() => chip("auto-staging").click());
+    assert.deepEqual(modeCalls, ["on-request", "auto-staging"]);
+
+    // 2. Busy / pending state disables all mode chips and shows pending indicator
+    await act(() =>
+      root.render(
+        createElement(ProjectPanel, {
+          theme,
+          panel: makePanel(),
+          mobile: false,
+          now: Date.now(),
+          daemonError: null,
+          actions: noopActions(),
+          initialUi: { tab: "project" },
+          storeRelease: makeStoreRelease({ isMobile: true, mode: "on-request", platforms: ["ios"] }),
+          storeReleaseBusy: true,
+          storeReleaseFeedback: null,
+          storeReleaseActions: {
+            setMode: (mode: string) => { modeCalls.push(mode); },
+          },
+        }),
+      ),
+    );
+    assert.equal(chip("off").disabled, true);
+    assert.equal(chip("on-request").disabled, true);
+    assert.equal(chip("auto-staging").disabled, true);
+    assert.match(container.querySelector('[data-testid="factory-panel-store-release-pending"]')?.textContent ?? "", /Saving/i);
+
+    // 3. Feedback banner renders success and error states
+    await act(() =>
+      root.render(
+        createElement(ProjectPanel, {
+          theme,
+          panel: makePanel(),
+          mobile: false,
+          now: Date.now(),
+          daemonError: null,
+          actions: noopActions(),
+          initialUi: { tab: "project" },
+          storeRelease: makeStoreRelease({ isMobile: true, mode: "auto-staging", platforms: ["ios"] }),
+          storeReleaseBusy: false,
+          storeReleaseFeedback: { text: "Store release mode set to auto-staging.", tone: "success" },
+          storeReleaseActions: { setMode() {} },
+        }),
+      ),
+    );
+    assert.match(container.querySelector('[data-testid="factory-panel-store-release-feedback"]')?.textContent ?? "", /auto-staging/);
+
+    await act(() =>
+      root.render(
+        createElement(ProjectPanel, {
+          theme,
+          panel: makePanel(),
+          mobile: false,
+          now: Date.now(),
+          daemonError: null,
+          actions: noopActions(),
+          initialUi: { tab: "project" },
+          storeRelease: makeStoreRelease({ isMobile: true, mode: "auto-staging", platforms: ["ios"] }),
+          storeReleaseBusy: false,
+          storeReleaseFeedback: { text: "Seat lead cannot change Store release settings; Store release mode is Owner-only.", tone: "error" },
+          storeReleaseActions: { setMode() {} },
+        }),
+      ),
+    );
+    assert.match(container.querySelector('[data-testid="factory-panel-store-release-feedback"]')?.textContent ?? "", /Owner-only/);
+  } finally {
+    await act(() => root.unmount());
+    Object.assign(g, saved);
+    dom.window.close();
+  }
+
+  // 4. Mobile host remains strictly read-only even if storeReleaseActions is supplied
+  const mobileHtml = await render(makePanel(), {
+    mobile: true,
+    initialUi: { tab: "project" },
+    storeRelease: makeStoreRelease({ isMobile: true, mode: "auto-staging", platforms: ["android", "ios"] }),
+    storeReleaseActions: { setMode() { assert.fail("mobile must not expose mode write"); } },
+  });
+  assert.doesNotMatch(elementOf(mobileHtml, "factory-panel-store-release"), /<button/);
+  assert.equal(hasHook(mobileHtml, "factory-panel-store-release-mode-off"), false);
+  assert.equal(hasHook(mobileHtml, "factory-panel-store-release-mode-on-request"), false);
+  assert.equal(hasHook(mobileHtml, "factory-panel-store-release-mode-auto-staging"), false);
 });
