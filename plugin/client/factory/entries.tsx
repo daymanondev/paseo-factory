@@ -67,8 +67,8 @@ export function FactorySettings({ theme, layout, navigation, host }: PluginSurfa
 }
 
 /** The workspace panel: the Project panel scoped to this workspace's directory. */
-export function FactoryPanel({ theme, layout, navigation, host, workspaceId, openSettings, editorRequests }: PluginWorkspacePanelProps & { openSettings?: () => void; editorRequests?: SeatEditorRequests }) {
+export function FactoryPanel({ theme, layout, navigation, host, workspaceId, openSettings, openReleaseLab, editorRequests }: PluginWorkspacePanelProps & { openSettings?: () => void; openReleaseLab?: () => void; editorRequests?: SeatEditorRequests }) {
   const dir = useWorkspace(workspaceId, (workspace) => workspace.directory);
   const request = useSyncExternalStore(editorRequests?.subscribe ?? (() => () => {}), () => editorRequests?.get(workspaceId) ?? null);
-  return <FactoryTabErrorBoundary theme={theme} section="Factory tab"><FactoryShell theme={theme} layout={layout} dir={dir ?? undefined} navigation={navigation} serverId={host.id} {...(request === null ? {} : { editorRequest: request, onEditorRequestHandled: () => editorRequests?.consume(workspaceId, request) })} {...(openSettings === undefined ? {} : { openSettings })} /></FactoryTabErrorBoundary>;
+  return <FactoryTabErrorBoundary theme={theme} section="Factory tab"><FactoryShell theme={theme} layout={layout} dir={dir ?? undefined} navigation={navigation} serverId={host.id} {...(request === null ? {} : { editorRequest: request, onEditorRequestHandled: () => editorRequests?.consume(workspaceId, request) })} {...(openSettings === undefined ? {} : { openSettings })} {...(openReleaseLab === undefined ? {} : { openReleaseLab })} /></FactoryTabErrorBoundary>;
 }

@@ -803,7 +803,7 @@ test('W14: iOS and Android expose exactly the Project model, handoff and adoptio
           await click('factory-panel-open-lead');
           assert.ok(calls.some(c => c.method === 'factory.self.update.status'), `${platform} checks the version on mount`);
           assert.equal(calls.some(c => c.method === 'factory.self.update.apply'), false, `${platform} never applies an update`);
-          assert.deepEqual(calls.filter(c => c.method !== 'factory.snapshot' && c.method !== 'factory.handoff.handover' && c.method !== 'factory.self.update.status' && c.method !== 'factory.release.settings.read'), [
+          assert.deepEqual(calls.filter(c => c.method !== 'factory.snapshot' && c.method !== 'factory.handoff.handover' && c.method !== 'factory.self.update.status' && c.method !== 'factory.release.settings.read' && c.method !== 'factory.store_release.read'), [
             { method: 'factory.lanes.set', input: { projectRoot: '/project', lane: 'supervisor', value: 'codex/gpt-live:high' } },
             { method: 'factory.handoff.start', input: { projectRoot: '/project', seat: 'lead' } },
             { method: 'factory.handoff.start', input: { projectRoot: '/project', seat: 'peer:task-1', lane: 'codex/gpt-live:high' } },
@@ -1192,6 +1192,7 @@ test('Project Shell scopes dynamic pack and profile writes to the snapshot Proje
     if (method === 'factory.snapshot') return { ok: true, view };
     if (method === 'factory.self.update.status') return { ok: true, current: '0.10.3', latest: '0.10.3', updateAvailable: false };
     if (method === 'factory.release.settings.read') return { ok: false, code: 'stub', error: 'stub' };
+    if (method === 'factory.store_release.read') return { ok: false, code: 'stub', error: 'stub' };
     if (method === 'factory.onboarding.status') return { ok: true, run: null };
     calls.push({ method, input });
     return { ok: true };
@@ -1470,6 +1471,84 @@ test("FactoryShell Start Supervisor on a vacant row dispatches factory.superviso
         await act(() => startButton.click());
         assert.deepEqual(startCalls, [{ projectRoot: "/snapshot-project" }]);
         assert.deepEqual(opened, [{ agentId: "agent-sup-new", serverId: "srv-1" }]);
+      } finally { await act(() => root.unmount()); }
+    });
+  } finally { g.__factoryClientRpc = prior; }
+});
+
+test("FactoryShell reads storeReleaseRead on the Project tab and wires Open Release Lab navigation", async () => {
+  const { FactoryShell } = await load("plugin/client/factory/shell.tsx");
+  const { testTheme } = await import("./client-markup.ts");
+  const { createElement } = await import("react");
+  const view = {
+    ...modelPickerFixture,
+    machineLanes: modelPickerFixture.lanes,
+    hasProjectLaneOverride: false,
+    panel: modelPanelFixture(),
+    project: { root: "/snapshot-project", slug: "my-app", missingRoot: false },
+    kpis: { running: 0, needsHuman: 0 },
+    companionTools: [],
+    corePlugin: {},
+    vault: {},
+    skillHub: { skillPacksExplicit: false, projectPacks: [] },
+    daemonError: null,
+  };
+  const storeReadInputs: unknown[] = [];
+  let openedLab = 0;
+  const g = globalThis as Record<string, any>, prior = g.__factoryClientRpc;
+  g.__factoryClientRpc = async (method: string, input: any) => {
+    if (method === "factory.snapshot") return { ok: true, view };
+    if (method === "factory.self.update.status") return { ok: true, current: "0.17.0", latest: "0.17.0", updateAvailable: false };
+    if (method === "factory.release.settings.read") return { ok: false, code: "stub", error: "stub" };
+    if (method === "factory.store_release.read") {
+      storeReadInputs.push(input);
+      return {
+        ok: true,
+        settings: {
+          project: "my-app",
+          projectRoot: "/snapshot-project",
+          mode: "auto-staging",
+          updatedAt: null,
+          pendingRequest: null,
+          vault: { ascKey: true, appleTeamId: false, gplayJson: true },
+          platforms: ["ios", "android"],
+          isMobile: true,
+          runner: {
+            installed: true,
+            enabled: true,
+            status: "running",
+            path: "/paseo/plugins/factory-release-lab/v1",
+            binPath: "/paseo/plugins/factory-release-lab/v1/bin/release-lab.mjs",
+          },
+          lastRun: null,
+          activeHole: null,
+        },
+      };
+    }
+    return { ok: true };
+  };
+  try {
+    await mountUnderNativeWindow(async (createRoot, container, act) => {
+      const root = createRoot(container);
+      const byId = (id: string) => container.querySelector(`[data-testid="${id}"]`) as HTMLElement;
+      try {
+        await act(() =>
+          root.render(
+            createElement(FactoryShell, {
+              theme: testTheme,
+              dir: "/snapshot-project",
+              layout: { compact: false, platform: "web" },
+              openReleaseLab: () => { openedLab++; },
+            }),
+          ),
+        );
+        await act(() => byId("factory-tab-project").click());
+        assert.deepEqual(storeReadInputs, [{ projectRoot: "/snapshot-project" }]);
+        assert.ok(byId("factory-panel-store-release"));
+        assert.match(byId("factory-panel-store-release-mode").textContent!, /auto-staging/);
+        assert.ok(byId("factory-panel-store-release-vault-warning"));
+        await act(() => (byId("factory-panel-store-release-open-lab") as HTMLButtonElement).click());
+        assert.equal(openedLab, 1);
       } finally { await act(() => root.unmount()); }
     });
   } finally { g.__factoryClientRpc = prior; }
