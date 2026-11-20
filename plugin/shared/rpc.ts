@@ -679,6 +679,7 @@ export const vaultImport = defineRpc({
     ascKeyPath: z.string().optional(),
     ascKeyId: z.string().optional(),
     ascIssuer: z.string().optional(),
+    teamId: z.string().optional(),
     gplayKeyPath: z.string().optional(),
     eyeConfigPath: z.string().optional(),
     appKey: z.string().optional(),
@@ -688,6 +689,7 @@ export const vaultImport = defineRpc({
     firebaseProjectId: z.string().optional(),
     googleServicesJsonPath: z.string().optional(),
     googleServiceInfoPlistPath: z.string().optional(),
+    storeDefaultsPath: z.string().optional(),
     syncAfterImport: z.boolean().optional(),
   }),
   output: z.union([

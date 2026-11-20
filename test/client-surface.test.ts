@@ -176,6 +176,8 @@ test("v0.0.35 Seam 2.1: VaultPane / VaultSyncBar moves out of Header into the de
   assert.match(vault, /ascKeyPath/, "Import Key drawer collects ascKeyPath");
   assert.match(vault, /ascKeyId/, "Import Key drawer collects ascKeyId");
   assert.match(vault, /ascIssuer/, "Import Key drawer collects ascIssuer");
+  assert.match(vault, /teamId/, "Import Key drawer collects teamId");
+  assert.match(vault, /storeDefaultsPath/, "Import Key drawer collects storeDefaultsPath");
   assert.match(vault, /gplayKeyPath/, "Import Key drawer collects gplayKeyPath");
   assert.match(vault, /Save Config/, "⚙ drawer keeps Save Config for custom repo/branch/passphrase");
   assert.match(vault, /Direct Hydrate \(gh api\)/, "⚙ drawer keeps Direct Hydrate (gh api)");

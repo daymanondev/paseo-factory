@@ -2923,6 +2923,7 @@ test("vault snapshot & vault.sync / vault.import: unconfigured snapshot probes g
     ascKeyPath: p8Path,
     ascKeyId: "ABC123",
     ascIssuer: "ISSUER-999",
+    teamId: "TEAM-999",
     gplayKeyPath: gplayPath,
     syncAfterImport: true,
   });
@@ -2938,6 +2939,7 @@ test("vault snapshot & vault.sync / vault.import: unconfigured snapshot probes g
   assert.equal(importReply.pushed, true);
   assert.match(importReply.summary, /Imported 3 secret file\(s\)/);
   assert.ok(existsSync(join(home, "vault-runtime", "env.json")), "env.json written after import");
+  assert.equal(JSON.parse(readFileSync(join(home, "vault-runtime", "env.json"), "utf8")).APPLE_TEAM_ID, "TEAM-999");
 
   // Missing import file refuses as data.
   const badImport = await handlers.vaultImport({ ascKeyPath: join(keysDir, "missing.p8"), syncAfterImport: false });

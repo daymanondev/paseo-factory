@@ -3,11 +3,12 @@ import { atomicJson } from './json-store.ts';
 import { collectHelperMcpVault, hydrateHelperMcpVault } from "./helper-mcp-vault.ts";
 import { ensureProviderSkillSymlinks } from "./companion-tools.ts";
 import { FactoryError } from "./errors.ts";
+import { LedgerAdmission } from "./history-admission.ts";
 import { mergeLaneProfilesFiles, projectLanesPath, readLaneProfilesFile } from "./lanes.ts";
 import type { LaneProfile, LaneProfilesFile } from "./lanes.ts";
 import { listProjectRegistrations, discoverProjects, resolveProject } from "./project.ts";
-import { vaultStateDir, sharedSecretExists, SHARED_SECRET_FILES, loadVaultConfig } from "./vault-config.ts";
-import type { VaultRuntimeEnv } from "./vault-config.ts";
+import { vaultStateDir, sharedSecretExists, SHARED_SECRET_FILES, STORE_DEFAULTS_FILE, loadVaultConfig } from "./vault-config.ts";
+import type { VaultRuntimeEnv, VaultStoreDefaults } from "./vault-config.ts";
 import { unsealVaultBuffer, resolveVaultPassphrase } from "./vault-envelope.ts";
 import { expandImportPath } from "./vault-secrets.ts";
 import { buildVaultPath } from "./vault-transport.ts";
@@ -25,24 +26,28 @@ export function hydrateRuntimeFromTree(paseoHome: string, treeRoot: string, pass
   return written.sort();
 }
 
-/** Writes one unsealed vault file under `<paseoHome>/vault-runtime/` — `0o600` (+ `0o700` dirs) under `secrets/`. */
+/** Writes one unsealed vault file under `<paseoHome>/vault-runtime/` — `0o600` (+ `0o700` dirs) under `secrets/` and `store-defaults.json`, `0o400` read-only under `store-memory/`. */
 export function writeRuntimeFile(paseoHome: string, vaultPath: string, data: Buffer): void {
   assertSafeVaultPath(vaultPath);
   if (isProjectDesignVaultPath(vaultPath)) throw new FactoryError('vault-project-design-excluded', 'Project designs belong in the Project repository');
   const runtimeRoot = join(paseoHome, "vault-runtime");
   mkdirSync(runtimeRoot, { recursive: true });
   const segments = vaultPath.split("/");
+  const isPrivateDir = segments[0] === "secrets" || segments[0] === "store-memory";
   let acc = runtimeRoot;
-  let insideSecrets = false;
+  let insidePrivate = false;
   for (const segment of segments.slice(0, -1)) {
     acc = join(acc, segment);
-    insideSecrets = insideSecrets || segment === "secrets";
+    insidePrivate = insidePrivate || isPrivateDir;
     mkdirSync(acc, { recursive: true });
-    if (insideSecrets) chmodSync(acc, 0o700);
+    if (insidePrivate) chmodSync(acc, 0o700);
   }
   const target = join(runtimeRoot, vaultPath);
+  // Existing read-only files (0o400) under store-memory/ must become owner-writable before overwriting.
+  if (existsSync(target)) chmodSync(target, 0o600);
   writeFileSync(target, data);
-  chmodSync(target, segments[0] === "secrets" ? 0o600 : 0o644);
+  const mode = segments[0] === "store-memory" ? 0o400 : segments[0] === "secrets" || vaultPath === STORE_DEFAULTS_FILE ? 0o600 : 0o644;
+  chmodSync(target, mode);
 }
 
 /** A vault path is `/`-separated relative segments, none of them `.`/`..`/empty — archive traversal is refused, not written. */
@@ -610,6 +615,42 @@ export function collectLocalStateIntoRuntime(paseoHome: string, options?: { user
     writeRuntimeFile(paseoHome, `secrets/shared/${SHARED_SECRET_FILES.eyeConfig}`, readFileSync(localEye));
   }
 
+  const localStoreDefaults = join(stateDir, STORE_DEFAULTS_FILE);
+  const runtimeStoreDefaults = storeDefaultsPath(paseoHome);
+  if (existsSync(localStoreDefaults) && !existsSync(runtimeStoreDefaults)) {
+    const parsedDefaults = parseStoreDefaults(readFileSync(localStoreDefaults, "utf8"), localStoreDefaults);
+    writeRuntimeFile(paseoHome, STORE_DEFAULTS_FILE, Buffer.from(`${JSON.stringify(parsedDefaults, null, 2)}\n`, "utf8"));
+  } else if (existsSync(runtimeStoreDefaults)) {
+    chmodSync(runtimeStoreDefaults, 0o600);
+  }
+
+  const localStoreMemoryDir = join(stateDir, STORE_MEMORY_DIR);
+  const localLessonsPath = join(localStoreMemoryDir, "lessons.md");
+  const runtimeLessonsPath = storeLessonsPath(paseoHome);
+  if (existsSync(localLessonsPath) && !existsSync(runtimeLessonsPath)) {
+    const lessonsText = readFileSync(localLessonsPath, "utf8");
+    assertStoreLessonsWithinLimit(lessonsText, localLessonsPath);
+    writeRuntimeFile(paseoHome, `${STORE_MEMORY_DIR}/lessons.md`, Buffer.from(lessonsText, "utf8"));
+  } else if (existsSync(runtimeLessonsPath)) {
+    assertStoreLessonsWithinLimit(readFileSync(runtimeLessonsPath, "utf8"), runtimeLessonsPath);
+    chmodSync(runtimeLessonsPath, 0o400);
+  }
+  const localAppsMemoryDir = join(localStoreMemoryDir, "apps");
+  if (existsSync(localAppsMemoryDir)) {
+    for (const file of walkFiles(localAppsMemoryDir, () => false)) {
+      const vaultRel = `${STORE_MEMORY_DIR}/apps/${file}`;
+      if (!existsSync(join(paseoHome, "vault-runtime", vaultRel))) {
+        writeRuntimeFile(paseoHome, vaultRel, readFileSync(join(localAppsMemoryDir, file)));
+      }
+    }
+  }
+  const runtimeAppsMemoryDir = join(storeMemoryDir(paseoHome), "apps");
+  if (existsSync(runtimeAppsMemoryDir)) {
+    for (const file of walkFiles(runtimeAppsMemoryDir, () => false)) {
+      chmodSync(join(runtimeAppsMemoryDir, file), 0o400);
+    }
+  }
+
   const config = loadVaultConfig(paseoHome);
   const passphrase = resolveVaultPassphrase(config?.passphrase);
   const envAscPath = process.env.ASC_KEY_PATH?.trim();
@@ -826,8 +867,14 @@ export function buildVaultRuntimeEnv(paseoHome: string): VaultRuntimeEnv {
   const ascCredentials = readJsonFile(join(shared, SHARED_SECRET_FILES.ascCredentials));
   const keyId = jsonStringField(ascCredentials, "keyId") ?? jsonStringField(ascCredentials, "key_id");
   const issuerId = jsonStringField(ascCredentials, "issuerId") ?? jsonStringField(ascCredentials, "issuer_id");
+  const teamId =
+    jsonStringField(ascCredentials, "teamId") ??
+    jsonStringField(ascCredentials, "team_id") ??
+    jsonStringField(ascCredentials, "appleTeamId") ??
+    jsonStringField(ascCredentials, "apple_team_id");
   if (keyId !== null) env.ASC_KEY_ID = keyId;
   if (issuerId !== null) env.ASC_ISSUER = issuerId;
+  if (teamId !== null) env.APPLE_TEAM_ID = teamId;
   const gplay = join(shared, SHARED_SECRET_FILES.gplayServiceAccount);
   if (existsSync(gplay)) env.GPLAY_KEY_PATH = gplay;
   for (const canonicalAppKey of hydratedAppKeys(paseoHome)) {
@@ -856,4 +903,120 @@ export function hydratedAppKeys(paseoHome: string): string[] {
   } catch {
     return []; // no apps dir yet — nothing hydrated
   }
+}
+
+export function storeDefaultsPath(paseoHome: string): string {
+  return join(paseoHome, "vault-runtime", STORE_DEFAULTS_FILE);
+}
+
+/** Validates and parses `store-defaults.json` as a plain object; refuses damaged content. */
+export function parseStoreDefaults(raw: string, pathLabel = STORE_DEFAULTS_FILE): VaultStoreDefaults {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new FactoryError("corrupted-store-defaults", `${pathLabel} is not valid JSON`);
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new FactoryError("corrupted-store-defaults", `${pathLabel} must be a JSON object`);
+  }
+  return parsed as VaultStoreDefaults;
+}
+
+/** Reads `<paseoHome>/vault-runtime/store-defaults.json`; returns `null` when absent. */
+export function readStoreDefaults(paseoHome: string): VaultStoreDefaults | null {
+  const target = storeDefaultsPath(paseoHome);
+  let raw: string;
+  try {
+    raw = readFileSync(target, "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw err;
+  }
+  return parseStoreDefaults(raw, target);
+}
+
+/** Writes `<paseoHome>/vault-runtime/store-defaults.json` (`0o600`) under the Vault state mutation lock. */
+export function writeStoreDefaults(paseoHome: string, defaults: VaultStoreDefaults): string {
+  if (typeof defaults !== "object" || defaults === null || Array.isArray(defaults)) {
+    throw new FactoryError("corrupted-store-defaults", `${STORE_DEFAULTS_FILE} must be a JSON object`);
+  }
+  return LedgerAdmission.stateMutation(vaultStateDir(paseoHome), () => {
+    writeRuntimeFile(paseoHome, STORE_DEFAULTS_FILE, Buffer.from(`${JSON.stringify(defaults, null, 2)}\n`, "utf8"));
+    return storeDefaultsPath(paseoHome);
+  });
+}
+
+export const STORE_MEMORY_DIR = "store-memory";
+export const STORE_LESSONS_MAX_LINES = 120;
+
+export function storeMemoryDir(paseoHome: string): string {
+  return join(paseoHome, "vault-runtime", STORE_MEMORY_DIR);
+}
+
+export function storeLessonsPath(paseoHome: string): string {
+  return join(storeMemoryDir(paseoHome), "lessons.md");
+}
+
+export function storeAppNotebookPath(paseoHome: string, canonicalAppKey: string): string {
+  const key = canonicalAppKey.trim();
+  if (key === "" || key.includes("/") || key.includes("\\")) {
+    throw new FactoryError("vault-invalid-path", `refusing unsafe store notebook app key "${canonicalAppKey}"`);
+  }
+  const vaultRel = `${STORE_MEMORY_DIR}/apps/${key}.md`;
+  assertSafeVaultPath(vaultRel);
+  return join(paseoHome, "vault-runtime", vaultRel);
+}
+
+export function countStoreLessonLines(content: string): number {
+  if (content === "") return 0;
+  const stripped = content.endsWith("\n") ? content.slice(0, -1) : content;
+  return stripped === "" ? 0 : stripped.split("\n").length;
+}
+
+export function assertStoreLessonsWithinLimit(content: string, pathLabel = `${STORE_MEMORY_DIR}/lessons.md`): number {
+  const lines = countStoreLessonLines(content);
+  if (lines > STORE_LESSONS_MAX_LINES) {
+    throw new FactoryError(
+      "store-notebook-limit-exceeded",
+      `${pathLabel} exceeds the ${STORE_LESSONS_MAX_LINES}-line cap (${lines} lines) — compact rows or graduate checks into factory-release-lab probe instead of truncating`,
+    );
+  }
+  return lines;
+}
+
+export function readStoreLessons(paseoHome: string): string | null {
+  try {
+    return readFileSync(storeLessonsPath(paseoHome), "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw err;
+  }
+}
+
+export function writeStoreLessons(paseoHome: string, content: string): string {
+  assertStoreLessonsWithinLimit(content);
+  return LedgerAdmission.stateMutation(vaultStateDir(paseoHome), () => {
+    writeRuntimeFile(paseoHome, `${STORE_MEMORY_DIR}/lessons.md`, Buffer.from(content, "utf8"));
+    return storeLessonsPath(paseoHome);
+  });
+}
+
+export function readStoreAppNotebook(paseoHome: string, canonicalAppKey: string): string | null {
+  const target = storeAppNotebookPath(paseoHome, canonicalAppKey);
+  try {
+    return readFileSync(target, "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw err;
+  }
+}
+
+export function writeStoreAppNotebook(paseoHome: string, canonicalAppKey: string, content: string): string {
+  const target = storeAppNotebookPath(paseoHome, canonicalAppKey);
+  const key = canonicalAppKey.trim();
+  return LedgerAdmission.stateMutation(vaultStateDir(paseoHome), () => {
+    writeRuntimeFile(paseoHome, `${STORE_MEMORY_DIR}/apps/${key}.md`, Buffer.from(content, "utf8"));
+    return target;
+  });
 }

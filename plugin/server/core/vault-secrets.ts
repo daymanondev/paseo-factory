@@ -1,14 +1,14 @@
 import { FactoryError } from "./errors.ts";
 import { LedgerAdmission } from "./history-admission.ts";
-import { vaultStateDir, loadVaultConfig, SHARED_SECRET_FILES } from "./vault-config.ts";
+import { vaultStateDir, loadVaultConfig, SHARED_SECRET_FILES, STORE_DEFAULTS_FILE } from "./vault-config.ts";
 import { sealVaultBuffer, resolveVaultPassphrase, unsealVaultBuffer } from "./vault-envelope.ts";
-import { writeRuntimeFile, readJsonFile, collectCandidateProjectRoots, inspectProjectRootFacts, assertSafeVaultPath, readVaultManifestAt, applyVaultHydration } from "./vault-materialization.ts";
+import { writeRuntimeFile, readJsonFile, collectCandidateProjectRoots, inspectProjectRootFacts, assertSafeVaultPath, readVaultManifestAt, applyVaultHydration, parseStoreDefaults, matchManifestAppKey, ensureLocalGitExcludeAndWorktreeInclude, jsonStringField, APP_FILE_TARGETS } from "./vault-materialization.ts";
 import { probeGhAuth } from "./vault-transport.ts";
-import { syncVault } from "./vault.ts";
-import type { ImportVaultSecretsInput, ImportVaultSecretsResult, SyncVaultResult } from "./vault.ts";
-import { existsSync, readFileSync } from "node:fs";
+import { pullVault, pushVault, syncVault } from "./vault.ts";
+import type { ImportVaultSecretsInput, ImportVaultSecretsResult, SyncVaultResult, WriteBackAndroidKeystoreInput, WriteBackAndroidKeystoreResult } from "./vault.ts";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, isAbsolute, join, relative, sep } from "node:path";
 
 export function expandImportPath(rawPath: string): string {
   const trimmed = rawPath.trim();
@@ -41,6 +41,7 @@ export async function importVaultSecrets(
     input.ascKeyPath,
     input.ascKeyId,
     input.ascIssuer,
+    input.teamId,
     input.gplayKeyPath,
     input.eyeConfigPath,
     input.keystorePath,
@@ -49,8 +50,11 @@ export async function importVaultSecrets(
     input.firebaseProjectId,
     input.googleServicesJsonPath,
     input.googleServiceInfoPlistPath,
+    input.storeDefaultsPath,
   ];
-  const hasExplicit = explicitFields.some((val) => val !== undefined && val.trim() !== "");
+  const hasExplicit =
+    explicitFields.some((val) => val !== undefined && val.trim() !== "") ||
+    input.storeDefaults !== undefined;
 
   const ascKeyPath = hasExplicit
     ? input.ascKeyPath?.trim() || undefined
@@ -59,6 +63,7 @@ export async function importVaultSecrets(
       : undefined;
   const ascKeyId = hasExplicit ? input.ascKeyId?.trim() || undefined : process.env.ASC_KEY_ID?.trim() || undefined;
   const ascIssuer = hasExplicit ? input.ascIssuer?.trim() || undefined : process.env.ASC_ISSUER?.trim() || undefined;
+  const teamId = hasExplicit ? input.teamId?.trim() || undefined : process.env.APPLE_TEAM_ID?.trim() || undefined;
   const gplayKeyPath = hasExplicit
     ? input.gplayKeyPath?.trim() || undefined
     : process.env.GPLAY_KEY_PATH?.trim() && existsSync(expandImportPath(process.env.GPLAY_KEY_PATH))
@@ -80,13 +85,14 @@ export async function importVaultSecrets(
 
     importFile(ascKeyPath, "ASC .p8 key", `secrets/shared/${SHARED_SECRET_FILES.ascKey}`);
 
-    if (ascKeyId !== undefined || ascIssuer !== undefined) {
+    if (ascKeyId !== undefined || ascIssuer !== undefined || teamId !== undefined) {
       const rel = `secrets/shared/${SHARED_SECRET_FILES.ascCredentials}`;
       const prior = readJsonFile(join(runtimeRoot, rel)) ?? {};
       const merged = {
         ...prior,
         ...(ascKeyId !== undefined ? { keyId: ascKeyId } : {}),
         ...(ascIssuer !== undefined ? { issuerId: ascIssuer } : {}),
+        ...(teamId !== undefined ? { teamId } : {}),
       };
       writeRuntimeFile(paseoHome, rel, Buffer.from(`${JSON.stringify(merged, null, 2)}\n`, "utf8"));
       importedFiles.add(rel);
@@ -94,6 +100,20 @@ export async function importVaultSecrets(
 
     importFile(gplayKeyPath, "Google Play service account JSON", `secrets/shared/${SHARED_SECRET_FILES.gplayServiceAccount}`);
     importFile(eyeConfigPath, "Eye config JSON", `secrets/shared/${SHARED_SECRET_FILES.eyeConfig}`);
+
+    const storeDefaultsPath = input.storeDefaultsPath?.trim() || undefined;
+    if (storeDefaultsPath !== undefined) {
+      const rawDefaults = unsealVaultBuffer(readImportFile(storeDefaultsPath, "Store defaults JSON"), passphrase).toString("utf8");
+      const parsedDefaults = parseStoreDefaults(rawDefaults, storeDefaultsPath);
+      writeRuntimeFile(paseoHome, STORE_DEFAULTS_FILE, Buffer.from(`${JSON.stringify(parsedDefaults, null, 2)}\n`, "utf8"));
+      importedFiles.add(STORE_DEFAULTS_FILE);
+    } else if (input.storeDefaults !== undefined) {
+      if (typeof input.storeDefaults !== "object" || input.storeDefaults === null || Array.isArray(input.storeDefaults)) {
+        throw new FactoryError("corrupted-store-defaults", `${STORE_DEFAULTS_FILE} must be a JSON object`);
+      }
+      writeRuntimeFile(paseoHome, STORE_DEFAULTS_FILE, Buffer.from(`${JSON.stringify(input.storeDefaults, null, 2)}\n`, "utf8"));
+      importedFiles.add(STORE_DEFAULTS_FILE);
+    }
 
     const keystorePath = input.keystorePath?.trim() || undefined;
     const storePass = input.storePass?.trim() || undefined;
@@ -207,4 +227,158 @@ export function sealVaultFile(paseoHome: string, sourcePath: string, vaultPath: 
     writeRuntimeFile(paseoHome, vaultPath, serialized);
     return { vaultPath, mode: envelope.mode, source: sourcePath, envelopeBytes: serialized.length };
   });
+}
+
+function parseKeystoreProperties(propsPath: string): { storePassword?: string; keyPassword?: string; keyAlias?: string } {
+  const out: { storePassword?: string; keyPassword?: string; keyAlias?: string } = {};
+  for (const rawLine of readFileSync(propsPath, "utf8").split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (line === "" || line.startsWith("#") || line.startsWith("!")) continue;
+    const eq = line.indexOf("=");
+    if (eq === -1) continue;
+    const key = line.slice(0, eq).trim();
+    const val = line.slice(eq + 1).trim();
+    if (val === "") continue;
+    if (key === "storePassword" || key === "keyPassword" || key === "keyAlias") {
+      out[key] = val;
+    }
+  }
+  return out;
+}
+
+function repoRelativeIfInside(projectRoot: string, candidatePath: string): string | null {
+  try {
+    const rootReal = realpathSync(projectRoot);
+    const targetReal = realpathSync(candidatePath);
+    const rel = relative(rootReal, targetReal);
+    if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) return null;
+    return rel.split(sep).join("/");
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Day-0 Android upload keystore write-back (ADR 0066 §4):
+ * Stages a newly generated `release.keystore` (plus sibling/explicit signing
+ * properties) under `secrets/apps/<canonicalAppKey>/`, registers the app in
+ * `vault.manifest.json`, materializes into `<projectRoot>` with `.git/info/exclude`
+ * and `.worktreeinclude` hygiene registered so `<projectRoot>` stays git-clean,
+ * and immediately seals & pushes to the configured Private vault remote.
+ */
+export async function writeBackAndroidKeystore(
+  paseoHome: string,
+  input: WriteBackAndroidKeystoreInput,
+): Promise<WriteBackAndroidKeystoreResult> {
+  const facts = inspectProjectRootFacts(input.projectRoot);
+  if (facts === null) {
+    throw new FactoryError("vault-project-not-git", `${input.projectRoot} does not resolve to a git checkout`);
+  }
+  const expandedKeystore = expandImportPath(input.keystorePath);
+  const keystoreBytes = readImportFile(expandedKeystore, "Android release keystore");
+
+  const explicitProps = input.keystorePropertiesPath?.trim() ? expandImportPath(input.keystorePropertiesPath) : undefined;
+  if (explicitProps !== undefined && !existsSync(explicitProps)) {
+    throw new FactoryError("vault-import-file-not-found", `Keystore properties file not found at "${explicitProps}"`);
+  }
+  const siblingProps = join(dirname(expandedKeystore), "keystore.properties");
+  const propsPath = explicitProps ?? (existsSync(siblingProps) ? siblingProps : undefined);
+  const propsSigning = propsPath !== undefined ? parseKeystoreProperties(propsPath) : {};
+
+  const storePassword = input.storePass?.trim() || propsSigning.storePassword;
+  const keyPassword = input.keyPass?.trim() || propsSigning.keyPassword || storePassword;
+  const keyAlias = input.keyAlias?.trim() || propsSigning.keyAlias;
+
+  const config = loadVaultConfig(paseoHome);
+  const passphrase = resolveVaultPassphrase(config?.passphrase);
+  const vaultConfigured = (config?.repo?.trim() ?? "") !== "";
+  if (input.syncAfterWriteBack !== false && vaultConfigured && existsSync(join(paseoHome, "vault", ".git"))) {
+    await pullVault(paseoHome, { runner: input.runner, mergeLedgers: false });
+  }
+
+  const runtimeRoot = join(paseoHome, "vault-runtime");
+  const manifest = existsSync(join(runtimeRoot, "vault.manifest.json"))
+    ? readVaultManifestAt(runtimeRoot)
+    : readVaultManifestAt(join(paseoHome, "vault"));
+
+  let canonicalAppKey = input.appKey?.trim() || "";
+  if (canonicalAppKey === "") {
+    canonicalAppKey = matchManifestAppKey(manifest, facts) ?? "";
+  }
+  if (canonicalAppKey === "") {
+    const storeManifest = readJsonFile(join(facts.root, ".store-release", "manifest.json"));
+    canonicalAppKey = jsonStringField(storeManifest, "appKey") ?? facts.basename;
+  }
+  assertSafeVaultPath(`secrets/apps/${canonicalAppKey}`);
+
+  const keystoreRel = `secrets/apps/${canonicalAppKey}/release.keystore`;
+  const signingRel = `secrets/apps/${canonicalAppKey}/signing.json`;
+
+  const writtenVaultFiles = await LedgerAdmission.withStateMaintenance(vaultStateDir(paseoHome), () => {
+    const written: string[] = [];
+    const unsealedKeystore = unsealVaultBuffer(keystoreBytes, passphrase);
+    writeRuntimeFile(paseoHome, keystoreRel, unsealedKeystore);
+    written.push(keystoreRel);
+
+    if (storePassword !== undefined || keyPassword !== undefined || keyAlias !== undefined) {
+      const prior = readJsonFile(join(runtimeRoot, signingRel)) ?? {};
+      const merged: Record<string, unknown> = {
+        ...prior,
+        ...(storePassword !== undefined ? { storePassword } : {}),
+        ...(keyPassword !== undefined ? { keyPassword } : {}),
+        ...(keyAlias !== undefined ? { keyAlias } : {}),
+      };
+      writeRuntimeFile(paseoHome, signingRel, Buffer.from(`${JSON.stringify(merged, null, 2)}\n`, "utf8"));
+      written.push(signingRel);
+    }
+
+    const priorEntry = manifest[canonicalAppKey] ?? {};
+    manifest[canonicalAppKey] = {
+      ...priorEntry,
+      repoBasename: facts.basename,
+      ...(facts.originUrl !== null && facts.originUrl !== "" ? { gitRemote: facts.originUrl } : {}),
+      ...(facts.bundleId !== null ? { bundleId: facts.bundleId } : {}),
+      ...(facts.packageName !== null ? { packageName: facts.packageName } : {}),
+    };
+    writeRuntimeFile(paseoHome, "vault.manifest.json", Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`, "utf8"));
+
+    applyVaultHydration(paseoHome);
+
+    // If the caller's source keystore/properties sat inside the repo outside APP_FILE_TARGETS, register hygiene for them too.
+    const extraHygiene: string[] = [];
+    for (const candidate of [expandedKeystore, ...(propsPath !== undefined ? [propsPath] : [])]) {
+      const rel = repoRelativeIfInside(facts.root, candidate);
+      if (rel !== null) extraHygiene.push(rel);
+    }
+    if (extraHygiene.length > 0) {
+      ensureLocalGitExcludeAndWorktreeInclude(facts.root, extraHygiene);
+    }
+
+    return written.sort();
+  });
+
+  const materializedFiles = APP_FILE_TARGETS
+    .map((target) => target.projectRel)
+    .filter((rel) => existsSync(join(facts.root, rel)));
+
+  let pushed = false;
+  let sealedFiles: string[] = [];
+  if (input.syncAfterWriteBack !== false && vaultConfigured) {
+    const sealSet = new Set(writtenVaultFiles);
+    const pushResult = await pushVault(paseoHome, {
+      runner: input.runner,
+      sealPaths: sealSet,
+    });
+    pushed = pushResult.pushed;
+    sealedFiles = writtenVaultFiles.filter((rel) => pushResult.pushedFiles.includes(rel));
+  }
+
+  return {
+    canonicalAppKey,
+    writtenVaultFiles,
+    sealedFiles,
+    materializedFiles,
+    pushed,
+    summary: `Wrote back ${writtenVaultFiles.join(", ")} for ${canonicalAppKey}${pushed ? " and sealed/pushed to Private vault" : " into local vault-runtime"}.`,
+  };
 }
