@@ -1548,3 +1548,107 @@ test("OnboardingScreen classifies browse and snapshot errors honestly using desc
   }
 });
 
+test("OnboardingScreen does not steal focus if Owner clicks Change folder while workspace resolution is in flight", async () => {
+  const { OnboardingScreen } = await loadScreenModule("plugin/client/factory/onboarding-screen.tsx", { platformOs: "web" });
+  const { createElement } = await import("react");
+
+  const openedAgents: any[] = [];
+  const openedWorkspaces: any[] = [];
+  const openedPanels: any[] = [];
+  const committed: any[] = [];
+  const toasts: any[] = [];
+  let resolveCreate!: (value: { id: string }) => void;
+  let createCalls = 0;
+
+  (globalThis as any).__onboardScreenTestToasts = toasts;
+  (globalThis as any).__onboardScreenTestPaseo = () => ({
+    workspaces: {
+      list: async () => ({ entries: [] }),
+      create: () => {
+        createCalls += 1;
+        return new Promise<{ id: string }>((resolve) => {
+          resolveCreate = resolve;
+        });
+      },
+    },
+    projects: { list: async () => ({ projects: [] }), subscribe: () => () => {} },
+  });
+  (globalThis as any).__onboardScreenTestRpc = async (name: string, input: any) => {
+    if (name === "factory.seats.directory") return { ok: true, daemonError: null, seats: [], projects: [] };
+    if (name === "factory.snapshot") return { ok: true, view: makeSnapshotView() };
+    if (name === "factory.onboarding.browse") return { ok: true, path: "/Users/owner", parent: "/Users", home: "/Users/owner", entries: [] };
+    if (name === "factory.onboarding.inspect") {
+      return { ok: true, folder: input.folder, gitRepo: true, hasCommits: true, registered: false, existingLead: false, existingSupervisor: false, prerequisites: [], missingPrerequisites: [] };
+    }
+    if (name === "factory.onboarding.status") return { ok: true, run: null };
+    if (name === "factory.onboarding.start") {
+      return {
+        ok: true,
+        run: makeSucceededRun({
+          runId: "run-race-1",
+          folder: "/Users/owner/race-app",
+          agentId: "agent-race-1",
+          slug: "race-app",
+          summary: "Set up race-app",
+        }),
+      };
+    }
+    return { ok: false, error: `unexpected ${name}` };
+  };
+
+  try {
+    await mountDom(async (createRoot, container, act) => {
+      const root = createRoot(container);
+      try {
+        await act(() =>
+          root.render(
+            createElement(OnboardingScreen, {
+              theme: testTheme,
+              host: { id: "h1", label: "Local" },
+              layout: { compact: false, platform: "web" },
+              params: { folder: "/Users/owner/race-app" },
+              navigation: {
+                openAgent: (x: any) => openedAgents.push(x),
+                openWorkspace: (x: any) => openedWorkspaces.push(x),
+              },
+              openPanel: (id: string, options: any) => openedPanels.push({ id, options }),
+              onCommitted: (result: any) => { committed.push(result); },
+            }),
+          ),
+        );
+        await act(() => new Promise<void>((r) => setTimeout(r, 10)));
+        await runWizardStepsToCommit(container, act);
+
+        assert.equal(createCalls, 1, "workspaces.create started during finalization");
+        assert.deepEqual(openedWorkspaces, []);
+        assert.deepEqual(openedPanels, []);
+        assert.deepEqual(openedAgents, []);
+
+        // Owner clicks Change folder while workspaces.create is still pending.
+        const changeBtn = container.querySelector('[data-testid="factory-onboard-change-folder"]') as HTMLElement;
+        assert.ok(changeBtn);
+        await act(() => changeBtn.click());
+        assert.ok(container.querySelector('[data-testid="factory-onboard-browse"]'), "returned to folder browser");
+
+        // Deferred workspaces.create resolves after navigating away.
+        await act(async () => {
+          resolveCreate({ id: "ws-race-created" });
+          await new Promise<void>((r) => setTimeout(r, 20));
+        });
+
+        assert.equal(toasts.filter((t) => /Set up race-app/.test(t.msg) && t.opts?.variant === "success").length, 1, "success toast shown once");
+        assert.deepEqual(openedWorkspaces, [], "does NOT call openWorkspace after Change folder");
+        assert.deepEqual(openedPanels, [], "does NOT call openPanel after Change folder");
+        assert.deepEqual(openedAgents, [], "does NOT call openAgent after Change folder");
+        assert.deepEqual(committed, [], "does NOT call onCommitted after Change folder");
+      } finally {
+        await act(() => root.unmount());
+      }
+    });
+  } finally {
+    delete (globalThis as any).__onboardScreenTestRpc;
+    delete (globalThis as any).__onboardScreenTestPaseo;
+    delete (globalThis as any).__onboardScreenTestToasts;
+  }
+});
+

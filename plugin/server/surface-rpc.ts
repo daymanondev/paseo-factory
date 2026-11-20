@@ -2527,8 +2527,33 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     result: run.result === null ? null : { ...run.result },
   });
 
+  const latestRunForFolder = (folder: string): OnboardingRun | undefined => {
+    const canonical = realpathSafe(resolve(folder));
+    const latestId = latestOnboardingRunIdByFolder.get(canonical);
+    return latestId !== undefined ? onboardingRunsById.get(latestId) : undefined;
+  };
+
   const emitOnboardingProgress = (projectRoot: string): void => {
     deps.onStateChange?.({ handler: "onboarding.progress", projectRoot });
+  };
+
+  const failOnboardingRun = (
+    run: OnboardingRun,
+    phase: OnboardingPhase | undefined,
+    code: string,
+    error: string,
+  ): void => {
+    const ts = new Date().toISOString();
+    if (phase !== undefined) {
+      phase.status = "failed";
+      phase.finishedAt = ts;
+      phase.error = error;
+    }
+    run.status = "failed";
+    run.errorCode = code;
+    run.error = error;
+    run.updatedAt = ts;
+    emitOnboardingProgress(run.folder);
   };
 
   const buildOnboardingPhases = (plan: OnboardingPlan, now: string): OnboardingPhase[] => {
@@ -3830,9 +3855,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     ): Promise<{ ok: true; run: OnboardingRun } | { ok: false; code: string; error: string }> {
       const rawFolder = (input.folder ?? "").trim();
       if (rawFolder !== "") {
-        const canonical = realpathSafe(resolve(rawFolder));
-        const activeId = latestOnboardingRunIdByFolder.get(canonical);
-        const activeRun = activeId !== undefined ? onboardingRunsById.get(activeId) : undefined;
+        const activeRun = latestRunForFolder(rawFolder);
         if (activeRun !== undefined && activeRun.status === "running") {
           return { ok: true as const, run: cloneOnboardingRun(activeRun) };
         }
@@ -3841,8 +3864,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       const plan = await prepareOnboardingPlan(input, context);
       if (!plan.ok) return plan;
 
-      const racedId = latestOnboardingRunIdByFolder.get(plan.folder);
-      const racedRun = racedId !== undefined ? onboardingRunsById.get(racedId) : undefined;
+      const racedRun = latestRunForFolder(plan.folder);
       if (racedRun !== undefined && racedRun.status === "running") {
         return { ok: true as const, run: cloneOnboardingRun(racedRun) };
       }
@@ -3883,13 +3905,12 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
               emitOnboardingProgress(plan.folder);
             },
             onPhaseFailed: (phaseId, code, error) => {
-              const ts = new Date().toISOString();
-              markPhase(phaseId, { status: "failed", finishedAt: ts, error });
-              run.status = "failed";
-              run.errorCode = code;
-              run.error = error;
-              run.updatedAt = ts;
-              emitOnboardingProgress(plan.folder);
+              failOnboardingRun(
+                run,
+                run.phases.find((item) => item.id === phaseId),
+                code,
+                error,
+              );
             },
             onSucceeded: (result) => {
               const ts = new Date().toISOString();
@@ -3904,19 +3925,12 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           });
         } catch (err) {
           if (run.status === "running") {
-            const ts = new Date().toISOString();
-            const runningPhase = run.phases.find((item) => item.status === "running");
-            const msg = messageOf(err);
-            if (runningPhase !== undefined) {
-              runningPhase.status = "failed";
-              runningPhase.finishedAt = ts;
-              runningPhase.error = msg;
-            }
-            run.status = "failed";
-            run.errorCode = codeOf(err);
-            run.error = msg;
-            run.updatedAt = ts;
-            emitOnboardingProgress(plan.folder);
+            failOnboardingRun(
+              run,
+              run.phases.find((item) => item.status === "running"),
+              codeOf(err),
+              messageOf(err),
+            );
           }
         }
       })();
@@ -3932,9 +3946,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         return { ok: true as const, run: found === undefined ? null : cloneOnboardingRun(found) };
       }
       if (folder !== "") {
-        const canonical = realpathSafe(resolve(folder));
-        const latestId = latestOnboardingRunIdByFolder.get(canonical);
-        const found = latestId !== undefined ? onboardingRunsById.get(latestId) : undefined;
+        const found = latestRunForFolder(folder);
         return { ok: true as const, run: found === undefined ? null : cloneOnboardingRun(found) };
       }
       return failure("missing-target", "pass runId or folder to check onboarding status");
