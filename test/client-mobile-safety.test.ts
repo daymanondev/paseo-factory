@@ -803,7 +803,7 @@ test('W14: iOS and Android expose exactly the Project model, handoff and adoptio
           await click('factory-panel-open-lead');
           assert.ok(calls.some(c => c.method === 'factory.self.update.status'), `${platform} checks the version on mount`);
           assert.equal(calls.some(c => c.method === 'factory.self.update.apply'), false, `${platform} never applies an update`);
-          assert.deepEqual(calls.filter(c => c.method !== 'factory.snapshot' && c.method !== 'factory.handoff.handover' && c.method !== 'factory.self.update.status' && c.method !== 'factory.release.settings.read'), [
+          assert.deepEqual(calls.filter(c => c.method !== 'factory.snapshot' && c.method !== 'factory.handoff.handover' && c.method !== 'factory.self.update.status' && c.method !== 'factory.release.settings.read' && c.method !== 'factory.store_release.read'), [
             { method: 'factory.lanes.set', input: { projectRoot: '/project', lane: 'supervisor', value: 'codex/gpt-live:high' } },
             { method: 'factory.handoff.start', input: { projectRoot: '/project', seat: 'lead' } },
             { method: 'factory.handoff.start', input: { projectRoot: '/project', seat: 'peer:task-1', lane: 'codex/gpt-live:high' } },
@@ -1192,6 +1192,7 @@ test('Project Shell scopes dynamic pack and profile writes to the snapshot Proje
     if (method === 'factory.snapshot') return { ok: true, view };
     if (method === 'factory.self.update.status') return { ok: true, current: '0.10.3', latest: '0.10.3', updateAvailable: false };
     if (method === 'factory.release.settings.read') return { ok: false, code: 'stub', error: 'stub' };
+    if (method === 'factory.store_release.read') return { ok: false, code: 'stub', error: 'stub' };
     if (method === 'factory.onboarding.status') return { ok: true, run: null };
     calls.push({ method, input });
     return { ok: true };
@@ -1470,6 +1471,256 @@ test("FactoryShell Start Supervisor on a vacant row dispatches factory.superviso
         await act(() => startButton.click());
         assert.deepEqual(startCalls, [{ projectRoot: "/snapshot-project" }]);
         assert.deepEqual(opened, [{ agentId: "agent-sup-new", serverId: "srv-1" }]);
+      } finally { await act(() => root.unmount()); }
+    });
+  } finally { g.__factoryClientRpc = prior; }
+});
+
+test("FactoryShell reads storeReleaseRead on the Project tab and wires Open Release Lab navigation", async () => {
+  const { FactoryShell } = await load("plugin/client/factory/shell.tsx");
+  const { testTheme } = await import("./client-markup.ts");
+  const { createElement } = await import("react");
+  const view = {
+    ...modelPickerFixture,
+    machineLanes: modelPickerFixture.lanes,
+    hasProjectLaneOverride: false,
+    panel: modelPanelFixture(),
+    project: { root: "/snapshot-project", slug: "my-app", missingRoot: false },
+    kpis: { running: 0, needsHuman: 0 },
+    companionTools: [],
+    corePlugin: {},
+    vault: {},
+    skillHub: { skillPacksExplicit: false, projectPacks: [] },
+    daemonError: null,
+  };
+  const storeReadInputs: unknown[] = [];
+  let openedLab = 0;
+  const g = globalThis as Record<string, any>, prior = g.__factoryClientRpc;
+  g.__factoryClientRpc = async (method: string, input: any) => {
+    if (method === "factory.snapshot") return { ok: true, view };
+    if (method === "factory.self.update.status") return { ok: true, current: "0.17.0", latest: "0.17.0", updateAvailable: false };
+    if (method === "factory.release.settings.read") return { ok: false, code: "stub", error: "stub" };
+    if (method === "factory.store_release.read") {
+      storeReadInputs.push(input);
+      return {
+        ok: true,
+        settings: {
+          project: "my-app",
+          projectRoot: "/snapshot-project",
+          mode: "auto-staging",
+          updatedAt: null,
+          pendingRequest: null,
+          vault: { ascKey: true, appleTeamId: false, gplayJson: true },
+          platforms: ["ios", "android"],
+          isMobile: true,
+          runner: {
+            installed: true,
+            enabled: true,
+            status: "running",
+            path: "/paseo/plugins/factory-release-lab/v1",
+            binPath: "/paseo/plugins/factory-release-lab/v1/bin/release-lab.mjs",
+          },
+          lastRun: null,
+          activeHole: null,
+        },
+      };
+    }
+    return { ok: true };
+  };
+  try {
+    await mountUnderNativeWindow(async (createRoot, container, act) => {
+      const root = createRoot(container);
+      const byId = (id: string) => container.querySelector(`[data-testid="${id}"]`) as HTMLElement;
+      try {
+        await act(() =>
+          root.render(
+            createElement(FactoryShell, {
+              theme: testTheme,
+              dir: "/snapshot-project",
+              layout: { compact: false, platform: "web" },
+              openReleaseLab: () => { openedLab++; },
+            }),
+          ),
+        );
+        await act(() => byId("factory-tab-project").click());
+        assert.deepEqual(storeReadInputs, [{ projectRoot: "/snapshot-project" }]);
+        assert.ok(byId("factory-panel-store-release"));
+        assert.match(byId("factory-panel-store-release-mode").textContent!, /auto-staging/);
+        assert.ok(byId("factory-panel-store-release-vault-warning"));
+        await act(() => (byId("factory-panel-store-release-open-lab") as HTMLButtonElement).click());
+        assert.equal(openedLab, 1);
+      } finally { await act(() => root.unmount()); }
+    });
+  } finally { g.__factoryClientRpc = prior; }
+});
+
+test("FactoryShell Store Release card switches modes (off -> on-request -> auto-staging), shows in-flight disabled/pending state, refreshes from storeReleaseRead, surfaces write errors, and stays read-only on mobile", async () => {
+  const { FactoryShell } = await load("plugin/client/factory/shell.tsx");
+  const { testTheme } = await import("./client-markup.ts");
+  const { createElement } = await import("react");
+  const view = {
+    ...modelPickerFixture,
+    machineLanes: modelPickerFixture.lanes,
+    hasProjectLaneOverride: false,
+    panel: modelPanelFixture(),
+    project: { root: "/snapshot-project", slug: "my-app", missingRoot: false },
+    kpis: { running: 0, needsHuman: 0 },
+    companionTools: [],
+    corePlugin: {},
+    vault: {},
+    skillHub: { skillPacksExplicit: false, projectPacks: [] },
+    daemonError: null,
+  };
+  let storeState = {
+    project: "my-app",
+    projectRoot: "/snapshot-project",
+    mode: "off" as "off" | "on-request" | "auto-staging",
+    updatedAt: null as string | null,
+    pendingRequest: null as { target: "staging" | "production"; platforms?: ("android" | "ios")[]; requestedAt: string } | null,
+    vault: { ascKey: true, appleTeamId: true, gplayJson: true },
+    platforms: ["android", "ios"] as ("android" | "ios" | "expo")[],
+    isMobile: true,
+    runner: {
+      installed: true,
+      enabled: true,
+      status: "running" as const,
+      path: "/paseo/plugins/factory-release-lab/v1",
+      binPath: "/paseo/plugins/factory-release-lab/v1/bin/release-lab.mjs",
+    },
+    lastRun: null,
+    activeHole: null,
+  };
+  let readCount = 0;
+  const writeCalls: Array<{ projectRoot?: string; mode: string }> = [];
+  let deferredWrite: { resolve: (val: unknown) => void; reject: (err: unknown) => void } | null = null;
+  let nextWriteFailure: { kind: "refusal"; code: string; error: string } | { kind: "throw"; message: string } | null = null;
+
+  const g = globalThis as Record<string, any>, prior = g.__factoryClientRpc;
+  g.__factoryClientRpc = async (method: string, input: any) => {
+    if (method === "factory.snapshot") return { ok: true, view };
+    if (method === "factory.self.update.status") return { ok: true, current: "0.17.0", latest: "0.17.0", updateAvailable: false };
+    if (method === "factory.release.settings.read") return { ok: false, code: "stub", error: "stub" };
+    if (method === "factory.store_release.read") {
+      readCount++;
+      return { ok: true, settings: structuredClone(storeState) };
+    }
+    if (method === "factory.store_release.write") {
+      writeCalls.push(input);
+      if (deferredWrite !== null) {
+        return new Promise((resolve, reject) => {
+          deferredWrite = { resolve, reject };
+        });
+      }
+      if (nextWriteFailure !== null) {
+        const failure = nextWriteFailure;
+        nextWriteFailure = null;
+        if (failure.kind === "throw") throw new Error(failure.message);
+        return { ok: false, code: failure.code, error: failure.error };
+      }
+      const dropped = storeState.mode === "on-request" && input.mode !== "on-request" && storeState.pendingRequest !== null;
+      storeState = {
+        ...storeState,
+        mode: input.mode,
+        updatedAt: "2026-11-20T18:00:00Z",
+        pendingRequest: input.mode === "on-request" ? { target: "staging", platforms: ["ios"], requestedAt: "2026-11-20T18:00:00Z" } : null,
+      };
+      return { ok: true, droppedPendingRequest: dropped, settings: structuredClone(storeState) };
+    }
+    return { ok: true };
+  };
+
+  try {
+    await mountUnderNativeWindow(async (createRoot, container, act) => {
+      const root = createRoot(container);
+      const byId = (id: string) => container.querySelector(`[data-testid="${id}"]`) as HTMLElement | null;
+      const chip = (mode: string) => byId(`factory-panel-store-release-mode-${mode}`) as HTMLButtonElement;
+      const click = (id: string) => act(() => { (byId(id) as HTMLElement).click(); });
+      try {
+        await act(() => root.render(createElement(FactoryShell, { theme: testTheme, dir: "/snapshot-project", layout: { compact: false, platform: "web" } })));
+        await click("factory-tab-project");
+        assert.equal(chip("off").getAttribute("data-selected"), "true");
+        const initialReads = readCount;
+
+        // 1. off -> on-request with deferred in-flight write: chips disabled, pending indicator shown, duplicate clicks ignored
+        let pendingResolve!: (val: unknown) => void;
+        deferredWrite = { resolve: () => {}, reject: () => {} };
+        g.__factoryClientRpc = ((orig) => async (method: string, input: any) => {
+          if (method === "factory.store_release.write" && deferredWrite !== null) {
+            writeCalls.push(input);
+            return new Promise((resolve) => {
+              pendingResolve = resolve;
+            });
+          }
+          return orig(method, input);
+        })(g.__factoryClientRpc);
+
+        await act(async () => {
+          chip("on-request").click();
+        });
+        assert.equal(chip("off").disabled, true);
+        assert.equal(chip("on-request").disabled, true);
+        assert.equal(chip("auto-staging").disabled, true);
+        assert.match(byId("factory-panel-store-release-pending")?.textContent ?? "", /Saving/i);
+        // Attempting another click while in-flight is ignored
+        await act(async () => {
+          chip("auto-staging").click();
+        });
+        assert.equal(writeCalls.length, 1);
+
+        deferredWrite = null;
+        storeState = {
+          ...storeState,
+          mode: "on-request",
+          updatedAt: "2026-11-20T18:01:00Z",
+          pendingRequest: { target: "staging", platforms: ["ios"], requestedAt: "2026-11-20T18:01:00Z" },
+        };
+        await act(async () => {
+          pendingResolve({ ok: true, droppedPendingRequest: false, settings: structuredClone(storeState) });
+        });
+        assert.equal(chip("on-request").getAttribute("data-selected"), "true");
+        assert.equal(chip("on-request").disabled, false);
+        assert.equal(byId("factory-panel-store-release-pending"), null);
+        assert.ok(readCount > initialReads, "refreshes card state via storeReleaseRead after write");
+        assert.match(byId("factory-panel-store-release-feedback")?.textContent ?? "", /Store release mode set to on-request\./);
+
+        // 2. on-request -> auto-staging drops pending request and refreshes from server truth
+        const readsBeforeAuto = readCount;
+        await click("factory-panel-store-release-mode-auto-staging");
+        assert.equal(chip("auto-staging").getAttribute("data-selected"), "true");
+        assert.ok(readCount > readsBeforeAuto, "refreshes via storeReleaseRead after auto-staging switch");
+        assert.doesNotMatch(byId("factory-panel-store-release-mode")?.textContent ?? "", /Pending request:/);
+        assert.match(byId("factory-panel-store-release-feedback")?.textContent ?? "", /auto-staging.*Pending Store release request was dropped/i);
+
+        // 3. seat-cannot-grant refusal keeps displayed mode unchanged and surfaces error feedback
+        nextWriteFailure = {
+          kind: "refusal",
+          code: "seat-cannot-grant",
+          error: "Seat lead cannot change Store release settings; Store release mode is Owner-only.",
+        };
+        await click("factory-panel-store-release-mode-off");
+        assert.equal(chip("auto-staging").getAttribute("data-selected"), "true", "refused write leaves mode unchanged");
+        assert.match(byId("factory-panel-store-release-feedback")?.textContent ?? "", /seat|Owner-only/i);
+
+        // 4. RPC rejection surfaces thrown error message and re-enables chips
+        nextWriteFailure = { kind: "throw", message: "Daemon connection lost" };
+        await click("factory-panel-store-release-mode-off");
+        assert.equal(chip("auto-staging").getAttribute("data-selected"), "true");
+        assert.equal(chip("off").disabled, false);
+        assert.match(byId("factory-panel-store-release-feedback")?.textContent ?? "", /Daemon connection lost/);
+      } finally { await act(() => root.unmount()); }
+    });
+
+    // 5. Mobile host renders Store Release strictly read-only with zero buttons
+    await mountUnderNativeWindow(async (createRoot, container, act) => {
+      const root = createRoot(container);
+      const writesBefore = writeCalls.length;
+      try {
+        await act(() => root.render(createElement(FactoryShell, { theme: testTheme, dir: "/snapshot-project", layout: { compact: true, platform: "ios" } })));
+        await act(() => { (container.querySelector('[data-testid="factory-tab-project"]') as HTMLElement).click(); });
+        const card = container.querySelector('[data-testid="factory-panel-store-release"]')!;
+        assert.ok(card);
+        assert.equal(card.querySelectorAll("button").length, 0, "mobile Store Release card has zero write buttons");
+        assert.equal(writeCalls.length, writesBefore);
       } finally { await act(() => root.unmount()); }
     });
   } finally { g.__factoryClientRpc = prior; }

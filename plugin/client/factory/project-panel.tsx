@@ -10,9 +10,11 @@ import { Modal, TextInput } from "@getpaseo/plugin/client/ui";
 import { createContext, useContext, useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { Pressable, Text, View } from "react-native";
-import type { GitHubPublishPreflightView, PanelNeedsYouItem, PanelOpenDesign, PanelPeerRow, PanelSeatRow, PanelSupervisorCandidateRow, PanelTone, PanelView, Lanes, ReleaseSettingsView } from "../../shared/view.ts";
+import type { GitHubPublishPreflightView, PanelNeedsYouItem, PanelOpenDesign, PanelPeerRow, PanelSeatRow, PanelSupervisorCandidateRow, PanelTone, PanelView, Lanes, ReleaseSettingsView, StoreReleaseView } from "../../shared/view.ts";
 import { GitHubReleaseCard } from "./github-release-card.tsx";
 import type { GitHubReleaseActions, ReleaseCardFeedback } from "./github-release-card.tsx";
+import { StoreReleaseCard } from "./store-release-card.tsx";
+import type { StoreReleaseActions, StoreReleaseCardFeedback } from "./store-release-card.tsx";
 import { Btn, RoleName, ToneBadge } from "../kit/pill.tsx";
 import { Tabs } from "../kit/tabs.tsx";
 import { RADIUS, SPACING, dispositionColour, factoryPalette, hoveredOf, statusBadgeColour, text, thinkingColour, tint } from "../kit/theme.ts";
@@ -872,6 +874,11 @@ export function ProjectPanel({
   releaseFeedback = null,
   releaseCopiedLogin = false,
   releaseActions,
+  storeRelease = null,
+  storeReleaseBusy = false,
+  storeReleaseFeedback = null,
+  storeReleaseActions,
+  onOpenReleaseLab,
   onTabChange,
 }: {
   /** The header's version + update control (ticket 11), mounted by the Shell; omitted, no control. */
@@ -882,6 +889,11 @@ export function ProjectPanel({
   releaseFeedback?: ReleaseCardFeedback | null;
   releaseCopiedLogin?: boolean;
   releaseActions?: GitHubReleaseActions;
+  storeRelease?: StoreReleaseView | null;
+  storeReleaseBusy?: boolean;
+  storeReleaseFeedback?: StoreReleaseCardFeedback | null;
+  storeReleaseActions?: StoreReleaseActions;
+  onOpenReleaseLab?: () => void;
   onTabChange?: (tab: ProjectPanelTab) => void;
   modelView?: LanePickerView;
   editorRequest?: SeatEditorRequest;
@@ -968,7 +980,7 @@ export function ProjectPanel({
             testID="factory-tab"
           />
           <View testID={`factory-tab-body-${tab}`}>
-            {tab === "team" ? boundary("Seats", seats) : tab === "models" ? boundary("Models", models) : <>{boundary("Project usage", panel.usage == null ? null : <ProjectUsage theme={theme} usage={panel.usage} mobile={mobile} />)}{boundary("Skill packs", packs)}{boundary("Open Design", design)}{release === null ? null : boundary("GitHub & Release", <GitHubReleaseCard theme={theme} release={release} publishPreflight={publishPreflight} mobile={mobile} now={now} busy={releaseBusy} feedback={releaseFeedback} copiedLogin={releaseCopiedLogin} {...(releaseActions === undefined ? {} : { actions: releaseActions })} />)}</>}
+            {tab === "team" ? boundary("Seats", seats) : tab === "models" ? boundary("Models", models) : <>{boundary("Project usage", panel.usage == null ? null : <ProjectUsage theme={theme} usage={panel.usage} mobile={mobile} />)}{boundary("Skill packs", packs)}{boundary("Open Design", design)}{release === null ? null : boundary("GitHub & Release", <GitHubReleaseCard theme={theme} release={release} publishPreflight={publishPreflight} mobile={mobile} now={now} busy={releaseBusy} feedback={releaseFeedback} copiedLogin={releaseCopiedLogin} {...(releaseActions === undefined ? {} : { actions: releaseActions })} />)}{storeRelease === null ? null : boundary("Store Release", <StoreReleaseCard theme={theme} storeRelease={storeRelease} mobile={mobile} now={now} busy={storeReleaseBusy} feedback={storeReleaseFeedback} {...(storeReleaseActions === undefined ? {} : { actions: storeReleaseActions })} {...(onOpenReleaseLab === undefined ? {} : { onOpenReleaseLab })} />)}</>}
           </View>
         </>
       ) : (
