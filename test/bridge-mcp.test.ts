@@ -7,7 +7,8 @@ import { join, resolve } from "node:path";
 import { CorrelationRegistry } from "../src/correlations.ts";
 import { createFactory } from "../plugin/server/core/factory.ts";
 import { ensureProjectRegistered, readProjectRegistration, writeProjectRegistration } from "../src/project.ts";
-import { setProjectReleaseSettings, setReleaseRequest, readReleaseRequest } from "../src/project-settings.ts";
+import { setProjectReleaseSettings, setReleaseRequest, readReleaseRequest, setProjectStoreReleaseSettings, readStoreReleaseRequest } from "../src/project-settings.ts";
+import { saveVaultConfig } from "../src/vault-config.ts";
 import { builtinVaultRunner } from "../src/vault-transport.ts";
 import type { VaultRunnerCall } from "../src/vault-transport.ts";
 import { readLeadMailbox } from "../src/mailbox.ts";
@@ -208,7 +209,7 @@ test("bridge.mjs exposes strictly role-scoped tools in tools/list and enforces r
       ],
     });
     const supTools = ((supResponses[1].result as { tools: Array<{ name: string }> }).tools).map((t) => t.name).sort();
-    assert.deepEqual(supTools, ["lead_close_task", "lead_retire_task", "supervisor_accept_task", "supervisor_dispatch_lead", "supervisor_end_cycle", "supervisor_read_ledger"]);
+    assert.deepEqual(supTools, ["lead_close_task", "lead_retire_task", "supervisor_accept_task", "supervisor_dispatch_lead", "supervisor_end_cycle", "supervisor_read_ledger", "supervisor_record_store_note"]);
     const supIllegalCall = supResponses[2].result as { isError?: boolean; content: Array<{ text: string }> };
     assert.equal(supIllegalCall.isError, true);
     assert.match(supIllegalCall.content[0].text, /not permitted|unauthorized|role/i);
@@ -224,7 +225,7 @@ test("bridge.mjs exposes strictly role-scoped tools in tools/list and enforces r
       ],
     });
     const leadTools = ((leadResponses[1].result as { tools: Array<{ name: string }> }).tools).map((t) => t.name).sort();
-    assert.deepEqual(leadTools, ["lead_close_task", "lead_create_worktree", "lead_dispatch_agent", "lead_merge", "lead_needs_human", "lead_read_ledger", "lead_release", "lead_remove_worktree", "lead_repoke_agent", "lead_report_to_supervisor", "lead_retire_task", "lead_set_contract", "lead_update_notebook", "lead_verify"]);
+    assert.deepEqual(leadTools, ["lead_close_task", "lead_create_worktree", "lead_dispatch_agent", "lead_merge", "lead_needs_human", "lead_read_ledger", "lead_record_store_note", "lead_release", "lead_remove_worktree", "lead_repoke_agent", "lead_report_to_supervisor", "lead_retire_task", "lead_set_contract", "lead_store_release", "lead_update_notebook", "lead_verify"]);
 
     // 3. Working Agent session
     const agentResponses = await runMcpSession({
@@ -2771,5 +2772,297 @@ test("supervisor_dispatch_lead carries optional release intent into release-requ
     registry.stop();
     rmSync(homeDir, { recursive: true, force: true });
     rmSync(repoDir, { recursive: true, force: true });
+  }
+});
+
+test("bridge.mjs: lead_store_release, supervisor_dispatch_lead({ storeRelease }), and store_record_note run end-to-end over Spool with Lead mailbox wakeups", async () => {
+  const homeDir = mkdtempSync(join(tmpdir(), "factory-bridge-store-home-"));
+  const repoDir = makeGitRepo();
+  mkdirSync(join(repoDir, "android", "app"), { recursive: true });
+  writeFileSync(join(repoDir, "android", "app", "build.gradle"), "android {}\n");
+  execFileSync("git", ["add", "."], { cwd: repoDir });
+  execFileSync("git", ["commit", "-m", "chore: android marker"], { cwd: repoDir });
+  const landedSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repoDir, encoding: "utf8" }).trim();
+
+  const stateDir = join(homeDir, "plugin-state", "paseo-factory");
+  const project = ensureProjectRegistered(stateDir, realpathSync(repoDir));
+  assert.ok(project.ok);
+
+  // Install fake release-lab plugin & Vault credentials
+  const pluginRoot = join(homeDir, "plugins", "factory-release-lab", "v1");
+  mkdirSync(join(pluginRoot, "bin"), { recursive: true });
+  mkdirSync(join(pluginRoot, "plugin"), { recursive: true });
+  writeFileSync(join(pluginRoot, "bin", "release-lab.mjs"), "#!/usr/bin/env node\n");
+  mkdirSync(join(homeDir, "vault-runtime", "secrets", "shared"), { recursive: true });
+  writeFileSync(join(homeDir, "vault-runtime", "secrets", "shared", "gplay-service-account.json"), "{}\n");
+  writeFileSync(join(homeDir, "vault-runtime", "env.json"), JSON.stringify({ GPLAY_KEY_PATH: join(homeDir, "vault-runtime", "secrets", "shared", "gplay-service-account.json") }));
+
+  // Configure bare Vault remote for store-memory sync
+  const bareVault = mkdtempSync(join(tmpdir(), "factory-bridge-store-vault-"));
+  execFileSync("git", ["init", "--bare", bareVault], { stdio: "pipe" });
+  const seedVault = mkdtempSync(join(tmpdir(), "factory-bridge-store-seed-"));
+  execFileSync("git", ["clone", bareVault, seedVault], { stdio: "pipe" });
+  execFileSync("git", ["-C", seedVault, "checkout", "-b", "main"], { stdio: "pipe" });
+  writeFileSync(join(seedVault, "README.md"), "# Vault\n");
+  execFileSync("git", ["-C", seedVault, "add", "."], { stdio: "pipe" });
+  execFileSync("git", ["-C", seedVault, "-c", "user.name=Test", "-c", "user.email=t@test.invalid", "commit", "-m", "init"], { stdio: "pipe" });
+  execFileSync("git", ["-C", seedVault, "push", "-u", "origin", "main"], { stdio: "pipe" });
+  rmSync(seedVault, { recursive: true, force: true });
+  saveVaultConfig(homeDir, { repo: bareVault, branch: "main", nodeId: "bridge-node" });
+
+  const sentToLead: string[] = [];
+  const daemon: any = {
+    agents: {
+      list: async () => ({
+        entries: [
+          {
+            agent: {
+              id: "lead-store-1",
+              provider: "claude-code",
+              title: "Lead",
+              status: "idle",
+              model: null,
+              labels: { role: "lead", seat: "lead", project: project.slug },
+              archivedAt: null,
+              requiresAttention: false,
+              attentionReason: null,
+              updatedAt: new Date().toISOString(),
+              cwd: realpathSync(repoDir),
+            },
+          },
+        ],
+      }),
+      create: async (opts: any) => ({ agent: { id: "lead-store-1", ...opts } }),
+      ref: () => ({
+        send: async (text: string) => { sentToLead.push(text); },
+        archive: async () => {},
+        timeline: { refetch: async () => ({ entries: [] }) },
+        cancel: async () => {},
+      }),
+    },
+    providers: { listAvailable: async () => ({ providers: [] }), listModels: async () => ({ models: [] }) },
+  };
+  const registry = createFactoryRegistry({ stateDir, root: createFactory({ stateDir }) });
+  const pf = registry.factoryForProject(project.slug);
+  pf.setContract({ task: "T-ST", workspace: realpathSync(repoDir), gate: "true", artifact: "README.md" });
+  pf.ledger.append({ event: "claim_reported", task: "T-ST", attempt: 1, sha: landedSha });
+  pf.ledger.append({ event: "gate_started", task: "T-ST", attempt: 1, cmd: "true" });
+  pf.ledger.append({ event: "gate_finished", task: "T-ST", attempt: 1, exit: 0, verdict: "green", note: "ok", sha: landedSha });
+  pf.ledger.append({ event: "report_written", task: "T-ST", attempt: 1, path: "report-T-ST-1.md" });
+  await pf.accept({ task: "T-ST", attempt: 1, accepted_by: "lead" });
+
+  const mailRuntime = createLeadMailRuntime({
+    factory: registry.root,
+    stateDir,
+    daemon,
+    ensureLead: async () => ({
+      ok: true,
+      agentId: "lead-store-1",
+      created: false,
+      projectRoot: realpathSync(repoDir),
+      slug: project.slug,
+    }),
+    retireLead: async () => ({ ok: true, agentId: "lead-store-1" }),
+  });
+
+  const runnerCalls: string[][] = [];
+  const spool = startSpool(stateDir, registry.root, {
+    pollMs: 25,
+    home: homeDir,
+    registry,
+    leadDispatch: (req) => mailRuntime.dispatchLead(req),
+    supervisorDispatch: (req) => mailRuntime.dispatchSupervisor(req),
+    listPlugins: async () => ({
+      ok: true,
+      plugins: [{ id: "factory-release-lab", path: join(pluginRoot, "plugin"), enabled: true, status: "running" }],
+    }),
+    storeReleaseNotify: async ({ slug, text }) => {
+      await mailRuntime.enqueueLeadMail(slug, { from: "system", kind: "report", text });
+      await mailRuntime.pumpProjectLead(slug);
+    },
+    storeReleaseRunner: async (call) => {
+      runnerCalls.push([...call.args]);
+      if (call.args[0] === "probe") {
+        return { exitCode: 0, stdout: JSON.stringify({ ok: true, platforms: ["android"], nextVersionCode: 12 }), stderr: "" };
+      }
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify({ id: "run-bridge-1", status: "completed", platforms: ["android"], phases: [] }),
+        stderr: "",
+      };
+    },
+  });
+
+  try {
+    const corr = new CorrelationRegistry(stateDir);
+    const leadCorr = corr.issue({ role: "lead", projectSlug: project.slug, projectRoot: realpathSync(repoDir) });
+    const supCorr = corr.issue({ role: "supervisor", projectSlug: project.slug, projectRoot: realpathSync(repoDir) });
+    const agentCorr = corr.issue({ role: "agent", projectSlug: project.slug, projectRoot: realpathSync(repoDir), task: "T-ST" });
+
+    // 1. Supervisor and Agent refused on lead_store_release
+    for (const roleCorr of [supCorr, agentCorr]) {
+      const res = await runMcpSession({
+        args: ["--correlation", roleCorr.correlationId, "--state-dir", stateDir],
+        cwd: repoDir,
+        requests: [{ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_store_release", arguments: { action: "probe" } } }],
+      });
+      assert.equal((res[0].result as { isError?: boolean }).isError, true);
+    }
+
+    // 2. Mode off -> store-release-not-granted
+    const offRes = await runMcpSession({
+      args: ["--correlation", leadCorr.correlationId, "--state-dir", stateDir],
+      cwd: repoDir,
+      requests: [{ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_store_release", arguments: { action: "probe" } } }],
+    });
+    assert.equal((offRes[0].result as { isError?: boolean }).isError, true);
+    assert.match((offRes[0].result as { content: Array<{ text: string }> }).content[0].text, /store-release-not-granted/);
+
+    // 3. Supervisor dispatch carries storeRelease intent into store-release-request.json without clobbering
+    setProjectStoreReleaseSettings(stateDir, project.slug, { mode: "on-request" });
+    const disp1 = await runMcpSession({
+      args: ["--correlation", supCorr.correlationId, "--state-dir", stateDir],
+      cwd: repoDir,
+      requests: [{
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: {
+          name: "supervisor_dispatch_lead",
+          arguments: {
+            message: "Stage Android build to Google Play internal.",
+            storeRelease: { target: "staging", platforms: ["android"] },
+          },
+        },
+      }],
+    });
+    assert.notEqual((disp1[0].result as { isError?: boolean }).isError, true);
+    const srReq = readStoreReleaseRequest(stateDir, project.slug);
+    assert.ok(srReq !== undefined);
+    assert.equal(srReq.target, "staging");
+    assert.deepEqual(srReq.platforms, ["android"]);
+
+    // Unrelated dispatch preserves pending store-release-request.json
+    const disp2 = await runMcpSession({
+      args: ["--correlation", supCorr.correlationId, "--state-dir", stateDir],
+      cwd: repoDir,
+      requests: [{
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "supervisor_dispatch_lead", arguments: { message: "Check status" } },
+      }],
+    });
+    assert.notEqual((disp2[0].result as { isError?: boolean }).isError, true);
+    assert.equal(readStoreReleaseRequest(stateDir, project.slug)?.target, "staging");
+
+    // Settle Lead's turn from dispatch mail (disp1 + disp2) so Lead is idle for async wakeup
+    await mailRuntime.onLeadTurnEnded({ agentId: "lead-store-1", outcome: { kind: "completed" }, timeline: [] });
+    await mailRuntime.onLeadTurnEnded({ agentId: "lead-store-1", outcome: { kind: "completed" }, timeline: [] });
+
+    // 4. Lead probe returns structured JSON and preserves on-request
+    const probeRes = await runMcpSession({
+      args: ["--correlation", leadCorr.correlationId, "--state-dir", stateDir],
+      cwd: repoDir,
+      requests: [{ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_store_release", arguments: { action: "probe" } } }],
+    });
+    assert.notEqual((probeRes[0].result as { isError?: boolean }).isError, true);
+    const probeParsed = JSON.parse((probeRes[0].result as { content: Array<{ text: string }> }).content[0].text);
+    assert.equal(probeParsed.ok, true);
+    assert.equal(probeParsed.action, "probe");
+    assert.equal(probeParsed.probe.nextVersionCode, 12);
+    assert.ok(readStoreReleaseRequest(stateDir, project.slug) !== undefined);
+
+    // 5. Lead stage runs asynchronously, consumes on-request, records Ledger, wakes Lead via mailbox
+    const stageRes = await runMcpSession({
+      args: ["--correlation", leadCorr.correlationId, "--state-dir", stateDir],
+      cwd: repoDir,
+      requests: [{ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_store_release", arguments: { action: "stage" } } }],
+    });
+    assert.notEqual((stageRes[0].result as { isError?: boolean }).isError, true);
+
+    const deadline = Date.now() + 3000;
+    while (
+      Date.now() < deadline &&
+      (!pf.ledger.events.some((e) => e.event === "store_release_completed") ||
+        !sentToLead.some((msg) => /Store release completed/.test(msg)))
+    ) {
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    assert.ok(pf.ledger.events.some((e) => e.event === "store_release_started"));
+    assert.ok(pf.ledger.events.some((e) => e.event === "store_release_completed" && e.runId === "run-bridge-1"));
+    assert.equal(readStoreReleaseRequest(stateDir, project.slug), undefined, "stage completion consumes on-request");
+    assert.ok(sentToLead.some((msg) => /Store release completed/.test(msg)), "Lead woken via mailbox on completion");
+
+    // 6. Supervisor records Store note (lessons <= 120 lines + app card); over-limit refused; Agent refused; repo stays git-clean
+    const noteBad = await runMcpSession({
+      args: ["--correlation", supCorr.correlationId, "--state-dir", stateDir],
+      cwd: repoDir,
+      requests: [{
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: {
+          name: "supervisor_record_store_note",
+          arguments: { target: "lessons", content: Array.from({ length: 121 }, (_, i) => `row ${i + 1}`).join("\n") },
+        },
+      }],
+    });
+    assert.equal((noteBad[0].result as { isError?: boolean }).isError, true);
+    assert.match((noteBad[0].result as { content: Array<{ text: string }> }).content[0].text, /store-notebook-limit-exceeded/);
+
+    const noteOk = await runMcpSession({
+      args: ["--correlation", supCorr.correlationId, "--state-dir", stateDir],
+      cwd: repoDir,
+      requests: [{
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: {
+          name: "supervisor_record_store_note",
+          arguments: { target: "lessons", content: "# Lessons\n| L-1 | android | Missing data safety | Fill form |\n" },
+        },
+      }],
+    });
+    assert.notEqual((noteOk[0].result as { isError?: boolean }).isError, true, (noteOk[0].result as { content: Array<{ text: string }> }).content[0].text);
+    assert.ok(existsSync(join(homeDir, "vault-runtime", "store-memory", "lessons.md")));
+
+    const appNoteOk = await runMcpSession({
+      args: ["--correlation", leadCorr.correlationId, "--state-dir", stateDir],
+      cwd: repoDir,
+      requests: [{
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: {
+          name: "lead_record_store_note",
+          arguments: { target: "app", appKey: "synth-bridge-app", content: "# Synth Bridge App\n- Staged Android internal\n" },
+        },
+      }],
+    });
+    assert.notEqual((appNoteOk[0].result as { isError?: boolean }).isError, true);
+    assert.ok(existsSync(join(homeDir, "vault-runtime", "store-memory", "apps", "synth-bridge-app.md")));
+
+    const agentNoteDenied = await runMcpSession({
+      args: ["--correlation", agentCorr.correlationId, "--state-dir", stateDir],
+      cwd: repoDir,
+      requests: [{
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: {
+          name: "supervisor_record_store_note",
+          arguments: { target: "lessons", content: "# Denied" },
+        },
+      }],
+    });
+    assert.equal((agentNoteDenied[0].result as { isError?: boolean }).isError, true);
+    assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: repoDir, encoding: "utf8" }).trim(), "");
+  } finally {
+    spool.stop();
+    registry.stop();
+    rmSync(homeDir, { recursive: true, force: true });
+    rmSync(repoDir, { recursive: true, force: true });
+    rmSync(bareVault, { recursive: true, force: true });
   }
 });

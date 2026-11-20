@@ -32,10 +32,12 @@ import type { UpgradeInput, UpgradeResult, UpgradePreflight } from "./core/histo
  */
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { homedir } from "node:os";
+import { basename, dirname, join, resolve } from "node:path";
 import { FactoryError } from "./core/errors.ts";
 import { usageIsValid } from "./core/ledger.ts";
-import { needsHumanEvidenceIsValid, NEEDS_HUMAN_REASONS, PEER_DISPOSITIONS, PEER_HANDOFF_OUTCOMES } from "./core/events.ts";
+import { needsHumanEvidenceIsValid, NEEDS_HUMAN_REASONS, PEER_DISPOSITIONS, PEER_HANDOFF_OUTCOMES, STORE_RELEASE_ACTIONS } from "./core/events.ts";
+import type { StoreReleaseAction } from "./core/events.ts";
 import { activeContractSnapshot, repokeCompletionFooter } from "./core/disposition-prompt.ts";
 import { handoffLines } from "./core/report.ts";
 import type { Factory } from "./core/factory.ts";
@@ -46,14 +48,17 @@ import type { LaneThinkingCatalogEntry, PeerThinkingLevel } from "./core/lanes.t
 import { listProjectRegistrations, readProjectRegistration, resolveProject, writeProjectRegistration } from "./core/project.ts";
 import { writeProjectNotebook } from "./core/preflight.ts";
 import { releaseProject } from "./release.ts";
+import { recordStoreNote, storeReleaseProject } from "./store-release.ts";
+import type { StoreReleasePlatformTarget, StoreReleaseRunner } from "./store-release.ts";
 import type { VaultRunner } from "./core/vault.ts";
+import { resolvePaseoHome } from "./paths.ts";
 import { allocateTaskWorktree } from "./core/mcp/worktrees.ts";
 import { ensureProjectRegistered, isProjectSeat, registerLaneSlug, resolveTargetProject, seatCannotRegisterMessage } from "./projects.ts";
 import type { FactoryRegistry, TargetProjectContext } from "./projects.ts";
 import { FACTORY_SEAT_PROVIDER_IDS, formatPeerAgentTitle, formatPeerWorkspaceTitle } from "./roles.ts";
 import { acceptanceSummary, archiveAcceptedTaskWorkspace, executeAcceptance } from "./commands.ts";
 import { boundTaskPeers, peerIsRunning } from "./task-peers.ts";
-import { stopAgentViaCli } from "./daemon-cli.ts";
+import { listDaemonPlugins, stopAgentViaCli } from "./daemon-cli.ts";
 import type { DaemonReply } from "./daemon-cli.ts";
 import { isPaseoWorkspaceArchivedOnDisk, restoreDaemonWorkspaceViaWs } from "./daemon-cli.ts";
 import type { SurfaceAgentSnapshot, SurfaceDaemonApi } from "./surface-rpc.ts";
@@ -282,6 +287,13 @@ export interface SpoolReleaseIntent {
   version?: string;
 }
 
+export interface SpoolStoreReleaseIntent {
+  target: "staging" | "production";
+  platforms?: StoreReleasePlatformTarget[];
+  resumeRunId?: string;
+  resolution?: unknown;
+}
+
 export interface SpoolLeadDispatchRequest {
   task?: string;
   id: string;
@@ -291,6 +303,7 @@ export interface SpoolLeadDispatchRequest {
   from?: "supervisor" | "owner" | "peer";
   message: string;
   release?: SpoolReleaseIntent;
+  storeRelease?: SpoolStoreReleaseIntent;
   submitter?: string;
   /** Caller seat stamped from `PASEO_FACTORY_SEAT` when present (v0.0.23, ADR 0015 §1). */
   seat?: SpoolSeat;
@@ -309,6 +322,7 @@ export interface SpoolSupervisorDispatchRequest {
   workspace?: string;
   message: string;
   release?: SpoolReleaseIntent;
+  storeRelease?: SpoolStoreReleaseIntent;
   submitter?: string;
   seat?: SpoolSeat;
 }
@@ -544,6 +558,32 @@ export interface SpoolReleaseRequest {
   seat?: SpoolSeat;
 }
 
+export interface SpoolStoreReleaseRequest {
+  id: string;
+  kind: "store-release";
+  action: StoreReleaseAction;
+  platforms?: StoreReleasePlatformTarget[];
+  runId?: string;
+  resolution?: unknown;
+  workspace?: string;
+  projectSlug?: string;
+  submitter?: string;
+  seat?: SpoolSeat;
+}
+
+export interface SpoolStoreNotebookWriteRequest {
+  id: string;
+  kind: "store-notebook-write";
+  target: "lessons" | "app";
+  content: string;
+  appKey?: string;
+  workspace?: string;
+  projectSlug?: string;
+  sync?: boolean;
+  submitter?: string;
+  seat?: SpoolSeat;
+}
+
 export type SpoolRequest =
   | ({ id: string; kind: "upgrade"; submitter?: string; seat?: SpoolSeat } & Omit<UpgradeInput, "controlId">)
   | { id: string; kind: "history_import" | "history_import_status"; sources?: HistoryImportSource[]; project?: string; submitter?: string; seat?: SpoolSeat }
@@ -566,7 +606,9 @@ export type SpoolRequest =
   | RepokeRequest
   | NeedsHumanRequest
   | NotebookRequest
-  | SpoolReleaseRequest;
+  | SpoolReleaseRequest
+  | SpoolStoreReleaseRequest
+  | SpoolStoreNotebookWriteRequest;
 
 /** Handles a synthetic ask — `createChoke(...).spoolAskHandler` is the implementation. */
 export type AskHandler = (request: AskRequest) => SpoolReply;
@@ -668,6 +710,12 @@ export type SpoolReply =
       branch?: string;
       url?: string | null;
       skipped?: string[];
+      action?: string;
+      runId?: string;
+      started?: boolean;
+      path?: string;
+      synced?: boolean;
+      pushed?: boolean;
     }
   | { id: string; ok: false; code: string; message: string; event?: LedgerEvent; step?: string };
 
@@ -916,6 +964,39 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
     const trimmed = typeof rawVersion === "string" ? rawVersion.trim() : "";
     return { ok: true, field: { release: trimmed !== "" ? { version: trimmed } : {} } };
   };
+  const parseStoreReleaseField = (raw: unknown): { ok: true; field: { storeRelease?: SpoolStoreReleaseIntent } } | { ok: false } => {
+    if (raw === undefined) return { ok: true, field: {} };
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return { ok: false };
+    const rec = raw as Record<string, unknown>;
+    const target = rec.target === undefined ? "staging" : rec.target;
+    if (target !== "staging" && target !== "production") return { ok: false };
+    let platforms: StoreReleasePlatformTarget[] | undefined;
+    if (rec.platforms !== undefined) {
+      if (
+        !Array.isArray(rec.platforms) ||
+        rec.platforms.length === 0 ||
+        !rec.platforms.every((p) => p === "android" || p === "ios")
+      ) {
+        return { ok: false };
+      }
+      platforms = [...new Set(rec.platforms)];
+    }
+    if (rec.resumeRunId !== undefined && (typeof rec.resumeRunId !== "string" || rec.resumeRunId.trim() === "")) {
+      return { ok: false };
+    }
+    const resumeRunId = typeof rec.resumeRunId === "string" ? rec.resumeRunId.trim() : undefined;
+    return {
+      ok: true,
+      field: {
+        storeRelease: {
+          target,
+          ...(platforms !== undefined ? { platforms } : {}),
+          ...(resumeRunId !== undefined ? { resumeRunId } : {}),
+          ...(rec.resolution !== undefined ? { resolution: rec.resolution } : {}),
+        },
+      },
+    };
+  };
   if (req.kind === "lead_dispatch") {
     // The v0.0.20 dispatch: the message is the payload (never blank); the
     // target Project rides either form — a registry slug or a workspace
@@ -927,6 +1008,8 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
     if (req.from !== undefined && req.from !== "supervisor" && req.from !== "owner" && !(req.from === "peer" && req.seat === "agent")) return undefined;
     const releaseParsed = parseReleaseField(req.release);
     if (!releaseParsed.ok) return undefined;
+    const storeReleaseParsed = parseStoreReleaseField(req.storeRelease);
+    if (!storeReleaseParsed.ok) return undefined;
     return {
       id: req.id,
       kind: "lead_dispatch",
@@ -936,6 +1019,7 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
       ...(req.from === undefined ? {} : { from: req.from }),
       message: req.message,
       ...releaseParsed.field,
+      ...storeReleaseParsed.field,
       ...submitterField,
       ...seatField,
     };
@@ -946,6 +1030,8 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
     if (req.workspace !== undefined && (typeof req.workspace !== "string" || req.workspace.trim() === "")) return undefined;
     const releaseParsed = req.kind === "supervisor_dispatch" ? parseReleaseField(req.release) : { ok: true as const, field: {} };
     if (!releaseParsed.ok) return undefined;
+    const storeReleaseParsed = req.kind === "supervisor_dispatch" ? parseStoreReleaseField(req.storeRelease) : { ok: true as const, field: {} };
+    if (!storeReleaseParsed.ok) return undefined;
     return {
       id: req.id,
       kind: req.kind,
@@ -953,6 +1039,7 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
       ...(req.workspace === undefined ? {} : { workspace: req.workspace }),
       message: req.message,
       ...releaseParsed.field,
+      ...storeReleaseParsed.field,
       ...submitterField,
       ...seatField,
     };
@@ -1038,6 +1125,55 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
       version: req.version.trim(),
       ...(req.workspace === undefined ? {} : { workspace: req.workspace }),
       ...(req.projectSlug === undefined ? {} : { projectSlug: req.projectSlug }),
+      ...submitterField,
+      ...seatField,
+    };
+  }
+  if (req.kind === "store-release") {
+    if (typeof req.action !== "string" || !(STORE_RELEASE_ACTIONS as readonly string[]).includes(req.action)) return undefined;
+    let platforms: StoreReleasePlatformTarget[] | undefined;
+    if (req.platforms !== undefined) {
+      if (
+        !Array.isArray(req.platforms) ||
+        req.platforms.length === 0 ||
+        !req.platforms.every((p) => p === "android" || p === "ios")
+      ) {
+        return undefined;
+      }
+      platforms = [...new Set(req.platforms)];
+    }
+    if (req.runId !== undefined && (typeof req.runId !== "string" || req.runId.trim() === "")) return undefined;
+    if (req.workspace !== undefined && (typeof req.workspace !== "string" || req.workspace.trim() === "")) return undefined;
+    if (req.projectSlug !== undefined && (typeof req.projectSlug !== "string" || req.projectSlug.trim() === "")) return undefined;
+    return {
+      id: req.id,
+      kind: "store-release",
+      action: req.action as StoreReleaseAction,
+      ...(platforms === undefined ? {} : { platforms }),
+      ...(typeof req.runId === "string" ? { runId: req.runId.trim() } : {}),
+      ...(req.resolution === undefined ? {} : { resolution: req.resolution }),
+      ...(req.workspace === undefined ? {} : { workspace: req.workspace }),
+      ...(req.projectSlug === undefined ? {} : { projectSlug: req.projectSlug }),
+      ...submitterField,
+      ...seatField,
+    };
+  }
+  if (req.kind === "store-notebook-write") {
+    if (req.target !== "lessons" && req.target !== "app") return undefined;
+    if (typeof req.content !== "string") return undefined;
+    if (req.appKey !== undefined && (typeof req.appKey !== "string" || req.appKey.trim() === "")) return undefined;
+    if (req.workspace !== undefined && (typeof req.workspace !== "string" || req.workspace.trim() === "")) return undefined;
+    if (req.projectSlug !== undefined && (typeof req.projectSlug !== "string" || req.projectSlug.trim() === "")) return undefined;
+    if (req.sync !== undefined && typeof req.sync !== "boolean") return undefined;
+    return {
+      id: req.id,
+      kind: "store-notebook-write",
+      target: req.target,
+      content: req.content,
+      ...(typeof req.appKey === "string" ? { appKey: req.appKey.trim() } : {}),
+      ...(req.workspace === undefined ? {} : { workspace: req.workspace }),
+      ...(req.projectSlug === undefined ? {} : { projectSlug: req.projectSlug }),
+      ...(req.sync === undefined ? {} : { sync: req.sync }),
       ...submitterField,
       ...seatField,
     };
@@ -1593,6 +1729,8 @@ const PROJECT_SCOPED_SPOOL_KINDS = new Set([
   "ask",
   "notebook",
   "release",
+  "store-release",
+  "store-notebook-write",
   "reset",
   "project_rotate",
   "delete",
@@ -1619,6 +1757,8 @@ function contextOfSpoolRequest(request: SpoolRequest): TargetProjectContext {
     case "notebook":
       return { project: request.projectSlug, workspace: request.projectRoot, submitter: request.submitter };
     case "release":
+    case "store-release":
+    case "store-notebook-write":
       return { project: request.projectSlug, workspace: request.workspace, submitter: request.submitter };
     case "ask":
       return { project: request.projectSlug, task: request.task, workspace: request.cwd, agentId: request.agent, submitter: request.submitter };
@@ -1703,7 +1843,7 @@ export async function handleSpoolRequest(
   const run = () => {
     const workspace = request.kind === "contract"
       ? request.workspace
-      : request.kind === "release"
+      : (request.kind === "release" || request.kind === "store-release")
         ? (request.workspace ?? (request.projectSlug ? readProjectRegistration(effective.stateDir, request.projectSlug)?.root : undefined))
         : (request.kind === "spawn" || request.kind === "respawn")
           ? effective.contractFor(request.task)?.workspace
@@ -1816,6 +1956,14 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
         message: "Seat supervisor cannot call lead_release; Lead owns Release within the Owner's Release mode.",
       };
     }
+    if (request.kind === "store-release" && effectiveSeat === "supervisor") {
+      return {
+        id: request.id,
+        ok: false,
+        code: "supervisor-cannot-store-release",
+        message: "Seat supervisor cannot call lead_store_release; Lead owns Store release within the Owner's Store release mode.",
+      };
+    }
 
     if (
       (request.kind === "contract" ||
@@ -1828,6 +1976,8 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
         request.kind === "close" ||
         request.kind === "notebook" ||
         request.kind === "release" ||
+        request.kind === "store-release" ||
+        request.kind === "store-notebook-write" ||
         (request.kind === "lead_dispatch" && request.from !== "peer") ||
         request.kind === "supervisor_dispatch" ||
         request.kind === "supervisor_report" ||
@@ -2030,6 +2180,7 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
           from: "supervisor",
           message: request.message,
           ...(request.release === undefined ? {} : { release: request.release }),
+          ...(request.storeRelease === undefined ? {} : { storeRelease: request.storeRelease }),
           ...(request.submitter === undefined ? {} : { submitter: request.submitter }),
           seat: "supervisor",
         });
@@ -2586,6 +2737,121 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
         skipped: res.skipped,
       };
     }
+    if (request.kind === "store-release") {
+      let projectSlug = request.projectSlug;
+      let projectRoot = request.workspace;
+      if (projectRoot !== undefined) {
+        const resolved = resolveProject(projectRoot);
+        if (!resolved.ok) {
+          return { id: request.id, ok: false, code: "unknown-project", message: `could not resolve Project root "${projectRoot}" — ${resolved.reason}` };
+        }
+        projectSlug = resolved.slug;
+        projectRoot = resolved.root;
+      } else if (projectSlug !== undefined) {
+        projectRoot = readProjectRegistration(factory.stateDir, projectSlug)?.root;
+      } else {
+        const regs = listProjectRegistrations(factory.stateDir);
+        if (regs.length === 1) {
+          projectSlug = regs[0]!.slug;
+          projectRoot = regs[0]!.root;
+        }
+      }
+      if (projectSlug === undefined || projectRoot === undefined || projectRoot.trim() === "") {
+        return {
+          id: request.id,
+          ok: false,
+          code: "unknown-project",
+          message: "store-release requires a registered Project workspace",
+        };
+      }
+      const paseoHome = resolveSpoolPaseoHome(factory.stateDir, home);
+      const res = await storeReleaseProject({
+        factory,
+        stateDir: factory.stateDir,
+        paseoHome,
+        projectSlug,
+        projectRoot,
+        action: request.action,
+        ...(request.platforms !== undefined ? { platforms: request.platforms } : {}),
+        ...(request.runId !== undefined ? { runId: request.runId } : {}),
+        ...(request.resolution !== undefined ? { resolution: request.resolution } : {}),
+        runner: deps.storeReleaseRunner,
+        vaultRunner: deps.vaultRunner,
+        listPlugins: deps.listPlugins,
+        notifyLead: deps.storeReleaseNotify,
+      });
+      if (!res.ok) {
+        return {
+          id: request.id,
+          ok: false,
+          code: res.code,
+          message: `${res.code}: ${res.message}`,
+        };
+      }
+      if (res.action === "probe") {
+        return {
+          id: request.id,
+          ok: true,
+          summary: `Store release probe (${res.mode}) — platforms=${res.detectedPlatforms.join(",") || "none"}`,
+          action: "probe",
+          data: res,
+        };
+      }
+      return {
+        id: request.id,
+        ok: true,
+        started: true,
+        action: res.action,
+        runId: res.runId,
+        summary: `Store release ${res.action} started (runId=${res.runId}, mode=${res.mode}, platforms=${res.platforms.join(",") || "default"})`,
+      };
+    }
+    if (request.kind === "store-notebook-write") {
+      let projectSlug = request.projectSlug;
+      let projectRoot = request.workspace;
+      if (projectRoot !== undefined) {
+        const resolved = resolveProject(projectRoot);
+        if (resolved.ok) {
+          projectSlug = resolved.slug;
+          projectRoot = resolved.root;
+        }
+      } else if (projectSlug !== undefined) {
+        projectRoot = readProjectRegistration(factory.stateDir, projectSlug)?.root;
+      } else {
+        const regs = listProjectRegistrations(factory.stateDir);
+        if (regs.length === 1) {
+          projectSlug = regs[0]!.slug;
+          projectRoot = regs[0]!.root;
+        }
+      }
+      const paseoHome = resolveSpoolPaseoHome(factory.stateDir, home);
+      const res = await recordStoreNote({
+        paseoHome,
+        target: request.target,
+        content: request.content,
+        ...(request.appKey !== undefined ? { appKey: request.appKey } : {}),
+        ...(projectRoot !== undefined ? { projectRoot } : {}),
+        ...(projectSlug !== undefined ? { projectSlug } : {}),
+        ...(request.sync !== undefined ? { sync: request.sync } : {}),
+        vaultRunner: deps.vaultRunner,
+      });
+      if (!res.ok) {
+        return {
+          id: request.id,
+          ok: false,
+          code: res.code,
+          message: `${res.code}: ${res.message}`,
+        };
+      }
+      return {
+        id: request.id,
+        ok: true,
+        path: res.path,
+        synced: res.synced,
+        pushed: res.pushed,
+        summary: `Store notebook (${res.target}${res.appKey ? `/${res.appKey}` : ""}) recorded at ${res.path}${res.synced ? " and synced to Private vault" : ""}${res.syncError ? ` (sync warning: ${res.syncError})` : ""}`,
+      };
+    }
     // The acceptance (v0.0.14): awaited — a worktree task's local landing
     // runs before the line records, and the reply carries the outcome. The
     // `--by` seat, when the request claims one, overrides the submitter
@@ -2613,6 +2879,14 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
       message: err instanceof Error ? err.message : String(err),
     };
   }
+}
+
+function resolveSpoolPaseoHome(stateDir: string, explicitHome?: string): string {
+  if (explicitHome !== undefined && explicitHome.trim() !== "") return explicitHome;
+  if (basename(stateDir) === "paseo-factory" && basename(dirname(stateDir)) === "plugin-state") {
+    return dirname(dirname(stateDir));
+  }
+  return resolvePaseoHome(process.env, homedir());
 }
 
 export interface SpoolOptions {
@@ -2676,6 +2950,12 @@ export interface SpoolOptions {
   registry?: FactoryRegistry;
   /** Injectable VaultRunner for release / gh / git calls (defaults to builtinVaultRunner). */
   vaultRunner?: VaultRunner;
+  /** Injectable StoreReleaseRunner for `factory-release-lab` calls (defaults to builtinStoreReleaseRunner). */
+  storeReleaseRunner?: StoreReleaseRunner;
+  /** Injectable daemon plugin lister for `factory-release-lab` discovery (defaults to listDaemonPlugins). */
+  listPlugins?: typeof listDaemonPlugins;
+  /** Asynchronous wakeup hook called when a background store release settles (`enqueueLeadMail` + `pumpProjectLead`). */
+  storeReleaseNotify?: (input: { slug: string; text: string }) => Promise<void> | void;
 }
 
 export type SpoolDeps = Omit<SpoolOptions, "onLog" | "pollMs">;
