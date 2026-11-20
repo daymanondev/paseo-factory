@@ -124,7 +124,6 @@ test("back returns to the previous step without losing anything the Owner entere
   state = reduceWizard(state, { type: "lane", lane: "lead", value: "claude/opus-4-8:high" });
   state = reduceWizard(state, { type: "next" });
   assert.equal(state.step, 4);
-  state = reduceWizard(state, { type: "directive", value: "Build the login page." });
   state = reduceWizard(state, { type: "design", design: { projectId: "owner-design", projectName: "Owner screens" } });
   state = reduceWizard(state, { type: "back" });
   state = reduceWizard(state, { type: "back" });
@@ -132,7 +131,7 @@ test("back returns to the previous step without losing anything the Owner entere
   assert.equal(state.step, 1);
   assert.equal(state.initGit, true);
   assert.equal(state.lanes.lead, "claude/opus-4-8:high");
-  assert.equal(state.directive, "Build the login page.");
+  assert.equal("directive" in state, false, "wizard UI state no longer carries directive");
   assert.deepEqual(state.design, { projectId: "owner-design", projectName: "Owner screens" });
   assert.equal(reduceWizard(state, { type: "back" }).step, 1, "there is no step before the Folder");
   let last = state;
@@ -156,21 +155,19 @@ test("a step may advance only when its own question is settled: the Folder must 
   assert.equal(canAdvance(3, readyInspection, false), true);
 });
 
-test("the commit payload carries the folder, the three models, the trimmed directive, the design id — and initGit only when the folder is not a repo", async () => {
+test("the commit payload carries the folder, the three models, the design id — and initGit only when the folder is not a repo (with no UI directive)", async () => {
   const { initialWizard, reduceWizard, commitInputOf } = await loadClientModule("plugin/client/factory/onboarding-state.ts");
   let state = initialWizard(MACHINE_LANES);
   state = reduceWizard(state, { type: "initGit", value: true });
-  state = reduceWizard(state, { type: "directive", value: "  Ship it.  \n" });
   state = reduceWizard(state, { type: "design", design: { projectId: "owner-design", projectName: "Owner screens" } });
   assert.deepEqual(commitInputOf(state, readyInspection, "/work/my-app"), {
     folder: "/work/my-app",
     models: { supervisor: "claude/opus-4-8", lead: "pi/zcode/glm-5.3", worker: "pi/zcode/glm-5.3" },
     openDesignProjectId: "owner-design",
-    directive: "Ship it.",
   }, "an existing repo never asks for git init");
   assert.deepEqual(commitInputOf(state, { ...readyInspection, gitRepo: false, hasCommits: false }, "/work/my-app").initGit, true);
   const bare = commitInputOf(initialWizard(MACHINE_LANES), readyInspection, "/work/my-app");
-  assert.equal("directive" in bare, false, "no directive, no first message");
+  assert.equal("directive" in bare, false, "no directive is emitted by the UI");
   assert.equal("openDesignProjectId" in bare, false);
   assert.equal("profileId" in bare, false, "no profile active, no profileId");
 });
@@ -231,6 +228,31 @@ test("02-profiles: selecting a profile prefills seats and sets profileId, editin
   assert.equal(state.profileModified, false);
   assert.deepEqual(state.lanes, { supervisor: MACHINE_LANES.supervisor, lead: MACHINE_LANES.lead, worker: MACHINE_LANES.worker });
   assert.equal("profileId" in commitInputOf(state, readyInspection, "/work/my-app"), false);
+});
+
+test("describeThrown distinguishes RPC timeouts, unreachable server errors, and generic handler errors honestly", async () => {
+  const { describeThrown } = await loadClientModule("plugin/client/factory/onboarding-state.ts");
+
+  // Timeouts -> honest Paseo-busy timeout message advising to check status or retry.
+  for (const msg of ["Plugin RPC timed out after 30000ms", "Request timeout waiting for daemon", "connect ETIMEDOUT 127.0.0.1:4100"]) {
+    const out = describeThrown(new Error(msg));
+    assert.match(out, /timed out/i, `timeout classification for: ${msg}`);
+    assert.match(out, /busy|check status|retry/i, `advises check status or retry for: ${msg}`);
+    assert.doesNotMatch(out, /Could not reach the Factory server/i, `must not misclassify timeout as unreachable: ${msg}`);
+  }
+
+  // Real connection/socket errors -> Factory server unreachable.
+  for (const msg of ["connect ECONNREFUSED 127.0.0.1:4100", "socket hang up", "WebSocket closed before response", "fetch failed: network error", "ENOTFOUND localhost", "client not connected"]) {
+    const out = describeThrown(new Error(msg));
+    assert.match(out, /Could not reach the Factory server/i, `connection classification for: ${msg}`);
+    assert.match(out, /check that Paseo is running/i, `advises checking Paseo for: ${msg}`);
+  }
+
+  // Other runtime/handler errors -> clean underlying reason without blaming Paseo being down.
+  const generic = describeThrown(new Error("ENOENT: no such directory /tmp/missing"));
+  assert.match(generic, /ENOENT: no such directory \/tmp\/missing/);
+  assert.doesNotMatch(generic, /Could not reach the Factory server/i);
+  assert.doesNotMatch(generic, /timed out/i);
 });
 
 // ---- the four steps, as an Owner sees them --------------------------------------------------
@@ -324,19 +346,17 @@ test("step 3 shows the Supervisor, Lead and Worker models prefilled from the mac
   assert.match(await render({ step: 3, inspection: readyInspection, lanes: { ...MACHINE_LANES, lead: "claude/opus-4-8:high" } }), /claude\/opus-4-8:high/, "a changed model shows");
 });
 
-test("step 4 offers an optional directive and an optional Open Design link, and Start — with Back, and no Next", async () => {
+test("step 4 omits First directive, offers an optional Open Design link and Start — with Back, and no Next — and explains direct Supervisor conversation", async () => {
   const html = await render({ step: 4, inspection: readyInspection });
   assert.match(html, /Step 4 of 4/);
-  assert.ok(hasHook(html, "factory-onboarding-directive"));
+  assert.equal(hasHook(html, "factory-onboarding-directive"), false, "First directive input is removed");
+  assert.doesNotMatch(html, /First directive/i);
   assert.ok(hasHook(html, "factory-onboarding-od"));
   assert.ok(hasHook(html, "factory-onboarding-start"));
   assert.ok(hasHook(html, "factory-onboarding-back"));
   assert.equal(hasHook(html, "factory-onboarding-next"), false);
-  assert.match(html, /optional/i);
-  assert.match(html, /Project panel/, "without a directive the wizard finishes on the Project panel");
+  assert.match(html, /sets up the Project and opens the Supervisor conversation directly/i);
 
-  const withDirective = await render({ step: 4, inspection: readyInspection, directive: "Build it" });
-  assert.match(withDirective, /first message/i);
   const linked = await render({ step: 4, inspection: readyInspection, design: { projectId: "d", projectName: "Owner screens" } });
   assert.match(linked, /Owner screens/);
 });
@@ -348,6 +368,93 @@ test("a failed Start says what went wrong and how to fix it, and Start stays ava
   assert.match(html, /then Start again/);
   assert.ok(hasHook(html, "factory-onboarding-start"));
   assert.equal(isDisabled(html, "factory-onboarding-start"), false);
+});
+
+test("step 4 checklist renders applicable-only phases with FACTORY_PALETTE status colours, elapsed seconds, >= 10s calm reassurance note, poll warning, and disabled Back/Start without Cancel", async () => {
+  const t0 = Date.parse("2026-11-20T12:00:00.000Z");
+
+  // Minimal config (existing Git repo, no Open Design): omits init-git and open-design.
+  const minimalRun = {
+    runId: "run-1",
+    folder: "/work/my-app",
+    status: "running",
+    startedAt: "2026-11-20T12:00:00.000Z",
+    updatedAt: "2026-11-20T12:00:12.000Z",
+    result: null,
+    error: null,
+    errorCode: null,
+    phases: [
+      { id: "checking", label: "Checking folder & preconditions", status: "done", startedAt: "2026-11-20T12:00:00.000Z", finishedAt: "2026-11-20T12:00:00.050Z", error: null },
+      { id: "register-and-lanes", label: "Registering Project & saving model lanes", status: "done", startedAt: "2026-11-20T12:00:00.050Z", finishedAt: "2026-11-20T12:00:01.000Z", error: null },
+      { id: "start-supervisor", label: "Starting Supervisor", status: "running", startedAt: "2026-11-20T12:00:01.000Z", finishedAt: null, error: null },
+    ],
+  };
+
+  // At 5s elapsed: elapsed counter shows 4s, no slow-note yet.
+  const under10s = await render({ step: 4, inspection: readyInspection, run: minimalRun, now: t0 + 5_000 });
+  assert.ok(hasHook(under10s, "factory-onboarding-run-checklist"));
+  assert.ok(hasHook(under10s, "factory-onboarding-phase-checking"));
+  assert.equal(hasHook(under10s, "factory-onboarding-phase-init-git"), false, "init-git omitted when not needed");
+  assert.ok(hasHook(under10s, "factory-onboarding-phase-register-and-lanes"));
+  assert.equal(hasHook(under10s, "factory-onboarding-phase-open-design"), false, "open-design omitted when not linked");
+  assert.ok(hasHook(under10s, "factory-onboarding-phase-start-supervisor"));
+  assert.ok(hasHook(under10s, "factory-onboarding-phase-open-workspace"), "client open-workspace phase appended");
+  assert.match(elementOf(under10s, "factory-onboarding-phase-start-supervisor"), /4s/);
+  assert.equal(hasHook(under10s, "factory-onboarding-slow-note"), false, "no slow note under 10s");
+  assert.ok(isDisabled(under10s, "factory-onboarding-back"), "Back disabled while running");
+  assert.ok(isDisabled(under10s, "factory-onboarding-start"), "Start disabled while running");
+  assert.equal(hasHook(under10s, "factory-onboarding-cancel"), false, "no Cancel button");
+  assert.doesNotMatch(under10s, />Cancel</i, "no Cancel button label");
+
+  // Status badge colours from FACTORY_PALETTE (light theme).
+  assert.ok(elementOf(under10s, "factory-onboarding-phase-status-checking").includes("#337e58"), "done uses palette.ok");
+  assert.ok(elementOf(under10s, "factory-onboarding-phase-status-start-supervisor").includes("#2f7899"), "running uses palette.lead");
+  assert.ok(elementOf(under10s, "factory-onboarding-phase-status-open-workspace").includes("#677176"), "pending uses palette.idle");
+
+  // At >= 10s elapsed (12s into start-supervisor) + pollWarning: renders calm neutral slow note and poll warning.
+  const over10s = await render({
+    step: 4,
+    inspection: readyInspection,
+    run: minimalRun,
+    now: t0 + 13_000,
+    pollWarning: "Temporary connection hiccup checking status — still retrying…",
+  });
+  assert.match(elementOf(over10s, "factory-onboarding-phase-start-supervisor"), /12s/);
+  assert.ok(hasHook(over10s, "factory-onboarding-slow-note"), "calm reassurance note renders at >= 10s");
+  assert.doesNotMatch(over10s.slice(over10s.indexOf("factory-onboarding-slow-note") - 120, over10s.indexOf("factory-onboarding-slow-note") + 200), /#c8253d|#fe5462/, "slow note is neutral, never styled as error");
+  assert.ok(hasHook(over10s, "factory-onboarding-poll-warning"));
+  assert.match(over10s, /Temporary connection hiccup/);
+
+  // Full config (init-git + open-design) + partial failure retains done/failed phases, exact error, and Retry + Back.
+  const failedRun = {
+    runId: "run-2",
+    folder: "/work/my-app",
+    status: "failed",
+    startedAt: "2026-11-20T12:00:00.000Z",
+    updatedAt: "2026-11-20T12:00:05.000Z",
+    result: null,
+    error: "Provider quota exceeded — check provider billing, then press Retry",
+    errorCode: "supervisor-start-failed",
+    phases: [
+      { id: "checking", label: "Checking folder & preconditions", status: "done", startedAt: "2026-11-20T12:00:00.000Z", finishedAt: "2026-11-20T12:00:00.050Z", error: null },
+      { id: "init-git", label: "Initialising Git repository", status: "done", startedAt: "2026-11-20T12:00:00.050Z", finishedAt: "2026-11-20T12:00:01.000Z", error: null },
+      { id: "register-and-lanes", label: "Registering Project & saving model lanes", status: "done", startedAt: "2026-11-20T12:00:01.000Z", finishedAt: "2026-11-20T12:00:01.500Z", error: null },
+      { id: "open-design", label: "Linking Open Design", status: "done", startedAt: "2026-11-20T12:00:01.500Z", finishedAt: "2026-11-20T12:00:02.000Z", error: null },
+      { id: "start-supervisor", label: "Starting Supervisor", status: "failed", startedAt: "2026-11-20T12:00:02.000Z", finishedAt: "2026-11-20T12:00:05.000Z", error: "Provider quota exceeded — check provider billing, then press Retry" },
+    ],
+  };
+  const failedHtml = await render({ step: 4, inspection: readyInspection, run: failedRun });
+  for (const id of ["checking", "init-git", "register-and-lanes", "open-design", "start-supervisor", "open-workspace"]) {
+    assert.ok(hasHook(failedHtml, `factory-onboarding-phase-${id}`), `phase ${id} renders`);
+  }
+  assert.ok(elementOf(failedHtml, "factory-onboarding-phase-status-init-git").includes("#337e58"));
+  assert.ok(elementOf(failedHtml, "factory-onboarding-phase-status-start-supervisor").includes("#c8253d"), "failed uses palette.bad");
+  assert.match(elementOf(failedHtml, "factory-onboarding-phase-start-supervisor"), /Provider quota exceeded/);
+  assert.ok(hasHook(failedHtml, "factory-onboarding-error"));
+  assert.match(elementOf(failedHtml, "factory-onboarding-error"), /Provider quota exceeded/);
+  assert.ok(hasHook(failedHtml, "factory-onboarding-run-retry"));
+  assert.equal(isDisabled(failedHtml, "factory-onboarding-run-retry"), false);
+  assert.equal(isDisabled(failedHtml, "factory-onboarding-back"), false);
 });
 
 test("01-badges: OnboardingWizard applies FACTORY_PALETTE to progress steps, Step 1–2 status badges, Step 3 seat/thinking pills, and Step 4 summary", async () => {
@@ -587,6 +694,350 @@ test("02-profiles: clicking a profile pill prefills seats, Machine defaults rese
         worker: "pi/zcode/glm-5.3:off",
       },
     });
+    await act(async () => {
+      root.unmount();
+    });
+  } finally {
+    g.window = saved.window;
+    g.document = saved.document;
+    g.IS_REACT_ACT_ENVIRONMENT = saved.IS_REACT_ACT_ENVIRONMENT;
+    dom.window.close();
+  }
+});
+
+test("Step 4 async run polls status, tolerates transient poll errors, supports client-only open-workspace Retry, and supports server failure Retry/Back", async () => {
+  const { OnboardingWizard } = await loadInteractiveWizard();
+  const { createElement, act } = await import("react");
+  const { createRoot } = await import("react-dom/client");
+  const { JSDOM } = (await import(["jsdom"].join(""))) as { JSDOM: new (html: string) => { window: any } };
+  const dom = new JSDOM("<!doctype html><div id=root></div>");
+  const g = globalThis as Record<string, unknown>;
+  const saved = { window: g.window, document: g.document, IS_REACT_ACT_ENVIRONMENT: g.IS_REACT_ACT_ENVIRONMENT };
+  g.window = dom.window;
+  g.document = dom.window.document;
+  g.IS_REACT_ACT_ENVIRONMENT = true;
+
+  const basePhases = [
+    { id: "checking", label: "Checking folder & preconditions", status: "done", startedAt: "2026-11-20T12:00:00.000Z", finishedAt: "2026-11-20T12:00:00.050Z", error: null },
+    { id: "register-and-lanes", label: "Registering Project & saving model lanes", status: "done", startedAt: "2026-11-20T12:00:00.050Z", finishedAt: "2026-11-20T12:00:00.200Z", error: null },
+  ];
+  const runningRun = {
+    runId: "run-live-1",
+    folder: "/work/my-app",
+    status: "running",
+    startedAt: "2026-11-20T12:00:00.000Z",
+    updatedAt: "2026-11-20T12:00:00.200Z",
+    result: null,
+    error: null,
+    errorCode: null,
+    phases: [
+      ...basePhases,
+      { id: "start-supervisor", label: "Starting Supervisor", status: "running", startedAt: "2026-11-20T12:00:00.200Z", finishedAt: null, error: null },
+    ],
+  };
+  const succeededRun = {
+    ...runningRun,
+    status: "succeeded",
+    updatedAt: "2026-11-20T12:00:01.000Z",
+    result: { agentId: "sup-1", projectRoot: "/work/my-app", slug: "my-app", bootstrapped: false, summary: "Started Supervisor" },
+    phases: [
+      ...basePhases,
+      { id: "start-supervisor", label: "Starting Supervisor", status: "done", startedAt: "2026-11-20T12:00:00.200Z", finishedAt: "2026-11-20T12:00:01.000Z", error: null },
+    ],
+  };
+
+  let startCalls = 0;
+  let statusCalls = 0;
+  let finalizeCalls = 0;
+  let finalizeShouldFail = true;
+  let releaseFourthPoll: (() => void) | null = null;
+  const fourthPollGate = new Promise<void>((resolve) => {
+    releaseFourthPoll = resolve;
+  });
+  const root = createRoot(dom.window.document.getElementById("root")!);
+  const q = (testId: string) => dom.window.document.querySelector(`[data-testid="${testId}"]`) as HTMLElement | null;
+
+  try {
+    // 1. Client-only open-workspace failure + transient poll error resilience + Retry only calls finalize.
+    await act(async () => {
+      root.render(
+        createElement(OnboardingWizard, {
+          theme,
+          view,
+          folder: "/work/my-app",
+          initialUi: { step: 4, inspection: readyInspection, pollIntervalMs: 10 },
+          actions: {
+            ...noopActions,
+            start: async () => {
+              startCalls += 1;
+              return { ok: true as const, run: runningRun };
+            },
+            status: async () => {
+              statusCalls += 1;
+              if (statusCalls <= 2) throw new Error("Plugin RPC timed out");
+              if (statusCalls === 3) return { ok: false as const, error: "transient blip" };
+              await fourthPollGate;
+              return { ok: true as const, run: succeededRun };
+            },
+            finalize: async () => {
+              finalizeCalls += 1;
+              if (finalizeShouldFail) return { ok: false as const, error: "Workspace creation failed: disk busy" };
+              return { ok: true as const };
+            },
+          },
+        }),
+      );
+    });
+
+    await act(async () => {
+      q("factory-onboarding-start")!.click();
+    });
+    assert.equal(startCalls, 1);
+    assert.ok(q("factory-onboarding-run-checklist"), "checklist renders immediately on async start");
+    assert.equal((q("factory-onboarding-back") as HTMLButtonElement).disabled, true);
+    assert.equal((q("factory-onboarding-start") as HTMLButtonElement).disabled, true);
+    assert.equal(q("factory-onboarding-cancel"), null);
+
+    // Wait for 2nd transient poll failure (still silent) and 3rd (shows poll warning).
+    for (let i = 0; i < 20 && statusCalls < 2; i++) {
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 8));
+      });
+    }
+    assert.ok(statusCalls >= 2);
+    if (statusCalls === 2) {
+      assert.equal(q("factory-onboarding-poll-warning"), null, "first 2 transient errors stay silent");
+    }
+    for (let i = 0; i < 20 && statusCalls < 3; i++) {
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 8));
+      });
+    }
+    assert.ok(statusCalls >= 3);
+    assert.ok(q("factory-onboarding-poll-warning"), "3 consecutive transient poll errors show non-fatal warning");
+    assert.equal(q("factory-onboarding-error"), null, "transient poll warning never marks checklist failed");
+
+    // Release 4th poll (succeeded) -> clears poll warning and runs finalize (which fails).
+    releaseFourthPoll!();
+    for (let i = 0; i < 20 && finalizeCalls === 0; i++) {
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 10));
+      });
+    }
+    assert.ok(statusCalls >= 4, `expected >= 4 status polls, got ${statusCalls}`);
+    assert.equal(finalizeCalls, 1, "finalize ran once after server run succeeded");
+    assert.equal(q("factory-onboarding-poll-warning"), null, "poll warning clears once status succeeds");
+    assert.equal(q("factory-onboarding-phase-status-start-supervisor")?.textContent, "done");
+    assert.equal(q("factory-onboarding-phase-status-open-workspace")?.textContent, "failed");
+    assert.match(q("factory-onboarding-error")?.textContent ?? "", /Workspace creation failed: disk busy/);
+    assert.ok(q("factory-onboarding-run-retry"), "Retry button renders on open-workspace failure");
+    assert.equal((q("factory-onboarding-back") as HTMLButtonElement).disabled, false);
+
+    // Clicking Retry retries ONLY finalize, never re-calling actions.start.
+    finalizeShouldFail = false;
+    await act(async () => {
+      q("factory-onboarding-run-retry")!.click();
+    });
+    assert.equal(startCalls, 1, "client-only retry never re-calls actions.start");
+    assert.equal(finalizeCalls, 2, "client-only retry calls actions.finalize again");
+    assert.equal(q("factory-onboarding-phase-status-open-workspace")?.textContent, "done");
+    assert.equal(q("factory-onboarding-error"), null);
+
+    // 2. Server failure retains checklist, Retry re-invokes start, Back returns to Step 3.
+    let serverStartCount = 0;
+    const failedServerRun = {
+      ...runningRun,
+      runId: "run-fail-1",
+      status: "failed",
+      error: "Supervisor creation failed: invalid key",
+      errorCode: "supervisor-start-failed",
+      phases: [
+        ...basePhases,
+        { id: "start-supervisor", label: "Starting Supervisor", status: "failed", startedAt: "2026-11-20T12:00:00.200Z", finishedAt: "2026-11-20T12:00:01.000Z", error: "Supervisor creation failed: invalid key" },
+      ],
+    };
+    await act(async () => {
+      root.render(
+        createElement(OnboardingWizard, {
+          key: "other-app",
+          theme,
+          view,
+          folder: "/work/other-app",
+          initialUi: { step: 4, inspection: { ...readyInspection, folder: "/work/other-app" } },
+          actions: {
+            ...noopActions,
+            start: async () => {
+              serverStartCount += 1;
+              return { ok: true as const, run: failedServerRun };
+            },
+          },
+        }),
+      );
+    });
+    await act(async () => {
+      q("factory-onboarding-start")!.click();
+    });
+    assert.equal(serverStartCount, 1);
+    assert.equal(q("factory-onboarding-phase-status-register-and-lanes")?.textContent, "done");
+    assert.equal(q("factory-onboarding-phase-status-start-supervisor")?.textContent, "failed");
+    assert.match(q("factory-onboarding-error")?.textContent ?? "", /Supervisor creation failed: invalid key/);
+
+    await act(async () => {
+      q("factory-onboarding-run-retry")!.click();
+    });
+    assert.equal(serverStartCount, 2, "Retry re-calls actions.start when server run failed");
+
+    await act(async () => {
+      q("factory-onboarding-back")!.click();
+    });
+    assert.match(q("factory-onboarding-progress")?.textContent ?? "", /Step 3 of 4/);
+
+    await act(async () => {
+      root.unmount();
+    });
+  } finally {
+    g.window = saved.window;
+    g.document = saved.document;
+    g.IS_REACT_ACT_ENVIRONMENT = saved.IS_REACT_ACT_ENVIRONMENT;
+    dom.window.close();
+  }
+});
+
+test("Step 4 live elapsed timer ticks every second and reveals neutral >= 10s reassurance note", async (t) => {
+  const { OnboardingWizard } = await loadInteractiveWizard();
+  const { createElement, act } = await import("react");
+  const { createRoot } = await import("react-dom/client");
+  const { JSDOM } = (await import(["jsdom"].join(""))) as { JSDOM: new (html: string) => { window: any } };
+  const dom = new JSDOM("<!doctype html><div id=root></div>");
+  const g = globalThis as Record<string, unknown>;
+  const saved = { window: g.window, document: g.document, IS_REACT_ACT_ENVIRONMENT: g.IS_REACT_ACT_ENVIRONMENT };
+  g.window = dom.window;
+  g.document = dom.window.document;
+  g.IS_REACT_ACT_ENVIRONMENT = true;
+
+  const baseNow = Date.parse("2026-11-20T12:00:00.000Z");
+  t.mock.timers.enable({ apis: ["Date", "setInterval"], now: baseNow });
+
+  const runningRun = {
+    runId: "run-timer-1",
+    folder: "/work/my-app",
+    status: "running",
+    startedAt: "2026-11-20T12:00:00.000Z",
+    updatedAt: "2026-11-20T12:00:00.000Z",
+    result: null,
+    error: null,
+    errorCode: null,
+    phases: [
+      { id: "checking", label: "Checking folder & preconditions", status: "done", startedAt: "2026-11-20T12:00:00.000Z", finishedAt: "2026-11-20T12:00:00.000Z", error: null },
+      { id: "start-supervisor", label: "Starting Supervisor", status: "running", startedAt: "2026-11-20T12:00:00.000Z", finishedAt: null, error: null },
+    ],
+  };
+
+  const root = createRoot(dom.window.document.getElementById("root")!);
+  const q = (testId: string) => dom.window.document.querySelector(`[data-testid="${testId}"]`) as HTMLElement | null;
+
+  try {
+    await act(async () => {
+      root.render(
+        createElement(OnboardingWizard, {
+          theme,
+          view,
+          folder: "/work/my-app",
+          initialUi: { step: 4, inspection: readyInspection, run: runningRun },
+          actions: noopActions,
+        }),
+      );
+    });
+    assert.equal(q("factory-onboarding-phase-elapsed-start-supervisor")?.textContent, "0s");
+    assert.equal(q("factory-onboarding-slow-note"), null);
+
+    await act(async () => {
+      t.mock.timers.tick(3_000);
+    });
+    assert.equal(q("factory-onboarding-phase-elapsed-start-supervisor")?.textContent, "3s");
+    assert.equal(q("factory-onboarding-slow-note"), null);
+
+    await act(async () => {
+      t.mock.timers.tick(7_000);
+    });
+    assert.equal(q("factory-onboarding-phase-elapsed-start-supervisor")?.textContent, "10s");
+    assert.ok(q("factory-onboarding-slow-note"), "calm reassurance note appears at 10s");
+
+    await act(async () => {
+      root.unmount();
+    });
+  } finally {
+    t.mock.timers.reset();
+    g.window = saved.window;
+    g.document = saved.document;
+    g.IS_REACT_ACT_ENVIRONMENT = saved.IS_REACT_ACT_ENVIRONMENT;
+    dom.window.close();
+  }
+});
+
+test("OnboardingWizard surfaces honest timeout vs connection error messages when inspect or start throws", async () => {
+  const { OnboardingWizard } = await loadInteractiveWizard();
+  const { createElement, act } = await import("react");
+  const { createRoot } = await import("react-dom/client");
+  const { JSDOM } = (await import(["jsdom"].join(""))) as { JSDOM: new (html: string) => { window: any } };
+  const dom = new JSDOM("<!doctype html><div id=root></div>");
+  const g = globalThis as Record<string, unknown>;
+  const saved = { window: g.window, document: g.document, IS_REACT_ACT_ENVIRONMENT: g.IS_REACT_ACT_ENVIRONMENT };
+  g.window = dom.window;
+  g.document = dom.window.document;
+  g.IS_REACT_ACT_ENVIRONMENT = true;
+
+  const root = createRoot(dom.window.document.getElementById("root")!);
+  const q = (testId: string) => dom.window.document.querySelector(`[data-testid="${testId}"]`) as HTMLElement | null;
+
+  try {
+    // 1. Inspect throws RPC timeout -> honest Paseo-busy timeout message.
+    await act(async () => {
+      root.render(
+        createElement(OnboardingWizard, {
+          theme,
+          view,
+          folder: "/work/timeout-app",
+          actions: {
+            ...noopActions,
+            inspect: async () => {
+              throw new Error("Plugin RPC timed out");
+            },
+          },
+        }),
+      );
+    });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 10));
+    });
+    const inspectMsg = q("factory-onboarding-error")?.textContent ?? "";
+    assert.match(inspectMsg, /Paseo was busy and the request timed out/i);
+    assert.doesNotMatch(inspectMsg, /Could not reach the Factory server/i);
+
+    // 2. Start throws ECONNREFUSED -> Factory server unreachable message.
+    await act(async () => {
+      root.render(
+        createElement(OnboardingWizard, {
+          key: "conn-app",
+          theme,
+          view,
+          folder: "/work/conn-app",
+          initialUi: { step: 4, inspection: readyInspection },
+          actions: {
+            ...noopActions,
+            start: async () => {
+              throw new Error("connect ECONNREFUSED 127.0.0.1:4100");
+            },
+          },
+        }),
+      );
+    });
+    await act(async () => {
+      q("factory-onboarding-start")!.click();
+    });
+    const startMsg = q("factory-onboarding-error")?.textContent ?? "";
+    assert.match(startMsg, /Could not reach the Factory server/i);
+
     await act(async () => {
       root.unmount();
     });
