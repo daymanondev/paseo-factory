@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-11-20
+
+**Server-tracked async Onboarding run with live Step 4 phase progress, honest error classification, and direct-to-chat Supervisor startup (ADR 0065).**
+
+### Added
+
+- **Async Onboarding run RPCs & server runner (`plugin/shared/rpc.ts`, `plugin/server/surface-rpc.ts`, `plugin/index.server.ts`):** Added `factory.onboarding.start` (`onboardingStart`) and `factory.onboarding.status` (`onboardingStatus`) alongside backward-compatible `factory.onboarding.commit` and `factory.supervisor.start`. Validates preconditions synchronously before any disk mutation, enforces per-canonical-folder single-flight, executes applicable phases (`checking`, optional `init-git`, `register-and-lanes`, optional `open-design`, `start-supervisor`) in the background, emits `onboarding.progress` events via `stateHub`, and enforces a 120-second `start-supervisor` watchdog ceiling (`supervisor-start-timeout`).
+- **Live Step 4 checklist & shared client tracker (`plugin/client/factory/onboarding-wizard.tsx`, `plugin/client/factory/onboarding-run-tracker.tsx`, `plugin/client/factory/onboarding-screen.tsx`, `plugin/client/factory/shell.tsx`):** Added an applicable-only Step 4 phase checklist (server phases plus client-side `open-workspace`) with `FACTORY_PALETTE` status badges, live elapsed-seconds counter, calm neutral `>= 10s` wait note, `factory.state.updates` subscription + `< 0.16.0` polling fallback, silent transient poll-error retry, automatic canonical-folder re-attach, partial-failure retention with idempotent Retry/Back (and client-only `open-workspace` Retry), and toast-only background completion when the Owner navigates away.
+
+### Changed
+
+- **Direct-to-chat `Start Supervisor` & directive input removal (`plugin/client/factory/onboarding-wizard.tsx`, `plugin/client/factory/onboarding-screen.tsx`, `plugin/client/factory/shell.tsx`, `plugin/client/factory/project-panel.tsx`):** Removed the `First directive (optional)` text inputs from both Onboarding Step 4 (`factory-onboarding-directive`) and the vacant `Supervisor` row on `ProjectPanel` (`factory-panel-directive`); pressing **Start Supervisor** now always opens the new `Supervisor` conversation directly when active.
+
+### Fixed
+
+- **Honest onboarding error classification (`plugin/client/factory/onboarding-state.ts`, `plugin/client/factory/onboarding-screen.tsx`):** Updated `describeThrown` across folder browsing, inspection, prerequisite install, and start so RPC timeouts report that Paseo was busy and advise checking status/retrying rather than falsely claiming the Factory server is unreachable.
+
 ## [0.16.2] - 2026-11-19
 
 ### Fixed
