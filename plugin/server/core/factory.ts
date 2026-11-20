@@ -1763,7 +1763,7 @@ export function createFactory(options: FactoryOptions): Factory {
           const cwd = (evt as { cwd: string }).cwd;
           if (matchesProjectRoot(cwd) || matchesProjectState(cwd)) return true;
         }
-        if ((evt.event === "retro_written" || evt.event === "release_published" || evt.event === "release_failed") && otherProjectTasks.size === 0) {
+        if ((evt.event === "retro_written" || evt.event === "release_published" || evt.event === "release_failed" || evt.event === "store_release_started" || evt.event === "store_release_paused" || evt.event === "store_release_completed" || evt.event === "store_release_failed") && otherProjectTasks.size === 0) {
           return true;
         }
         return false;
