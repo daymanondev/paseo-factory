@@ -1418,3 +1418,58 @@ test("FactoryShell GitHub Publish dispatches githubPublish with Public confirm +
     });
   } finally { g.__factoryClientRpc = prior; }
 });
+
+test("FactoryShell Start Supervisor on a vacant row dispatches factory.supervisor.start without directive and opens the Supervisor chat", async () => {
+  const { FactoryShell } = await load("plugin/client/factory/shell.tsx");
+  const { testTheme } = await import("./client-markup.ts");
+  const { createElement } = await import("react");
+  const view = {
+    ...modelPickerFixture,
+    machineLanes: modelPickerFixture.lanes,
+    hasProjectLaneOverride: false,
+    panel: modelPanelFixture(),
+    project: { root: "/snapshot-project", slug: "my-app", missingRoot: false },
+    kpis: { running: 0, needsHuman: 0 },
+    companionTools: [],
+    corePlugin: {},
+    vault: {},
+    skillHub: { skillPacksExplicit: false, projectPacks: [] },
+    daemonError: null,
+  };
+  const startCalls: unknown[] = [];
+  const opened: unknown[] = [];
+  const g = globalThis as Record<string, any>, prior = g.__factoryClientRpc;
+  g.__factoryClientRpc = async (method: string, input: any) => {
+    if (method === "factory.snapshot") return { ok: true, view };
+    if (method === "factory.self.update.status") return { ok: true, current: "0.14.0", latest: "0.14.0", updateAvailable: false };
+    if (method === "factory.supervisor.start") {
+      startCalls.push(input);
+      return { ok: true, agentId: "agent-sup-new", summary: "Supervisor started." };
+    }
+    return { ok: true };
+  };
+  try {
+    await mountUnderNativeWindow(async (createRoot, container, act) => {
+      const root = createRoot(container);
+      try {
+        await act(() =>
+          root.render(
+            createElement(FactoryShell, {
+              theme: testTheme,
+              dir: "/snapshot-project",
+              serverId: "srv-1",
+              layout: { compact: false, platform: "web" },
+              navigation: { openAgent: (target: unknown) => opened.push(target) },
+            }),
+          ),
+        );
+        assert.equal(container.querySelector('[data-testid="factory-panel-directive"]'), null);
+        const startButton = container.querySelector('[data-testid="factory-panel-start-supervisor"]') as HTMLButtonElement | null;
+        assert.ok(startButton);
+        await act(() => startButton.click());
+        assert.deepEqual(startCalls, [{ projectRoot: "/snapshot-project" }]);
+        assert.deepEqual(opened, [{ agentId: "agent-sup-new", serverId: "srv-1" }]);
+      } finally { await act(() => root.unmount()); }
+    });
+  } finally { g.__factoryClientRpc = prior; }
+});
