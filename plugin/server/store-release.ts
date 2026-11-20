@@ -10,7 +10,7 @@
  */
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { basename, join } from "node:path";
 import type {
   StoreReleaseAction,
@@ -27,7 +27,17 @@ import {
 } from "./core/project-settings.ts";
 import {
   detectMobilePlatforms,
+  discoverReleaseLabInstall,
+  isPlainRecord,
+  parseJsonObject,
+  parseRunnerFailure,
+  readJsonObject,
+  readStoreReleaseRunHoleInfo,
+  RELEASE_LAB_PLUGIN_ID,
+  trimDiagnosticTail,
+  type ReleaseLabCompanionStatus,
   type StoreReleasePlatform,
+  type StoreReleaseRunnerFailure,
 } from "./core/store-release-probe.ts";
 import {
   buildVaultPath,
@@ -44,7 +54,6 @@ import {
 } from "./core/vault.ts";
 import { readVaultManifestAt } from "./core/vault-materialization.ts";
 import { listDaemonPlugins, type DaemonPluginItem } from "./daemon-cli.ts";
-import { resolveManagedPluginDir } from "./paths.ts";
 import { checkRepoReleaseIntegrity } from "./release.ts";
 
 export type StoreReleasePlatformTarget = "android" | "ios";
@@ -135,9 +144,6 @@ export type RecordStoreNoteResult =
       message: string;
     };
 
-const RUNNER_PLUGIN_ID = "factory-release-lab";
-const MAX_DIAGNOSTIC_TAIL_CHARS = 2000;
-const MAX_DIAGNOSTIC_TAIL_LINES = 40;
 const DEFAULT_RUNNER_TIMEOUT_MS = 35 * 60 * 1000;
 const DEFAULT_RUNNER_MAX_BUFFER = 8 * 1024 * 1024;
 
@@ -176,139 +182,53 @@ export const builtinStoreReleaseRunner: StoreReleaseRunner = (call) =>
     );
   });
 
-function resolveRunnerBinFromPluginDir(pluginDir: string): string | null {
-  const candidates = [
-    join(pluginDir, "bin", "release-lab.mjs"),
-    join(pluginDir, "..", "bin", "release-lab.mjs"),
-  ];
-  return candidates.find((candidate) => existsSync(candidate)) ?? null;
-}
-
-function scanManagedReleaseLabDirs(paseoHome: string): string | null {
-  const managedRoot = join(paseoHome, "plugins", RUNNER_PLUGIN_ID);
-  const direct = resolveRunnerBinFromPluginDir(managedRoot);
-  if (direct !== null) return direct;
-
-  let entries;
-  try {
-    entries = readdirSync(managedRoot, { withFileTypes: true });
-  } catch {
-    return null;
-  }
-  const ranked: Array<{ binPath: string; mtime: number }> = [];
-  for (const entry of entries) {
-    if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
-    const versionDir = join(managedRoot, entry.name);
-    for (const candidateDir of [join(versionDir, "plugin"), versionDir]) {
-      const binPath = resolveRunnerBinFromPluginDir(candidateDir);
-      if (binPath === null) continue;
-      try {
-        const mtime = Math.max(statSync(versionDir).mtimeMs, statSync(binPath).mtimeMs);
-        ranked.push({ binPath, mtime });
-        break;
-      } catch {
-        // skip unreadable candidate
-      }
-    }
-  }
-  if (ranked.length === 0) return null;
-  ranked.sort((a, b) => b.mtime - a.mtime);
-  return ranked[0]!.binPath;
-}
-
-function readConfigJsonPluginPath(paseoHome: string): string | null {
-  try {
-    const raw = JSON.parse(readFileSync(join(paseoHome, "config.json"), "utf8")) as {
-      plugins?: Record<string, { path?: unknown; enabled?: unknown }>;
-    };
-    const entry = raw?.plugins?.[RUNNER_PLUGIN_ID];
-    if (entry && entry.enabled !== false && typeof entry.path === "string" && entry.path.trim() !== "") {
-      return entry.path;
-    }
-  } catch {
-    // ignore missing or unreadable config.json
-  }
-  return null;
-}
-
-/**
- * Resolves `<binPath>` for `factory-release-lab` under `<paseoHome>/plugins/factory-release-lab/`,
- * checking `listDaemonPlugins`, `config.json`, and managed versioned subdirectories
- * (both `<pluginDir>/bin/release-lab.mjs` and `<pluginDir>/../bin/release-lab.mjs`).
- */
-export async function resolveStoreReleaseRunnerBin(
+/** Queries daemon plugin state and delegates to shared `discoverReleaseLabInstall` discovery. */
+export async function resolveReleaseLabWithDaemon(
   paseoHome: string,
   listPlugins: typeof listDaemonPlugins = listDaemonPlugins,
-): Promise<{ binPath: string } | null> {
+) {
   let listed: DaemonPluginItem | undefined;
   let daemonAnswered = false;
   try {
     const result = await listPlugins(paseoHome);
     if (result.ok) {
       daemonAnswered = true;
-      listed = result.plugins.find((plugin) => plugin.id === RUNNER_PLUGIN_ID);
+      listed = result.plugins.find((plugin) => plugin.id === RELEASE_LAB_PLUGIN_ID);
     }
   } catch {
     // fall back to filesystem discovery when daemon is offline
   }
 
-  if (daemonAnswered) {
-    if (listed === undefined || listed.enabled === false) return null;
-    const resolvedDir = resolveManagedPluginDir(paseoHome, listed.path, RUNNER_PLUGIN_ID);
-    const binPath = resolveRunnerBinFromPluginDir(resolvedDir);
-    return binPath !== null ? { binPath } : null;
-  }
-
-  const configPath = readConfigJsonPluginPath(paseoHome);
-  if (configPath !== null) {
-    const resolvedDir = resolveManagedPluginDir(paseoHome, configPath, RUNNER_PLUGIN_ID);
-    const binPath = resolveRunnerBinFromPluginDir(resolvedDir);
-    if (binPath !== null) return { binPath };
-  }
-
-  const scanned = scanManagedReleaseLabDirs(paseoHome);
-  return scanned !== null ? { binPath: scanned } : null;
+  return discoverReleaseLabInstall(paseoHome, {
+    daemonAnswered,
+    daemonEntry: listed
+      ? {
+          path: listed.path,
+          enabled: listed.enabled,
+          status: listed.status as ReleaseLabCompanionStatus,
+        }
+      : null,
+  });
 }
 
-function readJsonObject(path: string): Record<string, unknown> | null {
-  try {
-    const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
-    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
-      ? (parsed as Record<string, unknown>)
-      : null;
-  } catch {
-    return null;
-  }
-}
-
-function readRunHoleInfo(paseoHome: string, runId: string): { holeKind: string | null; platforms: StoreReleasePlatformTarget[] } {
-  const record = readJsonObject(join(paseoHome, "release-lab", "runs", `${runId}.json`));
-  if (record === null) return { holeKind: null, platforms: [] };
-  const platforms = Array.isArray(record.platforms)
-    ? record.platforms.filter((p): p is StoreReleasePlatformTarget => p === "android" || p === "ios")
-    : [];
-  if (record.status !== "paused-hole" || !Array.isArray(record.phases)) {
-    return { holeKind: null, platforms };
-  }
-  for (const rawPhase of record.phases) {
-    if (typeof rawPhase !== "object" || rawPhase === null || Array.isArray(rawPhase)) continue;
-    const phase = rawPhase as Record<string, unknown>;
-    const hole = typeof phase.hole === "object" && phase.hole !== null && !Array.isArray(phase.hole)
-      ? (phase.hole as Record<string, unknown>)
-      : null;
-    if (hole === null) continue;
-    if (phase.state !== "paused-hole" && hole.resumedAt !== undefined) continue;
-    if (typeof hole.kind === "string") return { holeKind: hole.kind, platforms };
-  }
-  return { holeKind: null, platforms };
+/**
+ * Resolves `<binPath>` for `factory-release-lab` under `<paseoHome>/plugins/factory-release-lab/`,
+ * checking `listDaemonPlugins`, `config.json`, and managed versioned subdirectories.
+ */
+export async function resolveStoreReleaseRunnerBin(
+  paseoHome: string,
+  listPlugins: typeof listDaemonPlugins = listDaemonPlugins,
+): Promise<{ binPath: string } | null> {
+  const install = await resolveReleaseLabWithDaemon(paseoHome, listPlugins);
+  if (!install.installed || !install.enabled || install.binPath === null) return null;
+  return { binPath: install.binPath };
 }
 
 function isApprovingResolution(resolution: unknown): boolean {
   if (resolution === undefined) return true;
-  if (typeof resolution === "object" && resolution !== null && !Array.isArray(resolution)) {
-    const rec = resolution as Record<string, unknown>;
-    if (rec.approved === true) return true;
-    if (rec.approved === false) return false;
+  if (isPlainRecord(resolution)) {
+    if (resolution.approved === true) return true;
+    if (resolution.approved === false) return false;
   }
   return false;
 }
@@ -343,39 +263,20 @@ function pendingRequestMatches(
   return true;
 }
 
-function trimDiagnosticTail(raw: string): string {
-  const trimmed = raw.trim();
-  if (trimmed === "") return "";
-  const lines = trimmed.split(/\r?\n/);
-  const tailLines = lines.length > MAX_DIAGNOSTIC_TAIL_LINES ? lines.slice(-MAX_DIAGNOSTIC_TAIL_LINES) : lines;
-  const joined = tailLines.join("\n");
-  return joined.length > MAX_DIAGNOSTIC_TAIL_CHARS ? joined.slice(-MAX_DIAGNOSTIC_TAIL_CHARS) : joined;
-}
-
-interface ParsedRunnerFailure {
-  failureClass: StoreReleaseFailureClass;
-  code: string;
-  message: string;
-  phase?: string;
-  platform?: string;
-  logTail?: string;
-  hint?: string;
-  upstreamIssuePath?: string;
-}
-
 interface ParsedRunnerSummary {
   id?: string;
+  playbook?: string;
   status?: string;
   platforms?: string[];
   error?: string | null;
-  failure?: ParsedRunnerFailure | null;
+  failure?: StoreReleaseRunnerFailure | null;
   phases?: Array<{
     id?: string;
     state?: string;
     output?: unknown;
     hole?: string;
     error?: string;
-    failure?: ParsedRunnerFailure;
+    failure?: StoreReleaseRunnerFailure;
   }>;
   pausedAtHole?: {
     phase?: string;
@@ -386,54 +287,11 @@ interface ParsedRunnerSummary {
   } | null;
 }
 
-function parseJsonSafe(raw: string): Record<string, unknown> | null {
-  const trimmed = raw.trim();
-  if (trimmed === "") return null;
-  try {
-    const parsed = JSON.parse(trimmed) as unknown;
-    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
-      ? (parsed as Record<string, unknown>)
-      : null;
-  } catch {
-    return null;
-  }
-}
-
-function parseFailureObject(raw: unknown): ParsedRunnerFailure | null {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
-  const rec = raw as Record<string, unknown>;
-  const fc = rec.failureClass;
-  const failureClass: StoreReleaseFailureClass =
-    fc === "app-repo" || fc === "tool-bug" || fc === "account-policy" ? fc : "tool-bug";
-  const code = typeof rec.code === "string" && rec.code.trim() !== "" ? rec.code.trim() : "runner-failed";
-  const message = typeof rec.message === "string" && rec.message.trim() !== "" ? rec.message.trim() : code;
-  return {
-    failureClass,
-    code,
-    message,
-    ...(typeof rec.phase === "string" ? { phase: rec.phase } : {}),
-    ...(typeof rec.platform === "string" ? { platform: rec.platform } : {}),
-    ...(typeof rec.logTail === "string" && rec.logTail.trim() !== "" ? { logTail: trimDiagnosticTail(rec.logTail) } : {}),
-    ...(typeof rec.hint === "string" && rec.hint.trim() !== "" ? { hint: rec.hint.trim() } : {}),
-    ...(typeof rec.upstreamIssuePath === "string" && rec.upstreamIssuePath.trim() !== ""
-      ? { upstreamIssuePath: rec.upstreamIssuePath.trim() }
-      : {}),
-  };
-}
-
-function extractCreatedAndroidKeystore(
-  summary: ParsedRunnerSummary | null,
-): { path: string; alias?: string } | null {
-  if (!summary || !Array.isArray(summary.phases)) return null;
-  const day0 = summary.phases.find((p) => p.id === "phase-2-day0-and-signing");
-  if (!day0 || typeof day0.output !== "object" || day0.output === null || Array.isArray(day0.output)) return null;
-  const output = day0.output as Record<string, unknown>;
-  const keystore =
-    typeof output.keystore === "object" && output.keystore !== null && !Array.isArray(output.keystore)
-      ? (output.keystore as Record<string, unknown>)
-      : null;
+function extractCreatedKeystoreFromContainer(container: unknown): { path: string; alias?: string } | null {
+  if (!isPlainRecord(container)) return null;
+  const keystore = isPlainRecord(container.keystore) ? container.keystore : null;
   if (keystore === null) return null;
-  const created = keystore.created === true || output.keystoreCreated === true;
+  const created = keystore.created === true || container.keystoreCreated === true;
   if (!created || typeof keystore.path !== "string" || keystore.path.trim() === "") return null;
   return {
     path: keystore.path.trim(),
@@ -441,18 +299,34 @@ function extractCreatedAndroidKeystore(
   };
 }
 
+function extractCreatedAndroidKeystore(
+  summary: ParsedRunnerSummary | null,
+): { path: string; alias?: string } | null {
+  if (!summary) return null;
+  // Day-0 `day0-store-init` pauses before phase-2 sets `phase.output`, emitting `keystore` in `pausedAtHole.payload`.
+  const fromHole = extractCreatedKeystoreFromContainer(summary.pausedAtHole?.payload);
+  if (fromHole !== null) return fromHole;
+  if (!Array.isArray(summary.phases)) return null;
+  const day0 = summary.phases.find((p) => p.id === "phase-2-day0-and-signing");
+  return extractCreatedKeystoreFromContainer(day0?.output);
+}
+
 function buildCliArgs(input: {
   action: StoreReleaseAction;
   projectRoot: string;
   projectSlug: string;
+  platforms?: StoreReleasePlatformTarget[];
   runId?: string;
   resolution?: unknown;
 }): string[] {
+  const explicitPlatforms =
+    input.platforms !== undefined && input.platforms.length > 0 ? [...new Set(input.platforms)] : [];
+  const platformsArgs = explicitPlatforms.length > 0 ? ["--platforms", explicitPlatforms.join(",")] : [];
   switch (input.action) {
     case "probe":
-      return ["probe", "--project", input.projectRoot];
+      return ["probe", "--project", input.projectRoot, ...platformsArgs];
     case "stage":
-      return ["run", "--playbook", "stage-release", "--project", input.projectRoot, "--slug", input.projectSlug];
+      return ["run", "--playbook", "stage-release", "--project", input.projectRoot, "--slug", input.projectSlug, ...platformsArgs];
     case "submit":
       return [
         "submit-production",
@@ -461,6 +335,7 @@ function buildCliArgs(input: {
         "--slug",
         input.projectSlug,
         ...(input.runId !== undefined ? ["--run", input.runId] : []),
+        ...platformsArgs,
         "--approve",
       ];
     case "resume":
@@ -473,63 +348,89 @@ function buildCliArgs(input: {
   }
 }
 
-export async function storeReleaseProject(input: StoreReleaseInput): Promise<StoreReleaseResult> {
-  const runner = input.runner ?? builtinStoreReleaseRunner;
-  const vaultRunner = input.vaultRunner ?? builtinVaultRunner;
+interface ValidatedStoreReleaseContext {
+  mode: StoreReleaseMode;
+  pendingRequest: StoreReleaseRequest | undefined;
+  runnerBin: { binPath: string };
+  detectedPlatforms: StoreReleasePlatform[];
+  effectivePlatforms: StoreReleasePlatformTarget[];
+  effectiveRunId: string | undefined;
+  effectiveResolution: unknown;
+  isFinalApprovalResume: boolean;
+  runHolePlaybook: string | null;
+}
 
-  const fail = (code: string, message: string): StoreReleaseResult => ({ ok: false, code, message });
+const failStoreRelease = (code: string, message: string): StoreReleaseResult => ({ ok: false, code, message });
 
-  // 1. Mode gate
+async function validateStoreReleasePreconditions(
+  input: StoreReleaseInput,
+  vaultRunner: VaultRunner,
+): Promise<{ ok: true; ctx: ValidatedStoreReleaseContext } | { ok: false; result: StoreReleaseResult }> {
+  // 1. Mode & authorization gates
   const settings = readStoreReleaseSettings(input.stateDir, input.projectSlug);
   if (settings.mode === "off") {
-    return fail(
-      "store-release-not-granted",
-      "Store release mode is off for this Project; the Owner must enable on-request or auto-staging in the Store Release card.",
-    );
+    return {
+      ok: false,
+      result: failStoreRelease(
+        "store-release-not-granted",
+        "Store release mode is off for this Project; the Owner must enable on-request or auto-staging in the Store Release card.",
+      ),
+    };
   }
 
   const pendingRequest = readStoreReleaseRequest(input.stateDir, input.projectSlug);
-  if (settings.mode === "on-request") {
-    if (pendingRequest === undefined || !pendingRequestMatches(pendingRequest, input)) {
-      return fail(
+  if (settings.mode === "on-request" && (pendingRequest === undefined || !pendingRequestMatches(pendingRequest, input))) {
+    return {
+      ok: false,
+      result: failStoreRelease(
         "no-store-release-intent",
         "Store release mode is on-request and there is no matching pending Store release request from the Owner.",
-      );
-    }
+      ),
+    };
   }
 
   const effectiveRunId = input.runId?.trim() || pendingRequest?.resumeRunId?.trim() || undefined;
   if (input.action === "resume" && effectiveRunId === undefined) {
-    return fail("missing-run-id", "resume requires `runId` (or a pending Store release request with `resumeRunId`).");
+    return {
+      ok: false,
+      result: failStoreRelease(
+        "missing-run-id",
+        "resume requires `runId` (or a pending Store release request with `resumeRunId`).",
+      ),
+    };
   }
   const effectiveResolution = input.resolution !== undefined ? input.resolution : pendingRequest?.resolution;
 
-  const runHoleInfo = effectiveRunId !== undefined ? readRunHoleInfo(input.paseoHome, effectiveRunId) : { holeKind: null, platforms: [] };
+  const runHoleInfo =
+    effectiveRunId !== undefined
+      ? readStoreReleaseRunHoleInfo(input.paseoHome, effectiveRunId)
+      : { holeKind: null, playbook: null, platforms: [] };
   const isFinalApprovalResume =
     input.action === "resume" &&
     (runHoleInfo.holeKind === "final-release-approval" ||
-      (runHoleInfo.holeKind === null &&
-        typeof effectiveResolution === "object" &&
-        effectiveResolution !== null &&
-        (effectiveResolution as Record<string, unknown>).approved === true)) &&
+      (runHoleInfo.holeKind === null && isPlainRecord(effectiveResolution) && effectiveResolution.approved === true)) &&
     isApprovingResolution(effectiveResolution);
 
-  if (input.action === "submit" || isFinalApprovalResume) {
-    if (pendingRequest?.target !== "production") {
-      return fail(
+  if ((input.action === "submit" || isFinalApprovalResume) && pendingRequest?.target !== "production") {
+    return {
+      ok: false,
+      result: failStoreRelease(
         "production-approval-required",
         "Production rollout / App Store submission requires explicit Owner production approval (Store release request target=production or final-release-approval Hole resolution).",
-      );
-    }
+      ),
+    };
   }
 
   // 2. Runner & Vault gate
   const runnerBin = await resolveStoreReleaseRunnerBin(input.paseoHome, input.listPlugins);
   if (runnerBin === null) {
-    return fail(
-      "runner-not-installed",
-      "factory-release-lab companion plugin is not installed or enabled under <paseoHome>/plugins/factory-release-lab/.",
-    );
+    return {
+      ok: false,
+      result: failStoreRelease(
+        "runner-not-installed",
+        "factory-release-lab companion plugin is not installed or enabled under <paseoHome>/plugins/factory-release-lab/.",
+      ),
+    };
   }
 
   const detectedPlatforms = detectMobilePlatforms(input.projectRoot);
@@ -547,10 +448,13 @@ export async function storeReleaseProject(input: StoreReleaseInput): Promise<Sto
 
   const missingCreds = missingVaultVariables(input.paseoHome, effectivePlatforms);
   if (missingCreds.length > 0) {
-    return fail(
-      "vault-credentials-missing",
-      `Missing Private vault store credentials: ${missingCreds.join(", ")}. Import them in Private vault before running Store release.`,
-    );
+    return {
+      ok: false,
+      result: failStoreRelease(
+        "vault-credentials-missing",
+        `Missing Private vault store credentials: ${missingCreds.join(", ")}. Import them in Private vault before running Store release.`,
+      ),
+    };
   }
 
   // 3. Repo integrity gate (for stage and submit; relaxed for read-only probe and resume)
@@ -561,9 +465,266 @@ export async function storeReleaseProject(input: StoreReleaseInput): Promise<Sto
       runner: vaultRunner,
     });
     if (!integrity.ok) {
-      return fail(integrity.code, integrity.message);
+      return { ok: false, result: failStoreRelease(integrity.code, integrity.message) };
     }
   }
+
+  return {
+    ok: true,
+    ctx: {
+      mode: settings.mode,
+      pendingRequest,
+      runnerBin,
+      detectedPlatforms,
+      effectivePlatforms,
+      effectiveRunId,
+      effectiveResolution,
+      isFinalApprovalResume,
+      runHolePlaybook: runHoleInfo.playbook,
+    },
+  };
+}
+
+async function runStoreReleaseProbe(
+  input: StoreReleaseInput,
+  ctx: ValidatedStoreReleaseContext,
+  runner: StoreReleaseRunner,
+  cliArgs: string[],
+  runnerEnv: Record<string, string>,
+): Promise<StoreReleaseResult> {
+  let out: StoreReleaseRunnerOutput;
+  try {
+    out = await runner({
+      binPath: ctx.runnerBin.binPath,
+      args: cliArgs,
+      cwd: input.projectRoot,
+      env: runnerEnv,
+    });
+  } catch (error) {
+    return failStoreRelease(
+      "runner-spawn-failed",
+      `failed to execute release-lab probe: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  if (out.exitCode !== 0) {
+    const errJson = parseJsonObject(out.stderr);
+    const parsedErr = parseRunnerFailure(errJson?.failure);
+    const detail = parsedErr?.message ?? (trimDiagnosticTail(out.stderr) || `release-lab probe exited with code ${out.exitCode}`);
+    return failStoreRelease(parsedErr?.code ?? "probe-failed", detail);
+  }
+  const probeJson = parseJsonObject(out.stdout) ?? { raw: out.stdout.trim() };
+  return {
+    ok: true,
+    action: "probe",
+    mode: ctx.mode,
+    vault: readVaultStoreReadiness(input.paseoHome),
+    detectedPlatforms: ctx.detectedPlatforms,
+    platforms: ctx.effectivePlatforms,
+    runner: { binPath: ctx.runnerBin.binPath },
+    probe: probeJson,
+  };
+}
+
+async function maybeWriteBackAndroidKeystore(
+  input: StoreReleaseInput,
+  stdoutObj: ParsedRunnerSummary | null,
+  vaultRunner: VaultRunner,
+): Promise<string | undefined> {
+  const createdKeystore = extractCreatedAndroidKeystore(stdoutObj);
+  if (createdKeystore === null || !existsSync(createdKeystore.path)) return undefined;
+  try {
+    const wb = await writeBackAndroidKeystore(input.paseoHome, {
+      keystorePath: createdKeystore.path,
+      projectRoot: input.projectRoot,
+      ...(createdKeystore.alias !== undefined ? { keyAlias: createdKeystore.alias } : {}),
+      runner: vaultRunner,
+    });
+    return wb.summary;
+  } catch (err) {
+    return `keystore write-back warning: ${err instanceof Error ? err.message : String(err)}`;
+  }
+}
+
+function shouldClearOnRequestCompletion(
+  ctx: ValidatedStoreReleaseContext,
+  action: Exclude<StoreReleaseAction, "probe">,
+  stdoutObj: ParsedRunnerSummary | null,
+): boolean {
+  if (ctx.mode !== "on-request") return false;
+  if (action === "submit") return true;
+  if (action === "stage") return ctx.pendingRequest?.target !== "production";
+  // For `resume`, consume immediately if not production-targeted, or if it completes final approval / production playbook.
+  if (ctx.pendingRequest?.target !== "production") return true;
+  if (ctx.isFinalApprovalResume) return true;
+  const playbook = stdoutObj?.playbook ?? ctx.runHolePlaybook;
+  return playbook === "submit-production" || playbook === "full-release";
+}
+
+async function settleStoreReleaseRun(params: {
+  input: StoreReleaseInput;
+  ctx: ValidatedStoreReleaseContext;
+  action: Exclude<StoreReleaseAction, "probe">;
+  trackingRunId: string;
+  runner: StoreReleaseRunner;
+  vaultRunner: VaultRunner;
+  cliArgs: string[];
+  runnerEnv: Record<string, string>;
+}): Promise<void> {
+  const { input, ctx, action, trackingRunId, runner, vaultRunner, cliArgs, runnerEnv } = params;
+  let out: StoreReleaseRunnerOutput;
+  try {
+    out = await runner({
+      binPath: ctx.runnerBin.binPath,
+      args: cliArgs,
+      cwd: input.projectRoot,
+      env: runnerEnv,
+    });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    await input.factory.history.runOperation(() => {
+      input.factory.ledger.append({
+        event: "store_release_failed",
+        runId: trackingRunId,
+        action,
+        failureClass: "tool-bug",
+        code: "runner-spawn-failed",
+        detail,
+      });
+    });
+    await input.notifyLead?.({
+      slug: input.projectSlug,
+      text: [
+        `[Store release failed] action=${action} runId=${trackingRunId} failureClass=tool-bug code=runner-spawn-failed`,
+        `Detail: ${detail}`,
+        `Policy: tool-bug — halt immediately, do NOT dispatch an app Peer to work around the runner, and report to Supervisor.`,
+      ].join("\n"),
+    });
+    return;
+  }
+
+  const stdoutObj = parseJsonObject(out.stdout) as ParsedRunnerSummary | null;
+  const stderrObj = parseJsonObject(out.stderr);
+  const settledRunId =
+    typeof stdoutObj?.id === "string" && stdoutObj.id.trim() !== "" ? stdoutObj.id.trim() : trackingRunId;
+  const settledPlatforms = Array.isArray(stdoutObj?.platforms)
+    ? stdoutObj.platforms.filter((p): p is string => typeof p === "string" && p.trim() !== "")
+    : ctx.effectivePlatforms;
+
+  // Day-0 Android keystore write-back on both `paused-hole` (day0-store-init) and `completed`
+  const keystoreWriteBackNote = await maybeWriteBackAndroidKeystore(input, stdoutObj, vaultRunner);
+
+  if (stdoutObj?.status === "paused-hole") {
+    const pausedHole = stdoutObj.pausedAtHole;
+    const holePhase =
+      (typeof pausedHole?.phase === "string" && pausedHole.phase.trim() !== "" ? pausedHole.phase.trim() : undefined) ??
+      stdoutObj.phases?.find((p) => p.state === "paused-hole")?.id ??
+      "unknown-phase";
+    const holeKind =
+      (typeof pausedHole?.kind === "string" && pausedHole.kind.trim() !== "" ? pausedHole.kind.trim() : undefined) ??
+      stdoutObj.phases?.find((p) => p.state === "paused-hole")?.hole ??
+      "unknown-hole";
+
+    await input.factory.history.runOperation(() => {
+      input.factory.ledger.append({
+        event: "store_release_paused",
+        runId: settledRunId,
+        holeKind,
+        phase: holePhase,
+      });
+    });
+
+    const holeSummaryLines = [
+      `[Store release paused at Hole] action=${action} runId=${settledRunId} phase=${holePhase} holeKind=${holeKind}`,
+      ...(pausedHole?.payload !== undefined ? [`Payload: ${JSON.stringify(pausedHole.payload)}`] : []),
+      ...(pausedHole?.resolutionSpec !== undefined ? [`Resolution spec: ${JSON.stringify(pausedHole.resolutionSpec)}`] : []),
+      ...(keystoreWriteBackNote ? [`Vault write-back: ${keystoreWriteBackNote}`] : []),
+      `Next: Report this Hole summary to Supervisor so the Owner can approve/resolve it (in Supervisor chat or Release Lab UI) and dispatch resume.`,
+    ];
+    await input.notifyLead?.({
+      slug: input.projectSlug,
+      text: holeSummaryLines.join("\n"),
+    });
+    return;
+  }
+
+  if (out.exitCode === 0 && (stdoutObj?.status === "completed" || stdoutObj === null)) {
+    const summary = `Store release ${action} completed (${settledPlatforms.join(", ") || "default"})`;
+    await input.factory.history.runOperation(() => {
+      if (shouldClearOnRequestCompletion(ctx, action, stdoutObj)) {
+        clearStoreReleaseRequest(input.stateDir, input.projectSlug);
+      }
+      input.factory.ledger.append({
+        event: "store_release_completed",
+        runId: settledRunId,
+        action,
+        platforms: settledPlatforms,
+        summary,
+      });
+    });
+    await input.notifyLead?.({
+      slug: input.projectSlug,
+      text: [
+        `[Store release completed] action=${action} runId=${settledRunId} platforms=${settledPlatforms.join(",") || "default"}`,
+        ...(keystoreWriteBackNote ? [`Vault write-back: ${keystoreWriteBackNote}`] : []),
+        `Next: Update per-app Store notebook card if appropriate and report completion to Supervisor.`,
+      ].join("\n"),
+    });
+    return;
+  }
+
+  // Failed outcome (either stdout run status="failed" or non-zero exit with stderr JSON / text)
+  const failure =
+    parseRunnerFailure(stdoutObj?.failure) ??
+    parseRunnerFailure(stdoutObj?.phases?.find((p) => p.failure)?.failure) ??
+    parseRunnerFailure(stderrObj?.failure);
+
+  const failureClass: StoreReleaseFailureClass = failure?.failureClass ?? "tool-bug";
+  const code = failure?.code ?? (out.exitCode !== 0 ? "runner-exited-nonzero" : "store-release-failed");
+  const detail =
+    failure?.message ??
+    (typeof stdoutObj?.error === "string" && stdoutObj.error.trim() !== "" ? stdoutObj.error.trim() : undefined) ??
+    (typeof stderrObj?.error === "string" && stderrObj.error.trim() !== "" ? stderrObj.error.trim() : undefined) ??
+    (trimDiagnosticTail(out.stderr) || `release-lab ${action} exited with code ${out.exitCode}`);
+  const upstreamIssuePath = failure?.upstreamIssuePath;
+  const diagnosticTail = failure?.logTail ?? trimDiagnosticTail(out.stderr || out.stdout);
+
+  await input.factory.history.runOperation(() => {
+    input.factory.ledger.append({
+      event: "store_release_failed",
+      runId: settledRunId,
+      action,
+      failureClass,
+      code,
+      detail,
+      ...(upstreamIssuePath !== undefined ? { upstreamIssuePath } : {}),
+    });
+  });
+
+  const routePolicy =
+    failureClass === "app-repo"
+      ? "Policy: app-repo — dispatch a bounded Peer repair wave (max 2 repair attempts per store release) through Gate before retrying."
+      : `Policy: ${failureClass} — halt immediately, do NOT dispatch an app Peer to work around the runner, and report directly to Supervisor.`;
+
+  await input.notifyLead?.({
+    slug: input.projectSlug,
+    text: [
+      `[Store release failed] action=${action} runId=${settledRunId} failureClass=${failureClass} code=${code}`,
+      `Detail: ${detail}`,
+      ...(upstreamIssuePath !== undefined ? [`Upstream issue: ${upstreamIssuePath}`] : []),
+      ...(diagnosticTail !== "" ? [`Diagnostic tail:\n${diagnosticTail}`] : []),
+      ...(keystoreWriteBackNote ? [`Vault write-back: ${keystoreWriteBackNote}`] : []),
+      routePolicy,
+    ].join("\n"),
+  });
+}
+
+export async function storeReleaseProject(input: StoreReleaseInput): Promise<StoreReleaseResult> {
+  const runner = input.runner ?? builtinStoreReleaseRunner;
+  const vaultRunner = input.vaultRunner ?? builtinVaultRunner;
+
+  const validated = await validateStoreReleasePreconditions(input, vaultRunner);
+  if (!validated.ok) return validated.result;
+  const ctx = validated.ctx;
 
   const runnerEnv: Record<string, string> = {
     PASEO_HOME: input.paseoHome,
@@ -573,220 +734,36 @@ export async function storeReleaseProject(input: StoreReleaseInput): Promise<Sto
     action: input.action,
     projectRoot: input.projectRoot,
     projectSlug: input.projectSlug,
-    runId: effectiveRunId,
-    resolution: effectiveResolution,
+    platforms: input.platforms,
+    runId: ctx.effectiveRunId,
+    resolution: ctx.effectiveResolution,
   });
 
-  // Fast synchronous path for `probe`
   if (input.action === "probe") {
-    let out: StoreReleaseRunnerOutput;
-    try {
-      out = await runner({
-        binPath: runnerBin.binPath,
-        args: cliArgs,
-        cwd: input.projectRoot,
-        env: runnerEnv,
-      });
-    } catch (error) {
-      return fail(
-        "runner-spawn-failed",
-        `failed to execute release-lab probe: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
-    if (out.exitCode !== 0) {
-      const errJson = parseJsonSafe(out.stderr);
-      const parsedErr = parseFailureObject(errJson?.failure);
-      const detail = parsedErr?.message ?? (trimDiagnosticTail(out.stderr) || `release-lab probe exited with code ${out.exitCode}`);
-      return fail(parsedErr?.code ?? "probe-failed", detail);
-    }
-    const probeJson = parseJsonSafe(out.stdout) ?? { raw: out.stdout.trim() };
-    return {
-      ok: true,
-      action: "probe",
-      mode: settings.mode,
-      vault: readVaultStoreReadiness(input.paseoHome),
-      detectedPlatforms,
-      platforms: effectivePlatforms,
-      runner: { binPath: runnerBin.binPath },
-      probe: probeJson,
-    };
+    return runStoreReleaseProbe(input, ctx, runner, cliArgs, runnerEnv);
   }
 
-  // Background asynchronous path for `stage`, `submit`, `resume`
   const action = input.action;
-  const trackingRunId = effectiveRunId ?? `store-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`;
+  const trackingRunId = ctx.effectiveRunId ?? `store-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`;
 
   input.factory.ledger.append({
     event: "store_release_started",
     runId: trackingRunId,
     action,
-    platforms: effectivePlatforms,
-    mode: settings.mode,
+    platforms: ctx.effectivePlatforms,
+    mode: ctx.mode,
   });
 
-  const settle = async (): Promise<void> => {
-    let out: StoreReleaseRunnerOutput;
-    try {
-      out = await runner({
-        binPath: runnerBin.binPath,
-        args: cliArgs,
-        cwd: input.projectRoot,
-        env: runnerEnv,
-      });
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      await input.factory.history.runOperation(() => {
-        input.factory.ledger.append({
-          event: "store_release_failed",
-          runId: trackingRunId,
-          action,
-          failureClass: "tool-bug",
-          code: "runner-spawn-failed",
-          detail,
-        });
-      });
-      await input.notifyLead?.({
-        slug: input.projectSlug,
-        text: [
-          `[Store release failed] action=${action} runId=${trackingRunId} failureClass=tool-bug code=runner-spawn-failed`,
-          `Detail: ${detail}`,
-          `Policy: tool-bug — halt immediately, do NOT dispatch an app Peer to work around the runner, and report to Supervisor.`,
-        ].join("\n"),
-      });
-      return;
-    }
-
-    const stdoutObj = parseJsonSafe(out.stdout) as ParsedRunnerSummary | null;
-    const stderrObj = parseJsonSafe(out.stderr);
-    const settledRunId =
-      typeof stdoutObj?.id === "string" && stdoutObj.id.trim() !== "" ? stdoutObj.id.trim() : trackingRunId;
-    const settledPlatforms = Array.isArray(stdoutObj?.platforms)
-      ? stdoutObj.platforms.filter((p): p is string => typeof p === "string" && p.trim() !== "")
-      : effectivePlatforms;
-
-    // Day-0 Android keystore write-back whenever phase-2 reports a newly created keystore
-    let keystoreWriteBackNote: string | undefined;
-    const createdKeystore = extractCreatedAndroidKeystore(stdoutObj);
-    if (createdKeystore !== null && existsSync(createdKeystore.path)) {
-      try {
-        const wb = await writeBackAndroidKeystore(input.paseoHome, {
-          keystorePath: createdKeystore.path,
-          projectRoot: input.projectRoot,
-          ...(createdKeystore.alias !== undefined ? { keyAlias: createdKeystore.alias } : {}),
-          runner: vaultRunner,
-        });
-        keystoreWriteBackNote = wb.summary;
-      } catch (err) {
-        keystoreWriteBackNote = `keystore write-back warning: ${err instanceof Error ? err.message : String(err)}`;
-      }
-    }
-
-    if (stdoutObj?.status === "paused-hole") {
-      const pausedHole = stdoutObj.pausedAtHole;
-      const holePhase =
-        (typeof pausedHole?.phase === "string" && pausedHole.phase.trim() !== "" ? pausedHole.phase.trim() : undefined) ??
-        stdoutObj.phases?.find((p) => p.state === "paused-hole")?.id ??
-        "unknown-phase";
-      const holeKind =
-        (typeof pausedHole?.kind === "string" && pausedHole.kind.trim() !== "" ? pausedHole.kind.trim() : undefined) ??
-        stdoutObj.phases?.find((p) => p.state === "paused-hole")?.hole ??
-        "unknown-hole";
-
-      await input.factory.history.runOperation(() => {
-        input.factory.ledger.append({
-          event: "store_release_paused",
-          runId: settledRunId,
-          holeKind,
-          phase: holePhase,
-        });
-      });
-
-      const holeSummaryLines = [
-        `[Store release paused at Hole] action=${action} runId=${settledRunId} phase=${holePhase} holeKind=${holeKind}`,
-        ...(pausedHole?.payload !== undefined ? [`Payload: ${JSON.stringify(pausedHole.payload)}`] : []),
-        ...(pausedHole?.resolutionSpec !== undefined ? [`Resolution spec: ${JSON.stringify(pausedHole.resolutionSpec)}`] : []),
-        ...(keystoreWriteBackNote ? [`Vault write-back: ${keystoreWriteBackNote}`] : []),
-        `Next: Report this Hole summary to Supervisor so the Owner can approve/resolve it (in Supervisor chat or Release Lab UI) and dispatch resume.`,
-      ];
-      await input.notifyLead?.({
-        slug: input.projectSlug,
-        text: holeSummaryLines.join("\n"),
-      });
-      return;
-    }
-
-    if (out.exitCode === 0 && (stdoutObj?.status === "completed" || stdoutObj === null)) {
-      const summary = `Store release ${action} completed (${settledPlatforms.join(", ") || "default"})`;
-      await input.factory.history.runOperation(() => {
-        if (settings.mode === "on-request") {
-          clearStoreReleaseRequest(input.stateDir, input.projectSlug);
-        }
-        input.factory.ledger.append({
-          event: "store_release_completed",
-          runId: settledRunId,
-          action,
-          platforms: settledPlatforms,
-          summary,
-        });
-      });
-      await input.notifyLead?.({
-        slug: input.projectSlug,
-        text: [
-          `[Store release completed] action=${action} runId=${settledRunId} platforms=${settledPlatforms.join(",") || "default"}`,
-          ...(keystoreWriteBackNote ? [`Vault write-back: ${keystoreWriteBackNote}`] : []),
-          `Next: Update per-app Store notebook card if appropriate and report completion to Supervisor.`,
-        ].join("\n"),
-      });
-      return;
-    }
-
-    // Failed outcome (either stdout run status="failed" or non-zero exit with stderr JSON / text)
-    const failure =
-      parseFailureObject(stdoutObj?.failure) ??
-      parseFailureObject(stdoutObj?.phases?.find((p) => p.failure)?.failure) ??
-      parseFailureObject(stderrObj?.failure);
-
-    const failureClass: StoreReleaseFailureClass = failure?.failureClass ?? "tool-bug";
-    const code = failure?.code ?? (out.exitCode !== 0 ? "runner-exited-nonzero" : "store-release-failed");
-    const detail =
-      failure?.message ??
-      (typeof stdoutObj?.error === "string" && stdoutObj.error.trim() !== "" ? stdoutObj.error.trim() : undefined) ??
-      (typeof stderrObj?.error === "string" && stderrObj.error.trim() !== "" ? stderrObj.error.trim() : undefined) ??
-      (trimDiagnosticTail(out.stderr) || `release-lab ${action} exited with code ${out.exitCode}`);
-    const upstreamIssuePath = failure?.upstreamIssuePath;
-    const diagnosticTail = failure?.logTail ?? trimDiagnosticTail(out.stderr || out.stdout);
-
-    await input.factory.history.runOperation(() => {
-      input.factory.ledger.append({
-        event: "store_release_failed",
-        runId: settledRunId,
-        action,
-        failureClass,
-        code,
-        detail,
-        ...(upstreamIssuePath !== undefined ? { upstreamIssuePath } : {}),
-      });
-    });
-
-    const routePolicy =
-      failureClass === "app-repo"
-        ? "Policy: app-repo — dispatch a bounded Peer repair wave (max 2 repair attempts per store release) through Gate before retrying."
-        : `Policy: ${failureClass} — halt immediately, do NOT dispatch an app Peer to work around the runner, and report directly to Supervisor.`;
-
-    await input.notifyLead?.({
-      slug: input.projectSlug,
-      text: [
-        `[Store release failed] action=${action} runId=${settledRunId} failureClass=${failureClass} code=${code}`,
-        `Detail: ${detail}`,
-        ...(upstreamIssuePath !== undefined ? [`Upstream issue: ${upstreamIssuePath}`] : []),
-        ...(diagnosticTail !== "" ? [`Diagnostic tail:\n${diagnosticTail}`] : []),
-        ...(keystoreWriteBackNote ? [`Vault write-back: ${keystoreWriteBackNote}`] : []),
-        routePolicy,
-      ].join("\n"),
-    });
-  };
-
-  const settled = settle().catch((err) => {
+  const settled = settleStoreReleaseRun({
+    input,
+    ctx,
+    action,
+    trackingRunId,
+    runner,
+    vaultRunner,
+    cliArgs,
+    runnerEnv,
+  }).catch((err) => {
     void input.notifyLead?.({
       slug: input.projectSlug,
       text: `[Store release internal error] action=${action} runId=${trackingRunId}: ${err instanceof Error ? err.message : String(err)}`,
@@ -798,9 +775,9 @@ export async function storeReleaseProject(input: StoreReleaseInput): Promise<Sto
     started: true,
     action,
     runId: trackingRunId,
-    mode: settings.mode,
-    platforms: effectivePlatforms,
-    runner: { binPath: runnerBin.binPath },
+    mode: ctx.mode,
+    platforms: ctx.effectivePlatforms,
+    runner: { binPath: ctx.runnerBin.binPath },
     settled,
   };
 }

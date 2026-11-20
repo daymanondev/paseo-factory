@@ -17,7 +17,7 @@ import type {
   StoreReleaseVaultReadiness,
   StoreReleaseView,
 } from "../../shared/view.ts";
-import { Btn, ChoiceChip, Pill } from "../kit/pill.tsx";
+import { Btn, ChoiceChip, formatRelativeAgo, Pill } from "../kit/pill.tsx";
 import { SPACING, RADIUS, text, tint } from "../kit/theme.ts";
 import type { Colour } from "../kit/theme.ts";
 
@@ -43,17 +43,6 @@ const PLATFORM_LABELS: Record<StoreReleasePlatform, string> = {
   ios: "iOS",
   expo: "Expo",
 };
-
-function agoOf(iso: string | null, now: number): string {
-  if (iso === null) return "never";
-  const at = Date.parse(iso);
-  if (!Number.isFinite(at)) return "unknown";
-  const seconds = Math.max(0, Math.round((now - at) / 1000));
-  if (seconds < 60) return "just now";
-  if (seconds < 3600) return `${Math.round(seconds / 60)}m ago`;
-  if (seconds < 86_400) return `${Math.round(seconds / 3600)}h ago`;
-  return `${Math.round(seconds / 86_400)}d ago`;
-}
 
 function missingVaultKeysForPlatforms(
   platforms: readonly StoreReleasePlatform[],
@@ -81,7 +70,7 @@ function runStatusTone(status: string): Colour {
 
 function formatRunHeadline(run: StoreReleaseRunSummary, now: number): string {
   const platforms = run.platforms.length > 0 ? run.platforms.map((p) => PLATFORM_LABELS[p as StoreReleasePlatform] ?? p).join(", ") : "none";
-  const when = agoOf(run.completedAt ?? run.updatedAt, now);
+  const when = formatRelativeAgo(run.completedAt ?? run.updatedAt, now);
   return `${run.playbook} · ${platforms} · ${run.id} · ${when}`;
 }
 
@@ -295,7 +284,7 @@ export function StoreReleaseCard({
                 <Text style={text(theme, "rowTitle", "statusWarning")}>{storeRelease.activeHole.kind}</Text>
               </View>
               <Text style={text(theme, "meta")}>
-                {`Phase ${storeRelease.activeHole.phase} · Run ${storeRelease.activeHole.runId} · paused ${agoOf(storeRelease.activeHole.pausedAt, now)}`}
+                {`Phase ${storeRelease.activeHole.phase} · Run ${storeRelease.activeHole.runId} · paused ${formatRelativeAgo(storeRelease.activeHole.pausedAt, now)}`}
               </Text>
               <Text style={text(theme, "meta")}>Resolve in Supervisor chat or Release Lab.</Text>
             </View>

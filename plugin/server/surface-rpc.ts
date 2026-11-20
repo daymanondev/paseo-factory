@@ -8,13 +8,14 @@ import type { HandoffProgress, HandoffAction, HandoffRequest, HandoffReply } fro
 import { clearReleaseRequest, clearStoreReleaseRequest, readProjectSettings, readReleaseRequest, readReleaseSettings, readStoreReleaseRequest, readStoreReleaseSettings, setProjectReleaseSettings, setProjectSkillPacks, setProjectStoreReleaseSettings, resetProjectSkillPacks } from "./core/project-settings.ts";
 import type { ProjectReleaseMode, ProjectStoreReleaseMode } from "./core/project-settings.ts";
 import { detectMobilePlatforms, readLatestStoreReleaseRun } from "./core/store-release-probe.ts";
+import { resolveReleaseLabWithDaemon } from "./store-release.ts";
 import { linkedPreviewBundle } from "./core/open-design/preview-bundle.ts";
 import { serveLinkedPreview } from "./core/open-design/preview-server.ts";
 import { discoverOpenDesignProjects, exportOpenDesignProject, syncOpenDesignLink, readOpenDesignLink, unlinkOpenDesign, prepareOpenDesignDispatch } from "./core/open-design/open-design-link.ts";
 import type { HelperMcpConfigUpdate } from "./core/helper-mcp-sync.ts";
 import { discoverHelperMcps, helperMcpRoster, setHelperMcpEnabled, syncHelperMcps } from "./core/helper-mcp-sync.ts";
 import { provisionPiAgentHome } from "./core/pi-home.ts";
-import { expandHome, pluginDirFor, resolveManagedPluginDir } from "./paths.ts";
+import { expandHome, pluginDirFor } from "./paths.ts";
 import { liveSeatCandidates, seatCandidates } from "./seats.ts";
 import { checkProjectResetRepository, removeProjectStateDirectory, resetProjectRepository } from "./project-reset.ts";
 import { boundTaskPeers } from "./task-peers.ts";
@@ -875,37 +876,13 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     if (deps.storeReleaseRunnerProbe !== undefined) {
       return deps.storeReleaseRunnerProbe();
     }
-    const listPlugins = deps.listPlugins ?? listDaemonPlugins;
-    let listed: DaemonPluginItem | undefined;
-    try {
-      const result = await listPlugins(deps.home);
-      if (result.ok) {
-        listed = result.plugins.find((plugin) => plugin.id === "factory-release-lab");
-      }
-    } catch {
-      // degrade to not_installed when daemon plugin list cannot answer
-    }
-    if (listed === undefined) {
-      return {
-        installed: false,
-        enabled: false,
-        status: "not_installed",
-        path: null,
-        binPath: null,
-      };
-    }
-    const resolvedDir = resolveManagedPluginDir(deps.home, listed.path, "factory-release-lab");
-    const binCandidates = [
-      join(resolvedDir, "bin", "release-lab.mjs"),
-      join(resolvedDir, "..", "bin", "release-lab.mjs"),
-    ];
-    const binPath = binCandidates.find((candidate) => existsSync(candidate)) ?? null;
+    const install = await resolveReleaseLabWithDaemon(deps.home, deps.listPlugins ?? listDaemonPlugins);
     return {
-      installed: true,
-      enabled: listed.enabled,
-      status: listed.status,
-      path: resolvedDir,
-      binPath,
+      installed: install.installed,
+      enabled: install.enabled,
+      status: install.status,
+      path: install.path,
+      binPath: install.binPath,
     };
   };
 

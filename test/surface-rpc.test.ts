@@ -9089,3 +9089,61 @@ test("ADR 0066 (Ticket 03): storeReleaseRead / storeReleaseWrite enforce Owner-o
   assert.equal(aggregated.settings.activeHole?.kind, "final-release-approval");
   assert.equal(aggregated.settings.activeHole?.phase, "submit-production");
 });
+
+test("ADR 0066 (C3): storeReleaseRead resolves factory-release-lab via config.json and managed directory fallback when daemon plugin list fails", async (t) => {
+  const dir = makeTempDir("surface-store-release-fallback-");
+  disposeDir(t, dir);
+  const mobileRepo = join(dir, "mobile-repo");
+  mkdirSync(join(mobileRepo, "android", "app"), { recursive: true });
+  writeFileSync(join(mobileRepo, "android", "app", "build.gradle"), "android {}\n");
+  gitCommitAll(mobileRepo);
+
+  const { stateDir, home, handlers } = makeRotateSurface(t, [], {
+    listPlugins: async () => ({ ok: false, reason: "daemon offline" }),
+  });
+  const project = resolveProject(mobileRepo);
+  assert.ok(project.ok);
+  if (!project.ok) return;
+  writeProjectRegistration(stateDir, project.slug, { root: project.root });
+
+  // 1. Managed directory scan fallback when daemon is offline
+  const managedRoot = join(home, "plugins", "factory-release-lab", "v-managed");
+  mkdirSync(join(managedRoot, "bin"), { recursive: true });
+  mkdirSync(join(managedRoot, "plugin"), { recursive: true });
+  const managedBin = join(managedRoot, "bin", "release-lab.mjs");
+  writeFileSync(managedBin, "#!/usr/bin/env node\n");
+
+  const managedRead = await handlers.storeReleaseRead({ projectRoot: mobileRepo });
+  assert.ok(managedRead.ok, JSON.stringify(managedRead));
+  assert.equal(managedRead.settings.runner.installed, true);
+  assert.equal(managedRead.settings.runner.enabled, true);
+  assert.equal(managedRead.settings.runner.binPath, managedBin);
+
+  // 2. config.json path + enabled=false takes precedence over managed dir scan
+  const localLab = join(dir, "local-release-lab");
+  mkdirSync(join(localLab, "bin"), { recursive: true });
+  mkdirSync(join(localLab, "plugin"), { recursive: true });
+  const localBin = join(localLab, "bin", "release-lab.mjs");
+  writeFileSync(localBin, "#!/usr/bin/env node\n");
+  writeFileSync(
+    join(home, "config.json"),
+    JSON.stringify({ plugins: { "factory-release-lab": { path: join(localLab, "plugin"), enabled: true } } }),
+  );
+
+  const configRead = await handlers.storeReleaseRead({ projectRoot: mobileRepo });
+  assert.ok(configRead.ok, JSON.stringify(configRead));
+  assert.equal(configRead.settings.runner.installed, true);
+  assert.equal(configRead.settings.runner.enabled, true);
+  assert.equal(configRead.settings.runner.path, join(localLab, "plugin"));
+  assert.equal(configRead.settings.runner.binPath, localBin);
+
+  writeFileSync(
+    join(home, "config.json"),
+    JSON.stringify({ plugins: { "factory-release-lab": { path: join(localLab, "plugin"), enabled: false } } }),
+  );
+  const disabledRead = await handlers.storeReleaseRead({ projectRoot: mobileRepo });
+  assert.ok(disabledRead.ok, JSON.stringify(disabledRead));
+  assert.equal(disabledRead.settings.runner.installed, true);
+  assert.equal(disabledRead.settings.runner.enabled, false);
+  assert.equal(disabledRead.settings.runner.status, "disabled");
+});

@@ -816,3 +816,206 @@ test("releaseProject and Spool release reply signal storeReleaseAutoStaging when
     assert.equal(plainRes.storeReleaseAutoStaging, undefined);
   }
 });
+
+test("C1: on-request target=production preserves pending request across stage until submit completes", async (t) => {
+  const dir = makeTempDir("store-release-c1-");
+  disposeDir(t, dir);
+  const paseoHome = join(dir, "paseo-home");
+  const stateDir = join(paseoHome, "plugin-state", "paseo-factory");
+  const repoDir = makeMobileRepo(dir, ["android", "ios"]);
+  const project = ensureProjectRegistered(stateDir, repoDir);
+  assert.ok(project.ok);
+  const factory = createFactory({ stateDir: join(stateDir, "projects", project.slug) });
+  t.after(() => factory.history.stop());
+
+  acceptCommitOnRepo(factory, repoDir, "T-C1");
+  await factory.accept({ task: "T-C1", attempt: 1, accepted_by: "lead" });
+  installFakeRunnerPlugin(paseoHome);
+  writeVaultStoreEnv(paseoHome, {
+    ASC_KEY_PATH: "/tmp/synth-asc.p8",
+    ASC_KEY_ID: "SYNTHKEY",
+    ASC_ISSUER: "00000000-0000-0000-0000-000000000001",
+    APPLE_TEAM_ID: "SYNTHTEAM",
+    GPLAY_KEY_PATH: "/tmp/synth-gplay.json",
+  });
+
+  const listPlugins = async () => ({ ok: false as const, reason: "offline" });
+  setProjectStoreReleaseSettings(stateDir, project.slug, { mode: "on-request" });
+  setStoreReleaseRequest(stateDir, project.slug, { target: "production" });
+
+  // Stage completes but MUST keep pending target=production request for follow-up submit
+  const stageRes = await storeReleaseProject({
+    factory,
+    stateDir,
+    paseoHome,
+    projectSlug: project.slug,
+    projectRoot: repoDir,
+    action: "stage",
+    listPlugins,
+    runner: async () => ({
+      exitCode: 0,
+      stdout: JSON.stringify({ id: "run-prod-stage", status: "completed", platforms: ["android", "ios"], phases: [] }),
+      stderr: "",
+    }),
+  });
+  assert.equal(stageRes.ok, true);
+  if (stageRes.ok && "settled" in stageRes) await stageRes.settled;
+  assert.equal(
+    readStoreReleaseRequest(stateDir, project.slug)?.target,
+    "production",
+    "stage completion in on-request mode must preserve target=production for follow-up submit",
+  );
+
+  // Follow-up submit passes on-request + production gates and clears request on completion
+  const submitRes = await storeReleaseProject({
+    factory,
+    stateDir,
+    paseoHome,
+    projectSlug: project.slug,
+    projectRoot: repoDir,
+    action: "submit",
+    runId: "run-prod-stage",
+    listPlugins,
+    runner: async () => ({
+      exitCode: 0,
+      stdout: JSON.stringify({ id: "run-prod-stage", status: "completed", platforms: ["android", "ios"], phases: [] }),
+      stderr: "",
+    }),
+  });
+  assert.equal(submitRes.ok, true, JSON.stringify(submitRes));
+  if (submitRes.ok && "settled" in submitRes) await submitRes.settled;
+  assert.equal(readStoreReleaseRequest(stateDir, project.slug), undefined, "submit completion consumes pending production request");
+
+  // Staging request still clears on stage completion
+  setStoreReleaseRequest(stateDir, project.slug, { target: "staging" });
+  const stagingRes = await storeReleaseProject({
+    factory,
+    stateDir,
+    paseoHome,
+    projectSlug: project.slug,
+    projectRoot: repoDir,
+    action: "stage",
+    listPlugins,
+    runner: async () => ({
+      exitCode: 0,
+      stdout: JSON.stringify({ id: "run-staging-only", status: "completed", platforms: ["android"], phases: [] }),
+      stderr: "",
+    }),
+  });
+  assert.equal(stagingRes.ok, true);
+  if (stagingRes.ok && "settled" in stagingRes) await stagingRes.settled;
+  assert.equal(readStoreReleaseRequest(stateDir, project.slug), undefined, "stage completion consumes staging request");
+});
+
+test("C2: day0-store-init paused-hole extracts keystore from pausedAtHole.payload and writes it back to Vault", async (t) => {
+  const dir = makeTempDir("store-release-c2-");
+  disposeDir(t, dir);
+  const paseoHome = join(dir, "paseo-home");
+  const stateDir = join(paseoHome, "plugin-state", "paseo-factory");
+  const repoDir = makeMobileRepo(dir, ["android"]);
+  const project = ensureProjectRegistered(stateDir, repoDir);
+  assert.ok(project.ok);
+  const factory = createFactory({ stateDir: join(stateDir, "projects", project.slug) });
+  t.after(() => factory.history.stop());
+
+  acceptCommitOnRepo(factory, repoDir, "T-C2");
+  await factory.accept({ task: "T-C2", attempt: 1, accepted_by: "lead" });
+  installFakeRunnerPlugin(paseoHome);
+  writeVaultStoreEnv(paseoHome, { GPLAY_KEY_PATH: "/tmp/synth-gplay.json" });
+
+  const bareVault = join(dir, "vault.git");
+  execFileSync("git", ["init", "--bare", bareVault], { stdio: "pipe" });
+  const seedClone = join(dir, "seed-vault");
+  execFileSync("git", ["clone", bareVault, seedClone], { stdio: "pipe" });
+  execFileSync("git", ["-C", seedClone, "checkout", "-b", "main"], { stdio: "pipe" });
+  writeFileSync(join(seedClone, "README.md"), "# Vault\n");
+  execFileSync("git", ["-C", seedClone, "add", "."], { stdio: "pipe" });
+  execFileSync("git", ["-C", seedClone, "-c", "user.name=Test", "-c", "user.email=t@test.invalid", "commit", "-m", "init"], { stdio: "pipe" });
+  execFileSync("git", ["-C", seedClone, "push", "-u", "origin", "main"], { stdio: "pipe" });
+  saveVaultConfig(paseoHome, { repo: bareVault, branch: "main", nodeId: "test-node" });
+
+  const createdKeystorePath = join(paseoHome, "release-lab", "keystores", project.slug, "release.keystore");
+  mkdirSync(join(paseoHome, "release-lab", "keystores", project.slug), { recursive: true });
+  writeFileSync(createdKeystorePath, "DAY0_PAUSED_KEYSTORE_BYTES");
+  writeFileSync(
+    join(paseoHome, "release-lab", "keystores", project.slug, "keystore.properties"),
+    "storePassword=synthpass\nkeyPassword=synthpass\nkeyAlias=upload\n",
+  );
+
+  setProjectStoreReleaseSettings(stateDir, project.slug, { mode: "auto-staging" });
+  const notifications: Array<{ slug: string; text: string }> = [];
+  const res = await storeReleaseProject({
+    factory,
+    stateDir,
+    paseoHome,
+    projectSlug: project.slug,
+    projectRoot: repoDir,
+    action: "stage",
+    listPlugins: async () => ({ ok: false, reason: "offline" }),
+    notifyLead: (n) => { notifications.push(n); },
+    runner: async () => ({
+      exitCode: 0,
+      stdout: JSON.stringify({
+        id: "run-day0-hole",
+        playbook: "stage-release",
+        status: "paused-hole",
+        phases: [{ id: "phase-2-day0-and-signing", state: "paused-hole", hole: "day0-store-init" }],
+        pausedAtHole: {
+          phase: "phase-2-day0-and-signing",
+          kind: "day0-store-init",
+          payload: {
+            keystoreCreated: true,
+            keystore: { path: createdKeystorePath, alias: "upload", created: true },
+          },
+        },
+      }),
+      stderr: "",
+    }),
+  });
+  assert.equal(res.ok, true);
+  if (res.ok && "settled" in res) await res.settled;
+  assert.ok(existsSync(join(paseoHome, "vault-runtime", "secrets", "apps", "mobile-app", "release.keystore")));
+  assert.match(notifications[0]?.text ?? "", /Vault write-back:/);
+});
+
+test("A1: buildCliArgs forwards explicit --platforms filter for probe, stage, and submit", async (t) => {
+  const dir = makeTempDir("store-release-a1-");
+  disposeDir(t, dir);
+  const paseoHome = join(dir, "paseo-home");
+  const stateDir = join(paseoHome, "plugin-state", "paseo-factory");
+  const repoDir = makeMobileRepo(dir, ["android", "ios"]);
+  const project = ensureProjectRegistered(stateDir, repoDir);
+  assert.ok(project.ok);
+  const factory = createFactory({ stateDir: join(stateDir, "projects", project.slug) });
+  t.after(() => factory.history.stop());
+
+  acceptCommitOnRepo(factory, repoDir, "T-A1");
+  await factory.accept({ task: "T-A1", attempt: 1, accepted_by: "lead" });
+  installFakeRunnerPlugin(paseoHome);
+  writeVaultStoreEnv(paseoHome, {
+    ASC_KEY_PATH: "/tmp/synth-asc.p8",
+    ASC_KEY_ID: "SYNTHKEY",
+    ASC_ISSUER: "00000000-0000-0000-0000-000000000001",
+    APPLE_TEAM_ID: "SYNTHTEAM",
+    GPLAY_KEY_PATH: "/tmp/synth-gplay.json",
+  });
+  setProjectStoreReleaseSettings(stateDir, project.slug, { mode: "on-request" });
+  setStoreReleaseRequest(stateDir, project.slug, { target: "production", platforms: ["android", "ios"] });
+
+  const recordedArgs: string[][] = [];
+  const listPlugins = async () => ({ ok: false as const, reason: "offline" });
+  const runner = async (call: { args: readonly string[] }) => {
+    recordedArgs.push([...call.args]);
+    return { exitCode: 0, stdout: JSON.stringify({ id: "run-a1", status: "completed", platforms: ["android"], phases: [] }), stderr: "" };
+  };
+
+  await storeReleaseProject({ factory, stateDir, paseoHome, projectSlug: project.slug, projectRoot: repoDir, action: "probe", platforms: ["android"], listPlugins, runner });
+  const stageRes = await storeReleaseProject({ factory, stateDir, paseoHome, projectSlug: project.slug, projectRoot: repoDir, action: "stage", platforms: ["android", "ios"], listPlugins, runner });
+  if (stageRes.ok && "settled" in stageRes) await stageRes.settled;
+  const submitRes = await storeReleaseProject({ factory, stateDir, paseoHome, projectSlug: project.slug, projectRoot: repoDir, action: "submit", platforms: ["android"], runId: "run-a1", listPlugins, runner });
+  if (submitRes.ok && "settled" in submitRes) await submitRes.settled;
+
+  assert.deepEqual(recordedArgs[0], ["probe", "--project", repoDir, "--platforms", "android"]);
+  assert.deepEqual(recordedArgs[1], ["run", "--playbook", "stage-release", "--project", repoDir, "--slug", project.slug, "--platforms", "android,ios"]);
+  assert.deepEqual(recordedArgs[2], ["submit-production", "--project", repoDir, "--slug", project.slug, "--run", "run-a1", "--platforms", "android", "--approve"]);
+});

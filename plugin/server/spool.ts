@@ -3,7 +3,8 @@ export { spoolRequestSemanticKey } from "./core/mcp/transport.ts";
 import { withProjectIngressLock } from "./core/project-ingress-lock.ts";
 import { resolveProjectSkillPacks, resolveRoleSkillsForProject } from "./core/skill-hub.ts";
 import { renderPeerSkillScope } from "./core/roles-contract.ts";
-import { readProjectSettings } from "./core/project-settings.ts";
+import { normalizeStoreReleasePlatforms, readProjectSettings } from "./core/project-settings.ts";
+import { derivePaseoHomeFromStateDir } from "./core/store-release-probe.ts";
 import { safeId } from "./core/safe-id.ts";
 import { recordUpgradeControlReceipt } from "./core/history-upgrade.ts";
 import { pendingUpgradeFor } from "./core/upgrade-state.ts";
@@ -972,14 +973,8 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
     if (target !== "staging" && target !== "production") return { ok: false };
     let platforms: StoreReleasePlatformTarget[] | undefined;
     if (rec.platforms !== undefined) {
-      if (
-        !Array.isArray(rec.platforms) ||
-        rec.platforms.length === 0 ||
-        !rec.platforms.every((p) => p === "android" || p === "ios")
-      ) {
-        return { ok: false };
-      }
-      platforms = [...new Set(rec.platforms)];
+      platforms = normalizeStoreReleasePlatforms(rec.platforms);
+      if (platforms === undefined) return { ok: false };
     }
     if (rec.resumeRunId !== undefined && (typeof rec.resumeRunId !== "string" || rec.resumeRunId.trim() === "")) {
       return { ok: false };
@@ -1133,14 +1128,8 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
     if (typeof req.action !== "string" || !(STORE_RELEASE_ACTIONS as readonly string[]).includes(req.action)) return undefined;
     let platforms: StoreReleasePlatformTarget[] | undefined;
     if (req.platforms !== undefined) {
-      if (
-        !Array.isArray(req.platforms) ||
-        req.platforms.length === 0 ||
-        !req.platforms.every((p) => p === "android" || p === "ios")
-      ) {
-        return undefined;
-      }
-      platforms = [...new Set(req.platforms)];
+      platforms = normalizeStoreReleasePlatforms(req.platforms);
+      if (platforms === undefined) return undefined;
     }
     if (req.runId !== undefined && (typeof req.runId !== "string" || req.runId.trim() === "")) return undefined;
     if (req.workspace !== undefined && (typeof req.workspace !== "string" || req.workspace.trim() === "")) return undefined;
@@ -2682,25 +2671,11 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
       };
     }
     if (request.kind === "release") {
-      let projectSlug = request.projectSlug;
-      let projectRoot = request.workspace;
-      if (projectRoot !== undefined) {
-        const resolved = resolveProject(projectRoot);
-        if (!resolved.ok) {
-          return { id: request.id, ok: false, code: "unknown-project", message: `could not resolve Project root "${projectRoot}" — ${resolved.reason}` };
-        }
-        projectSlug = resolved.slug;
-        projectRoot = resolved.root;
-      } else if (projectSlug !== undefined) {
-        projectRoot = readProjectRegistration(factory.stateDir, projectSlug)?.root;
-      } else {
-        const regs = listProjectRegistrations(factory.stateDir);
-        if (regs.length === 1) {
-          projectSlug = regs[0]!.slug;
-          projectRoot = regs[0]!.root;
-        }
+      const target = resolveSpoolTargetProject(factory.stateDir, request);
+      if (!target.ok) {
+        return { id: request.id, ok: false, code: target.code, message: target.message };
       }
-      if (projectSlug === undefined || projectRoot === undefined || projectRoot.trim() === "") {
+      if (target.projectSlug === undefined || target.projectRoot === undefined || target.projectRoot.trim() === "") {
         return {
           id: request.id,
           ok: false,
@@ -2711,8 +2686,8 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
       const res = await releaseProject({
         factory,
         stateDir: factory.stateDir,
-        projectSlug,
-        projectRoot,
+        projectSlug: target.projectSlug,
+        projectRoot: target.projectRoot,
         version: request.version,
         runner: deps.vaultRunner,
       });
@@ -2739,25 +2714,11 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
       };
     }
     if (request.kind === "store-release") {
-      let projectSlug = request.projectSlug;
-      let projectRoot = request.workspace;
-      if (projectRoot !== undefined) {
-        const resolved = resolveProject(projectRoot);
-        if (!resolved.ok) {
-          return { id: request.id, ok: false, code: "unknown-project", message: `could not resolve Project root "${projectRoot}" — ${resolved.reason}` };
-        }
-        projectSlug = resolved.slug;
-        projectRoot = resolved.root;
-      } else if (projectSlug !== undefined) {
-        projectRoot = readProjectRegistration(factory.stateDir, projectSlug)?.root;
-      } else {
-        const regs = listProjectRegistrations(factory.stateDir);
-        if (regs.length === 1) {
-          projectSlug = regs[0]!.slug;
-          projectRoot = regs[0]!.root;
-        }
+      const target = resolveSpoolTargetProject(factory.stateDir, request);
+      if (!target.ok) {
+        return { id: request.id, ok: false, code: target.code, message: target.message };
       }
-      if (projectSlug === undefined || projectRoot === undefined || projectRoot.trim() === "") {
+      if (target.projectSlug === undefined || target.projectRoot === undefined || target.projectRoot.trim() === "") {
         return {
           id: request.id,
           ok: false,
@@ -2770,8 +2731,8 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
         factory,
         stateDir: factory.stateDir,
         paseoHome,
-        projectSlug,
-        projectRoot,
+        projectSlug: target.projectSlug,
+        projectRoot: target.projectRoot,
         action: request.action,
         ...(request.platforms !== undefined ? { platforms: request.platforms } : {}),
         ...(request.runId !== undefined ? { runId: request.runId } : {}),
@@ -2808,23 +2769,9 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
       };
     }
     if (request.kind === "store-notebook-write") {
-      let projectSlug = request.projectSlug;
-      let projectRoot = request.workspace;
-      if (projectRoot !== undefined) {
-        const resolved = resolveProject(projectRoot);
-        if (resolved.ok) {
-          projectSlug = resolved.slug;
-          projectRoot = resolved.root;
-        }
-      } else if (projectSlug !== undefined) {
-        projectRoot = readProjectRegistration(factory.stateDir, projectSlug)?.root;
-      } else {
-        const regs = listProjectRegistrations(factory.stateDir);
-        if (regs.length === 1) {
-          projectSlug = regs[0]!.slug;
-          projectRoot = regs[0]!.root;
-        }
-      }
+      const target = resolveSpoolTargetProject(factory.stateDir, request);
+      const projectSlug = target.ok ? target.projectSlug : request.projectSlug;
+      const projectRoot = target.ok ? target.projectRoot : request.workspace;
       const paseoHome = resolveSpoolPaseoHome(factory.stateDir, home);
       const res = await recordStoreNote({
         paseoHome,
@@ -2882,12 +2829,40 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
   }
 }
 
+function resolveSpoolTargetProject(
+  stateDir: string,
+  input: { projectSlug?: string; workspace?: string },
+):
+  | { ok: true; projectSlug?: string; projectRoot?: string }
+  | { ok: false; code: "unknown-project"; message: string } {
+  if (input.workspace !== undefined) {
+    const resolved = resolveProject(input.workspace);
+    if (!resolved.ok) {
+      return {
+        ok: false,
+        code: "unknown-project",
+        message: `could not resolve Project root "${input.workspace}" — ${resolved.reason}`,
+      };
+    }
+    return { ok: true, projectSlug: resolved.slug, projectRoot: resolved.root };
+  }
+  if (input.projectSlug !== undefined) {
+    return {
+      ok: true,
+      projectSlug: input.projectSlug,
+      projectRoot: readProjectRegistration(stateDir, input.projectSlug)?.root,
+    };
+  }
+  const regs = listProjectRegistrations(stateDir);
+  if (regs.length === 1) {
+    return { ok: true, projectSlug: regs[0]!.slug, projectRoot: regs[0]!.root };
+  }
+  return { ok: true };
+}
+
 function resolveSpoolPaseoHome(stateDir: string, explicitHome?: string): string {
   if (explicitHome !== undefined && explicitHome.trim() !== "") return explicitHome;
-  if (basename(stateDir) === "paseo-factory" && basename(dirname(stateDir)) === "plugin-state") {
-    return dirname(dirname(stateDir));
-  }
-  return resolvePaseoHome(process.env, homedir());
+  return derivePaseoHomeFromStateDir(stateDir) ?? resolvePaseoHome(process.env, homedir());
 }
 
 export interface SpoolOptions {
