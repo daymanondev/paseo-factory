@@ -646,6 +646,10 @@ export default function contribute(server: PluginServerContext) {
     // The Per-Project Factory registry (v0.0.89, ADR 0045 §1): every
     // Project-scoped command routes onto the target Project's own Factory.
     registry,
+    storeReleaseNotify: async ({ slug, text }) => {
+      await leadMail.enqueueLeadMail(slug, { from: "system", kind: "report", text });
+      await leadMail.pumpProjectLead(slug);
+    },
   });
 
   log(`spool listening on ${spoolRootFor(stateDir)}/{requests,replies,processed}`);

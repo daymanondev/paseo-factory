@@ -1814,7 +1814,7 @@ function extendTool(tool, properties) {
 var sharedTools = {
   supervisor_dispatch_lead: {
     name: "supervisor_dispatch_lead",
-    description: "Dispatch an implementation directive to the Project's Lead seat via the serialized Lead mailbox. Pass `release` when the Owner wants to record a Release intent (optional pinned `version` X.Y.Z). After calling this tool, end your turn immediately and wait for Lead's wave report.",
+    description: "Dispatch an implementation directive to the Project's Lead seat via the serialized Lead mailbox. Pass `release` when the Owner wants to record a Release intent (optional pinned `version` X.Y.Z), or `storeRelease` when the Owner wants to record a Store release intent (`staging` | `production`, optional `platforms`, optional `resumeRunId` + `resolution` to resume a paused Hole). After calling this tool, end your turn immediately and wait for Lead's wave report.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1825,6 +1825,24 @@ var sharedTools = {
           description: "Optional Owner release intent for `on-request` / `auto` Release modes.",
           properties: {
             version: { type: "string", description: "Optional exact target semver X.Y.Z; omit when Owner did not pin a version." }
+          }
+        },
+        storeRelease: {
+          type: "object",
+          description: "Optional Owner Store release intent (`staging` or `production`, optional `platforms`, optional `resumeRunId` + `resolution` to resume a paused Hole).",
+          properties: {
+            target: {
+              type: "string",
+              enum: ["staging", "production"],
+              description: "Intended Store release target (defaults to `staging`)."
+            },
+            platforms: {
+              type: "array",
+              items: { type: "string", enum: ["android", "ios"] },
+              description: "Optional platform filter (`android` and/or `ios`)."
+            },
+            resumeRunId: { type: "string", description: "Optional paused release-lab run ID to resume." },
+            resolution: { description: "Optional Hole resolution payload for `resumeRunId`." }
           }
         }
       },
@@ -2007,6 +2025,62 @@ var sharedTools = {
       required: ["version"]
     }
   },
+  lead_store_release: {
+    name: "lead_store_release",
+    description: "Run the deterministic factory-release-lab store runner server-side (`probe`, `stage`, `submit`, or `resume` a paused Hole). `probe` returns synchronous Vault/platform/store readiness JSON; `stage`, `submit`, and `resume` execute asynchronously at zero seat tokens and wake Lead via mailbox on completion, Hole pause, or failure. Never run release-lab inside a seat shell.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        action: {
+          type: "string",
+          enum: ["probe", "stage", "submit", "resume"],
+          description: "Store release action to execute."
+        },
+        platforms: {
+          type: "array",
+          items: { type: "string", enum: ["android", "ios"] },
+          description: "Optional platform filter (`android` and/or `ios`)."
+        },
+        runId: {
+          type: "string",
+          description: "Existing release-lab run ID (required for `resume`, optional for `submit`)."
+        },
+        resolution: {
+          description: "Optional Hole resolution payload for `resume`."
+        },
+        workspace: { type: "string", description: "Optional Project root path." }
+      },
+      required: ["action"]
+    }
+  },
+  supervisor_record_store_note: {
+    name: "supervisor_record_store_note",
+    description: 'Record a cross-project rejection lesson (`target: "lessons"`, capped at <= 120 lines) or a per-app Store notebook card (`target: "app"`) into `<paseoHome>/vault-runtime/store-memory/` (`0o400`) and sync to Private vault without touching `<project-root>`.',
+    inputSchema: {
+      type: "object",
+      properties: {
+        target: {
+          type: "string",
+          enum: ["lessons", "app"],
+          description: "Which Store notebook tier to update: `lessons` (`lessons.md`, <= 120 lines) or `app` (`apps/<appKey>.md`)."
+        },
+        content: {
+          type: "string",
+          description: "Full Markdown content to write into the target Store notebook file."
+        },
+        appKey: {
+          type: "string",
+          description: 'Optional canonical app key for `target: "app"` (resolved from Project manifest/slug when omitted).'
+        },
+        workspace: { type: "string", description: "Optional Project root path." },
+        sync: {
+          type: "boolean",
+          description: "Whether to push to Private vault when configured (defaults to true)."
+        }
+      },
+      required: ["target", "content"]
+    }
+  },
   agent_claim: {
     name: "agent_claim",
     description: "Submit a Claim for your bound Task in the Task worktree with the mandatory 6-Field Handoff (`outcome`, `scope`, `verification`, `unknowns`, optional `ownership`). Runs the Contract's Gate and returns the Verdict (`GREEN` or `RED`) and report.",
@@ -2060,13 +2134,14 @@ var sharedTools = {
   }
 };
 var sharedRoles = {
-  supervisor: ["supervisor_accept_task", "supervisor_dispatch_lead", "supervisor_read_ledger", "supervisor_end_cycle", "lead_close_task", "lead_retire_task"],
-  lead: ["lead_repoke_agent", "lead_needs_human", "lead_create_worktree", "lead_set_contract", "lead_dispatch_agent", "lead_verify", "lead_merge", "lead_remove_worktree", "lead_release", "lead_report_to_supervisor", "lead_close_task", "lead_retire_task", "lead_update_notebook", "lead_read_ledger"],
+  supervisor: ["supervisor_accept_task", "supervisor_dispatch_lead", "supervisor_read_ledger", "supervisor_record_store_note", "supervisor_end_cycle", "lead_close_task", "lead_retire_task"],
+  lead: ["lead_repoke_agent", "lead_needs_human", "lead_create_worktree", "lead_set_contract", "lead_dispatch_agent", "lead_verify", "lead_merge", "lead_remove_worktree", "lead_release", "lead_store_release", "lead_record_store_note", "lead_report_to_supervisor", "lead_close_task", "lead_retire_task", "lead_update_notebook", "lead_read_ledger"],
   agent: ["agent_claim", "agent_escalate_blocker"],
   unbound: ["factory_dispatch_supervisor", "factory_status"]
 };
 sharedTools.supervisor_read_ledger = { ...sharedTools.factory_status, name: "supervisor_read_ledger" };
 sharedTools.lead_read_ledger = { ...sharedTools.factory_status, name: "lead_read_ledger" };
+sharedTools.lead_record_store_note = { ...sharedTools.supervisor_record_store_note, name: "lead_record_store_note" };
 sharedTools.supervisor_end_cycle = { name: "supervisor_end_cycle", description: "Finish this Supervisor turn and await the next Owner directive or Lead report.", inputSchema: { type: "object", properties: {} } };
 for (const [name, source] of Object.entries({ lead_dispatch_agent: "lead_spawn_agent", lead_merge: "lead_accept_task", lead_retire_task: "lead_close_task" })) {
   sharedTools[name] = { ...sharedTools[source], name };
@@ -2242,6 +2317,40 @@ async function handleToolCall(name, rawArgs) {
       const trimmedVersion = typeof args.release.version === "string" ? args.release.version.trim() : "";
       release = trimmedVersion !== "" ? { version: trimmedVersion } : {};
     }
+    let storeRelease;
+    if (args.storeRelease !== undefined) {
+      if (args.storeRelease === null || typeof args.storeRelease !== "object" || Array.isArray(args.storeRelease)) {
+        return toolResult("supervisor_dispatch_lead: `storeRelease` must be an object.", true);
+      }
+      const target = args.storeRelease.target === undefined ? "staging" : args.storeRelease.target;
+      if (target !== "staging" && target !== "production") {
+        return toolResult("supervisor_dispatch_lead: `storeRelease.target` must be \"staging\" or \"production\".", true);
+      }
+      let platforms;
+      if (args.storeRelease.platforms !== undefined) {
+        if (
+          !Array.isArray(args.storeRelease.platforms) ||
+          args.storeRelease.platforms.length === 0 ||
+          !args.storeRelease.platforms.every((p) => p === "android" || p === "ios")
+        ) {
+          return toolResult("supervisor_dispatch_lead: `storeRelease.platforms` must be a non-empty array of \"android\" / \"ios\".", true);
+        }
+        platforms = [...new Set(args.storeRelease.platforms)];
+      }
+      let resumeRunId;
+      if (args.storeRelease.resumeRunId !== undefined) {
+        if (typeof args.storeRelease.resumeRunId !== "string" || args.storeRelease.resumeRunId.trim() === "") {
+          return toolResult("supervisor_dispatch_lead: `storeRelease.resumeRunId` must be a non-empty string when provided.", true);
+        }
+        resumeRunId = args.storeRelease.resumeRunId.trim();
+      }
+      storeRelease = {
+        target,
+        ...(platforms !== undefined ? { platforms } : {}),
+        ...(resumeRunId !== undefined ? { resumeRunId } : {}),
+        ...(args.storeRelease.resolution !== undefined ? { resolution: args.storeRelease.resolution } : {}),
+      };
+    }
     const reply = await roundTripSpool(ctx, {
       id: randomId(),
       kind: "lead_dispatch",
@@ -2249,6 +2358,7 @@ async function handleToolCall(name, rawArgs) {
       from: "supervisor",
       message,
       ...(release !== undefined ? { release } : {}),
+      ...(storeRelease !== undefined ? { storeRelease } : {}),
       seat: "supervisor",
     });
     if (!reply.ok) return toolResult(`${reply.code}: ${reply.message}`, true);
@@ -2406,6 +2516,78 @@ async function handleToolCall(name, rawArgs) {
       ...(ctx.projectSlug !== undefined ? { projectSlug: ctx.projectSlug } : {}),
       ...(workspace !== undefined && workspace !== null && workspace !== "" ? { workspace } : {}),
       seat: "lead",
+    });
+    if (!reply.ok) return toolResult(`${reply.code}: ${reply.message}`, true);
+    return toolResult(reply.summary);
+  }
+
+  if (name === "lead_store_release") {
+    const action = typeof args.action === "string" ? args.action.trim() : "";
+    if (!["probe", "stage", "submit", "resume"].includes(action)) {
+      return toolResult("lead_store_release requires `action` (\"probe\" | \"stage\" | \"submit\" | \"resume\").", true);
+    }
+    let platforms;
+    if (args.platforms !== undefined) {
+      if (!Array.isArray(args.platforms) || args.platforms.length === 0 || !args.platforms.every((p) => p === "android" || p === "ios")) {
+        return toolResult("lead_store_release: `platforms` must be a non-empty array of \"android\" / \"ios\".", true);
+      }
+      platforms = [...new Set(args.platforms)];
+    }
+    let runId;
+    if (args.runId !== undefined) {
+      if (typeof args.runId !== "string" || args.runId.trim() === "") {
+        return toolResult("lead_store_release: `runId` must be a non-empty string when provided.", true);
+      }
+      runId = args.runId.trim();
+    }
+    const workspace =
+      typeof args.workspace === "string" && args.workspace.trim() !== ""
+        ? resolve(args.workspace.trim())
+        : ctx.projectRoot ?? ctx.workspace;
+    const reply = await roundTripSpool(ctx, {
+      id: randomId(),
+      kind: "store-release",
+      action,
+      ...(platforms !== undefined ? { platforms } : {}),
+      ...(runId !== undefined ? { runId } : {}),
+      ...(args.resolution !== undefined ? { resolution: args.resolution } : {}),
+      ...(ctx.projectSlug !== undefined ? { projectSlug: ctx.projectSlug } : {}),
+      ...(workspace !== undefined && workspace !== null && workspace !== "" ? { workspace } : {}),
+      seat: "lead",
+    });
+    if (!reply.ok) return toolResult(`${reply.code}: ${reply.message}`, true);
+    if (action === "probe") {
+      return toolResult(JSON.stringify(reply.data ?? reply, null, 2));
+    }
+    return toolResult(
+      `${reply.summary}\nStore release ${action} running asynchronously — end your turn now and wait for Lead's mailbox wakeup.`,
+    );
+  }
+
+  if (name === "supervisor_record_store_note" || name === "lead_record_store_note") {
+    const target = typeof args.target === "string" ? args.target.trim() : "";
+    if (target !== "lessons" && target !== "app") {
+      return toolResult(`${name} requires \`target\` ("lessons" | "app").`, true);
+    }
+    if (typeof args.content !== "string") {
+      return toolResult(`${name} requires a \`content\` string.`, true);
+    }
+    const appKey = typeof args.appKey === "string" && args.appKey.trim() !== "" ? args.appKey.trim() : undefined;
+    const workspace =
+      typeof args.workspace === "string" && args.workspace.trim() !== ""
+        ? resolve(args.workspace.trim())
+        : ctx.projectRoot ?? ctx.workspace;
+    const seat = name === "supervisor_record_store_note" ? "supervisor" : "lead";
+    const reply = await roundTripSpool(ctx, {
+      id: randomId(),
+      kind: "store-notebook-write",
+      target,
+      content: args.content,
+      ...(appKey !== undefined ? { appKey } : {}),
+      ...(typeof args.sync === "boolean" ? { sync: args.sync } : {}),
+      ...(ctx.projectSlug !== undefined ? { projectSlug: ctx.projectSlug } : {}),
+      ...(workspace !== undefined && workspace !== null && workspace !== "" ? { workspace } : {}),
+      seat,
     });
     if (!reply.ok) return toolResult(`${reply.code}: ${reply.message}`, true);
     return toolResult(reply.summary);

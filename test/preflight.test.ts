@@ -126,7 +126,7 @@ test('the Lead kickoff packet is byte-identical to the pre-0.12.4 render (Superv
     '- Build/Test commands: package.json scripts (test: `node --test`, typecheck: `tsc --noEmit`)',
     '- Active lanes: agent=claude',
     '- Ledger tasks: none (clean slate)',
-    '- Role MCP tools (paseo_factory): `lead_set_contract`, `lead_dispatch_agent`, `lead_read_ledger`, `lead_verify`, `lead_merge`, `lead_release`, `lead_report_to_supervisor`',
+    '- Role MCP tools (paseo_factory): `lead_set_contract`, `lead_dispatch_agent`, `lead_read_ledger`, `lead_verify`, `lead_merge`, `lead_release`, `lead_store_release`, `lead_record_store_note`, `lead_report_to_supervisor`',
     '- Law: Fire-and-End-Turn: orient within <= 3 small boundary reads (dispatch a read-only `scout` or `architect` Peer first whenever deeper repo/design discovery is needed), outline the serial-wave roadmap, call `lead_set_contract` then `lead_dispatch_agent` (or `factory contract` + `factory run`) for the current wave only, and IMMEDIATELY end your turn — never poll, never sleep, never grep raw `ledger.jsonl` or `~/.paseo/plugins/**`, and never edit product source code on `<project-root>`.',
     '--- [end seat kickoff packet] ---',
     '',
@@ -282,8 +282,8 @@ test('the kickoff packet renders the SLP MCP tool table and the Project notebook
     const packet = buildSeatKickoffPacket({ role, projectSlug: "repo", projectRoot: root, ledgerEvents: [], stateDir });
     const lines = new Set(packet.split("\n"));
     const tools = role === "supervisor"
-      ? "`supervisor_dispatch_lead`, `supervisor_read_ledger`, `supervisor_end_cycle`"
-      : "`lead_set_contract`, `lead_dispatch_agent`, `lead_read_ledger`, `lead_verify`, `lead_merge`, `lead_release`, `lead_report_to_supervisor`";
+      ? "`supervisor_dispatch_lead`, `supervisor_read_ledger`, `supervisor_record_store_note`, `supervisor_end_cycle`"
+      : "`lead_set_contract`, `lead_dispatch_agent`, `lead_read_ledger`, `lead_verify`, `lead_merge`, `lead_release`, `lead_store_release`, `lead_record_store_note`, `lead_report_to_supervisor`";
     assert.ok(lines.has(`- Role MCP tools (paseo_factory): ${tools}`), `${role} renders the SLP MCP tool table`);
     assert.doesNotMatch(packet, /scrum/i, `${role} packet carries no Scrum vocabulary`);
     // Every deterministic repo preflight line and the Project notebook ride the packet.
