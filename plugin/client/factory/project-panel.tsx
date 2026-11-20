@@ -15,7 +15,7 @@ import { GitHubReleaseCard } from "./github-release-card.tsx";
 import type { GitHubReleaseActions, ReleaseCardFeedback } from "./github-release-card.tsx";
 import { Btn, RoleName, ToneBadge } from "../kit/pill.tsx";
 import { Tabs } from "../kit/tabs.tsx";
-import { CONTROL_H, RADIUS, SPACING, dispositionColour, factoryPalette, hoveredOf, statusBadgeColour, text, thinkingColour, tint } from "../kit/theme.ts";
+import { RADIUS, SPACING, dispositionColour, factoryPalette, hoveredOf, statusBadgeColour, text, thinkingColour, tint } from "../kit/theme.ts";
 import type { Colour } from "../kit/theme.ts";
 import type { SeatEditorRequest } from "./editor-request.ts";
 import { SelfUpdateControls, SelfUpdateNote } from "./self-update.tsx";
@@ -39,8 +39,8 @@ export interface ProjectPanelActions {
   /** Failed handoff retry is Desktop-only. */
   handoffRetry(seat: string): void;
   viewHandover(seat: string): void;
-  /** Start the Supervisor on a vacant seat with the Owner's optional first directive (desktop only). */
-  startSupervisor(directive: string): void;
+  /** Start the Supervisor on a vacant seat and open its conversation directly (desktop only). */
+  startSupervisor(directive?: string): void;
   /** Sync the linked Open Design project again from the host — a broken link's primary action (desktop only). */
   syncOpenDesign(): void;
   /** "Use this chat as Supervisor" (v0.6.1, ADR 0057 §5) — adopt a candidate chat; available on mobile (ADR 0057 §10). */
@@ -59,15 +59,14 @@ export interface ProjectPanelActions {
 }
 
 /**
- * UI-only state a host may seed — what is open and the directive draft. Never
- * data. Kept deliberately (review S7): the panel's tests render to static
- * markup, which cannot click a `⋯` or type a draft, so seeding the initial UI
- * state is the only door to the open-menu and typed-directive renders. The
- * live state stays local to the component either way.
+ * UI-only state a host may seed — what is open and which tab or seat editor is
+ * active. Never data. Kept deliberately (review S7): the panel's tests render
+ * to static markup, which cannot click a `⋯`, so seeding the initial UI state
+ * is the only door to the open-menu render. The live state stays local to the
+ * component either way.
  */
 export interface ProjectPanelInitialUi {
   menuOpen?: boolean;
-  directive?: string;
   /** Stable targets: supervisor, lead, peer:<task>, worker. */
   editingSeat?: string;
   /** Which tab opens first (default `team`) — static markup cannot click a tab. */
@@ -182,7 +181,7 @@ function NeedsYouRow({ theme, item, mobile, wide, actions }: { theme: PluginThem
     : action.kind === "retry-handoff" ? (mobile ? <Text style={text(theme, "meta")}>Try again on Paseo Desktop, or use Replace now below.</Text> : primary(() => actions.handoffRetry(action.seat)))
     : mobile ? <Text testID={`factory-panel-needs-you-hint-${item.key}`} style={text(theme, "meta")}>{DESKTOP_ONLY_HINT[action.kind]}</Text>
     : action.kind === "install-prerequisites" ? primary(actions.installPrerequisites)
-    : action.kind === "start-supervisor" ? primary(() => actions.startSupervisor(""))
+    : action.kind === "start-supervisor" ? primary(() => actions.startSupervisor())
     : primary(actions.syncOpenDesign);
   return (
     <AlertRow theme={theme} testID={`factory-panel-needs-you-${item.key}`} colour={colour} title={item.title} wide={wide} actions={alertActions(control)}>
@@ -296,7 +295,6 @@ function SeatRow({
   wide,
   divider = true,
   actions,
-  initialUi,
 }: {
   theme: PluginTheme;
   name: string;
@@ -305,10 +303,8 @@ function SeatRow({
   wide: boolean;
   divider?: boolean;
   actions: ProjectPanelActions;
-  initialUi?: ProjectPanelInitialUi;
 }) {
   const colour = toneColour(row.tone);
-  const [directive, setDirective] = useState(initialUi?.directive ?? "");
   const isSupervisor = row.role === "supervisor";
   const live = seatIsLive(row);
   const agentId = row.agentId;
@@ -334,36 +330,15 @@ function SeatRow({
       {row.hint !== null ? <Text style={text(theme, "meta", colour)}>{row.hint}</Text> : null}
       {row.handoff !== null && row.handoff.state !== "failed" ? <Text style={{ ...text(theme, "meta"), color: row.handoff.state === "done" ? factoryPalette(theme).ok : factoryPalette(theme).move }}>Handoff: {row.handoff.state === "scheduled" ? `Scheduled · waiting for ${row.handoff.waitingPeers ?? 0} Peers` : row.handoff.state}</Text> : null}
       {isSupervisor && row.vacant && !mobile ? (
-        <View style={{ gap: SPACING[1.5] }}>
-          <TextInput
-            testID="factory-panel-directive"
-            value={directive}
-            onChangeText={setDirective}
-            placeholder="First directive for the Supervisor (optional)"
-            placeholderTextColor={theme.colors.foregroundMuted}
-            multiline
-            style={{
-              minHeight: CONTROL_H * 2,
-              paddingHorizontal: SPACING[2.5],
-              paddingVertical: SPACING[1.5],
-              color: theme.colors.foreground,
-              fontSize: 12,
-              borderWidth: 1,
-              borderColor: theme.colors.border,
-              borderRadius: RADIUS.md,
-              backgroundColor: theme.colors.surface1,
-            }}
-          />
-          <Btn
-            theme={theme}
-            small
-            variant="primary"
-            testID="factory-panel-start-supervisor"
-            label="Start Supervisor"
-            disabled={actions.busy}
-            onPress={() => actions.startSupervisor(directive)}
-          />
-        </View>
+        <Btn
+          theme={theme}
+          small
+          variant="primary"
+          testID="factory-panel-start-supervisor"
+          label="Start Supervisor"
+          disabled={actions.busy}
+          onPress={() => actions.startSupervisor()}
+        />
       ) : null}
     </View></View>
   );
@@ -444,21 +419,19 @@ function Seats({
   mobile,
   wide,
   actions,
-  initialUi,
 }: {
   theme: PluginTheme;
   seats: NonNullable<PanelView["seats"]>;
   mobile: boolean;
   wide: boolean;
   actions: ProjectPanelActions;
-  initialUi?: ProjectPanelInitialUi;
 }) {
   const [closedOpen, setClosedOpen] = useState(false);
   const live = seats.peers.filter((peer) => !isClosedPeer(peer));
   const closed = seats.peers.filter(isClosedPeer);
   return (
     <View testID="factory-panel-seats">
-      <SeatRow theme={theme} name="Supervisor" row={seats.supervisor} mobile={mobile} wide={wide} divider={false} actions={actions} {...(initialUi === undefined ? {} : { initialUi })} />
+      <SeatRow theme={theme} name="Supervisor" row={seats.supervisor} mobile={mobile} wide={wide} divider={false} actions={actions} />
       <SeatRow theme={theme} name="Lead" row={seats.lead} mobile={mobile} wide={wide} actions={actions} />
       {seats.peers.length > 0 ? (
         <View testID="factory-panel-peers">
@@ -930,7 +903,7 @@ export function ProjectPanel({
   menu?: ReactNode;
   /** The onboarding wizard (onboarding-wizard.tsx) for a workspace that is not a Project — supplied by the Shell on desktop only; mobile never mounts it. */
   onboarding?: ReactNode;
-  /** Seeds UI-only state (open menus, directive draft) — hosts and tests; never data. */
+  /** Seeds UI-only state (open menus, active tab) — hosts and tests; never data. */
   initialUi?: ProjectPanelInitialUi;
 }) {
   const [menuOpen, setMenuOpen] = useState(initialUi?.menuOpen === true);
@@ -949,7 +922,7 @@ export function ProjectPanel({
   const needsYouItems = withoutShownHandoffFailures(panel.needsYou, panel.handoffs);
   const needsYou = <NeedsYou theme={theme} items={needsYouItems} mobile={mobile} wide={wide} actions={actions} />;
   const handoff = <HandoffBlock theme={theme} handoffs={panel.handoffs} mobile={mobile} wide={wide} actions={actions} />;
-  const seats = panel.seats === null ? null : <Seats theme={theme} seats={panel.seats} mobile={mobile} wide={wide} actions={actions} {...(initialUi === undefined ? {} : { initialUi })} />;
+  const seats = panel.seats === null ? null : <Seats theme={theme} seats={panel.seats} mobile={mobile} wide={wide} actions={actions} />;
   const models = <ModelsTab theme={theme} panel={panel} mobile={mobile} actions={actions} modelView={modelView} machineLanes={machineLanes} hasProjectLaneOverride={hasProjectLaneOverride} />;
   const packs = <SkillPacks theme={theme} divider={panel.usage != null} packs={skillPacks} explicit={skillPacksExplicit} {...(!mobile ? { onReset: actions.resetSkillPacks, onManage: actions.manageSkillPacks } : {})} initiallyExpanded={initialUi?.expandedSkillPacks ?? []} busy={actions.busy} {...(!mobile && actions.toggleSkillPack !== undefined ? { onToggle: actions.toggleSkillPack } : {})} />;
   const design = panel.openDesign === null ? null : <OpenDesign theme={theme} openDesign={panel.openDesign} now={now} desktopActions={mobile ? null : openDesignActions} />;

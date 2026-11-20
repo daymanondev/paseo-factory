@@ -306,10 +306,10 @@ test("Supervisor Hand off now is a direct live-row action on Desktop and mobile 
   assert.equal(hasHook(vacant, "factory-seat-hand-off-now-supervisor"), false);
 });
 
-test("a vacant Supervisor offers Start Supervisor with a directive box on desktop; mobile offers neither; a live Supervisor never does", async () => {
+test("a vacant Supervisor offers Start Supervisor directly without a directive box on desktop; mobile offers neither; a live Supervisor never does", async () => {
   const desktop = await render(makePanel({ seats: vacantSupervisorSeats }));
   assert.ok(hasHook(desktop, "factory-panel-start-supervisor"));
-  assert.ok(hasHook(desktop, "factory-panel-directive"));
+  assert.equal(hasHook(desktop, "factory-panel-directive"), false, "no First directive box on vacant Supervisor");
   assert.match(desktop, /Start Supervisor/);
   assert.equal(hasHook(desktop, "factory-panel-open-supervisor"), false, "a vacant seat has no conversation to open");
 
@@ -321,6 +321,48 @@ test("a vacant Supervisor offers Start Supervisor with a directive box on deskto
   const live = await render(makePanel());
   assert.equal(hasHook(live, "factory-panel-start-supervisor"), false);
   assert.doesNotMatch(live, /Start Lead/);
+});
+
+test("clicking Start Supervisor on a vacant desktop Supervisor row immediately invokes startSupervisor with no directive", async () => {
+  const calls: unknown[][] = [];
+  const { ProjectPanel } = await loadPanel();
+  const { createElement, act } = await import("react");
+  const { JSDOM } = await import(["jsdom"].join(""));
+  const dom = new JSDOM("<!doctype html><div id=root></div>");
+  const g = globalThis as Record<string, any>;
+  const saved = { window: g.window, document: g.document, IS_REACT_ACT_ENVIRONMENT: g.IS_REACT_ACT_ENVIRONMENT };
+  g.window = dom.window; g.document = dom.window.document; g.IS_REACT_ACT_ENVIRONMENT = true;
+  const { createRoot } = await import("react-dom/client");
+  const container = dom.window.document.getElementById("root")!;
+  const root = createRoot(container);
+  try {
+    await act(() =>
+      root.render(
+        createElement(ProjectPanel, {
+          theme,
+          panel: makePanel({ seats: vacantSupervisorSeats }),
+          mobile: false,
+          now: Date.now(),
+          daemonError: null,
+          actions: {
+            ...noopActions(),
+            startSupervisor: (...args: unknown[]) => {
+              calls.push(args);
+            },
+          },
+        }),
+      ),
+    );
+    assert.equal(container.querySelector('[data-testid="factory-panel-directive"]'), null);
+    const startButton = container.querySelector('[data-testid="factory-panel-start-supervisor"]') as HTMLButtonElement | null;
+    assert.ok(startButton);
+    await act(() => startButton.click());
+    assert.deepEqual(calls, [[]]);
+  } finally {
+    await act(() => root.unmount());
+    Object.assign(g, saved);
+    dom.window.close();
+  }
 });
 
 test("the header ⋯ appears only when the shell supplies a menu, and its content only once opened", async () => {
