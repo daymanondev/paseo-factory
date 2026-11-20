@@ -4,13 +4,17 @@ import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createFactory } from "../plugin/server/core/factory.ts";
+import { createFactoryRegistry } from "../plugin/server/projects.ts";
 import { ensureProjectRegistered } from "../plugin/server/core/project.ts";
 import {
   readStoreReleaseRequest,
+  setProjectReleaseSettings,
   setProjectStoreReleaseSettings,
   setStoreReleaseRequest,
 } from "../plugin/server/core/project-settings.ts";
 import { saveVaultConfig } from "../plugin/server/core/vault-config.ts";
+import { releaseProject } from "../plugin/server/release.ts";
+import { handleSpoolRequest } from "../plugin/server/spool.ts";
 import { recordStoreNote, storeReleaseProject } from "../plugin/server/store-release.ts";
 import { disposeDir, gitCommitAll, makeTempDir } from "./helpers.ts";
 
@@ -713,4 +717,102 @@ test("recordStoreNote enforces <= 120-line lessons.md cap, writes 0o400 to vault
 
   // Verify repoDir has zero untracked/modified files
   assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: repoDir, encoding: "utf8" }).trim(), "");
+});
+
+test("releaseProject and Spool release reply signal storeReleaseAutoStaging when Store release mode is auto-staging on a mobile project", async (t) => {
+  const dir = makeTempDir("store-auto-staging-");
+  disposeDir(t, dir);
+  const paseoHome = join(dir, "paseo-home");
+  const stateDir = join(paseoHome, "plugin-state", "paseo-factory");
+
+  const mobileRepo = makeMobileRepo(dir, ["android"]);
+  const nonMobileRepo = join(dir, "plain-lib");
+  mkdirSync(nonMobileRepo, { recursive: true });
+  writeFileSync(join(nonMobileRepo, "README.md"), "# Plain\n");
+  gitCommitAll(nonMobileRepo);
+
+  const setupRepo = async (repoRoot: string, bareName: string, version: string) => {
+    const bare = join(dir, bareName);
+    execFileSync("git", ["branch", "-M", "main"], { cwd: repoRoot, stdio: "pipe" });
+    execFileSync("git", ["init", "--bare", bare], { stdio: "pipe" });
+    execFileSync("git", ["remote", "add", "origin", bare], { cwd: repoRoot, stdio: "pipe" });
+    execFileSync("git", ["push", "-u", "origin", "main"], { cwd: repoRoot, stdio: "pipe" });
+    const proj = ensureProjectRegistered(stateDir, repoRoot);
+    assert.ok(proj.ok);
+    const factory = createFactory({ stateDir: join(stateDir, "projects", proj.slug) });
+    t.after(() => factory.history.stop());
+    const sha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repoRoot, encoding: "utf8" }).trim();
+    factory.setContract({ task: "T-1", workspace: repoRoot, gate: "true", artifact: "README.md" });
+    factory.ledger.append({ event: "claim_reported", task: "T-1", attempt: 1, sha });
+    factory.ledger.append({ event: "gate_started", task: "T-1", attempt: 1, cmd: "true" });
+    factory.ledger.append({ event: "gate_finished", task: "T-1", attempt: 1, exit: 0, verdict: "green", note: "ok", sha });
+    factory.ledger.append({ event: "report_written", task: "T-1", attempt: 1, path: "report-T-1-1.md" });
+    await factory.accept({ task: "T-1", attempt: 1, accepted_by: "lead" });
+    setProjectReleaseSettings(stateDir, proj.slug, { mode: "auto", branch: "main" });
+    const fakeVaultRunner = async (call: { command: string; args: readonly string[]; cwd?: string }) => {
+      if (call.command === "gh" && call.args[0] === "release" && call.args[1] === "view") {
+        throw new Error("release not found");
+      }
+      if (call.command === "gh" && call.args[0] === "release" && call.args[1] === "create") {
+        return Buffer.from(`https://github.com/owner/app/releases/tag/v${version}\n`);
+      }
+      return execFileSync(call.command, [...call.args], { cwd: call.cwd, stdio: ["ignore", "pipe", "pipe"] });
+    };
+    return { slug: proj.slug, factory, fakeVaultRunner };
+  };
+
+  const mob = await setupRepo(mobileRepo, "mob-origin.git", "1.0.0");
+  setProjectStoreReleaseSettings(stateDir, mob.slug, { mode: "auto-staging" });
+
+  const mobRes = await releaseProject({
+    factory: mob.factory,
+    stateDir,
+    projectSlug: mob.slug,
+    projectRoot: mobileRepo,
+    version: "1.0.0",
+    runner: mob.fakeVaultRunner,
+  });
+  assert.equal(mobRes.ok, true);
+  if (mobRes.ok) {
+    assert.equal(mobRes.storeReleaseAutoStaging, true);
+  }
+
+  // Spool reply also carries the auto-staging follow-up hint after a new landed wave
+  writeFileSync(join(mobileRepo, "feature.txt"), "v1.0.1\n");
+  const nextSha = gitCommitAll(mobileRepo, "feat: v1.0.1");
+  mob.factory.setContract({ task: "T-2", workspace: mobileRepo, gate: "true", artifact: "README.md" });
+  mob.factory.ledger.append({ event: "claim_reported", task: "T-2", attempt: 1, sha: nextSha });
+  mob.factory.ledger.append({ event: "gate_started", task: "T-2", attempt: 1, cmd: "true" });
+  mob.factory.ledger.append({ event: "gate_finished", task: "T-2", attempt: 1, exit: 0, verdict: "green", note: "ok", sha: nextSha });
+  mob.factory.ledger.append({ event: "report_written", task: "T-2", attempt: 1, path: "report-T-2-1.md" });
+  await mob.factory.accept({ task: "T-2", attempt: 1, accepted_by: "lead" });
+  const registry = createFactoryRegistry({ stateDir });
+  t.after(() => registry.stop());
+  const spoolMob = await handleSpoolRequest(
+    registry.root,
+    { id: "rel-mob-2", kind: "release", version: "1.0.1", workspace: mobileRepo, projectSlug: mob.slug, seat: "lead" },
+    { home: paseoHome, vaultRunner: mob.fakeVaultRunner },
+    registry,
+  );
+  assert.equal(spoolMob.ok, true);
+  if (spoolMob.ok) {
+    assert.equal((spoolMob as { storeReleaseAutoStaging?: boolean }).storeReleaseAutoStaging, true);
+    assert.match(spoolMob.summary ?? "", /auto-staging.*lead_store_release/i);
+  }
+
+  // Non-mobile project even with auto-staging stays clean (no storeReleaseAutoStaging)
+  const plain = await setupRepo(nonMobileRepo, "plain-origin.git", "1.0.0");
+  setProjectStoreReleaseSettings(stateDir, plain.slug, { mode: "auto-staging" });
+  const plainRes = await releaseProject({
+    factory: plain.factory,
+    stateDir,
+    projectSlug: plain.slug,
+    projectRoot: nonMobileRepo,
+    version: "1.0.0",
+    runner: plain.fakeVaultRunner,
+  });
+  assert.equal(plainRes.ok, true);
+  if (plainRes.ok) {
+    assert.equal(plainRes.storeReleaseAutoStaging, undefined);
+  }
 });

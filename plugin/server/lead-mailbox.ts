@@ -788,6 +788,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       // Turn-1 packet carries the Project notebook's slug-dependent path and
       // bounded content so the seat never guesses <projectStateDir>/notebook.md.
       stateDir: deps.stateDir,
+      ...(deps.home !== undefined && deps.home.trim() !== "" ? { paseoHome: deps.home } : {}),
       // v0.0.97 (ADR 0047 §1.2): the seat's config.systemPrompt already carries
       // buildRoleKickoffPrompt(role) — the Turn-1 user message keeps only the
       // dynamic repository preflight facts, never a second copy of the linked

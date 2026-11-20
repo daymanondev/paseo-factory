@@ -3253,7 +3253,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         view: {
           ...view,
           machineLanes: machineLanes.lanes,
-          skillHub: inspectSkillHub({ stateDir: deps.stateDir, slpLanes: lanes.lanes, userHome: resolveSurfaceUserHome(), projectRoot: enrichedProject?.root, configuredPacks }),
+          skillHub: inspectSkillHub({ stateDir: deps.stateDir, paseoHome: deps.home, slpLanes: lanes.lanes, userHome: resolveSurfaceUserHome(), projectRoot: enrichedProject?.root, configuredPacks }),
           companionTools: buildCompanionToolsView(),
           helperMcps: helperMcpRoster(discoverHelperMcps({ stateDir: deps.stateDir, userHome: resolveSurfaceUserHome() }).servers),
           ...profileInfo,
@@ -4579,7 +4579,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
 
     async skillsImport(input: { id: string }) {
       try {
-        const reply = importHostSkillOrPack({ ...input, userHome: resolveSurfaceUserHome(), runner: deps.companionToolRunner });
+        const reply = importHostSkillOrPack({ ...input, userHome: resolveSurfaceUserHome(), paseoHome: deps.home, runner: deps.companionToolRunner });
         return reply.ok ? { ok: true as const, summary: reply.summary } : failure('skill-import-failed', reply.reason);
       } catch (error) { return failure(codeOf(error), messageOf(error)); }
     },

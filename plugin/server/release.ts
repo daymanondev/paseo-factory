@@ -14,8 +14,9 @@ import { join } from "node:path";
 import { isSeatMemoryRelativePathAllowed } from "./core/choke.ts";
 import { isReadOnlyPeerDisposition, type LedgerEvent } from "./core/events.ts";
 import type { Factory } from "./core/factory.ts";
-import { clearReleaseRequest, readReleaseRequest, readReleaseSettings } from "./core/project-settings.ts";
+import { clearReleaseRequest, readReleaseRequest, readReleaseSettings, readStoreReleaseSettings } from "./core/project-settings.ts";
 import type { ProjectReleaseMode } from "./core/project-settings.ts";
+import { detectMobilePlatforms } from "./core/store-release-probe.ts";
 import { builtinVaultRunner, isGhMissingError, isGhUnauthenticatedError } from "./core/vault-transport.ts";
 import type { VaultRunner } from "./core/vault-transport.ts";
 
@@ -40,6 +41,7 @@ export type ReleaseProjectResult =
       url: string | null;
       mode: ProjectReleaseMode;
       skipped: string[];
+      storeReleaseAutoStaging?: boolean;
     }
   | {
       ok: false;
@@ -493,6 +495,12 @@ export async function releaseProject(input: ReleaseProjectInput): Promise<Releas
     skipped,
   });
 
+  const storeSettings = readStoreReleaseSettings(input.stateDir, input.projectSlug);
+  const isMobileProject =
+    detectMobilePlatforms(input.projectRoot).length > 0 ||
+    existsSync(join(input.projectRoot, ".store-release", "manifest.json"));
+  const storeReleaseAutoStaging = storeSettings.mode === "auto-staging" && isMobileProject;
+
   return {
     ok: true,
     version: cleanVersion,
@@ -502,5 +510,6 @@ export async function releaseProject(input: ReleaseProjectInput): Promise<Releas
     url: releaseUrl,
     mode: settings.mode,
     skipped,
+    ...(storeReleaseAutoStaging ? { storeReleaseAutoStaging: true } : {}),
   };
 }

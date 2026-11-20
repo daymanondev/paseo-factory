@@ -1,6 +1,7 @@
 import { listSkillPacks } from './skill-packs.ts';
 import { readProjectSettings } from './project-settings.ts';
 import { resolveProject } from './project.ts';
+import { detectMobilePlatforms } from './store-release-probe.ts';
 /** Local capability inventory and the shared Project role-skill policy. Discovery never executes host code. */
 import { createHash } from "node:crypto";
 import {
@@ -10,8 +11,10 @@ import {
   realpathSync,
   mkdirSync,
   cpSync,
+  rmSync,
+  statSync,
 } from "node:fs";
-import { join, basename, relative, isAbsolute } from "node:path";
+import { join, basename, dirname, relative, isAbsolute } from "node:path";
 import { homedir } from "node:os";
 import {
   CORE_FACTORY_SKILLS,
@@ -102,6 +105,7 @@ export function resolveProjectSkillPacks(options: {
 
 export interface ProjectSkillContext {
   stateDir?: string;
+  paseoHome?: string;
   projectRoot?: string;
   userHome?: string;
   configuredPacks?: string[];
@@ -122,6 +126,20 @@ export const SLP_ROLE_SKILLS = {
   ],
   lead: ["codebase-design", "domain-modeling", "tdd"],
 } as const;
+
+function resolvePaseoHomeForSkillHub(userHome: string, paseoHome?: string, stateDir?: string): string {
+  if (paseoHome !== undefined && paseoHome.trim() !== "") return paseoHome.trim();
+  if (stateDir !== undefined && basename(stateDir) === "paseo-factory" && basename(dirname(stateDir)) === "plugin-state") {
+    return dirname(dirname(stateDir));
+  }
+  return join(userHome, ".paseo");
+}
+
+function isMobileStoreProject(projectRoot?: string): boolean {
+  if (!projectRoot) return false;
+  return detectMobilePlatforms(projectRoot).length > 0 || existsSync(join(projectRoot, ".store-release", "manifest.json"));
+}
+
 export function resolveRoleSkillsForProject(
   options: RoleSkillOptions,
 ): string[] {
@@ -130,8 +148,14 @@ export function resolveRoleSkillsForProject(
   if (role === "supervisor") return inspectFactorySkillPack(options.userHome).installedSkills;
   const baseline = [...CORE_FACTORY_SKILLS];
   const domain = role === 'peer' ? projectSkillPackInventory(options).filter(p => p.enabled).flatMap(p => p.skills) : [];
+  const mobileStoreSkills =
+    role === "peer" &&
+    isMobileStoreProject(options.projectRoot) &&
+    inspectFactorySkillPack(options.userHome).installedSkills.includes("mobile-store-release")
+      ? ["mobile-store-release"]
+      : [];
   return [
-    ...new Set([...baseline, ...domain, ...(options.contractSkills ?? [])]),
+    ...new Set([...baseline, ...domain, ...mobileStoreSkills, ...(options.contractSkills ?? [])]),
   ].filter((name) => /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name));
 }
 
@@ -196,8 +220,55 @@ function discoverHostMcpNames(root: string, depth = 0): string[] {
   }
   return [...new Set(names)];
 }
+function resolveReleaseLabSkillRoot(paseoHome: string): string | null {
+  const pickSkillRoot = (candidates: readonly string[]): string | null => {
+    for (const candidate of candidates) {
+      if (existsSync(candidate) && walkSkills(candidate).length > 0) return candidate;
+    }
+    return null;
+  };
+
+  const configEntry = json(join(paseoHome, "config.json")).plugins?.["factory-release-lab"] as
+    | { path?: unknown; enabled?: unknown }
+    | undefined;
+  if (configEntry && configEntry.enabled !== false && typeof configEntry.path === "string" && configEntry.path.trim() !== "") {
+    const recorded = configEntry.path.trim();
+    const fromConfig = pickSkillRoot([join(recorded, "skill"), join(recorded, "..", "skill"), recorded]);
+    if (fromConfig !== null) return fromConfig;
+  }
+
+  const managedRoot = join(paseoHome, "plugins", "factory-release-lab");
+  if (!existsSync(managedRoot)) return null;
+  const direct = pickSkillRoot([join(managedRoot, "skill")]);
+  if (direct !== null) return direct;
+
+  let entries;
+  try {
+    entries = readdirSync(managedRoot, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+  const ranked: Array<{ versionDir: string; mtime: number }> = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
+    const versionDir = join(managedRoot, entry.name);
+    try {
+      ranked.push({ versionDir, mtime: statSync(versionDir).mtimeMs });
+    } catch {
+      // skip unreadable entry
+    }
+  }
+  ranked.sort((a, b) => b.mtime - a.mtime);
+  for (const { versionDir } of ranked) {
+    const found = pickSkillRoot([join(versionDir, "skill"), join(versionDir, "plugin", "skill"), versionDir]);
+    if (found !== null) return found;
+  }
+  return null;
+}
+
 export function discoverHostEcosystems(
   userHome = homedir(),
+  paseoHome?: string,
 ): HostCatalogEntry[] {
   const installed = new Set(inspectFactorySkillPack(userHome).installedSkills);
   const lock = readSkillLockFile(userHome);
@@ -221,6 +292,23 @@ export function discoverHostEcosystems(
       mcpServers: ["expo-mcp"],
     },
   ];
+  const releaseLabSkillRoot = resolveReleaseLabSkillRoot(resolvePaseoHomeForSkillHub(userHome, paseoHome));
+  if (releaseLabSkillRoot !== null) {
+    const paths = walkSkills(releaseLabSkillRoot);
+    const skills = [...new Set(paths.map((p) => basename(p)))];
+    if (skills.length > 0) {
+      result.push({
+        id: "paseo:factory-release-lab",
+        name: "factory-release-lab",
+        ecosystem: "paseo",
+        path: releaseLabSkillRoot,
+        skills,
+        kind: paths.length === 1 && paths[0] === releaseLabSkillRoot ? "skill" : "pack",
+        mcpServers: [],
+        status: skills.every((s) => installed.has(s)) ? "linked" : "available",
+      });
+    }
+  }
   const builtin = join(userHome, ".codex/skills/.system");
   if (existsSync(builtin)) {
     const skills = walkSkills(builtin).map((path) => basename(path));
@@ -335,9 +423,58 @@ function validatePortableTree(
   }
   visited.delete(real);
 }
+function installSkillDirsToAgents(options: {
+  home: string;
+  paths: readonly string[];
+  source: string;
+  updateSameSource: boolean;
+}): { synced: string[]; lockUpdated: boolean } {
+  const lock = readSkillLockFile(options.home);
+  const now = new Date().toISOString();
+  const synced: string[] = [];
+  let lockUpdated = false;
+  for (const path of options.paths) {
+    const name = basename(path);
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name)) continue;
+    const dest = join(options.home, ".agents", "skills", name);
+    const destSkillMd = join(dest, "SKILL.md");
+    const srcHash = createHash("sha256").update(readFileSync(join(path, "SKILL.md"))).digest("hex");
+    const existingEntry = lock.skills[name];
+    if (existsSync(destSkillMd)) {
+      if (!options.updateSameSource || existingEntry?.source !== options.source) continue;
+      const destHash = createHash("sha256").update(readFileSync(destSkillMd)).digest("hex");
+      if (destHash === srcHash) {
+        synced.push(name);
+        continue;
+      }
+      rmSync(dest, { recursive: true, force: true });
+    }
+    mkdirSync(dest, { recursive: true });
+    cpSync(path, dest, {
+      recursive: true,
+      dereference: true,
+      filter: (src) => !IMPORT_EXCLUDED_NAMES.has(basename(src)),
+    });
+    lock.skills[name] = {
+      source: options.source,
+      sourceType: "local",
+      sourceUrl: path,
+      skillFolderHash: srcHash,
+      installedAt: existingEntry?.installedAt ?? now,
+      updatedAt: now,
+    };
+    lockUpdated = true;
+    synced.push(name);
+  }
+  if (lockUpdated) writeSkillLockFile(options.home, lock);
+  ensureProviderSkillSymlinks(options.home);
+  return { synced, lockUpdated };
+}
+
 export function importHostSkillOrPack(options: {
   id: string;
   userHome?: string;
+  paseoHome?: string;
   runner?: CompanionToolRunner;
 }) {
   const home = options.userHome ?? homedir();
@@ -347,11 +484,10 @@ export function importHostSkillOrPack(options: {
       action: "update",
       runner: options.runner,
     });
-  const entry = discoverHostEcosystems(home).find((e) => e.id === options.id);
+  const entry = discoverHostEcosystems(home, options.paseoHome).find((e) => e.id === options.id);
   if (!entry?.path)
     return { ok: false as const, reason: "Unknown host skill or pack" };
-  const paths = walkSkills(entry.path),
-    lock = readSkillLockFile(home);
+  const paths = walkSkills(entry.path);
   if (!paths.length)
     return {
       ok: false as const,
@@ -362,33 +498,45 @@ export function importHostSkillOrPack(options: {
   } catch (error) {
     return { ok: false as const, reason: String(error) };
   }
-  const now = new Date().toISOString();
-  for (const path of [...paths].sort().reverse()) {
-    const name = basename(path);
-    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name)) continue;
-    const dest = join(home, ".agents/skills", name);
-    // Import preserves existing canonical skills; updates use their own source installer.
-    if (existsSync(join(dest, "SKILL.md"))) continue;
-    mkdirSync(dest, { recursive: true });
-    cpSync(path, dest, {
-      recursive: true,
-      dereference: true,
-      filter: (src) => !IMPORT_EXCLUDED_NAMES.has(basename(src)),
-    });
-    lock.skills[name] = {
-      source: `${entry.ecosystem}/${entry.name}`,
-      sourceType: "local",
-      sourceUrl: path,
-      skillFolderHash: createHash("sha256")
-        .update(readFileSync(join(dest, "SKILL.md")))
-        .digest("hex"),
-      installedAt: now,
-      updatedAt: now,
-    };
-  }
-  writeSkillLockFile(home, lock);
-  ensureProviderSkillSymlinks(home);
+  installSkillDirsToAgents({
+    home,
+    paths: [...paths].sort().reverse(),
+    source: `${entry.ecosystem}/${entry.name}`,
+    updateSameSource: false,
+  });
   return { ok: true as const, summary: `Imported ${entry.name} into Factory` };
+}
+
+/**
+ * Reconciles companion plugin skills (e.g. `mobile-store-release` from an
+ * installed `factory-release-lab` plugin) into `<userHome>/.agents/skills/` and
+ * provider skill directories without vendoring external skill Markdown in
+ * `paseo-factory`. Safe & non-fatal when roots are absent or unwritable.
+ */
+export function ensureCompanionPluginSkills(
+  options: { userHome?: string; paseoHome?: string; stateDir?: string } = {},
+  onWarn?: (message: string) => void,
+): string[] {
+  const userHome = options.userHome ?? homedir();
+  const paseoHome = resolvePaseoHomeForSkillHub(userHome, options.paseoHome, options.stateDir);
+  const releaseLabSkillRoot = resolveReleaseLabSkillRoot(paseoHome);
+  if (releaseLabSkillRoot === null) return [];
+
+  const paths = walkSkills(releaseLabSkillRoot);
+  if (paths.length === 0) return [];
+
+  try {
+    for (const path of paths) validatePortableTree(path);
+    return installSkillDirsToAgents({
+      home: userHome,
+      paths,
+      source: "paseo/factory-release-lab",
+      updateSameSource: true,
+    }).synced;
+  } catch (err) {
+    onWarn?.(`skill: could not reconcile companion plugin skills — ${err instanceof Error ? err.message : String(err)}`);
+    return [];
+  }
 }
 export function buildRoleSkillMatrix(options: ProjectSkillContext = {}) {
   const installed = inspectFactorySkillPack(options.userHome).installedSkills;
@@ -493,7 +641,7 @@ export function inspectSkillHub(options: ProjectSkillContext = {}) {
     installedSkills,
     projectPacks,
     skillPacksExplicit: options.configuredPacks !== undefined || !!(options.stateDir && options.projectRoot && (() => { const project = resolveProject(options.projectRoot); return project.ok && readProjectSettings(options.stateDir!, project.slug).skillPacks !== undefined; })()),
-    hostCatalog: discoverHostEcosystems(home),
+    hostCatalog: discoverHostEcosystems(home, resolvePaseoHomeForSkillHub(home, options.paseoHome, options.stateDir)),
     roleMatrix,
   };
 }
