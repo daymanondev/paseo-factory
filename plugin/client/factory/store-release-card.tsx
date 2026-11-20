@@ -1,9 +1,10 @@
 /**
- * "Store Release" card on the Project panel's Project tab (Ticket 06, ADR 0066).
- * Pure React Native read-only view: collapsible (collapsed by default on
- * non-mobile Projects), displaying Store release mode, Private vault store
- * credential readiness + missing-key warning, detected mobile platforms,
- * latest run status, active Hole summary, and Open Release Lab navigation.
+ * "Store Release" card on the Project panel's Project tab (Tickets 06–07, ADR 0066).
+ * Pure React Native view: collapsible (collapsed by default on non-mobile
+ * Projects), displaying Store release mode (with Owner-only desktop selector),
+ * Private vault store credential readiness + missing-key warning, detected
+ * mobile platforms, latest run status, active Hole summary, and Open Release
+ * Lab navigation. Mobile renders strictly read-only.
  */
 import type { PluginTheme } from "@getpaseo/plugin";
 import { Icon } from "@getpaseo/plugin/client/ui";
@@ -16,15 +17,26 @@ import type {
   StoreReleaseVaultReadiness,
   StoreReleaseView,
 } from "../../shared/view.ts";
-import { Btn, Pill } from "../kit/pill.tsx";
+import { Btn, ChoiceChip, Pill } from "../kit/pill.tsx";
 import { SPACING, RADIUS, text, tint } from "../kit/theme.ts";
 import type { Colour } from "../kit/theme.ts";
+
+export const STORE_RELEASE_MODES: readonly StoreReleaseMode[] = ["off", "on-request", "auto-staging"];
 
 export const STORE_RELEASE_MODE_MEANINGS: Record<StoreReleaseMode, string> = {
   off: "Store uploads disabled — Lead refuses store releases.",
   "on-request": "Lead builds and uploads to store staging only on explicit Supervisor dispatch.",
   "auto-staging": "Lead automatically stages mobile builds after GitHub Release succeeds; production still requires approval.",
 };
+
+export interface StoreReleaseCardFeedback {
+  text: string;
+  tone: "info" | "success" | "error";
+}
+
+export interface StoreReleaseActions {
+  setMode?: (mode: StoreReleaseMode) => void | Promise<void>;
+}
 
 const PLATFORM_LABELS: Record<StoreReleasePlatform, string> = {
   android: "Android",
@@ -78,12 +90,18 @@ export function StoreReleaseCard({
   storeRelease,
   mobile,
   now,
+  busy = false,
+  feedback = null,
+  actions = {},
   onOpenReleaseLab,
 }: {
   theme: PluginTheme;
   storeRelease: StoreReleaseView;
   mobile: boolean;
   now: number;
+  busy?: boolean;
+  feedback?: StoreReleaseCardFeedback | null;
+  actions?: StoreReleaseActions;
   onOpenReleaseLab?: () => void;
 }) {
   const [expanded, setExpanded] = useState(storeRelease.isMobile);
@@ -94,6 +112,7 @@ export function StoreReleaseCard({
 
   const missingKeys = missingVaultKeysForPlatforms(storeRelease.platforms, storeRelease.vault);
   const platformLabels = storeRelease.platforms.map((p) => PLATFORM_LABELS[p]);
+  const modeInteractive = !mobile && actions.setMode !== undefined;
   const runnerReady = storeRelease.runner.installed && storeRelease.runner.enabled && storeRelease.runner.binPath !== null;
   const runnerNote = !storeRelease.runner.installed
     ? "factory-release-lab not installed"
@@ -139,12 +158,33 @@ export function StoreReleaseCard({
           <View testID="factory-panel-store-release-mode" style={{ gap: SPACING[1] }}>
             <Text style={text(theme, "label")}>Store release mode</Text>
             <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: SPACING[1.5] }}>
-              <Pill
-                theme={theme}
-                label={storeRelease.mode}
-                tone={storeRelease.mode === "off" ? "foregroundMuted" : "accent"}
-                lit={storeRelease.mode !== "off"}
-              />
+              {modeInteractive ? (
+                STORE_RELEASE_MODES.map((m) => (
+                  <ChoiceChip
+                    key={m}
+                    theme={theme}
+                    testID={`factory-panel-store-release-mode-${m}`}
+                    label={m}
+                    selected={storeRelease.mode === m}
+                    disabled={busy}
+                    onPress={() => {
+                      if (m !== storeRelease.mode) void actions.setMode?.(m);
+                    }}
+                  />
+                ))
+              ) : (
+                <Pill
+                  theme={theme}
+                  label={storeRelease.mode}
+                  tone={storeRelease.mode === "off" ? "foregroundMuted" : "accent"}
+                  lit={storeRelease.mode !== "off"}
+                />
+              )}
+              {busy ? (
+                <Text testID="factory-panel-store-release-pending" style={text(theme, "meta")}>
+                  Saving…
+                </Text>
+              ) : null}
               {storeRelease.pendingRequest !== null ? (
                 <Pill
                   theme={theme}
@@ -160,6 +200,23 @@ export function StoreReleaseCard({
             </View>
             <Text style={text(theme, "meta")}>{STORE_RELEASE_MODE_MEANINGS[storeRelease.mode]}</Text>
           </View>
+
+          {feedback !== null ? (
+            <Text
+              testID="factory-panel-store-release-feedback"
+              style={text(
+                theme,
+                "label",
+                feedback.tone === "error"
+                  ? "statusDanger"
+                  : feedback.tone === "success"
+                    ? "statusSuccess"
+                    : "statusWarning",
+              )}
+            >
+              {feedback.text}
+            </Text>
+          ) : null}
 
           <View testID="factory-panel-store-release-platforms" style={{ gap: SPACING[1] }}>
             <Text style={text(theme, "label")}>Detected mobile platforms</Text>

@@ -9,11 +9,12 @@ import { openExternalUrl, useRpc } from "@getpaseo/plugin/client";
 import { Modal, ScrollView, useToast } from "@getpaseo/plugin/client/ui";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Text, View } from "react-native";
-import { skillsImport, skillsPackSave, skillsPackDelete, skillsPackReset, skillsTogglePack, lanesSet, lanesReset, lanesSetBatch, handoffStart, handoffReplaceNow, handoffCancel, handoffRetry, handoffHandover, onboardingInspect, onboardingStart, onboardingStatus, openDesignCatalog, openDesignSync, helperMcpsSyncAndProbe, helperMcpsSetEnabled, pluginsInstall, pluginsManage, pluginsCheckUpdates, releaseSettingsRead, releaseSettingsWrite, storeReleaseRead, githubPublishPreflight, githubPublish, selfUpdateApply, selfUpdateStatus, profilesApply, profilesDelete, profilesSave, projectDelete, projectReset, projectRotate, snapshot, stateUpdates, supervisorAdopt, supervisorStart, vaultConfigure, vaultHydrate, vaultImport, vaultSync } from "../../shared/rpc.ts";
+import { skillsImport, skillsPackSave, skillsPackDelete, skillsPackReset, skillsTogglePack, lanesSet, lanesReset, lanesSetBatch, handoffStart, handoffReplaceNow, handoffCancel, handoffRetry, handoffHandover, onboardingInspect, onboardingStart, onboardingStatus, openDesignCatalog, openDesignSync, helperMcpsSyncAndProbe, helperMcpsSetEnabled, pluginsInstall, pluginsManage, pluginsCheckUpdates, releaseSettingsRead, releaseSettingsWrite, storeReleaseRead, storeReleaseWrite, githubPublishPreflight, githubPublish, selfUpdateApply, selfUpdateStatus, profilesApply, profilesDelete, profilesSave, projectDelete, projectReset, projectRotate, snapshot, stateUpdates, supervisorAdopt, supervisorStart, vaultConfigure, vaultHydrate, vaultImport, vaultSync } from "../../shared/rpc.ts";
 import { GH_LOGIN_CMD } from "./github-release-card.tsx";
 import type { GitHubPublishSubmitInput, ReleaseCardFeedback } from "./github-release-card.tsx";
+import type { StoreReleaseCardFeedback } from "./store-release-card.tsx";
 import type { ManageablePluginId } from "../../shared/companions.ts";
-import type { FactoryView, GitHubPublishPreflightView, LaneName, ReleaseSettingsView, StoreReleaseView } from "../../shared/view.ts";
+import type { FactoryView, GitHubPublishPreflightView, LaneName, ReleaseSettingsView, StoreReleaseMode, StoreReleaseView } from "../../shared/view.ts";
 import { SPACING, text } from "../kit/theme.ts";
 import { useNow, usePoll, pollEvery, PROVIDERS_LOADING_MS, QUIET_MS } from "../kit/poll.ts";
 import { isSubscriptionLive, useClientSubscription } from "../kit/subscription.ts";
@@ -111,6 +112,7 @@ export function FactoryShell({
   const releaseReadCall = useRpc(releaseSettingsRead);
   const releaseWriteCall = useRpc(releaseSettingsWrite);
   const storeReleaseReadCall = useRpc(storeReleaseRead);
+  const storeReleaseWriteCall = useRpc(storeReleaseWrite);
   const githubPublishPreflightCall = useRpc(githubPublishPreflight);
   const githubPublishCall = useRpc(githubPublish);
   const selfUpdate = useSelfUpdate({ status: selfUpdateStatusCall, apply: selfUpdateApplyCall, enabled: surface === "panel" });
@@ -135,6 +137,8 @@ export function FactoryShell({
   const [panelTab, setPanelTab] = useState<"team" | "models" | "project">("team");
   const [releaseView, setReleaseView] = useState<ReleaseSettingsView | null>(null);
   const [storeReleaseView, setStoreReleaseView] = useState<StoreReleaseView | null>(null);
+  const [storeReleaseBusy, setStoreReleaseBusy] = useState(false);
+  const [storeReleaseFeedback, setStoreReleaseFeedback] = useState<StoreReleaseCardFeedback | null>(null);
   const [publishPreflightView, setPublishPreflightView] = useState<GitHubPublishPreflightView | null>(null);
   const [releaseBusy, setReleaseBusy] = useState(false);
   const [releaseFeedback, setReleaseFeedback] = useState<ReleaseCardFeedback | null>(null);
@@ -320,6 +324,7 @@ export function FactoryShell({
         setStoreReleaseView(null);
         setPublishPreflightView(null);
         setReleaseFeedback(null);
+        setStoreReleaseFeedback(null);
       }
       return;
     }
@@ -368,6 +373,34 @@ export function FactoryShell({
         setReleaseFeedback({ text: "Pending Release request was dropped.", tone: "info" });
       }
     });
+
+  const updateStoreReleaseMode = async (mode: StoreReleaseMode) => {
+    if (activeReleaseRoot === null || storeReleaseBusy || mobile) return;
+    setStoreReleaseBusy(true);
+    setStoreReleaseFeedback(null);
+    try {
+      const reply = await storeReleaseWriteCall({ projectRoot: activeReleaseRoot, mode });
+      if (!reply.ok) {
+        setStoreReleaseFeedback({ text: reply.error, tone: "error" });
+        return;
+      }
+      setStoreReleaseView(reply.settings);
+      await refreshStoreReleaseView(activeReleaseRoot);
+      setStoreReleaseFeedback({
+        text: reply.droppedPendingRequest
+          ? `Store release mode set to ${reply.settings.mode}. Pending Store release request was dropped.`
+          : `Store release mode set to ${reply.settings.mode}.`,
+        tone: "success",
+      });
+    } catch (error) {
+      setStoreReleaseFeedback({
+        text: error instanceof Error ? error.message : String(error),
+        tone: "error",
+      });
+    } finally {
+      setStoreReleaseBusy(false);
+    }
+  };
 
   const copyReleaseLoginCommand = () => {
     const clip = (globalThis as { navigator?: { clipboard?: { writeText?: (value: string) => Promise<void> } } }).navigator?.clipboard;
@@ -960,6 +993,9 @@ export function FactoryShell({
               },
             }}
             storeRelease={storeReleaseView}
+            storeReleaseBusy={storeReleaseBusy}
+            storeReleaseFeedback={storeReleaseFeedback}
+            {...(mobile ? {} : { storeReleaseActions: { setMode: updateStoreReleaseMode } })}
             {...(mobile || openReleaseLab === undefined ? {} : { onOpenReleaseLab: openReleaseLab })}
             onTabChange={setPanelTab}
             skillPacks={view.skillHub?.projectPacks ?? []}

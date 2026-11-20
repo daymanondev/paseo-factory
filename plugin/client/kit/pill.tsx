@@ -427,3 +427,53 @@ export function ToneBadge({
     </View>
   );
 }
+
+/** Single-select choice chip used by Release and Store Release mode/option selectors. */
+export function ChoiceChip({
+  theme,
+  testID,
+  label,
+  selected,
+  disabled,
+  onPress,
+}: {
+  theme: PluginTheme;
+  testID: string;
+  label: string;
+  selected: boolean;
+  disabled: boolean;
+  onPress: () => void;
+}) {
+  const accent = theme.colors.accent;
+  return (
+    <Pressable
+      testID={testID}
+      accessibilityRole="button"
+      accessibilityState={{ selected }}
+      disabled={disabled}
+      onPress={onPress}
+      style={(state) => ({
+        minHeight: CONTROL_SM,
+        paddingHorizontal: SPACING[2.5],
+        paddingVertical: 4,
+        borderRadius: RADIUS.md,
+        borderWidth: 1,
+        borderColor: selected ? accent : hoveredOf(state) ? theme.colors.foregroundMuted : theme.colors.border,
+        backgroundColor: selected ? tint(accent, "1f") : theme.colors.surface1,
+        alignItems: "center",
+        justifyContent: "center",
+        opacity: disabled ? 0.5 : 1,
+      })}
+    >
+      <Text
+        style={{
+          ...text(theme, "label"),
+          color: selected ? accent : theme.colors.foreground,
+          fontWeight: selected ? "600" : "400",
+        }}
+      >
+        {label}
+      </Text>
+    </Pressable>
+  );
+}

@@ -10,8 +10,8 @@ import { Icon, TextInput } from "@getpaseo/plugin/client/ui";
 import { useEffect, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import type { GitHubPublishPreflightView, ReleaseMode, ReleaseSettingsView } from "../../shared/view.ts";
-import { Btn, Pill } from "../kit/pill.tsx";
-import { CONTROL_SM, RADIUS, SPACING, hoveredOf, text, tint } from "../kit/theme.ts";
+import { Btn, ChoiceChip, Pill } from "../kit/pill.tsx";
+import { CONTROL_SM, RADIUS, SPACING, text, tint } from "../kit/theme.ts";
 
 export const GH_LOGIN_CMD = "gh auth login --web -p https";
 
@@ -55,55 +55,6 @@ function releaseAgoOf(iso: string | null, now: number): string {
   if (seconds < 3600) return `${Math.round(seconds / 60)}m ago`;
   if (seconds < 86_400) return `${Math.round(seconds / 3600)}h ago`;
   return `${Math.round(seconds / 86_400)}d ago`;
-}
-
-function ChoiceChip({
-  theme,
-  testID,
-  label,
-  selected,
-  disabled,
-  onPress,
-}: {
-  theme: PluginTheme;
-  testID: string;
-  label: string;
-  selected: boolean;
-  disabled: boolean;
-  onPress: () => void;
-}) {
-  const accent = theme.colors.accent;
-  return (
-    <Pressable
-      testID={testID}
-      accessibilityRole="button"
-      accessibilityState={{ selected }}
-      disabled={disabled}
-      onPress={onPress}
-      style={(state) => ({
-        minHeight: CONTROL_SM,
-        paddingHorizontal: SPACING[2.5],
-        paddingVertical: 4,
-        borderRadius: RADIUS.md,
-        borderWidth: 1,
-        borderColor: selected ? accent : hoveredOf(state) ? theme.colors.foregroundMuted : theme.colors.border,
-        backgroundColor: selected ? tint(accent, "1f") : theme.colors.surface1,
-        alignItems: "center",
-        justifyContent: "center",
-        opacity: disabled ? 0.5 : 1,
-      })}
-    >
-      <Text
-        style={{
-          ...text(theme, "label"),
-          color: selected ? accent : theme.colors.foreground,
-          fontWeight: selected ? "600" : "400",
-        }}
-      >
-        {label}
-      </Text>
-    </Pressable>
-  );
 }
 
 function GitHubPublishForm({
