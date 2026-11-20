@@ -477,3 +477,15 @@ export function ChoiceChip({
     </Pressable>
   );
 }
+
+/** Formats an ISO timestamp relative to `now` (ms) as "never", "unknown", "just now", or "<n>m/h/d ago". */
+export function formatRelativeAgo(iso: string | null, now: number): string {
+  if (iso === null) return "never";
+  const at = Date.parse(iso);
+  if (!Number.isFinite(at)) return "unknown";
+  const seconds = Math.max(0, Math.round((now - at) / 1000));
+  if (seconds < 60) return "just now";
+  if (seconds < 3600) return `${Math.round(seconds / 60)}m ago`;
+  if (seconds < 86_400) return `${Math.round(seconds / 3600)}h ago`;
+  return `${Math.round(seconds / 86_400)}d ago`;
+}

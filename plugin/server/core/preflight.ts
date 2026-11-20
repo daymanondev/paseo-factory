@@ -13,11 +13,11 @@ import { projectMemoryPresence } from "./project-memory.ts";
  */
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { join } from "node:path";
 import { LEAD_WAVE_LAWS, SUPERVISOR_OUTCOME_BOUNDARY } from "./roles-contract.ts";
 import { projectNotebookPath, readProjectNotebook } from "./project.ts";
 import { readReleaseSettings, readStoreReleaseSettings } from "./project-settings.ts";
-import { detectMobilePlatforms } from "./store-release-probe.ts";
+import { derivePaseoHomeFromStateDir, detectMobilePlatforms } from "./store-release-probe.ts";
 import { readVaultStoreReadiness, storeMemoryDir } from "./vault-materialization.ts";
 import type { LedgerEvent } from "./events.ts";
 
@@ -212,10 +212,7 @@ function resolveKickoffReleaseBranch(
 
 function resolveKickoffPaseoHome(explicitHome?: string, stateDir?: string): string | undefined {
   if (explicitHome !== undefined && explicitHome.trim() !== "") return explicitHome.trim();
-  if (stateDir !== undefined && basename(stateDir) === "paseo-factory" && basename(dirname(stateDir)) === "plugin-state") {
-    return dirname(dirname(stateDir));
-  }
-  return undefined;
+  return derivePaseoHomeFromStateDir(stateDir);
 }
 
 export function buildSeatKickoffPacket(input: SeatKickoffPacketInput): string {

@@ -1,7 +1,7 @@
 import { listSkillPacks } from './skill-packs.ts';
 import { readProjectSettings } from './project-settings.ts';
 import { resolveProject } from './project.ts';
-import { detectMobilePlatforms } from './store-release-probe.ts';
+import { derivePaseoHomeFromStateDir, detectMobilePlatforms, discoverReleaseLabInstall } from './store-release-probe.ts';
 /** Local capability inventory and the shared Project role-skill policy. Discovery never executes host code. */
 import { createHash } from "node:crypto";
 import {
@@ -12,9 +12,8 @@ import {
   mkdirSync,
   cpSync,
   rmSync,
-  statSync,
 } from "node:fs";
-import { join, basename, dirname, relative, isAbsolute } from "node:path";
+import { join, basename, relative, isAbsolute } from "node:path";
 import { homedir } from "node:os";
 import {
   CORE_FACTORY_SKILLS,
@@ -129,10 +128,7 @@ export const SLP_ROLE_SKILLS = {
 
 function resolvePaseoHomeForSkillHub(userHome: string, paseoHome?: string, stateDir?: string): string {
   if (paseoHome !== undefined && paseoHome.trim() !== "") return paseoHome.trim();
-  if (stateDir !== undefined && basename(stateDir) === "paseo-factory" && basename(dirname(stateDir)) === "plugin-state") {
-    return dirname(dirname(stateDir));
-  }
-  return join(userHome, ".paseo");
+  return derivePaseoHomeFromStateDir(stateDir) ?? join(userHome, ".paseo");
 }
 
 function isMobileStoreProject(projectRoot?: string): boolean {
@@ -221,49 +217,8 @@ function discoverHostMcpNames(root: string, depth = 0): string[] {
   return [...new Set(names)];
 }
 function resolveReleaseLabSkillRoot(paseoHome: string): string | null {
-  const pickSkillRoot = (candidates: readonly string[]): string | null => {
-    for (const candidate of candidates) {
-      if (existsSync(candidate) && walkSkills(candidate).length > 0) return candidate;
-    }
-    return null;
-  };
-
-  const configEntry = json(join(paseoHome, "config.json")).plugins?.["factory-release-lab"] as
-    | { path?: unknown; enabled?: unknown }
-    | undefined;
-  if (configEntry && configEntry.enabled !== false && typeof configEntry.path === "string" && configEntry.path.trim() !== "") {
-    const recorded = configEntry.path.trim();
-    const fromConfig = pickSkillRoot([join(recorded, "skill"), join(recorded, "..", "skill"), recorded]);
-    if (fromConfig !== null) return fromConfig;
-  }
-
-  const managedRoot = join(paseoHome, "plugins", "factory-release-lab");
-  if (!existsSync(managedRoot)) return null;
-  const direct = pickSkillRoot([join(managedRoot, "skill")]);
-  if (direct !== null) return direct;
-
-  let entries;
-  try {
-    entries = readdirSync(managedRoot, { withFileTypes: true });
-  } catch {
-    return null;
-  }
-  const ranked: Array<{ versionDir: string; mtime: number }> = [];
-  for (const entry of entries) {
-    if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
-    const versionDir = join(managedRoot, entry.name);
-    try {
-      ranked.push({ versionDir, mtime: statSync(versionDir).mtimeMs });
-    } catch {
-      // skip unreadable entry
-    }
-  }
-  ranked.sort((a, b) => b.mtime - a.mtime);
-  for (const { versionDir } of ranked) {
-    const found = pickSkillRoot([join(versionDir, "skill"), join(versionDir, "plugin", "skill"), versionDir]);
-    if (found !== null) return found;
-  }
-  return null;
+  const install = discoverReleaseLabInstall(paseoHome);
+  return install.installed && install.enabled ? install.skillRoot : null;
 }
 
 export function discoverHostEcosystems(

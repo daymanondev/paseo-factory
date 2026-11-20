@@ -298,17 +298,27 @@ export function setProjectStoreReleaseSettings(
   });
 }
 
+/**
+ * Validates and deduplicates a non-empty `platforms` array (`("android" | "ios")[]`).
+ * Returns `undefined` when the input is not a non-empty array of valid platform names.
+ */
+export function normalizeStoreReleasePlatforms(value: unknown): StoreReleaseRequestPlatform[] | undefined {
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    !value.every((platform): platform is StoreReleaseRequestPlatform => platform === "android" || platform === "ios")
+  ) {
+    return undefined;
+  }
+  return [...new Set(value)];
+}
+
 function storeReleaseRequestIsValid(value: unknown): value is StoreReleaseRequest {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
   const req = value as Record<string, unknown>;
   if (typeof req.target !== "string" || !(STORE_RELEASE_REQUEST_TARGETS as readonly string[]).includes(req.target)) return false;
   if (typeof req.requestedAt !== "string" || req.requestedAt.trim() === "") return false;
-  if (
-    req.platforms !== undefined &&
-    (!Array.isArray(req.platforms) ||
-      req.platforms.length === 0 ||
-      !req.platforms.every((platform) => platform === "android" || platform === "ios"))
-  ) {
+  if (req.platforms !== undefined && normalizeStoreReleasePlatforms(req.platforms) === undefined) {
     return false;
   }
   if (req.resumeRunId !== undefined && (typeof req.resumeRunId !== "string" || req.resumeRunId.trim() === "")) return false;
@@ -349,14 +359,10 @@ export function setStoreReleaseRequest(
     }
     let platforms: StoreReleaseRequestPlatform[] | undefined;
     if (request.platforms !== undefined) {
-      if (
-        !Array.isArray(request.platforms) ||
-        request.platforms.length === 0 ||
-        !request.platforms.every((platform) => platform === "android" || platform === "ios")
-      ) {
+      platforms = normalizeStoreReleasePlatforms(request.platforms);
+      if (platforms === undefined) {
         throw new FactoryError("invalid-store-release-platforms", "Store release platforms must be a non-empty list of android/ios");
       }
-      platforms = [...new Set(request.platforms)];
     }
     const resumeRunId = request.resumeRunId !== undefined ? request.resumeRunId.trim() : undefined;
     if (resumeRunId !== undefined && resumeRunId === "") {
