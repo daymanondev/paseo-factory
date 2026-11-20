@@ -21,6 +21,8 @@ import {
   onboardingBrowse,
   onboardingCommit,
   onboardingInspect,
+  onboardingStart,
+  onboardingStatus,
   openDesignCatalog,
   pluginsInstall,
   seatsDirectory,
@@ -29,6 +31,8 @@ import {
 import type { FactoryView, ProjectDirectoryEntry } from "../../shared/view.ts";
 import { Btn, Card, ToneBadge } from "../kit/pill.tsx";
 import { RADIUS, SPACING, factoryPalette, hoveredOf, text } from "../kit/theme.ts";
+import { OnboardingRunSubscriber, useOnboardingRunTracker } from "./onboarding-run-tracker.tsx";
+import { describeThrown } from "./onboarding-state.ts";
 import type { CommitInput } from "./onboarding-state.ts";
 import {
   filterUnregisteredProjects,
@@ -164,7 +168,8 @@ export function OnboardingScreen({
   const snapshotCall = useRpc(snapshot);
   const browseCall = useRpc(onboardingBrowse);
   const inspectCall = useRpc(onboardingInspect);
-  const commitCall = useRpc(onboardingCommit);
+  const startCall = useRpc(onboardingStart);
+  const statusCall = useRpc(onboardingStatus);
   const pluginsInstallCall = useRpc(pluginsInstall);
   const openDesignCatalogCall = useRpc(openDesignCatalog);
 
@@ -208,7 +213,7 @@ export function OnboardingScreen({
         }
       } catch (error) {
         if (alive.current && seq === browseSeq.current) {
-          setBrowseError(error instanceof Error ? error.message : String(error));
+          setBrowseError(describeThrown(error));
         }
       } finally {
         if (alive.current && seq === browseSeq.current) setBrowsing(false);
@@ -248,7 +253,7 @@ export function OnboardingScreen({
         setSnapshotError(snapResult.value.error);
       }
     } else {
-      setSnapshotError(snapResult.reason instanceof Error ? snapResult.reason.message : String(snapResult.reason));
+      setSnapshotError(describeThrown(snapResult.reason));
     }
   }, [mobile, refreshPaseoProjects, seatsDirectoryCall, snapshotCall]);
 
@@ -272,6 +277,59 @@ export function OnboardingScreen({
     [paseoProjects, registeredProjects],
   );
 
+  const toastedRunIdsRef = useRef<Set<string>>(new Set());
+  const [liveSubscriptionRuns, setLiveSubscriptionRuns] = useState<Readonly<Record<string, boolean>>>({});
+  const subscriptionLive = Object.values(liveSubscriptionRuns).some(Boolean);
+  const handleSubscriberLiveChange = useCallback((runId: string, live: boolean) => {
+    setLiveSubscriptionRuns((prev) => {
+      if ((prev[runId] ?? false) === live) return prev;
+      const next = { ...prev };
+      if (live) next[runId] = true;
+      else delete next[runId];
+      return next;
+    });
+  }, []);
+
+  const onboardingTracker = useOnboardingRunTracker({
+    activeFolder: mobile ? null : selectedFolder,
+    subscriptionLive,
+    start: (input) => startCall(input),
+    status: (input) => statusCall(input),
+    onActiveComplete: async (result, input, runId) => {
+      if (!toastedRunIdsRef.current.has(runId)) {
+        toastedRunIdsRef.current.add(runId);
+        toast.show(result.summary, { variant: "success" });
+      }
+      await loadSnapshotAndDirectory();
+      const workspaceResult = await resolveOrCreateProjectWorkspace({
+        paseo,
+        projectRoot: result.projectRoot,
+        paseoProjects,
+      });
+      if (workspaceResult.workspaceId === null) {
+        toast.show(
+          `Supervisor started, but workspace could not be opened: ${workspaceResult.error ?? "unknown error"}`,
+          { variant: "warning" },
+        );
+        return { ok: false as const, error: workspaceResult.error ?? "Could not open workspace" };
+      }
+      navigation?.openWorkspace({ workspaceId: workspaceResult.workspaceId, serverId: host.id });
+      openPanel?.(FACTORY_PANEL_ID, { workspaceId: workspaceResult.workspaceId, location: "workspace" });
+      navigation?.openAgent({ agentId: result.agentId, serverId: host.id });
+      if (onCommitted !== undefined && input !== null) {
+        await onCommitted({ input, reply: { ok: true, ...result } });
+      }
+      return { ok: true as const };
+    },
+    onBackgroundComplete: (result, _input, runId) => {
+      if (!toastedRunIdsRef.current.has(runId)) {
+        toastedRunIdsRef.current.add(runId);
+        toast.show(result.summary, { variant: "success" });
+      }
+      void loadSnapshotAndDirectory();
+    },
+  });
+
   if (mobile) {
     return (
       <View testID="factory-onboard-mobile" style={{ padding: SPACING[4] }}>
@@ -282,36 +340,16 @@ export function OnboardingScreen({
 
   const palette = factoryPalette(theme);
 
-  const startOnboarding = async (input: CommitInput): Promise<{ ok: true } | { ok: false; error: string }> => {
-    const reply = await commitCall(input);
-    if (!reply.ok) return { ok: false, error: reply.error };
-    toast.show(reply.summary, { variant: "success" });
-    await loadSnapshotAndDirectory();
-    const workspaceResult = await resolveOrCreateProjectWorkspace({
-      paseo,
-      projectRoot: reply.projectRoot,
-      paseoProjects,
-    });
-    if (onCommitted !== undefined) {
-      await onCommitted({ input, reply });
-    }
-    if ((input.directive ?? "").trim() !== "") {
-      navigation?.openAgent({ agentId: reply.agentId, serverId: host.id });
-    } else if (workspaceResult.workspaceId !== null) {
-      navigation?.openWorkspace({ workspaceId: workspaceResult.workspaceId, serverId: host.id });
-      openPanel?.(FACTORY_PANEL_ID, { workspaceId: workspaceResult.workspaceId, location: "workspace" });
-    } else {
-      toast.show(
-        `Supervisor started, but workspace could not be opened: ${workspaceResult.error ?? "unknown error"}`,
-        { variant: "warning" },
-      );
-      if (alive.current) setSelectedFolder(null);
-    }
-    return { ok: true };
-  };
-
   return (
     <ScrollView style={{ flex: 1, backgroundColor: theme.colors.surface0 }}>
+      {onboardingTracker.runningRuns.map((runningRun) => (
+        <OnboardingRunSubscriber
+          key={runningRun.runId}
+          projectRoot={runningRun.folder}
+          onProgress={onboardingTracker.notifyProgress}
+          onLiveChange={(live) => handleSubscriberLiveChange(runningRun.runId, live)}
+        />
+      ))}
       <View testID="factory-onboard-screen" style={{ padding: SPACING[4], gap: SPACING[4], maxWidth: 820, width: "100%", alignSelf: "center" }}>
         <View style={{ gap: SPACING[1] }}>
           <Text style={text(theme, "detailTitle")}>Onboard Project to Factory</Text>
@@ -471,6 +509,7 @@ export function OnboardingScreen({
                   theme={theme}
                   view={view}
                   folder={selectedFolder}
+                  tracker={onboardingTracker}
                   actions={{
                     inspect: (folder) => inspectCall({ folder }),
                     installPrerequisites: async () => {
@@ -490,7 +529,8 @@ export function OnboardingScreen({
                           }
                         : { ok: false as const, error: reply.error };
                     },
-                    start: startOnboarding,
+                    start: (input) => startCall(input),
+                    status: (input) => statusCall(input),
                   }}
                 />
               )}

@@ -49,6 +49,7 @@ export interface WizardInput {
 export type WizardAction =
   | { type: "next" }
   | { type: "back" }
+  | { type: "step"; step: OnboardingStep }
   | { type: "initGit"; value: boolean }
   | { type: "lane"; lane: OnboardingLaneName; value: string }
   | { type: "profile"; profile: ProfileChoice }
@@ -78,6 +79,8 @@ export function reduceWizard(state: WizardInput, action: WizardAction): WizardIn
       return { ...state, step: Math.min(4, state.step + 1) as OnboardingStep };
     case "back":
       return { ...state, step: Math.max(1, state.step - 1) as OnboardingStep };
+    case "step":
+      return { ...state, step: action.step };
     case "initGit":
       return { ...state, initGit: action.value };
     case "lane": {

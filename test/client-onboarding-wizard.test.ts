@@ -1049,6 +1049,100 @@ test("OnboardingWizard surfaces honest timeout vs connection error messages when
   }
 });
 
+test("OnboardingWizard automatically jumps to Step 4 and attaches when inspect + status find an in-flight running run for the canonical folder", async () => {
+  const { OnboardingWizard } = await loadInteractiveWizard();
+  const { createElement, act } = await import("react");
+  const { createRoot } = await import("react-dom/client");
+  const { JSDOM } = (await import(["jsdom"].join(""))) as { JSDOM: new (html: string) => { window: any } };
+  const dom = new JSDOM("<!doctype html><div id=root></div>");
+  const g = globalThis as Record<string, unknown>;
+  const saved = { window: g.window, document: g.document, IS_REACT_ACT_ENVIRONMENT: g.IS_REACT_ACT_ENVIRONMENT };
+  g.window = dom.window;
+  g.document = dom.window.document;
+  g.IS_REACT_ACT_ENVIRONMENT = true;
+
+  const statusQueries: unknown[] = [];
+  const finalizeCalls: unknown[] = [];
+  let statusCallCount = 0;
+
+  const runningRun = {
+    runId: "run-reattach-1",
+    folder: "/canonical/work/my-app",
+    status: "running",
+    startedAt: "2026-11-20T12:00:00.000Z",
+    updatedAt: "2026-11-20T12:00:01.000Z",
+    result: null,
+    error: null,
+    errorCode: null,
+    phases: [
+      { id: "checking", label: "Checking folder & preconditions", status: "done", startedAt: "2026-11-20T12:00:00.000Z", finishedAt: "2026-11-20T12:00:00.050Z", error: null },
+      { id: "register-and-lanes", label: "Registering Project & saving model lanes", status: "done", startedAt: "2026-11-20T12:00:00.050Z", finishedAt: "2026-11-20T12:00:00.500Z", error: null },
+      { id: "start-supervisor", label: "Starting Supervisor", status: "running", startedAt: "2026-11-20T12:00:00.500Z", finishedAt: null, error: null },
+    ],
+  };
+  const succeededRun = {
+    ...runningRun,
+    status: "succeeded",
+    updatedAt: "2026-11-20T12:00:02.000Z",
+    result: { agentId: "sup-reattach", projectRoot: "/canonical/work/my-app", slug: "my-app", bootstrapped: false, summary: "Reattached and ready" },
+    phases: [
+      runningRun.phases[0]!,
+      runningRun.phases[1]!,
+      { id: "start-supervisor", label: "Starting Supervisor", status: "done", startedAt: "2026-11-20T12:00:00.500Z", finishedAt: "2026-11-20T12:00:02.000Z", error: null },
+    ],
+  };
+
+  const root = createRoot(dom.window.document.getElementById("root")!);
+  const q = (testId: string) => dom.window.document.querySelector(`[data-testid="${testId}"]`) as HTMLElement | null;
+
+  try {
+    await act(async () => {
+      root.render(
+        createElement(OnboardingWizard, {
+          theme,
+          view,
+          folder: "/work/my-app",
+          initialUi: { pollIntervalMs: 10 },
+          actions: {
+            ...noopActions,
+            inspect: async () => ({ ...readyInspection, folder: "/canonical/work/my-app" }),
+            status: async (input: unknown) => {
+              statusQueries.push(input);
+              statusCallCount += 1;
+              return { ok: true as const, run: statusCallCount === 1 ? runningRun : succeededRun };
+            },
+            finalize: async (result: unknown) => {
+              finalizeCalls.push(result);
+              return { ok: true as const };
+            },
+          },
+        }),
+      );
+    });
+
+    for (let i = 0; i < 20 && finalizeCalls.length === 0; i++) {
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 10));
+      });
+    }
+
+    assert.deepEqual(statusQueries[0], { folder: "/canonical/work/my-app" }, "queries status by canonical inspected folder");
+    assert.match(q("factory-onboarding-progress")?.textContent ?? "", /Step 4 of 4/);
+    assert.ok(q("factory-onboarding-run-checklist"), "Step 4 checklist attaches immediately");
+    assert.equal(finalizeCalls.length, 1, "reattached run completes through finalize");
+    assert.equal(q("factory-onboarding-phase-status-open-workspace")?.textContent, "done");
+
+    await act(async () => {
+      root.unmount();
+    });
+  } finally {
+    g.window = saved.window;
+    g.document = saved.document;
+    g.IS_REACT_ACT_ENVIRONMENT = saved.IS_REACT_ACT_ENVIRONMENT;
+    dom.window.close();
+  }
+});
+
 // ---- panel integration + structural pins -----------------------------------------------------
 
 const notAProject: PanelView = {
@@ -1082,14 +1176,475 @@ test("desktop mounts the wizard under 'Set up Factory for this folder'; mobile s
 
 const read = (rel: string): string => readFileSync(join(repoRoot, rel), "utf8");
 
-test("the shell builds the wizard on desktop only and drives it through the two onboarding RPCs — and the old paste-path door is not bound", () => {
+test("the shell builds the wizard on desktop only and drives it through onboardingInspect, onboardingStart, and onboardingStatus — and the old paste-path door is not bound", () => {
   const shell = read("plugin/client/factory/shell.tsx");
   assert.match(shell, /useRpc\(onboardingInspect\)/);
-  assert.match(shell, /useRpc\(onboardingCommit\)/);
+  assert.match(shell, /useRpc\(onboardingStart\)/);
+  assert.match(shell, /useRpc\(onboardingStatus\)/);
+  assert.doesNotMatch(shell, /useRpc\(onboardingCommit\)/);
   assert.match(shell, /<OnboardingWizard/);
   assert.match(shell, /!mobile/, "the wizard is gated on the mobile flag");
-  assert.match(shell, /navigation\?\.openAgent\(\{ agentId: reply\.agentId/, "a directive opens the Supervisor conversation");
+  assert.match(shell, /navigation\?\.openAgent\(\{ agentId: result\.agentId/, "completing onboarding opens the Supervisor conversation directly");
   assert.doesNotMatch(shell, /projectAdd|pickFolder|projectPick/);
   const wizard = read("plugin/client/factory/onboarding-wizard.tsx");
   assert.doesNotMatch(wizard, /Start Lead|useRpc\((leadEnsure|leadDispatch)\)/, "the wizard starts the Supervisor and never a Lead");
+});
+
+async function loadShellHarness(options: { withSubscription?: boolean } = {}): Promise<Record<string, any>> {
+  const withSubscription = options.withSubscription ?? true;
+  const entryContents = withSubscription
+    ? `export { FactoryShell } from ${JSON.stringify(join(repoRoot, "plugin/client/factory/shell.tsx"))};\nexport { PluginRpcProvider } from "@getpaseo/plugin/client";`
+    : `export { FactoryShell } from ${JSON.stringify(join(repoRoot, "plugin/client/factory/shell.tsx"))};`;
+  const bundle = await build({
+    stdin: {
+      contents: entryContents,
+      resolveDir: repoRoot,
+      loader: "tsx",
+    },
+    bundle: true,
+    write: false,
+    platform: "node",
+    format: "cjs",
+    jsx: "automatic",
+    external: ["react", "react/jsx-runtime"],
+    plugins: [
+      {
+        name: "shell-test-adapter",
+        setup(b) {
+          b.onResolve({ filter: /^(react-native|@getpaseo\/plugin\/client\/ui)$/ }, (args) => ({ path: args.path, namespace: "rn-ui" }));
+          b.onResolve({ filter: /^@getpaseo\/plugin\/client$/ }, (args) => ({ path: args.path, namespace: "paseo-client" }));
+          b.onLoad({ filter: /.*/, namespace: "rn-ui" }, () => ({
+            loader: "js",
+            contents: `
+              const React = require("react");
+              const tag = (name) => ({ children, onPress, disabled, testID, accessibilityRole, accessibilityState, accessibilityLabel }) =>
+                React.createElement(name, {
+                  disabled,
+                  onClick: onPress,
+                  "data-testid": testID,
+                  "data-role": accessibilityRole,
+                  "aria-label": accessibilityLabel,
+                  "data-selected": accessibilityState && accessibilityState.selected !== undefined ? String(accessibilityState.selected) : undefined,
+                }, typeof children === "function" ? children({ pressed: false }) : children);
+              exports.View = tag("div");
+              exports.ScrollView = tag("div");
+              exports.Text = tag("span");
+              exports.Pressable = tag("button");
+              exports.Icon = () => null;
+              exports.Loading = () => null;
+              exports.DocumentFrame = ({ url }) => React.createElement("section", { "data-document-frame": url });
+              exports.TextInput = ({ value, placeholder, testID, onChangeText }) =>
+                React.createElement("input", {
+                  value: value ?? "",
+                  placeholder,
+                  "data-testid": testID,
+                  onChange: (e) => onChangeText && onChangeText(e.target.value),
+                });
+              const Modal = ({ children, open, title }) => (open ? React.createElement("div", { "data-modal-title": title }, children) : null);
+              Modal.Content = tag("div");
+              exports.Modal = Modal;
+              exports.useToast = () => ({
+                show(msg, opts) { globalThis.__shellTestToasts?.push({ msg, opts }); },
+                error(msg) { globalThis.__shellTestToasts?.push({ msg, error: true }); },
+              });
+              exports.Platform = { OS: "web", select: (spec) => (spec.web !== undefined ? spec.web : spec.default) };
+            `,
+          }));
+          b.onLoad({ filter: /.*/, namespace: "paseo-client" }, () => ({
+            loader: "js",
+            resolveDir: repoRoot,
+            contents: withSubscription
+              ? `
+                export { PluginRpcProvider, useRpc, useSubscription } from ${JSON.stringify(
+                  join(repoRoot, "node_modules/@getpaseo/plugin/dist/client/rpc-context.js"),
+                )};
+                export const useToast = () => ({
+                  show(msg, opts) { globalThis.__shellTestToasts?.push({ msg, opts }); },
+                  error(msg) { globalThis.__shellTestToasts?.push({ msg, error: true }); },
+                });
+                export const openExternalUrl = async () => {};
+              `
+              : `
+                export const useRpc = (contract) => (input) => globalThis.__shellTestLegacyRpc(contract.name, input);
+                export const useToast = () => ({
+                  show(msg, opts) { globalThis.__shellTestToasts?.push({ msg, opts }); },
+                  error(msg) { globalThis.__shellTestToasts?.push({ msg, error: true }); },
+                });
+                export const openExternalUrl = async () => {};
+              `,
+          }));
+        },
+      },
+    ],
+  });
+  const compiled = { exports: {} as Record<string, any> };
+  new Function("require", "module", "exports", bundle.outputFiles[0]!.text)(createRequire(import.meta.url), compiled, compiled.exports);
+  return compiled.exports;
+}
+
+function makeShellOnboardingView(overrides: { isProject?: boolean; folder?: string; supervisorVacant?: boolean } = {}) {
+  const folder = overrides.folder ?? "/work/my-app";
+  const isProject = overrides.isProject ?? false;
+  return {
+    version: 5 as const,
+    stateDir: "/tmp/state",
+    generatedAt: new Date().toISOString(),
+    lanes: MACHINE_LANES,
+    machineLanes: MACHINE_LANES,
+    hasProjectLaneOverride: false,
+    providersLoading: false,
+    providers: [{ provider: "claude", available: true, models: [{ id: "opus-4-8", label: "Opus", thinkingOptions: [] }] }],
+    kpis: { running: 0, needsHuman: 0, readyToAccept: 0, accepted: 0, totalCostUsd: 0, totalTokens: 0 },
+    agents: [],
+    supervisor: null,
+    lead: null,
+    project: isProject ? { root: folder, slug: "my-app", missingRoot: false } : null,
+    companionTools: [],
+    companions: [],
+    corePlugin: {
+      id: "paseo-factory",
+      title: "Paseo Factory",
+      tagline: "Verification core",
+      description: "Verification core",
+      status: "running" as const,
+      enabled: true,
+      installKind: "git" as const,
+      installedSource: "git:daymanondev/paseo-factory:plugin",
+      canonicalSource: "git:daymanondev/paseo-factory:plugin",
+      currentRevision: "rev-1",
+      version: "0.16.2",
+      latestRevision: "rev-1",
+      commitsBehind: 0,
+      updateAvailable: false,
+      error: null,
+      capabilities: [],
+      access: "public" as const,
+      sidebarIcon: "flame",
+      sidebarLabel: "Factory",
+    },
+    pluginsCheckedAt: new Date().toISOString(),
+    vault: {
+      configured: false, repo: null, branch: "main", nodeId: "n1", hasPassphrase: false, cloneExists: false,
+      lastHydratedAt: null, lastHydrateMode: null, lastPushedAt: null,
+      sharedSecrets: { ascKey: false, ascCredentials: false, gplayServiceAccount: false, eyeConfig: false },
+      hydratedApps: [], ghInstalled: false, ghAuthenticated: false, ghUser: null, suggestedRepo: null, error: null, historyImports: [],
+    },
+    profiles: [],
+    activeProfileId: null,
+    activeProfileModified: false,
+    skillHub: {
+      totalInstalled: 0, upToDateCount: 0, updateAvailableCount: 0, localCustomCount: 0, symlinkDriftCount: 0,
+      installedSkills: [], skillPacksExplicit: false, projectPacks: [], hostCatalog: [], roleMatrix: [],
+    },
+    daemonError: null,
+    panel: isProject
+      ? {
+          isProject: true,
+          name: "my-app",
+          summary: "Supervisor vacant",
+          needsYou: [],
+          handoffs: [],
+          profile: { active: null, list: [], modified: false },
+          defaultWorker: { role: "worker" as const, title: "Default worker" as const, lane: { provider: "pi", model: "zcode/glm-5.3", thinking: "off", scope: "machine" as const } },
+          seats: {
+            supervisor: {
+              role: "supervisor" as const,
+              vacant: overrides.supervisorVacant ?? true,
+              agentId: overrides.supervisorVacant === false ? "sup-live" : null,
+              lane: { provider: "claude", model: "opus-4-8", thinking: "off", scope: "machine" as const },
+              pendingLane: null,
+              markTokens: 128000,
+              allowedActions: [],
+              statusLabel: "vacant",
+              tone: "normal" as const,
+              model: null,
+              hint: null,
+              context: null,
+              handoff: null,
+            },
+            lead: {
+              role: "lead" as const,
+              vacant: true,
+              agentId: null,
+              lane: { provider: "pi", model: "zcode/glm-5.3", thinking: "off", scope: "machine" as const },
+              pendingLane: null,
+              markTokens: 128000,
+              allowedActions: [],
+              statusLabel: "vacant",
+              tone: "normal" as const,
+              model: null,
+              hint: null,
+              context: null,
+              handoff: null,
+            },
+            peers: [],
+            supervisorCandidates: [],
+          },
+          openDesign: null,
+          onboarding: null,
+        }
+      : {
+          isProject: false,
+          name: null,
+          summary: "Not a Factory Project yet",
+          needsYou: [],
+          handoffs: [],
+          profile: { active: null, list: [], modified: false },
+          defaultWorker: null,
+          seats: null,
+          openDesign: null,
+          onboarding: { folder, gitRepo: true, hasCommits: true, existingLead: false },
+        },
+  };
+}
+
+test("FactoryShell uses onboardingStart + onboardingStatus, reacts to stateUpdates onboarding.progress even when isProject flips mid-run, and opens Supervisor chat directly", async () => {
+  const { FactoryShell, PluginRpcProvider } = await loadShellHarness({ withSubscription: true });
+  const { createElement, act } = await import("react");
+  const { createRoot } = await import("react-dom/client");
+  const { JSDOM } = (await import(["jsdom"].join(""))) as { JSDOM: new (html: string) => { window: any } };
+  const dom = new JSDOM("<!doctype html><div id=root></div>");
+  const g = globalThis as Record<string, unknown>;
+  const saved = { window: g.window, document: g.document, IS_REACT_ACT_ENVIRONMENT: g.IS_REACT_ACT_ENVIRONMENT };
+  g.window = dom.window;
+  g.document = dom.window.document;
+  g.IS_REACT_ACT_ENVIRONMENT = true;
+
+  const toasts: any[] = [];
+  (g as any).__shellTestToasts = toasts;
+  const rpcCalls: Array<{ method: string; input: any }> = [];
+  const openedAgents: any[] = [];
+  let subObserver: { event: (e: any) => void; closed: (err?: Error) => void } | null = null;
+  let currentView = makeShellOnboardingView({ isProject: false, folder: "/work/my-app" });
+
+  const runningRun = {
+    runId: "shell-run-1",
+    folder: "/work/my-app",
+    status: "running",
+    startedAt: "2026-11-20T12:00:00.000Z",
+    updatedAt: "2026-11-20T12:00:00.100Z",
+    result: null,
+    error: null,
+    errorCode: null,
+    phases: [
+      { id: "checking", label: "Checking folder & preconditions", status: "done", startedAt: "2026-11-20T12:00:00.000Z", finishedAt: "2026-11-20T12:00:00.050Z", error: null },
+      { id: "register-and-lanes", label: "Registering Project & saving model lanes", status: "running", startedAt: "2026-11-20T12:00:00.050Z", finishedAt: null, error: null },
+      { id: "start-supervisor", label: "Starting Supervisor", status: "pending", startedAt: null, finishedAt: null, error: null },
+    ],
+  };
+  let currentRun: any = runningRun;
+
+  const invoke = async (method: string, input: any) => {
+    rpcCalls.push({ method, input });
+    if (method === "factory.snapshot") return { ok: true, view: currentView };
+    if (method === "factory.self.update.status") return { ok: true, current: "0.16.2", latest: "0.16.2", updateAvailable: false };
+    if (method === "factory.open_design.status") return { ok: true, link: null, updateAvailable: false, sourceAvailable: false };
+    if (method === "factory.onboarding.inspect") return { ...readyInspection, folder: "/work/my-app" };
+    if (method === "factory.onboarding.status") return { ok: true, run: currentRun === runningRun && rpcCalls.filter((c) => c.method === "factory.onboarding.start").length === 0 ? null : currentRun };
+    if (method === "factory.onboarding.start") return { ok: true, run: runningRun };
+    return { ok: true };
+  };
+  const subscribe = (_method: string, _input: unknown, observer: { event: (e: any) => void; closed: (err?: Error) => void }) => {
+    subObserver = observer;
+    const stop = () => {};
+    return Object.assign(stop, { ready: Promise.resolve(), release: async () => {} });
+  };
+
+  const root = createRoot(dom.window.document.getElementById("root")!);
+  const q = (testId: string) => dom.window.document.querySelector(`[data-testid="${testId}"]`) as HTMLElement | null;
+
+  try {
+    await act(async () => {
+      root.render(
+        createElement(
+          PluginRpcProvider,
+          { invoke, subscribe },
+          createElement(FactoryShell, {
+            theme,
+            dir: "/work/my-app",
+            serverId: "srv-1",
+            layout: { compact: false, platform: "web" },
+            navigation: { openAgent: (x: unknown) => openedAgents.push(x) },
+          }),
+        ),
+      );
+    });
+    for (let i = 0; i < 10 && !q("factory-onboarding-next"); i++) {
+      await act(async () => { await new Promise((r) => setTimeout(r, 10)); });
+    }
+    assert.ok(q("factory-onboarding"), "renders OnboardingWizard initially");
+
+    // Step 1 -> 2 -> 3 -> 4 -> Start Supervisor.
+    for (let s = 0; s < 3; s++) {
+      await act(async () => { q("factory-onboarding-next")!.click(); });
+    }
+    await act(async () => { q("factory-onboarding-start")!.click(); });
+
+    assert.equal(rpcCalls.some((c) => c.method === "factory.onboarding.commit"), false, "never calls legacy onboardingCommit");
+    assert.ok(rpcCalls.some((c) => c.method === "factory.onboarding.start"), "calls onboardingStart");
+    assert.ok(q("factory-onboarding-run-checklist"), "renders Step 4 checklist");
+
+    // Mid-run: register-and-lanes finishes so snapshot flips panel.isProject = true while start-supervisor is still running.
+    currentView = makeShellOnboardingView({ isProject: true, folder: "/work/my-app", supervisorVacant: true });
+    currentRun = {
+      ...runningRun,
+      phases: [
+        runningRun.phases[0],
+        { ...runningRun.phases[1], status: "done", finishedAt: "2026-11-20T12:00:00.400Z" },
+        { id: "start-supervisor", label: "Starting Supervisor", status: "running", startedAt: "2026-11-20T12:00:00.400Z", finishedAt: null, error: null },
+      ],
+    };
+    const statusBeforePush = rpcCalls.filter((c) => c.method === "factory.onboarding.status").length;
+    await act(async () => {
+      subObserver!.event({ seq: 1, reasons: ["onboarding.progress"], projectRoot: "/work/my-app", at: "2026-11-20T12:00:00.400Z" });
+    });
+    for (let i = 0; i < 10 && rpcCalls.filter((c) => c.method === "factory.onboarding.status").length === statusBeforePush; i++) {
+      await act(async () => { await new Promise((r) => setTimeout(r, 10)); });
+    }
+    assert.ok(rpcCalls.filter((c) => c.method === "factory.onboarding.status").length > statusBeforePush, "onboarding.progress triggers immediate status refresh");
+    assert.ok(q("factory-onboarding-run-checklist"), "wizard checklist stays mounted mid-run even after project registration");
+    assert.equal(q("factory-onboarding-phase-status-register-and-lanes")?.textContent, "done");
+    assert.equal(q("factory-onboarding-phase-status-start-supervisor")?.textContent, "running");
+
+    // Terminal completion via onboarding.progress push -> calls refresh and openAgent, then flips to ProjectPanel.
+    currentView = makeShellOnboardingView({ isProject: true, folder: "/work/my-app", supervisorVacant: false });
+    currentRun = {
+      ...runningRun,
+      status: "succeeded",
+      result: { agentId: "sup-shell-1", projectRoot: "/work/my-app", slug: "my-app", bootstrapped: false, summary: "Set up my-app; Supervisor running." },
+      phases: [
+        runningRun.phases[0],
+        { ...runningRun.phases[1], status: "done", finishedAt: "2026-11-20T12:00:00.400Z" },
+        { id: "start-supervisor", label: "Starting Supervisor", status: "done", startedAt: "2026-11-20T12:00:00.400Z", finishedAt: "2026-11-20T12:00:01.000Z", error: null },
+      ],
+    };
+    await act(async () => {
+      subObserver!.event({ seq: 2, reasons: ["onboarding.progress"], projectRoot: "/work/my-app", at: "2026-11-20T12:00:01.000Z" });
+    });
+    for (let i = 0; i < 20 && openedAgents.length === 0; i++) {
+      await act(async () => { await new Promise((r) => setTimeout(r, 10)); });
+    }
+    assert.deepEqual(openedAgents, [{ agentId: "sup-shell-1", serverId: "srv-1" }], "always opens Supervisor chat on completion");
+    assert.ok(toasts.some((t) => /Set up my-app/.test(t.msg) && t.opts?.variant === "success"));
+
+    await act(async () => { root.unmount(); });
+  } finally {
+    delete (g as any).__shellTestToasts;
+    g.window = saved.window;
+    g.document = saved.document;
+    g.IS_REACT_ACT_ENVIRONMENT = saved.IS_REACT_ACT_ENVIRONMENT;
+    dom.window.close();
+  }
+});
+
+test("FactoryShell (< 0.16.0 host without useSubscription) re-attaches to in-flight run on mount and completes via polling, and suppresses navigation if dir switches away", async () => {
+  const { FactoryShell } = await loadShellHarness({ withSubscription: false });
+  const { createElement, act } = await import("react");
+  const { createRoot } = await import("react-dom/client");
+  const { JSDOM } = (await import(["jsdom"].join(""))) as { JSDOM: new (html: string) => { window: any } };
+  const dom = new JSDOM("<!doctype html><div id=root></div>");
+  const g = globalThis as Record<string, unknown>;
+  const saved = { window: g.window, document: g.document, IS_REACT_ACT_ENVIRONMENT: g.IS_REACT_ACT_ENVIRONMENT };
+  g.window = dom.window;
+  g.document = dom.window.document;
+  g.IS_REACT_ACT_ENVIRONMENT = true;
+
+  const toasts: any[] = [];
+  const openedAgents: any[] = [];
+  (g as any).__shellTestToasts = toasts;
+
+  const runningRun = {
+    runId: "shell-reattach-1",
+    folder: "/work/alpha",
+    status: "running",
+    startedAt: "2026-11-20T12:00:00.000Z",
+    updatedAt: "2026-11-20T12:00:00.100Z",
+    result: null,
+    error: null,
+    errorCode: null,
+    phases: [
+      { id: "checking", label: "Checking folder & preconditions", status: "done", startedAt: "2026-11-20T12:00:00.000Z", finishedAt: "2026-11-20T12:00:00.050Z", error: null },
+      { id: "register-and-lanes", label: "Registering Project & saving model lanes", status: "done", startedAt: "2026-11-20T12:00:00.050Z", finishedAt: "2026-11-20T12:00:00.200Z", error: null },
+      { id: "start-supervisor", label: "Starting Supervisor", status: "running", startedAt: "2026-11-20T12:00:00.200Z", finishedAt: null, error: null },
+    ],
+  };
+  const succeededRun = {
+    ...runningRun,
+    status: "succeeded",
+    result: { agentId: "sup-bg-1", projectRoot: "/work/alpha", slug: "alpha", bootstrapped: false, summary: "Background alpha ready." },
+    phases: [
+      runningRun.phases[0],
+      runningRun.phases[1],
+      { id: "start-supervisor", label: "Starting Supervisor", status: "done", startedAt: "2026-11-20T12:00:00.200Z", finishedAt: "2026-11-20T12:00:01.000Z", error: null },
+    ],
+  };
+
+  let statusPollCount = 0;
+  let releaseComplete = false;
+  (g as any).__shellTestLegacyRpc = async (method: string, input: any) => {
+    if (method === "factory.snapshot") {
+      if (input?.projectRoot === "/work/beta") return { ok: true, view: makeShellOnboardingView({ isProject: true, folder: "/work/beta", supervisorVacant: false }) };
+      // Already registered mid-run with vacant Supervisor!
+      return { ok: true, view: makeShellOnboardingView({ isProject: true, folder: "/work/alpha", supervisorVacant: true }) };
+    }
+    if (method === "factory.self.update.status") return { ok: true, current: "0.16.2", latest: "0.16.2", updateAvailable: false };
+    if (method === "factory.open_design.status") return { ok: true, link: null, updateAvailable: false, sourceAvailable: false };
+    if (method === "factory.onboarding.inspect") return { ...readyInspection, folder: input.folder };
+    if (method === "factory.onboarding.status") {
+      statusPollCount += 1;
+      return { ok: true, run: releaseComplete ? succeededRun : runningRun };
+    }
+    return { ok: true };
+  };
+
+  const root = createRoot(dom.window.document.getElementById("root")!);
+  const q = (testId: string) => dom.window.document.querySelector(`[data-testid="${testId}"]`) as HTMLElement | null;
+
+  try {
+    await act(async () => {
+      root.render(
+        createElement(FactoryShell, {
+          theme,
+          dir: "/work/alpha",
+          serverId: "srv-1",
+          layout: { compact: false, platform: "web" },
+          navigation: { openAgent: (x: unknown) => openedAgents.push(x) },
+        }),
+      );
+    });
+    for (let i = 0; i < 20 && !q("factory-onboarding-run-checklist"); i++) {
+      await act(async () => { await new Promise((r) => setTimeout(r, 15)); });
+    }
+    assert.ok(q("factory-onboarding-run-checklist"), "re-attaches to Step 4 checklist even when isProject is already true with vacant Supervisor");
+    assert.match(q("factory-onboarding-progress")?.textContent ?? "", /Step 4 of 4/);
+
+    // User switches away to another workspace (/work/beta) before alpha finishes.
+    await act(async () => {
+      root.render(
+        createElement(FactoryShell, {
+          theme,
+          dir: "/work/beta",
+          serverId: "srv-1",
+          layout: { compact: false, platform: "web" },
+          navigation: { openAgent: (x: unknown) => openedAgents.push(x) },
+        }),
+      );
+    });
+    releaseComplete = true;
+    for (let i = 0; i < 30 && toasts.length === 0; i++) {
+      await act(async () => { await new Promise((r) => setTimeout(r, 60)); });
+    }
+    assert.ok(statusPollCount >= 2, "polling fallback continues watching background run");
+    assert.ok(toasts.some((t) => /Background alpha ready/.test(t.msg) && t.opts?.variant === "success"), "emits non-intrusive success toast on background completion");
+    assert.deepEqual(openedAgents, [], "does NOT steal focus with openAgent when Owner switched away");
+
+    await act(async () => { root.unmount(); });
+  } finally {
+    delete (g as any).__shellTestToasts;
+    delete (g as any).__shellTestLegacyRpc;
+    g.window = saved.window;
+    g.document = saved.document;
+    g.IS_REACT_ACT_ENVIRONMENT = saved.IS_REACT_ACT_ENVIRONMENT;
+    dom.window.close();
+  }
 });

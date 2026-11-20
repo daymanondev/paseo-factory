@@ -15,10 +15,12 @@ type Exports = Record<string, any>;
 
 interface LoadOptions {
   platformOs?: "web" | "ios" | "android";
+  withSubscription?: boolean;
 }
 
 async function loadScreenModule(entry: string, options: LoadOptions = {}): Promise<Exports> {
   const platformOs = options.platformOs ?? "web";
+  const withSubscription = options.withSubscription ?? false;
   const bundle = await build({
     entryPoints: [join(repoRoot, entry)],
     bundle: true,
@@ -75,6 +77,16 @@ async function loadScreenModule(entry: string, options: LoadOptions = {}): Promi
               Modal.Content = tag('div');
               exports.Modal = Modal;
               exports.useRpc = (contract) => (input) => globalThis.__onboardScreenTestRpc(contract.name, input);
+              ${
+                withSubscription
+                  ? `
+              exports.useSubscription = (contract, input, onEvent) => {
+                const subFn = globalThis.__onboardScreenTestUseSubscription;
+                return subFn ? subFn(contract, input, onEvent) : { status: 'connecting' };
+              };
+              `
+                  : ""
+              }
               exports.useWorkspace = () => '/project';
               exports.useWorkspaces = () => {
                 throw new Error('Plugin state hooks must run inside a plugin host');
@@ -767,7 +779,31 @@ async function runWizardStepsToCommit(
   await click("factory-onboarding-start");
 }
 
-test("05-commit: Step 4 Start reuses an existing active local workspace and opens workspace + Factory panel when no directive is entered", async () => {
+function makeSucceededRun(overrides: { runId?: string; folder: string; agentId: string; slug: string; bootstrapped?: boolean; summary: string }) {
+  return {
+    runId: overrides.runId ?? `run-${overrides.slug}`,
+    folder: overrides.folder,
+    status: "succeeded" as const,
+    startedAt: "2026-11-20T12:00:00.000Z",
+    updatedAt: "2026-11-20T12:00:01.000Z",
+    error: null,
+    errorCode: null,
+    result: {
+      agentId: overrides.agentId,
+      projectRoot: overrides.folder,
+      slug: overrides.slug,
+      bootstrapped: overrides.bootstrapped ?? false,
+      summary: overrides.summary,
+    },
+    phases: [
+      { id: "checking", label: "Checking folder & preconditions", status: "done", startedAt: "2026-11-20T12:00:00.000Z", finishedAt: "2026-11-20T12:00:00.100Z", error: null },
+      { id: "register-and-lanes", label: "Registering Project & saving model lanes", status: "done", startedAt: "2026-11-20T12:00:00.100Z", finishedAt: "2026-11-20T12:00:00.500Z", error: null },
+      { id: "start-supervisor", label: "Starting Supervisor", status: "done", startedAt: "2026-11-20T12:00:00.500Z", finishedAt: "2026-11-20T12:00:01.000Z", error: null },
+    ],
+  };
+}
+
+test("05-commit: Step 4 Start calls onboardingStart, reuses an existing active local workspace, opens workspace + Factory panel, and always opens Supervisor chat", async () => {
   const desktop = await loadScreenModule("plugin/index.client.tsx", { platformOs: "web" });
   const { createElement } = await import("react");
 
@@ -864,14 +900,19 @@ test("05-commit: Step 4 Start reuses an existing active local workspace and open
         missingPrerequisites: [],
       };
     }
-    if (name === "factory.onboarding.commit") {
+    if (name === "factory.onboarding.status") {
+      return { ok: true, run: null };
+    }
+    if (name === "factory.onboarding.start") {
       return {
         ok: true,
-        agentId: "agent-sup-1",
-        projectRoot: "/Users/owner/work/new-app",
-        slug: "new-app-123456",
-        bootstrapped: true,
-        summary: "Initialised Git and set up new-app",
+        run: makeSucceededRun({
+          folder: "/Users/owner/work/new-app",
+          agentId: "agent-sup-1",
+          slug: "new-app-123456",
+          bootstrapped: true,
+          summary: "Initialised Git and set up new-app",
+        }),
       };
     }
     return { ok: false, error: `unexpected rpc ${name}` };
@@ -902,9 +943,10 @@ test("05-commit: Step 4 Start reuses an existing active local workspace and open
 
         await runWizardStepsToCommit(container, act, { initGit: true, profileId: "fast" });
 
-        const commit = rpcCalls.find((c) => c.name === "factory.onboarding.commit");
-        assert.ok(commit, "onboardingCommit called");
-        assert.deepEqual(commit!.input, {
+        assert.equal(rpcCalls.some((c) => c.name === "factory.onboarding.commit"), false, "never calls legacy onboardingCommit");
+        const startCall = rpcCalls.find((c) => c.name === "factory.onboarding.start");
+        assert.ok(startCall, "onboardingStart called");
+        assert.deepEqual(startCall!.input, {
           folder: "/Users/owner/work/new-app",
           initGit: true,
           profileId: "fast",
@@ -915,9 +957,9 @@ test("05-commit: Step 4 Start reuses an existing active local workspace and open
           },
         });
         assert.deepEqual(createWorkspaceCalls, [], "reuses existing active local workspace without creating a duplicate");
-        assert.deepEqual(openedAgents, []);
         assert.deepEqual(openedWorkspaces, [{ workspaceId: "ws-active-local", serverId: "h1" }]);
         assert.deepEqual(openedPanels, [{ id: "paseo-factory", options: { workspaceId: "ws-active-local", location: "workspace" } }]);
+        assert.deepEqual(openedAgents, [{ agentId: "agent-sup-1", serverId: "h1" }], "always opens Supervisor conversation directly");
       } finally {
         await act(() => root.unmount());
       }
@@ -951,6 +993,7 @@ test("05-commit: Step 4 Start creates a clean local workspace via workspaces.cre
     const createCalls: any[] = [];
     const openedWorkspaces: any[] = [];
     const openedPanels: any[] = [];
+    const openedAgents: any[] = [];
 
     (globalThis as any).__onboardScreenTestPaseo = () => ({
       workspaces: {
@@ -975,8 +1018,12 @@ test("05-commit: Step 4 Start creates a clean local workspace via workspaces.cre
       if (name === "factory.onboarding.inspect") {
         return { ok: true, folder: input.folder, gitRepo: true, hasCommits: true, registered: false, existingLead: false, existingSupervisor: false, prerequisites: [], missingPrerequisites: [] };
       }
-      if (name === "factory.onboarding.commit") {
-        return { ok: true, agentId: "agent-sup-zero", projectRoot: "/Users/owner/work/zero-ws", slug: "zero-ws-111111", bootstrapped: false, summary: "Set up zero-ws" };
+      if (name === "factory.onboarding.status") return { ok: true, run: null };
+      if (name === "factory.onboarding.start") {
+        return {
+          ok: true,
+          run: makeSucceededRun({ folder: "/Users/owner/work/zero-ws", agentId: "agent-sup-zero", slug: "zero-ws-111111", summary: "Set up zero-ws" }),
+        };
       }
       return { ok: false, error: `unexpected ${name}` };
     };
@@ -993,7 +1040,7 @@ test("05-commit: Step 4 Start creates a clean local workspace via workspaces.cre
                 layout: { compact: false, platform: "web" },
                 params: {},
                 navigation: {
-                  openAgent: () => {},
+                  openAgent: (x: any) => openedAgents.push(x),
                   openWorkspace: (input: any) => openedWorkspaces.push(input),
                 },
                 openPanel: (id: string, options: any) => openedPanels.push({ id, options }),
@@ -1013,6 +1060,7 @@ test("05-commit: Step 4 Start creates a clean local workspace via workspaces.cre
           assert.equal("agent" in (createCalls[0].opts ?? {}), false, "creates workspace with zero dummy agent session");
           assert.deepEqual(openedWorkspaces, [{ workspaceId: "ws-created-via-project", serverId: "h1" }]);
           assert.deepEqual(openedPanels, [{ id: "paseo-factory", options: { workspaceId: "ws-created-via-project", location: "workspace" } }]);
+          assert.deepEqual(openedAgents, [{ agentId: "agent-sup-zero", serverId: "h1" }]);
         } finally {
           await act(() => root.unmount());
         }
@@ -1032,6 +1080,7 @@ test("05-commit: Step 4 Start creates a clean local workspace via workspaces.cre
     const createCalls: any[] = [];
     const openedWorkspaces: any[] = [];
     const openedPanels: any[] = [];
+    const openedAgents: any[] = [];
 
     (globalThis as any).__onboardScreenTestPaseo = () => ({
       workspaces: {
@@ -1056,8 +1105,12 @@ test("05-commit: Step 4 Start creates a clean local workspace via workspaces.cre
       if (name === "factory.onboarding.inspect") {
         return { ok: true, folder: input.folder, gitRepo: true, hasCommits: true, registered: false, existingLead: false, existingSupervisor: false, prerequisites: [], missingPrerequisites: [] };
       }
-      if (name === "factory.onboarding.commit") {
-        return { ok: true, agentId: "agent-sup-folder", projectRoot: "/Users/owner/folder-app", slug: "folder-app-222222", bootstrapped: false, summary: "Set up folder-app" };
+      if (name === "factory.onboarding.status") return { ok: true, run: null };
+      if (name === "factory.onboarding.start") {
+        return {
+          ok: true,
+          run: makeSucceededRun({ folder: "/Users/owner/folder-app", agentId: "agent-sup-folder", slug: "folder-app-222222", summary: "Set up folder-app" }),
+        };
       }
       return { ok: false, error: `unexpected ${name}` };
     };
@@ -1074,7 +1127,7 @@ test("05-commit: Step 4 Start creates a clean local workspace via workspaces.cre
                 layout: { compact: false, platform: "web" },
                 params: {},
                 navigation: {
-                  openAgent: () => {},
+                  openAgent: (x: any) => openedAgents.push(x),
                   openWorkspace: (input: any) => openedWorkspaces.push(input),
                 },
                 openPanel: (id: string, options: any) => openedPanels.push({ id, options }),
@@ -1092,6 +1145,7 @@ test("05-commit: Step 4 Start creates a clean local workspace via workspaces.cre
           assert.equal("agent" in createCalls[0].opts, false, "no dummy agent session");
           assert.deepEqual(openedWorkspaces, [{ workspaceId: "ws-created-folder", serverId: "h1" }]);
           assert.deepEqual(openedPanels, [{ id: "paseo-factory", options: { workspaceId: "ws-created-folder", location: "workspace" } }]);
+          assert.deepEqual(openedAgents, [{ agentId: "agent-sup-folder", serverId: "h1" }]);
         } finally {
           await act(() => root.unmount());
         }
@@ -1107,7 +1161,7 @@ test("05-commit: Step 4 Start creates a clean local workspace via workspaces.cre
   }
 });
 
-test("05-commit: Step 4 Start handles workspace errors gracefully without throwing unhandled rejection", async () => {
+test("05-commit: Step 4 open-workspace failure keeps Step 4 checklist visible and Retry retries only workspace/chat navigation without re-calling onboardingStart", async () => {
   const { OnboardingScreen } = await loadScreenModule("plugin/client/factory/onboarding-screen.tsx", { platformOs: "web" });
   const { createElement } = await import("react");
 
@@ -1115,12 +1169,16 @@ test("05-commit: Step 4 Start handles workspace errors gracefully without throwi
   const openedWorkspaces: any[] = [];
   const openedPanels: any[] = [];
   const toasts: any[] = [];
-  let commitCount = 0;
+  let startCount = 0;
+  let createShouldFail = true;
 
   (globalThis as any).__onboardScreenTestPaseo = () => ({
     workspaces: {
       list: async () => { throw new Error("list unavailable"); },
-      create: async () => { throw new Error("create unavailable"); },
+      create: async () => {
+        if (createShouldFail) throw new Error("create unavailable");
+        return { id: "ws-retried-1" };
+      },
     },
     projects: {
       list: async () => { throw new Error("projects list unavailable"); },
@@ -1135,9 +1193,13 @@ test("05-commit: Step 4 Start handles workspace errors gracefully without throwi
     if (name === "factory.onboarding.inspect") {
       return { ok: true, folder: input.folder, gitRepo: true, hasCommits: true, registered: false, existingLead: false, existingSupervisor: false, prerequisites: [], missingPrerequisites: [] };
     }
-    if (name === "factory.onboarding.commit") {
-      commitCount += 1;
-      return { ok: true, agentId: `agent-sup-${commitCount}`, projectRoot: "/Users/owner/dir-app", slug: "dir-app-333333", bootstrapped: false, summary: "Set up dir-app" };
+    if (name === "factory.onboarding.status") return { ok: true, run: null };
+    if (name === "factory.onboarding.start") {
+      startCount += 1;
+      return {
+        ok: true,
+        run: makeSucceededRun({ folder: "/Users/owner/dir-app", agentId: `agent-sup-${startCount}`, slug: "dir-app-333333", summary: "Set up dir-app" }),
+      };
     }
     return { ok: false, error: `unexpected ${name}` };
   };
@@ -1164,10 +1226,23 @@ test("05-commit: Step 4 Start handles workspace errors gracefully without throwi
         await act(() => new Promise<void>((r) => setTimeout(r, 10)));
         await runWizardStepsToCommit(container, act);
 
+        assert.equal(startCount, 1);
         assert.deepEqual(openedAgents, []);
         assert.deepEqual(openedWorkspaces, []);
         assert.deepEqual(openedPanels, []);
+        assert.equal(container.querySelector('[data-testid="factory-onboarding-phase-status-open-workspace"]')?.textContent, "failed");
+        const retryBtn = container.querySelector('[data-testid="factory-onboarding-run-retry"]') as HTMLElement | null;
+        assert.ok(retryBtn, "Retry button stays visible on open-workspace failure");
         assert.ok(toasts.some((t) => /workspace/i.test(t.msg) && (t.error || t.opts?.variant === "warning")));
+
+        // Retry succeeds client-side without re-calling factory.onboarding.start!
+        createShouldFail = false;
+        await act(() => retryBtn.click());
+        await act(() => new Promise<void>((r) => setTimeout(r, 10)));
+        assert.equal(startCount, 1, "Retry never re-calls factory.onboarding.start");
+        assert.deepEqual(openedWorkspaces, [{ workspaceId: "ws-retried-1", serverId: "h1" }]);
+        assert.deepEqual(openedPanels, [{ id: "paseo-factory", options: { workspaceId: "ws-retried-1", location: "workspace" } }]);
+        assert.deepEqual(openedAgents, [{ agentId: "agent-sup-1", serverId: "h1" }]);
       } finally {
         await act(() => root.unmount());
       }
@@ -1179,6 +1254,297 @@ test("05-commit: Step 4 Start handles workspace errors gracefully without throwi
     delete (globalThis as any).__onboardScreenTestWorkspaces;
     delete (globalThis as any).__onboardScreenTestPaseo;
     delete (globalThis as any).__onboardScreenTestToasts;
+  }
+});
+
+test("OnboardingScreen uses stateUpdates (onboarding.progress) push on >=0.16.0, falls back to polling on <0.16.0 with transient poll tolerance, re-attaches to running runs, and handles background completion toast-only", async () => {
+  // Part A: >= 0.16.0 push subscription + background completion after clicking Change folder.
+  {
+    const { OnboardingScreen } = await loadScreenModule("plugin/client/factory/onboarding-screen.tsx", { platformOs: "web", withSubscription: true });
+    const { createElement } = await import("react");
+
+    const openedAgents: any[] = [];
+    const openedWorkspaces: any[] = [];
+    const openedPanels: any[] = [];
+    const toasts: any[] = [];
+    const subInputs: any[] = [];
+    let activeOnEvent: ((e: any) => void) | null = null;
+    let statusPhase = "running";
+
+    (globalThis as any).__onboardScreenTestUseSubscription = (_contract: any, input: any, onEvent: (e: any) => void) => {
+      subInputs.push(input);
+      activeOnEvent = onEvent;
+      return { status: "live" };
+    };
+    (globalThis as any).__onboardScreenTestPaseo = () => ({
+      workspaces: { list: async () => ({ entries: [] }), create: async () => ({ id: "ws-bg" }) },
+      projects: { list: async () => ({ projects: [] }), subscribe: () => () => {} },
+    });
+    (globalThis as any).__onboardScreenTestToasts = toasts;
+    const runningRun = {
+      runId: "run-push-1",
+      folder: "/Users/owner/push-app",
+      status: "running",
+      startedAt: "2026-11-20T12:00:00.000Z",
+      updatedAt: "2026-11-20T12:00:00.100Z",
+      result: null,
+      error: null,
+      errorCode: null,
+      phases: [
+        { id: "checking", label: "Checking folder & preconditions", status: "done", startedAt: "2026-11-20T12:00:00.000Z", finishedAt: "2026-11-20T12:00:00.050Z", error: null },
+        { id: "register-and-lanes", label: "Registering Project & saving model lanes", status: "done", startedAt: "2026-11-20T12:00:00.050Z", finishedAt: "2026-11-20T12:00:00.100Z", error: null },
+        { id: "start-supervisor", label: "Starting Supervisor", status: "running", startedAt: "2026-11-20T12:00:00.100Z", finishedAt: null, error: null },
+      ],
+    };
+    const succeededRun = makeSucceededRun({
+      runId: "run-push-1",
+      folder: "/Users/owner/push-app",
+      agentId: "agent-bg-push",
+      slug: "push-app",
+      summary: "Background push-app ready!",
+    });
+
+    (globalThis as any).__onboardScreenTestRpc = async (name: string, input: any) => {
+      if (name === "factory.seats.directory") return { ok: true, daemonError: null, seats: [], projects: [] };
+      if (name === "factory.snapshot") return { ok: true, view: makeSnapshotView() };
+      if (name === "factory.onboarding.browse") return { ok: true, path: "/Users/owner", parent: "/Users", home: "/Users/owner", entries: [] };
+      if (name === "factory.onboarding.inspect") {
+        return { ok: true, folder: input.folder, gitRepo: true, hasCommits: true, registered: false, existingLead: false, existingSupervisor: false, prerequisites: [], missingPrerequisites: [] };
+      }
+      if (name === "factory.onboarding.start") return { ok: true, run: runningRun };
+      if (name === "factory.onboarding.status") {
+        if (input?.folder && statusPhase === "initial") return { ok: true, run: null };
+        return { ok: true, run: statusPhase === "succeeded" ? succeededRun : runningRun };
+      }
+      return { ok: false, error: `unexpected ${name}` };
+    };
+
+    try {
+      await mountDom(async (createRoot, container, act) => {
+        const root = createRoot(container);
+        try {
+          statusPhase = "initial";
+          await act(() =>
+            root.render(
+              createElement(OnboardingScreen, {
+                theme: testTheme,
+                host: { id: "h1", label: "Local" },
+                layout: { compact: false, platform: "web" },
+                params: { folder: "/Users/owner/push-app" },
+                navigation: {
+                  openAgent: (x: any) => openedAgents.push(x),
+                  openWorkspace: (x: any) => openedWorkspaces.push(x),
+                },
+                openPanel: (id: string, opts: any) => openedPanels.push({ id, opts }),
+              }),
+            ),
+          );
+          await act(() => new Promise<void>((r) => setTimeout(r, 10)));
+          statusPhase = "running";
+          await runWizardStepsToCommit(container, act);
+
+          assert.ok(container.querySelector('[data-testid="factory-onboarding-run-checklist"]'), "checklist mounts");
+          assert.deepEqual(subInputs[0], { projectRoot: "/Users/owner/push-app" }, "subscribes to stateUpdates for folder");
+
+          // Owner clicks Change folder while run is still running in background.
+          await act(() => (container.querySelector('[data-testid="factory-onboard-change-folder"]') as HTMLElement).click());
+          await act(() => new Promise<void>((r) => setTimeout(r, 10)));
+          assert.equal(container.querySelector('[data-testid="factory-onboarding"]'), null, "returned to folder browser");
+
+          // Push event arrives in background -> toast-only, zero navigation calls!
+          statusPhase = "succeeded";
+          await act(async () => {
+            activeOnEvent!({ seq: 1, reasons: ["onboarding.progress"], projectRoot: "/Users/owner/push-app", at: "2026-11-20T12:00:02.000Z" });
+            await new Promise<void>((r) => setTimeout(r, 20));
+          });
+          assert.ok(toasts.some((t) => /Background push-app ready!/.test(t.msg) && t.opts?.variant === "success"));
+          assert.deepEqual(openedWorkspaces, [], "background completion does NOT call openWorkspace");
+          assert.deepEqual(openedPanels, [], "background completion does NOT call openPanel");
+          assert.deepEqual(openedAgents, [], "background completion does NOT call openAgent");
+        } finally {
+          await act(() => root.unmount());
+        }
+      });
+    } finally {
+      delete (globalThis as any).__onboardScreenTestUseSubscription;
+      delete (globalThis as any).__onboardScreenTestRpc;
+      delete (globalThis as any).__onboardScreenTestPaseo;
+      delete (globalThis as any).__onboardScreenTestToasts;
+    }
+  }
+
+  // Part B: < 0.16.0 re-attach on folder selection -> jumps to Step 4 -> tolerates 2 silent poll failures, shows warning on 3rd, recovers & opens chat.
+  {
+    const { OnboardingScreen } = await loadScreenModule("plugin/client/factory/onboarding-screen.tsx", { platformOs: "web", withSubscription: false });
+    const { createElement } = await import("react");
+
+    const openedAgents: any[] = [];
+    const openedWorkspaces: any[] = [];
+    const openedPanels: any[] = [];
+    let statusCalls = 0;
+
+    const runningRun = {
+      runId: "run-reattach-screen",
+      folder: "/canonical/reattach-app",
+      status: "running",
+      startedAt: "2026-11-20T12:00:00.000Z",
+      updatedAt: "2026-11-20T12:00:00.100Z",
+      result: null,
+      error: null,
+      errorCode: null,
+      phases: [
+        { id: "checking", label: "Checking folder & preconditions", status: "done", startedAt: "2026-11-20T12:00:00.000Z", finishedAt: "2026-11-20T12:00:00.050Z", error: null },
+        { id: "start-supervisor", label: "Starting Supervisor", status: "running", startedAt: "2026-11-20T12:00:00.050Z", finishedAt: null, error: null },
+      ],
+    };
+    const succeededRun = makeSucceededRun({
+      runId: "run-reattach-screen",
+      folder: "/canonical/reattach-app",
+      agentId: "agent-reattach",
+      slug: "reattach-app",
+      summary: "Reattached screen ready",
+    });
+
+    (globalThis as any).__onboardScreenTestPaseo = () => ({
+      workspaces: {
+        list: async () => ({ entries: [{ id: "ws-reattach", workspaceDirectory: "/canonical/reattach-app", workspaceKind: "local_checkout", archivingAt: null }] }),
+        create: async () => ({ id: "ws-unused" }),
+      },
+      projects: { list: async () => ({ projects: [] }), subscribe: () => () => {} },
+    });
+    (globalThis as any).__onboardScreenTestToasts = [];
+    (globalThis as any).__onboardScreenTestRpc = async (name: string, input: any) => {
+      if (name === "factory.seats.directory") return { ok: true, daemonError: null, seats: [], projects: [] };
+      if (name === "factory.snapshot") return { ok: true, view: makeSnapshotView() };
+      if (name === "factory.onboarding.browse") return { ok: true, path: "/Users/owner/reattach-app", parent: "/Users/owner", home: "/Users/owner", entries: [] };
+      if (name === "factory.onboarding.inspect") {
+        return { ok: true, folder: "/canonical/reattach-app", gitRepo: true, hasCommits: true, registered: false, existingLead: false, existingSupervisor: false, prerequisites: [], missingPrerequisites: [] };
+      }
+      if (name === "factory.onboarding.status") {
+        statusCalls += 1;
+        if (statusCalls === 1) return { ok: true, run: runningRun };
+        if (statusCalls <= 3) throw new Error("Plugin RPC timed out");
+        if (statusCalls === 4) return { ok: false, error: "transient error" };
+        return { ok: true, run: succeededRun };
+      }
+      return { ok: false, error: `unexpected ${name}` };
+    };
+
+    try {
+      await mountDom(async (createRoot, container, act) => {
+        const root = createRoot(container);
+        try {
+          await act(() =>
+            root.render(
+              createElement(OnboardingScreen, {
+                theme: testTheme,
+                host: { id: "h1", label: "Local" },
+                layout: { compact: false, platform: "web" },
+                params: {},
+                navigation: {
+                  openAgent: (x: any) => openedAgents.push(x),
+                  openWorkspace: (x: any) => openedWorkspaces.push(x),
+                },
+                openPanel: (id: string, options: any) => openedPanels.push({ id, options }),
+              }),
+            ),
+          );
+          await act(() => new Promise<void>((r) => setTimeout(r, 10)));
+          await act(() => (container.querySelector('[data-testid="factory-onboard-select-folder"]') as HTMLElement).click());
+          await act(() => new Promise<void>((r) => setTimeout(r, 20)));
+
+          assert.match(container.querySelector('[data-testid="factory-onboarding-progress"]')?.textContent ?? "", /Step 4 of 4/);
+          assert.ok(container.querySelector('[data-testid="factory-onboarding-run-checklist"]'), "re-attached to Step 4 checklist");
+
+          // Wait until 3 transient errors trigger the non-fatal poll warning, then completion clears it.
+          let sawPollWarning = false;
+          for (let i = 0; i < 40 && openedAgents.length === 0; i++) {
+            await act(() => new Promise<void>((r) => setTimeout(r, 100)));
+            if (container.querySelector('[data-testid="factory-onboarding-poll-warning"]') !== null) {
+              sawPollWarning = true;
+            }
+          }
+          assert.ok(sawPollWarning, "repeated transient status-fetch errors surface factory-onboarding-poll-warning");
+          assert.equal(container.querySelector('[data-testid="factory-onboarding-poll-warning"]'), null, "poll warning clears once status recovers");
+          assert.ok(statusCalls >= 5, `expected >= 5 status calls including retries, got ${statusCalls}`);
+          assert.deepEqual(openedWorkspaces, [{ workspaceId: "ws-reattach", serverId: "h1" }]);
+          assert.deepEqual(openedPanels, [{ id: "paseo-factory", options: { workspaceId: "ws-reattach", location: "workspace" } }]);
+          assert.deepEqual(openedAgents, [{ agentId: "agent-reattach", serverId: "h1" }]);
+        } finally {
+          await act(() => root.unmount());
+        }
+      });
+    } finally {
+      delete (globalThis as any).__onboardScreenTestRpc;
+      delete (globalThis as any).__onboardScreenTestPaseo;
+      delete (globalThis as any).__onboardScreenTestToasts;
+    }
+  }
+});
+
+test("OnboardingScreen classifies browse and snapshot errors honestly using describeThrown", async () => {
+  const { OnboardingScreen } = await loadScreenModule("plugin/client/factory/onboarding-screen.tsx", { platformOs: "web" });
+  const { createElement } = await import("react");
+
+  let mode: "timeout" | "unreachable" = "timeout";
+  (globalThis as any).__onboardScreenTestPaseo = () => ({
+    workspaces: { list: async () => ({ entries: [] }), create: async () => ({ id: "ws" }) },
+    projects: { list: async () => ({ projects: [] }), subscribe: () => () => {} },
+  });
+  (globalThis as any).__onboardScreenTestRpc = async (name: string) => {
+    if (name === "factory.seats.directory") return { ok: true, daemonError: null, seats: [], projects: [] };
+    if (name === "factory.snapshot") {
+      if (mode === "timeout") throw new Error("Plugin RPC timed out");
+      throw new Error("connect ECONNREFUSED 127.0.0.1:4100");
+    }
+    if (name === "factory.onboarding.browse") {
+      if (mode === "timeout") throw new Error("Plugin RPC timed out");
+      throw new Error("connect ECONNREFUSED 127.0.0.1:4100");
+    }
+    return { ok: true };
+  };
+
+  try {
+    await mountDom(async (createRoot, container, act) => {
+      const root = createRoot(container);
+      try {
+        mode = "timeout";
+        await act(() =>
+          root.render(
+            createElement(OnboardingScreen, {
+              theme: testTheme,
+              host: { id: "h1", label: "Local" },
+              layout: { compact: false, platform: "web" },
+              params: {},
+            }),
+          ),
+        );
+        await act(() => new Promise<void>((r) => setTimeout(r, 15)));
+        const browseTimeout = container.querySelector('[data-testid="factory-onboard-browse-error"]')?.textContent ?? "";
+        assert.match(browseTimeout, /Paseo was busy and the request timed out/i);
+        assert.doesNotMatch(browseTimeout, /Could not reach the Factory server/i);
+
+        mode = "unreachable";
+        await act(() =>
+          root.render(
+            createElement(OnboardingScreen, {
+              key: "unreachable",
+              theme: testTheme,
+              host: { id: "h1", label: "Local" },
+              layout: { compact: false, platform: "web" },
+              params: { folder: "/Users/owner/app" },
+            }),
+          ),
+        );
+        await act(() => new Promise<void>((r) => setTimeout(r, 15)));
+        assert.match(container.textContent ?? "", /Could not reach the Factory server/i);
+      } finally {
+        await act(() => root.unmount());
+      }
+    });
+  } finally {
+    delete (globalThis as any).__onboardScreenTestRpc;
+    delete (globalThis as any).__onboardScreenTestPaseo;
   }
 });
 

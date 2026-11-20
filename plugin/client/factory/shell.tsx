@@ -9,7 +9,7 @@ import { openExternalUrl, useRpc } from "@getpaseo/plugin/client";
 import { Modal, ScrollView, useToast } from "@getpaseo/plugin/client/ui";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Text, View } from "react-native";
-import { skillsImport, skillsPackSave, skillsPackDelete, skillsPackReset, skillsTogglePack, lanesSet, lanesReset, lanesSetBatch, handoffStart, handoffReplaceNow, handoffCancel, handoffRetry, handoffHandover, onboardingCommit, onboardingInspect, openDesignCatalog, openDesignSync, helperMcpsSyncAndProbe, helperMcpsSetEnabled, pluginsInstall, pluginsManage, pluginsCheckUpdates, releaseSettingsRead, releaseSettingsWrite, githubPublishPreflight, githubPublish, selfUpdateApply, selfUpdateStatus, profilesApply, profilesDelete, profilesSave, projectDelete, projectReset, projectRotate, snapshot, stateUpdates, supervisorAdopt, supervisorStart, vaultConfigure, vaultHydrate, vaultImport, vaultSync } from "../../shared/rpc.ts";
+import { skillsImport, skillsPackSave, skillsPackDelete, skillsPackReset, skillsTogglePack, lanesSet, lanesReset, lanesSetBatch, handoffStart, handoffReplaceNow, handoffCancel, handoffRetry, handoffHandover, onboardingInspect, onboardingStart, onboardingStatus, openDesignCatalog, openDesignSync, helperMcpsSyncAndProbe, helperMcpsSetEnabled, pluginsInstall, pluginsManage, pluginsCheckUpdates, releaseSettingsRead, releaseSettingsWrite, githubPublishPreflight, githubPublish, selfUpdateApply, selfUpdateStatus, profilesApply, profilesDelete, profilesSave, projectDelete, projectReset, projectRotate, snapshot, stateUpdates, supervisorAdopt, supervisorStart, vaultConfigure, vaultHydrate, vaultImport, vaultSync } from "../../shared/rpc.ts";
 import { GH_LOGIN_CMD } from "./github-release-card.tsx";
 import type { GitHubPublishSubmitInput, ReleaseCardFeedback } from "./github-release-card.tsx";
 import type { ManageablePluginId } from "../../shared/companions.ts";
@@ -22,8 +22,8 @@ import type { SeatEditorRequest } from "./editor-request.ts";
 import { ProjectPanel } from "./project-panel.tsx";
 import { useSelfUpdate } from "./self-update.tsx";
 import { ProjectMenu } from "./project-menu.tsx";
+import { useOnboardingRunTracker } from "./onboarding-run-tracker.tsx";
 import { OnboardingWizard } from "./onboarding-wizard.tsx";
-import type { CommitInput } from "./onboarding-state.ts";
 import { VaultPane, isVaultActName } from "./vault.tsx";
 import type { VaultNote } from "./vault.tsx";
 import { actionFeedback, createResponseOrder } from "./vault-feedback.ts";
@@ -75,9 +75,10 @@ export function FactoryShell({
   const handoffHandoverCall = useRpc(handoffHandover);
   const supervisorStartCall = useRpc(supervisorStart);
   const supervisorAdoptCall = useRpc(supervisorAdopt);
-  // The onboarding wizard's doors (v0.6.0 W7): a read-only folder inspection, the Start commit, and the Open Design catalog.
+  // The onboarding wizard's doors (ADR 0056 / ADR 0065): folder inspection, async run start/status, and Open Design catalog.
   const onboardingInspectCall = useRpc(onboardingInspect);
-  const onboardingCommitCall = useRpc(onboardingCommit);
+  const onboardingStartCall = useRpc(onboardingStart);
+  const onboardingStatusCall = useRpc(onboardingStatus);
   const openDesignCatalogCall = useRpc(openDesignCatalog);
   const openDesignSyncCall = useRpc(openDesignSync);
   const projectResetCall = useRpc(projectReset);
@@ -137,6 +138,8 @@ export function FactoryShell({
   const [containerWidth, setContainerWidth] = useState<number>(0);
   const lastViewRef = useRef<FactoryView | null>(null);
   const refreshRef = useRef<() => void>(() => {});
+  const onboardingProgressRef = useRef<(projectRoot?: string) => void>(() => {});
+  const [onboardingHoldFolder, setOnboardingHoldFolder] = useState<string | null>(null);
 
   // The active Project scope: the workspace panel's directory (auto-bound).
   const scopeRoot = dir;
@@ -146,8 +149,11 @@ export function FactoryShell({
   const mobile = layout?.platform === "ios" || layout?.platform === "android";
 
   const subscriptionInput = useMemo(() => ({ projectRoot: scopeRoot }), [scopeRoot]);
-  const subscription = useClientSubscription(stateUpdates, subscriptionInput, () => {
+  const subscription = useClientSubscription(stateUpdates, subscriptionInput, (event) => {
     refreshRef.current();
+    if (event.reasons.includes("onboarding.progress")) {
+      onboardingProgressRef.current(event.projectRoot);
+    }
   });
   const subscriptionLive = isSubscriptionLive(subscription);
 
@@ -186,6 +192,63 @@ export function FactoryShell({
   if (poll.value !== null) lastViewRef.current = poll.value;
   const serverView = poll.value ?? lastViewRef.current;
   const view = serverView;
+  const onboardingFolder = !mobile && panelHost ? (scopeRoot ?? view?.panel.onboarding?.folder ?? null) : null;
+  const prevScopeRef = useRef(scopeRoot);
+  const scopeChangedThisRender = prevScopeRef.current !== scopeRoot;
+  useEffect(() => {
+    prevScopeRef.current = scopeRoot;
+  }, [scopeRoot]);
+  const freshView = scopeChangedThisRender ? null : poll.value;
+  const onboardingCanBeActive =
+    onboardingFolder !== null &&
+    (freshView === null
+      ? onboardingHoldFolder === onboardingFolder
+      : !freshView.panel.isProject ||
+        onboardingHoldFolder === onboardingFolder ||
+        freshView.panel.seats?.supervisor.vacant === true);
+  const onboardingTracker = useOnboardingRunTracker({
+    activeFolder: onboardingCanBeActive ? onboardingFolder : null,
+    subscriptionLive,
+    start: async (input) => {
+      setOnboardingHoldFolder(input.folder);
+      return onboardingStartCall(input);
+    },
+    status: (input) => onboardingStatusCall(input),
+    onActiveComplete: async (result) => {
+      toast.show(result.summary, { variant: "success" });
+      setOnboardingHoldFolder(null);
+      refresh();
+      navigation?.openAgent({ agentId: result.agentId, serverId });
+      return { ok: true as const };
+    },
+    onBackgroundComplete: (result) => {
+      toast.show(result.summary, { variant: "success" });
+      refresh();
+    },
+  });
+  onboardingProgressRef.current = onboardingTracker.notifyProgress;
+
+  useEffect(() => {
+    setOnboardingHoldFolder(null);
+  }, [scopeRoot]);
+
+  const probedScopeRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (mobile || !panelHost || scopeRoot === undefined || freshView === null) return;
+    if (probedScopeRef.current === scopeRoot) return;
+    if (!freshView.panel.isProject) {
+      probedScopeRef.current = scopeRoot;
+      return;
+    }
+    if (freshView.panel.seats?.supervisor.vacant !== true) return;
+    probedScopeRef.current = scopeRoot;
+    void onboardingTracker.probeFolder(scopeRoot).then((found) => {
+      if (found !== null && found.status === "running") {
+        setOnboardingHoldFolder(scopeRoot);
+      }
+    });
+  }, [mobile, panelHost, scopeRoot, freshView, onboardingTracker.probeFolder]);
+
   const now = useNow(1000);
   const elapsedSeconds = activePluginAct === null ? 0 : Math.max(0, Math.floor((now - activePluginAct.startedAt) / 1000));
   useEffect(() => { if (view !== null) setVaultNote(null); }, [view]);
@@ -518,15 +581,6 @@ export function FactoryShell({
   const installPrerequisites = (): void => {
     void installPrerequisitesResult();
   };
-  /** The onboarding wizard's Start: commit, then open the Supervisor conversation when a directive was sent (else finish on the Project panel). */
-  const startOnboarding = async (input: CommitInput): Promise<{ ok: true } | { ok: false; error: string }> => {
-    const reply = await onboardingCommitCall(input);
-    if (!reply.ok) return { ok: false, error: reply.error };
-    toast.show(reply.summary, { variant: "success" });
-    if ((input.directive ?? "") !== "") navigation?.openAgent({ agentId: reply.agentId, serverId });
-    refresh();
-    return { ok: true };
-  };
   const pluginActions: PluginsActions = {
     busy: busy || activePluginAct !== null,
     checkingUpdates,
@@ -843,10 +897,30 @@ export function FactoryShell({
           gap: isCompact ? SPACING[3] : SPACING[4],
         }}
       >
-        {panelHost ? (
+        {panelHost ? (() => {
+          const holdOnboardingWizard =
+            !mobile &&
+            onboardingFolder !== null &&
+            (!view.panel.isProject ||
+              onboardingHoldFolder === onboardingFolder ||
+              (onboardingTracker.activeRun !== null && onboardingTracker.openWorkspace.status !== "done"));
+          const effectivePanel =
+            holdOnboardingWizard && view.panel.isProject
+              ? {
+                  ...view.panel,
+                  isProject: false as const,
+                  onboarding: view.panel.onboarding ?? {
+                    folder: onboardingFolder,
+                    gitRepo: true,
+                    hasCommits: true,
+                    existingLead: false,
+                  },
+                }
+              : view.panel;
+          return (
           <ProjectPanel
             theme={theme}
-            panel={view.panel}
+            panel={effectivePanel}
             modelView={view}
             {...(editorRequest === undefined ? {} : { editorRequest })}
             {...(onEditorRequestHandled === undefined ? {} : { onEditorRequestHandled })}
@@ -886,11 +960,12 @@ export function FactoryShell({
             }
             onboarding={
               // Desktop only: the wizard cannot finish on mobile, which shows "set this Project up on Paseo Desktop".
-              !mobile && !view.panel.isProject ? (
+              holdOnboardingWizard ? (
                 <OnboardingWizard
                   theme={theme}
                   view={view}
-                  folder={scopeRoot ?? view.panel.onboarding?.folder ?? null}
+                  folder={onboardingFolder}
+                  tracker={onboardingTracker}
                   actions={{
                     inspect: (folder) => onboardingInspectCall({ folder }),
                     installPrerequisites: installPrerequisitesResult,
@@ -900,13 +975,14 @@ export function FactoryShell({
                         ? { ok: true as const, projects: reply.projects.map((p) => ({ projectId: p.projectId, projectName: p.projectName, screenCount: p.screenCount })) }
                         : { ok: false as const, error: reply.error };
                     },
-                    start: startOnboarding,
+                    start: (input) => onboardingStartCall(input),
+                    status: (input) => onboardingStatusCall(input),
                   }}
                 />
               ) : null
             }
             menu={
-              view.panel.isProject && view.project !== null ? (
+              effectivePanel.isProject && view.project !== null ? (
                 <ProjectMenu
                   theme={theme}
                   mobile={mobile}
@@ -920,7 +996,8 @@ export function FactoryShell({
               ) : null
             }
           />
-        ) : (
+          );
+        })() : (
           settingsScreen
         )}
       </ScrollView>

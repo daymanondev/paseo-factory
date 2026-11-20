@@ -1192,6 +1192,7 @@ test('Project Shell scopes dynamic pack and profile writes to the snapshot Proje
     if (method === 'factory.snapshot') return { ok: true, view };
     if (method === 'factory.self.update.status') return { ok: true, current: '0.10.3', latest: '0.10.3', updateAvailable: false };
     if (method === 'factory.release.settings.read') return { ok: false, code: 'stub', error: 'stub' };
+    if (method === 'factory.onboarding.status') return { ok: true, run: null };
     calls.push({ method, input });
     return { ok: true };
   };
