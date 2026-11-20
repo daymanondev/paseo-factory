@@ -9,11 +9,11 @@ import { openExternalUrl, useRpc } from "@getpaseo/plugin/client";
 import { Modal, ScrollView, useToast } from "@getpaseo/plugin/client/ui";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Text, View } from "react-native";
-import { skillsImport, skillsPackSave, skillsPackDelete, skillsPackReset, skillsTogglePack, lanesSet, lanesReset, lanesSetBatch, handoffStart, handoffReplaceNow, handoffCancel, handoffRetry, handoffHandover, onboardingInspect, onboardingStart, onboardingStatus, openDesignCatalog, openDesignSync, helperMcpsSyncAndProbe, helperMcpsSetEnabled, pluginsInstall, pluginsManage, pluginsCheckUpdates, releaseSettingsRead, releaseSettingsWrite, githubPublishPreflight, githubPublish, selfUpdateApply, selfUpdateStatus, profilesApply, profilesDelete, profilesSave, projectDelete, projectReset, projectRotate, snapshot, stateUpdates, supervisorAdopt, supervisorStart, vaultConfigure, vaultHydrate, vaultImport, vaultSync } from "../../shared/rpc.ts";
+import { skillsImport, skillsPackSave, skillsPackDelete, skillsPackReset, skillsTogglePack, lanesSet, lanesReset, lanesSetBatch, handoffStart, handoffReplaceNow, handoffCancel, handoffRetry, handoffHandover, onboardingInspect, onboardingStart, onboardingStatus, openDesignCatalog, openDesignSync, helperMcpsSyncAndProbe, helperMcpsSetEnabled, pluginsInstall, pluginsManage, pluginsCheckUpdates, releaseSettingsRead, releaseSettingsWrite, storeReleaseRead, githubPublishPreflight, githubPublish, selfUpdateApply, selfUpdateStatus, profilesApply, profilesDelete, profilesSave, projectDelete, projectReset, projectRotate, snapshot, stateUpdates, supervisorAdopt, supervisorStart, vaultConfigure, vaultHydrate, vaultImport, vaultSync } from "../../shared/rpc.ts";
 import { GH_LOGIN_CMD } from "./github-release-card.tsx";
 import type { GitHubPublishSubmitInput, ReleaseCardFeedback } from "./github-release-card.tsx";
 import type { ManageablePluginId } from "../../shared/companions.ts";
-import type { FactoryView, GitHubPublishPreflightView, LaneName, ReleaseSettingsView } from "../../shared/view.ts";
+import type { FactoryView, GitHubPublishPreflightView, LaneName, ReleaseSettingsView, StoreReleaseView } from "../../shared/view.ts";
 import { SPACING, text } from "../kit/theme.ts";
 import { useNow, usePoll, pollEvery, PROVIDERS_LOADING_MS, QUIET_MS } from "../kit/poll.ts";
 import { isSubscriptionLive, useClientSubscription } from "../kit/subscription.ts";
@@ -49,6 +49,7 @@ export function FactoryShell({
   serverId,
   surface = "panel",
   openSettings,
+  openReleaseLab,
   editorRequest,
   onEditorRequestHandled,
 }: {
@@ -61,6 +62,7 @@ export function FactoryShell({
   /** Which entry hosts the shell: the workspace panel (the Project panel) or the settings screen. */
   surface?: "panel" | "settings";
   openSettings?: () => void;
+  openReleaseLab?: () => void;
   editorRequest?: SeatEditorRequest;
   onEditorRequestHandled?: () => void;
 }) {
@@ -108,6 +110,7 @@ export function FactoryShell({
   const selfUpdateApplyCall = useRpc(selfUpdateApply);
   const releaseReadCall = useRpc(releaseSettingsRead);
   const releaseWriteCall = useRpc(releaseSettingsWrite);
+  const storeReleaseReadCall = useRpc(storeReleaseRead);
   const githubPublishPreflightCall = useRpc(githubPublishPreflight);
   const githubPublishCall = useRpc(githubPublish);
   const selfUpdate = useSelfUpdate({ status: selfUpdateStatusCall, apply: selfUpdateApplyCall, enabled: surface === "panel" });
@@ -131,6 +134,7 @@ export function FactoryShell({
   const [laneNote, setLaneNote] = useState<string | null>(null);
   const [panelTab, setPanelTab] = useState<"team" | "models" | "project">("team");
   const [releaseView, setReleaseView] = useState<ReleaseSettingsView | null>(null);
+  const [storeReleaseView, setStoreReleaseView] = useState<StoreReleaseView | null>(null);
   const [publishPreflightView, setPublishPreflightView] = useState<GitHubPublishPreflightView | null>(null);
   const [releaseBusy, setReleaseBusy] = useState(false);
   const [releaseFeedback, setReleaseFeedback] = useState<ReleaseCardFeedback | null>(null);
@@ -272,8 +276,21 @@ export function FactoryShell({
 
   const releaseReadRef = useRef(releaseReadCall);
   releaseReadRef.current = releaseReadCall;
+  const storeReleaseReadRef = useRef(storeReleaseReadCall);
+  storeReleaseReadRef.current = storeReleaseReadCall;
   const publishPreflightRef = useRef(githubPublishPreflightCall);
   publishPreflightRef.current = githubPublishPreflightCall;
+
+  const refreshStoreReleaseView = useCallback(async (projectRoot: string) => {
+    try {
+      const reply = await storeReleaseReadRef.current({ projectRoot });
+      if (reply && reply.ok && reply.settings !== undefined) {
+        setStoreReleaseView(reply.settings);
+      }
+    } catch {
+      // Transient store-release read errors leave the last good view in place.
+    }
+  }, []);
 
   const refreshReleaseView = useCallback(async (projectRoot: string) => {
     try {
@@ -300,13 +317,15 @@ export function FactoryShell({
     if (activeReleaseRoot === null) {
       if (view?.panel.isProject !== true) {
         setReleaseView(null);
+        setStoreReleaseView(null);
         setPublishPreflightView(null);
         setReleaseFeedback(null);
       }
       return;
     }
     void refreshReleaseView(activeReleaseRoot);
-  }, [activeReleaseRoot, view?.generatedAt, view?.panel.isProject, refreshReleaseView]);
+    void refreshStoreReleaseView(activeReleaseRoot);
+  }, [activeReleaseRoot, view?.generatedAt, view?.panel.isProject, refreshReleaseView, refreshStoreReleaseView]);
 
   const runReleaseAct = async (work: (projectRoot: string) => Promise<void>) => {
     if (activeReleaseRoot === null || releaseBusy) return;
@@ -940,6 +959,8 @@ export function FactoryShell({
                 if (activeReleaseRoot !== null) await refreshReleaseView(activeReleaseRoot);
               },
             }}
+            storeRelease={storeReleaseView}
+            {...(mobile || openReleaseLab === undefined ? {} : { onOpenReleaseLab: openReleaseLab })}
             onTabChange={setPanelTab}
             skillPacks={view.skillHub?.projectPacks ?? []}
             skillPacksExplicit={view.skillHub?.skillPacksExplicit === true}
