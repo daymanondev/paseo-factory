@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-11-21
+
+**Typed Store Release Server Bridge to `factory-release-lab`, extended `Private vault` store defaults & keystore write-back, and cross-project `Store notebook` (ADR 0066).**
+
+### Added
+
+- **Store Release Server Bridge, Spool & MCP tools (`plugin/server/store-release.ts`, `plugin/server/spool.ts`, `plugin/server/lead-mailbox.ts`, `src/mcp/shared.ts`, `plugin/bin/bridge.mjs`):** Added the Lead-only `lead_store_release` (`probe` | `stage` | `submit` | `resume`) act executed server-side against the installed `factory-release-lab` runner with `PASEO_HOME` and Finder-safe `PATH`. Enforces ordered Mode, Runner & Vault, and Repo integrity preconditions (`store-release-not-granted`, `no-store-release-intent`, `production-approval-required`, `runner-not-installed`, `vault-credentials-missing`, `root-dirty`, `root-detached`, `gate-running`, `head-not-accepted`), runs long builds and Apple build polling asynchronously at zero seat tokens before waking `Lead` via mailbox, preserves upfront `target: "production"` requests across `stage` until `submit`, classifies runner errors into `app-repo` vs. `tool-bug`/`account-policy`, and triggers Day-0 Android keystore write-back automatically when created.
+- **`supervisor_dispatch_lead.storeRelease` & `Store notebook` write acts (`src/mcp/shared.ts`, `plugin/server/spool.ts`, `plugin/server/lead-mailbox.ts`):** Extended `supervisor_dispatch_lead` with typed `storeRelease` intents persisted atomically to `store-release-request.json`, and added `supervisor_record_store_note` / `lead_record_store_note` (`store-notebook-write`) to record `lessons.md` (`<= 120` lines) and per-app notes in `Private vault` without dirtying `<project-root>`.
+- **Private Vault store defaults, `APPLE_TEAM_ID`, keystore write-back & `Store notebook` (`src/vault-config.ts`, `src/vault-secrets.ts`, `src/vault-materialization.ts`, `src/vault-envelope.ts`, `plugin/bin/factory.mjs`, `plugin/client/factory/vault.tsx`):** Added optional `teamId` → `APPLE_TEAM_ID` (`0o600` `env.json`) and `store-defaults.json` (`0o600`) hydration, `writeBackAndroidKeystore` sealing with `.git/info/exclude` + `.worktreeinclude` hygiene, and read-only (`0o400`) `store-memory/` hydration & Vault sync.
+- **Owner-only `Store release mode`, RPCs & Project-panel card (`src/project-settings.ts`, `src/store-release-probe.ts`, `plugin/shared/rpc.ts`, `plugin/shared/view.ts`, `plugin/server/surface-rpc.ts`, `plugin/client/factory/store-release-card.tsx`, `plugin/client/factory/project-panel.tsx`):** Added `storeRelease` (`off` | `on-request` | `auto-staging`) settings surviving seat rotation and project reset, `factory.store_release.read` / `factory.store_release.write` RPCs (`seat-cannot-grant` refusal), and the collapsible React Native **Store Release** card beneath **GitHub & Release** with named E2E hooks (`factory-panel-store-release*`) and desktop **Open Release Lab** navigation.
+- **Ledger store-release events (`src/events.ts`, `src/ledger-validation.ts`, `src/factory.ts`, `plugin/server/view.ts`):** Added task-less Project-level `store_release_started`, `store_release_paused`, `store_release_completed`, and `store_release_failed` events across validation, migration, history import/upgrade, and generated `.mjs` mirrors.
+
+### Changed
+
+- **Role contracts, kickoff packet, `auto-staging` & Skill Hub (`src/roles-contract.ts`, `src/preflight.ts`, `plugin/server/release.ts`, `src/skill-hub.ts`, `CONTEXT.md`):** Taught `Supervisor` and `Lead` the Store release workflow, `Hole` relay, and 2-route failure policy (`<= 2` Peer repair attempts on `app-repo`; immediate halt + `Upstream issue` escalation on `tool-bug`/`account-policy`), added `auto-staging` follow-up after `lead_release`, included Store release & read-only `Store notebook` facts in mobile kickoff packets, enabled `factory-release-lab` `mobile-store-release` discovery in `Skill hub`, and documented new terms in `CONTEXT.md`.
+
 ## [0.17.0] - 2026-11-20
 
 **Server-tracked async Onboarding run with live Step 4 phase progress, honest error classification, and direct-to-chat Supervisor startup (ADR 0065).**
