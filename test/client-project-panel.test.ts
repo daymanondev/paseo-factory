@@ -102,7 +102,7 @@ const noopActions = () => ({
   openAgent() {}, installPrerequisites() {}, handoffStart() {}, handoffReplaceNow() {}, handoffCancel() {}, handoffRetry() {}, viewHandover() {}, startSupervisor() {}, syncOpenDesign() {}, adoptSupervisor() {}, busy: false,
 });
 
-async function render(panel: PanelView, props: { theme?: typeof theme; mobile?: boolean; openDesignActions?: unknown; menu?: unknown; initialUi?: Record<string, unknown>; actions?: Record<string, unknown>; width?: number; skillPacks?: unknown[]; selfUpdate?: unknown; release?: ReleaseSettingsView | null; publishPreflight?: Record<string, unknown> | null; releaseFeedback?: { text: string; tone: "info" | "error" } | null; releaseActions?: Record<string, unknown>; storeRelease?: StoreReleaseView | null; storeReleaseBusy?: boolean; storeReleaseFeedback?: { text: string; tone: "info" | "success" | "error" } | null; storeReleaseActions?: Record<string, unknown>; onOpenReleaseLab?: () => void } = {}): Promise<string> {
+async function render(panel: PanelView, props: { theme?: typeof theme; mobile?: boolean; openDesignActions?: unknown; menu?: unknown; initialUi?: Record<string, unknown>; actions?: Record<string, unknown>; width?: number; skillPacks?: unknown[]; selfUpdate?: unknown; release?: ReleaseSettingsView | null; publishPreflight?: Record<string, unknown> | null; releaseFeedback?: { text: string; tone: "info" | "error" } | null; releaseActions?: Record<string, unknown>; storeRelease?: StoreReleaseView | null; storeReleaseBusy?: boolean; storeReleaseFeedback?: { text: string; tone: "info" | "success" | "error" } | null; storeReleaseActions?: Record<string, unknown>; onOpenReleaseLab?: () => void; onOpenSettings?: () => void } = {}): Promise<string> {
   const { ProjectPanel } = await loadPanel();
   const { createElement } = await import("react");
   const { renderToStaticMarkup } = await import("react-dom/server");
@@ -124,6 +124,7 @@ async function render(panel: PanelView, props: { theme?: typeof theme; mobile?: 
       ...(props.storeReleaseFeedback === undefined ? {} : { storeReleaseFeedback: props.storeReleaseFeedback }),
       ...(props.storeReleaseActions === undefined ? {} : { storeReleaseActions: props.storeReleaseActions }),
       ...(props.onOpenReleaseLab === undefined ? {} : { onOpenReleaseLab: props.onOpenReleaseLab }),
+      ...(props.onOpenSettings === undefined ? {} : { onOpenSettings: props.onOpenSettings }),
     }),
   );
 }
@@ -1764,8 +1765,9 @@ test("Store Release card renders mobile off, mobile auto-staging, missing-Vault-
   assert.match(missingVaultHtml, /GPlay JSON/);
   assert.match(missingVaultHtml, /Missing Vault keys/);
 
-  // 4. Active Hole summary + Open Release Lab button click on desktop
+  // 4. Active Hole summary + Open Release Lab & Open Vault Settings button clicks on desktop
   const openedLab: string[] = [];
+  const openedSettings: string[] = [];
   const { ProjectPanel } = await loadPanel();
   const { createElement, act } = await import("react");
   const { JSDOM } = await import(["jsdom"].join(""));
@@ -1791,6 +1793,7 @@ test("Store Release card renders mobile off, mobile auto-staging, missing-Vault-
             isMobile: true,
             mode: "on-request",
             platforms: ["ios"],
+            vault: { ascKey: false, appleTeamId: false, gplayJson: false },
             activeHole: {
               runId: "run-hole-42",
               kind: "final-release-approval",
@@ -1799,6 +1802,7 @@ test("Store Release card renders mobile off, mobile auto-staging, missing-Vault-
             },
           }),
           onOpenReleaseLab: () => { openedLab.push("opened"); },
+          onOpenSettings: () => { openedSettings.push("settings"); },
         }),
       ),
     );
@@ -1808,6 +1812,9 @@ test("Store Release card renders mobile off, mobile auto-staging, missing-Vault-
     assert.match(holeEl.textContent!, /submit/);
     assert.match(holeEl.textContent!, /run-hole-42/);
     assert.match(holeEl.textContent!, /5m ago/);
+
+    await act(() => (container.querySelector('[data-testid="factory-panel-store-release-open-vault-settings"]') as HTMLButtonElement).click());
+    assert.deepEqual(openedSettings, ["settings"]);
 
     await act(() => (container.querySelector('[data-testid="factory-panel-store-release-open-lab"]') as HTMLButtonElement).click());
     assert.deepEqual(openedLab, ["opened"]);
@@ -1825,6 +1832,7 @@ test("Store Release card renders mobile off, mobile auto-staging, missing-Vault-
       isMobile: true,
       mode: "auto-staging",
       platforms: ["android"],
+      vault: { ascKey: false, appleTeamId: false, gplayJson: false },
       activeHole: {
         runId: "run-hole-99",
         kind: "day0-store-init",
@@ -1833,9 +1841,11 @@ test("Store Release card renders mobile off, mobile auto-staging, missing-Vault-
       },
     }),
     onOpenReleaseLab: () => { assert.fail("mobile host must not invoke openReleaseLab button"); },
+    onOpenSettings: () => { assert.fail("mobile host must not invoke openSettings button"); },
   });
   assert.doesNotMatch(elementOf(hostMobileHtml, "factory-panel-store-release"), /<button/);
   assert.ok(hasHook(hostMobileHtml, "factory-panel-store-release-hole"));
+  assert.ok(hasHook(hostMobileHtml, "factory-panel-store-release-vault-warning"));
 });
 
 test("FactoryShell wires storeReleaseRead and storeReleaseWrite RPCs and index.client.tsx threads openReleaseLab targeting factory-release-lab", () => {
@@ -1846,6 +1856,7 @@ test("FactoryShell wires storeReleaseRead and storeReleaseWrite RPCs and index.c
   assert.match(shell, /useRpc\(storeReleaseWrite\)/);
   assert.match(shell, /storeRelease=\{storeReleaseView\}/);
   assert.match(shell, /onOpenReleaseLab/);
+  assert.match(shell, /onOpenSettings/);
 
   const entries = readFileSync(join(repoRoot, "plugin/client/factory/entries.tsx"), "utf8");
   assert.match(entries, /openReleaseLab/);

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.1] - 2026-11-21
+
+### Added
+
+- **Direct `Open Vault Settings` button in the Store Release missing-keys warning (`plugin/client/factory/store-release-card.tsx`, `plugin/client/factory/project-panel.tsx`, `plugin/client/factory/shell.tsx`):** Wired `openSettings` from `FactoryShell` into `StoreReleaseCard` so desktop Owners missing required `Private vault` store credentials (`ASC .p8`, `Team ID`, or `GPlay JSON`) can jump straight to Factory Settings → Vault with one click (`factory-panel-store-release-open-vault-settings`) while preserving mobile read-only discipline.
+
 ## [0.18.0] - 2026-11-21
 
 **Typed Store Release Server Bridge to `factory-release-lab`, extended `Private vault` store defaults & keystore write-back, and cross-project `Store notebook` (ADR 0066).**

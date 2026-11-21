@@ -879,6 +879,7 @@ export function ProjectPanel({
   storeReleaseFeedback = null,
   storeReleaseActions,
   onOpenReleaseLab,
+  onOpenSettings,
   onTabChange,
 }: {
   /** The header's version + update control (ticket 11), mounted by the Shell; omitted, no control. */
@@ -894,6 +895,7 @@ export function ProjectPanel({
   storeReleaseFeedback?: StoreReleaseCardFeedback | null;
   storeReleaseActions?: StoreReleaseActions;
   onOpenReleaseLab?: () => void;
+  onOpenSettings?: () => void;
   onTabChange?: (tab: ProjectPanelTab) => void;
   modelView?: LanePickerView;
   editorRequest?: SeatEditorRequest;
@@ -980,7 +982,7 @@ export function ProjectPanel({
             testID="factory-tab"
           />
           <View testID={`factory-tab-body-${tab}`}>
-            {tab === "team" ? boundary("Seats", seats) : tab === "models" ? boundary("Models", models) : <>{boundary("Project usage", panel.usage == null ? null : <ProjectUsage theme={theme} usage={panel.usage} mobile={mobile} />)}{boundary("Skill packs", packs)}{boundary("Open Design", design)}{release === null ? null : boundary("GitHub & Release", <GitHubReleaseCard theme={theme} release={release} publishPreflight={publishPreflight} mobile={mobile} now={now} busy={releaseBusy} feedback={releaseFeedback} copiedLogin={releaseCopiedLogin} {...(releaseActions === undefined ? {} : { actions: releaseActions })} />)}{storeRelease === null ? null : boundary("Store Release", <StoreReleaseCard theme={theme} storeRelease={storeRelease} mobile={mobile} now={now} busy={storeReleaseBusy} feedback={storeReleaseFeedback} {...(storeReleaseActions === undefined ? {} : { actions: storeReleaseActions })} {...(onOpenReleaseLab === undefined ? {} : { onOpenReleaseLab })} />)}</>}
+            {tab === "team" ? boundary("Seats", seats) : tab === "models" ? boundary("Models", models) : <>{boundary("Project usage", panel.usage == null ? null : <ProjectUsage theme={theme} usage={panel.usage} mobile={mobile} />)}{boundary("Skill packs", packs)}{boundary("Open Design", design)}{release === null ? null : boundary("GitHub & Release", <GitHubReleaseCard theme={theme} release={release} publishPreflight={publishPreflight} mobile={mobile} now={now} busy={releaseBusy} feedback={releaseFeedback} copiedLogin={releaseCopiedLogin} {...(releaseActions === undefined ? {} : { actions: releaseActions })} />)}{storeRelease === null ? null : boundary("Store Release", <StoreReleaseCard theme={theme} storeRelease={storeRelease} mobile={mobile} now={now} busy={storeReleaseBusy} feedback={storeReleaseFeedback} {...(storeReleaseActions === undefined ? {} : { actions: storeReleaseActions })} {...(onOpenReleaseLab === undefined ? {} : { onOpenReleaseLab })} {...(onOpenSettings === undefined ? {} : { onOpenSettings })} />)}</>}
           </View>
         </>
       ) : (

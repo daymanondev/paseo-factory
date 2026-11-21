@@ -997,6 +997,7 @@ export function FactoryShell({
             storeReleaseFeedback={storeReleaseFeedback}
             {...(mobile ? {} : { storeReleaseActions: { setMode: updateStoreReleaseMode } })}
             {...(mobile || openReleaseLab === undefined ? {} : { onOpenReleaseLab: openReleaseLab })}
+            {...(mobile || openSettings === undefined ? {} : { onOpenSettings: openSettings })}
             onTabChange={setPanelTab}
             skillPacks={view.skillHub?.projectPacks ?? []}
             skillPacksExplicit={view.skillHub?.skillPacksExplicit === true}

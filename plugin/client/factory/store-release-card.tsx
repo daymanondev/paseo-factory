@@ -83,6 +83,7 @@ export function StoreReleaseCard({
   feedback = null,
   actions = {},
   onOpenReleaseLab,
+  onOpenSettings,
 }: {
   theme: PluginTheme;
   storeRelease: StoreReleaseView;
@@ -92,6 +93,7 @@ export function StoreReleaseCard({
   feedback?: StoreReleaseCardFeedback | null;
   actions?: StoreReleaseActions;
   onOpenReleaseLab?: () => void;
+  onOpenSettings?: () => void;
 }) {
   const [expanded, setExpanded] = useState(storeRelease.isMobile);
 
@@ -247,9 +249,6 @@ export function StoreReleaseCard({
               <View
                 testID="factory-panel-store-release-vault-warning"
                 style={{
-                  flexDirection: "row",
-                  flexWrap: "wrap",
-                  alignItems: "center",
                   gap: SPACING[1.5],
                   padding: SPACING[2],
                   borderWidth: 1,
@@ -258,10 +257,25 @@ export function StoreReleaseCard({
                   backgroundColor: tint(theme.colors.statusWarning, "14"),
                 }}
               >
-                <Icon name="Shield" size={14} color={theme.colors.statusWarning} />
-                <Text style={text(theme, "label", "statusWarning")}>
-                  {`Missing Vault keys for ${platformLabels.join(" / ")}: ${missingKeys.join(", ")}. Import them in Factory Settings → Vault.`}
-                </Text>
+                <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: SPACING[1.5] }}>
+                  <Icon name="Shield" size={14} color={theme.colors.statusWarning} />
+                  <Text style={text(theme, "label", "statusWarning")}>
+                    {`Missing Vault keys for ${platformLabels.join(" / ")}: ${missingKeys.join(", ")}. Import them in Factory Settings → Vault.`}
+                  </Text>
+                </View>
+                {!mobile && onOpenSettings !== undefined ? (
+                  <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: SPACING[1.5] }}>
+                    <Btn
+                      theme={theme}
+                      small
+                      variant="secondary"
+                      icon="Settings"
+                      testID="factory-panel-store-release-open-vault-settings"
+                      label="Open Vault Settings"
+                      onPress={onOpenSettings}
+                    />
+                  </View>
+                ) : null}
               </View>
             ) : null}
           </View>
