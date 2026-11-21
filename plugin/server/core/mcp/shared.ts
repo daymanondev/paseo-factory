@@ -13,7 +13,7 @@ export const sharedTools: Record<string, ToolDefinition> = {
   supervisor_dispatch_lead: {
     name: "supervisor_dispatch_lead",
     description:
-      "Dispatch an implementation directive to the Project's Lead seat via the serialized Lead mailbox. Pass `release` when the Owner wants to record a Release intent (optional pinned `version` X.Y.Z). After calling this tool, end your turn immediately and wait for Lead's wave report.",
+      "Dispatch an implementation directive to the Project's Lead seat via the serialized Lead mailbox. Pass `release` when the Owner wants to record a Release intent (optional pinned `version` X.Y.Z), or `storeRelease` when the Owner wants to record a Store release intent (`staging` | `production`, optional `platforms`, optional `resumeRunId` + `resolution` to resume a paused Hole). After calling this tool, end your turn immediately and wait for Lead's wave report.",
     inputSchema: {
       type: "object",
       properties: {
@@ -24,6 +24,25 @@ export const sharedTools: Record<string, ToolDefinition> = {
           description: "Optional Owner release intent for `on-request` / `auto` Release modes.",
           properties: {
             version: { type: "string", description: "Optional exact target semver X.Y.Z; omit when Owner did not pin a version." },
+          },
+        },
+        storeRelease: {
+          type: "object",
+          description:
+            "Optional Owner Store release intent (`staging` or `production`, optional `platforms`, optional `resumeRunId` + `resolution` to resume a paused Hole).",
+          properties: {
+            target: {
+              type: "string",
+              enum: ["staging", "production"],
+              description: "Intended Store release target (defaults to `staging`).",
+            },
+            platforms: {
+              type: "array",
+              items: { type: "string", enum: ["android", "ios"] },
+              description: "Optional platform filter (`android` and/or `ios`).",
+            },
+            resumeRunId: { type: "string", description: "Optional paused release-lab run ID to resume." },
+            resolution: { description: "Optional Hole resolution payload for `resumeRunId`." },
           },
         },
       },
@@ -217,6 +236,64 @@ export const sharedTools: Record<string, ToolDefinition> = {
       required: ["version"],
     },
   },
+  lead_store_release: {
+    name: "lead_store_release",
+    description:
+      "Run the deterministic factory-release-lab store runner server-side (`probe`, `stage`, `submit`, or `resume` a paused Hole). `probe` returns synchronous Vault/platform/store readiness JSON; `stage`, `submit`, and `resume` execute asynchronously at zero seat tokens and wake Lead via mailbox on completion, Hole pause, or failure. Never run release-lab inside a seat shell.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        action: {
+          type: "string",
+          enum: ["probe", "stage", "submit", "resume"],
+          description: "Store release action to execute.",
+        },
+        platforms: {
+          type: "array",
+          items: { type: "string", enum: ["android", "ios"] },
+          description: "Optional platform filter (`android` and/or `ios`).",
+        },
+        runId: {
+          type: "string",
+          description: "Existing release-lab run ID (required for `resume`, optional for `submit`).",
+        },
+        resolution: {
+          description: "Optional Hole resolution payload for `resume`.",
+        },
+        workspace: { type: "string", description: "Optional Project root path." },
+      },
+      required: ["action"],
+    },
+  },
+  supervisor_record_store_note: {
+    name: "supervisor_record_store_note",
+    description:
+      "Record a cross-project rejection lesson (`target: \"lessons\"`, capped at <= 120 lines) or a per-app Store notebook card (`target: \"app\"`) into `<paseoHome>/vault-runtime/store-memory/` (`0o400`) and sync to Private vault without touching `<project-root>`.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        target: {
+          type: "string",
+          enum: ["lessons", "app"],
+          description: "Which Store notebook tier to update: `lessons` (`lessons.md`, <= 120 lines) or `app` (`apps/<appKey>.md`).",
+        },
+        content: {
+          type: "string",
+          description: "Full Markdown content to write into the target Store notebook file.",
+        },
+        appKey: {
+          type: "string",
+          description: "Optional canonical app key for `target: \"app\"` (resolved from Project manifest/slug when omitted).",
+        },
+        workspace: { type: "string", description: "Optional Project root path." },
+        sync: {
+          type: "boolean",
+          description: "Whether to push to Private vault when configured (defaults to true).",
+        },
+      },
+      required: ["target", "content"],
+    },
+  },
   agent_claim: {
     name: "agent_claim",
     description:
@@ -274,13 +351,14 @@ export const sharedTools: Record<string, ToolDefinition> = {
 
 
 export const sharedRoles = {
-  supervisor: ["supervisor_accept_task", "supervisor_dispatch_lead", "supervisor_read_ledger", "supervisor_end_cycle", "lead_close_task", "lead_retire_task"],
-  lead: ["lead_repoke_agent", "lead_needs_human", "lead_create_worktree", "lead_set_contract", "lead_dispatch_agent", "lead_verify", "lead_merge", "lead_remove_worktree", "lead_release", "lead_report_to_supervisor", "lead_close_task", "lead_retire_task", "lead_update_notebook", "lead_read_ledger"],
+  supervisor: ["supervisor_accept_task", "supervisor_dispatch_lead", "supervisor_read_ledger", "supervisor_record_store_note", "supervisor_end_cycle", "lead_close_task", "lead_retire_task"],
+  lead: ["lead_repoke_agent", "lead_needs_human", "lead_create_worktree", "lead_set_contract", "lead_dispatch_agent", "lead_verify", "lead_merge", "lead_remove_worktree", "lead_release", "lead_store_release", "lead_record_store_note", "lead_report_to_supervisor", "lead_close_task", "lead_retire_task", "lead_update_notebook", "lead_read_ledger"],
   agent: ["agent_claim", "agent_escalate_blocker"],
   unbound: ["factory_dispatch_supervisor", "factory_status"],
 };
 sharedTools.supervisor_read_ledger = { ...sharedTools.factory_status, name: "supervisor_read_ledger" };
 sharedTools.lead_read_ledger = { ...sharedTools.factory_status, name: "lead_read_ledger" };
+sharedTools.lead_record_store_note = { ...sharedTools.supervisor_record_store_note, name: "lead_record_store_note" };
 sharedTools.supervisor_end_cycle = { name: "supervisor_end_cycle", description: "Finish this Supervisor turn and await the next Owner directive or Lead report.", inputSchema: { type: "object", properties: {} } };
 for (const [name, source] of Object.entries({ lead_dispatch_agent: "lead_spawn_agent", lead_merge: "lead_accept_task", lead_retire_task: "lead_close_task" })) {
   sharedTools[name] = { ...sharedTools[source], name };

@@ -2113,3 +2113,67 @@ test("Lead and Supervisor role laws teach three-mode Release ownership, semver r
   }
   assert.doesNotMatch(supContract, /lead_release\(/);
 });
+
+test("Lead and Supervisor role laws teach Store release contracts, Hole relay, 2-route failure policy, auto-staging, and Store notebook recording", () => {
+  const project = { root: "/workspace/repo", slug: "repo" };
+  const supInput = {
+    seat: "supervisor" as const,
+    home: "/trial",
+    stateDir: "/trial/state",
+    nodePath: process.execPath,
+    path: "/usr/bin",
+    lane: "codex",
+    project,
+  };
+  const supContract = renderRoleContract("supervisor");
+  for (const surface of [
+    SUPERVISOR_OUTCOME_BOUNDARY,
+    supContract,
+    renderSeatContract("supervisor", project),
+    ROLE_PROMPTS.supervisor,
+    renderSeatBootstrapPrompt(supInput),
+    buildSeatKickoffPacket({ role: "supervisor", projectSlug: project.slug, projectRoot: project.root, ledgerEvents: [] }),
+  ]) {
+    assert.match(surface, /Store Release/);
+    assert.match(surface, /storeRelease/);
+    assert.match(surface, /target.*"staging"/);
+    assert.match(surface, /"production"/);
+    assert.match(surface, /resumeRunId/);
+    assert.match(surface, /resolution/);
+    assert.match(surface, /Hole/);
+    assert.match(surface, /supervisor_record_store_note/);
+    assert.match(surface, /Store notebook/);
+    assert.match(surface, /Store release mode.*off|Vault credentials/i);
+  }
+  assert.match(supContract, /paseo-factory_supervisor_record_store_note/);
+  assert.doesNotMatch(supContract, /lead_release\(/);
+  assert.doesNotMatch(supContract, /lead_store_release\(/);
+  assert.doesNotMatch(supContract, /lead_record_store_note/);
+
+  const leadInput = { ...supInput, seat: "lead" as const };
+  const leadContract = renderRoleContract("lead");
+  for (const surface of [
+    LEAD_WAVE_LAWS.join("\n"),
+    leadContract,
+    renderSeatContract("lead", project),
+    ROLE_PROMPTS.lead,
+    renderSeatBootstrapPrompt(leadInput),
+    buildSeatKickoffPacket({ role: "lead", projectSlug: project.slug, projectRoot: project.root, ledgerEvents: [] }),
+  ]) {
+    assert.match(surface, /Store notebook/);
+    assert.match(surface, /lessons\.md/);
+    assert.match(surface, /lead_store_release/);
+    assert.match(surface, /probe/);
+    assert.match(surface, /mobile-store-release/);
+    assert.match(surface, /auto-staging/);
+    assert.match(surface, /app-repo/);
+    assert.match(surface, /(?:<=|at most|max)\s*2/i);
+    assert.match(surface, /tool-bug/);
+    assert.match(surface, /account-policy/);
+    assert.match(surface, /Upstream issue/);
+    assert.match(surface, /lead_record_store_note/);
+    assert.match(surface, /never.*hack around/i);
+  }
+  assert.match(leadContract, /paseo-factory_lead_store_release/);
+  assert.match(leadContract, /paseo-factory_lead_record_store_note/);
+});

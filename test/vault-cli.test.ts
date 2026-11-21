@@ -951,6 +951,7 @@ test("factory vault sync and factory vault import work end-to-end across machine
     "--asc-key", ascKeyPath,
     "--asc-key-id", "CLI_KEY_ID",
     "--asc-issuer", "CLI_ISSUER_ID",
+    "--team-id", "CLI_TEAM_ID",
     "--gplay-key", gplayKeyPath,
     "--eye-config", eyeConfigPath,
     "--app", "patigame",
@@ -976,6 +977,7 @@ test("factory vault sync and factory vault import work end-to-end across machine
   const envJson1 = JSON.parse(readFileSync(join(home1, "vault-runtime", "env.json"), "utf8"));
   assert.equal(envJson1.ASC_KEY_ID, "CLI_KEY_ID");
   assert.equal(envJson1.ASC_ISSUER, "CLI_ISSUER_ID");
+  assert.equal(envJson1.APPLE_TEAM_ID, "CLI_TEAM_ID");
   assert.equal(envJson1.RELEASE_LAB_KEYSTORE_STOREPASS, "cli-store-pass");
 
   // 2. `factory vault sync` on home1 pushes everything (including ledgers & local state) to the empty bare remote
@@ -1078,4 +1080,74 @@ test("busy-owner CLI hydrate retains pending history and refused materialization
   assert.equal(factory.ledger.events.filter((event) => event.event === "retro_written" && event.model === "held-retro").length, 1);
   const duplicate = await cli(); assert.equal(duplicate.status, 0, duplicate.stderr);
   assert.equal(JSON.parse(duplicate.stdout).historyImports[0].status, "applied", "a later transport retry never downgrades an admitted batch");
+});
+
+test("factory vault CLI imports store-defaults.json (0o600), writes back Day-0 keystore (sealed), and updates store-memory (<= 120 lines, 0o400)", async (t) => {
+  const bare = makeBareRemote(t);
+  seedBareRemote(t, bare, { "README.md": "vault\n" });
+
+  const workDir = makeTempDir();
+  disposeDir(t, workDir);
+  const storeDefaultsSrc = join(workDir, "store-defaults.json");
+  const defaults = {
+    organizationName: "Synthetic CLI Org",
+    supportEmail: "cli-support@example.invalid",
+    privacyUrlTemplate: "https://example.invalid/{slug}/privacy",
+  };
+  writeFileSync(storeDefaultsSrc, JSON.stringify(defaults, null, 2));
+
+  const home = makeTempDir();
+  disposeDir(t, home);
+  saveVaultConfig(home, { repo: bare, nodeId: "cli-node" });
+
+  const importDefaults = await runFactory([
+    "--home", home, "vault", "import",
+    "--store-defaults", storeDefaultsSrc,
+  ]);
+  assert.equal(importDefaults.status, 0, importDefaults.stderr);
+  const importPayload = JSON.parse(importDefaults.stdout);
+  assert.equal(importPayload.ok, true);
+  assert.ok(importPayload.importedFiles.includes("store-defaults.json"));
+  assert.equal(statSync(join(home, "vault-runtime/store-defaults.json")).mode & 0o777, 0o600);
+
+  // Day-0 keystore write-back via CLI
+  const projectDir = join(workDir, "cli-mobile-app");
+  mkdirSync(projectDir, { recursive: true });
+  writeFileSync(join(projectDir, "README.md"), "cli mobile app\n");
+  gitCommitAll(projectDir);
+  const ksPath = join(workDir, "generated-release.keystore");
+  const ksBytes = randomBytes(512);
+  writeFileSync(ksPath, ksBytes);
+  writeFileSync(join(workDir, "keystore.properties"), "storePassword=cli-pass\nkeyAlias=upload\n");
+
+  const writeBack = await runFactory([
+    "--home", home, "vault", "keystore-writeback",
+    "--project", projectDir,
+    "--keystore", ksPath,
+  ]);
+  assert.equal(writeBack.status, 0, writeBack.stderr);
+  const wbPayload = JSON.parse(writeBack.stdout);
+  assert.equal(wbPayload.ok, true);
+  assert.equal(wbPayload.canonicalAppKey, "cli-mobile-app");
+  assert.equal(wbPayload.pushed, true);
+  assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: projectDir, encoding: "utf8" }), "");
+
+  // Store notebook via CLI: valid lessons + app card succeed (0o400); > 120 lines refused
+  const lessonsSrc = join(workDir, "lessons.md");
+  writeFileSync(lessonsSrc, "| L-001 | ios | Synth trap | Synth fix |\n");
+  const noteLessons = await runFactory(["--home", home, "vault", "store-note", "--file", lessonsSrc]);
+  assert.equal(noteLessons.status, 0, noteLessons.stderr);
+  assert.equal(statSync(join(home, "vault-runtime/store-memory/lessons.md")).mode & 0o222, 0);
+
+  const appCardSrc = join(workDir, "app.md");
+  writeFileSync(appCardSrc, "# cli-mobile-app\n- Status: staging\n");
+  const noteApp = await runFactory(["--home", home, "vault", "store-note", "--app", "cli-mobile-app", "--file", appCardSrc]);
+  assert.equal(noteApp.status, 0, noteApp.stderr);
+  assert.equal(statSync(join(home, "vault-runtime/store-memory/apps/cli-mobile-app.md")).mode & 0o222, 0);
+
+  const overSrc = join(workDir, "lessons-over.md");
+  writeFileSync(overSrc, Array.from({ length: 121 }, (_, i) => `line ${i + 1}`).join("\n") + "\n");
+  const overRes = await runFactory(["--home", home, "vault", "store-note", "--file", overSrc]);
+  assert.equal(overRes.status, 2);
+  assert.match(overRes.stderr, /store-notebook-limit-exceeded/);
 });

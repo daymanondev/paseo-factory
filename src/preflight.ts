@@ -16,7 +16,9 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { LEAD_WAVE_LAWS, SUPERVISOR_OUTCOME_BOUNDARY } from "./roles-contract.ts";
 import { projectNotebookPath, readProjectNotebook } from "./project.ts";
-import { readReleaseSettings } from "./project-settings.ts";
+import { readReleaseSettings, readStoreReleaseSettings } from "./project-settings.ts";
+import { derivePaseoHomeFromStateDir, detectMobilePlatforms } from "./store-release-probe.ts";
+import { readVaultStoreReadiness, storeMemoryDir } from "./vault-materialization.ts";
 import type { LedgerEvent } from "./events.ts";
 
 /**
@@ -50,6 +52,13 @@ export interface SeatKickoffPacketInput {
    * notebook lines (backward-compatible standalone callers).
    */
   stateDir?: string;
+  /**
+   * Optional Paseo home directory (`<paseoHome>`) used to probe Vault store
+   * readiness and render the read-only Store notebook directory on mobile
+   * Projects. Derived from `stateDir` when omitted if `stateDir` sits at
+   * `<paseoHome>/plugin-state/paseo-factory`.
+   */
+  paseoHome?: string;
   /**
    * Omits the static blocks the seat's `config.systemPrompt` already carries
    * (the `linkedDesignSpecification` block, the helper-MCP roster, and the
@@ -201,6 +210,11 @@ function resolveKickoffReleaseBranch(
   return currentBranch === "(detached/unborn)" ? "main" : currentBranch;
 }
 
+function resolveKickoffPaseoHome(explicitHome?: string, stateDir?: string): string | undefined {
+  if (explicitHome !== undefined && explicitHome.trim() !== "") return explicitHome.trim();
+  return derivePaseoHomeFromStateDir(stateDir);
+}
+
 export function buildSeatKickoffPacket(input: SeatKickoffPacketInput): string {
   const omitDuplicates = input.omitSystemPromptDuplicates === true;
   const branch = runGitFast(input.projectRoot, ["rev-parse", "--abbrev-ref", "HEAD"]) || "(detached/unborn)";
@@ -232,8 +246,8 @@ export function buildSeatKickoffPacket(input: SeatKickoffPacketInput): string {
 
   const roleTools =
     input.role === "supervisor"
-      ? "`supervisor_dispatch_lead`, `supervisor_read_ledger`, `supervisor_end_cycle`"
-      : "`lead_set_contract`, `lead_dispatch_agent`, `lead_read_ledger`, `lead_verify`, `lead_merge`, `lead_release`, `lead_report_to_supervisor`";
+      ? "`supervisor_dispatch_lead`, `supervisor_read_ledger`, `supervisor_record_store_note`, `supervisor_end_cycle`"
+      : "`lead_set_contract`, `lead_dispatch_agent`, `lead_read_ledger`, `lead_verify`, `lead_merge`, `lead_release`, `lead_store_release`, `lead_record_store_note`, `lead_report_to_supervisor`";
 
   const fireAndEndTurn =
     input.role === "supervisor"
@@ -260,6 +274,24 @@ export function buildSeatKickoffPacket(input: SeatKickoffPacketInput): string {
       notebook !== undefined
         ? `- Project notebook (${notebookPath}):\n${notebook}`
         : `- Project notebook (${notebookPath}): (none yet — initialize on first verified Gate or observed failure mechanism)`,
+    );
+  }
+
+  const detectedPlatforms = detectMobilePlatforms(input.projectRoot);
+  const hasStoreManifest = input.projectRoot !== "" && existsSync(join(input.projectRoot, ".store-release", "manifest.json"));
+  if (detectedPlatforms.length > 0 || hasStoreManifest) {
+    const storeMode = input.stateDir !== undefined ? readStoreReleaseSettings(input.stateDir, input.projectSlug).mode : "off";
+    const effectivePaseoHome = resolveKickoffPaseoHome(input.paseoHome, input.stateDir);
+    const vault = effectivePaseoHome !== undefined
+      ? readVaultStoreReadiness(effectivePaseoHome)
+      : { ascKey: false, appleTeamId: false, gplayJson: false };
+    const storeNotebookDir = effectivePaseoHome !== undefined
+      ? storeMemoryDir(effectivePaseoHome)
+      : "<paseoHome>/vault-runtime/store-memory";
+    const platformsLabel = detectedPlatforms.length > 0 ? detectedPlatforms.join(", ") : "none";
+    releaseLines.push(
+      `- Store release: mode=${storeMode}, platforms=[${platformsLabel}], vault={ascKey=${vault.ascKey}, appleTeamId=${vault.appleTeamId}, gplayJson=${vault.gplayJson}}`,
+      `- Store notebook (read-only): ${storeNotebookDir} (lessons.md, apps/<canonical-app>.md)`,
     );
   }
 

@@ -2,7 +2,7 @@ import { FactoryError } from "./errors.ts";
 import { LedgerAdmission } from "./history-admission.ts";
 import { updateImportMaterialization } from "./history-stage.ts";
 import type { ImportMaterialization, ImportStatus } from "./history-stage.ts";
-import type { VaultConfig } from "./vault-config.ts";
+import type { VaultConfig, VaultStoreDefaults } from "./vault-config.ts";
 import { loadVaultConfig, stampVaultConfig, nowIso, requiredVaultConfig, vaultStateDir, saveVaultConfig, withConfigDefaults } from "./vault-config.ts";
 import { resolveVaultPassphrase, unsealVaultBuffer, stageRuntimeFileIntoCheckout } from "./vault-envelope.ts";
 import { snapshotVaultLedger, refreshVaultImports, stageFetchedVaultHistory, listDirNames } from "./vault-history.ts";
@@ -14,11 +14,29 @@ import { join, dirname } from "node:path";
 import { gunzipSync } from "node:zlib";
 
 export type { VaultEnvelope } from "./vault-envelope.ts";
-export type { VaultConfig } from "./vault-config.ts";
-export type { VaultRuntimeEnv } from "./vault-config.ts";
+export type { VaultConfig, VaultRuntimeEnv, VaultStatusView, VaultStoreDefaults, VaultStoreReviewContact } from "./vault-config.ts";
+export type { VaultStoreReadiness } from "./vault-materialization.ts";
 export type { VaultGhAuthStatus } from "./vault-transport.ts";
-export type { VaultStatusView } from "./vault-config.ts";
-export { sealVaultBuffer } from "./vault-envelope.ts";
+export {
+  STORE_LESSONS_MAX_LINES,
+  STORE_MEMORY_DIR,
+  assertStoreLessonsWithinLimit,
+  countStoreLessonLines,
+  parseStoreDefaults,
+  readStoreAppNotebook,
+  readStoreDefaults,
+  readStoreLessons,
+  readVaultRuntimeEnv,
+  readVaultStoreReadiness,
+  storeAppNotebookPath,
+  storeDefaultsPath,
+  storeLessonsPath,
+  storeMemoryDir,
+  writeStoreAppNotebook,
+  writeStoreDefaults,
+  writeStoreLessons,
+} from "./vault-materialization.ts";
+export { parseEnvelope, sealVaultBuffer } from "./vault-envelope.ts";
 export { unsealVaultBuffer } from "./vault-envelope.ts";
 export { loadVaultConfig } from "./vault-config.ts";
 export { saveVaultConfig, withConfigDefaults } from "./vault-config.ts";
@@ -33,7 +51,7 @@ export { isLocalCompanionGitSource } from "./vault-transport.ts";
 export type { CompanionGitRemote } from "./vault-transport.ts";
 export { normalizeCompanionGitRemote } from "./vault-transport.ts";
 export { probeCompanionGitAccess } from "./vault-transport.ts";
-export { importVaultSecrets, sealVaultFile } from "./vault-secrets.ts";
+export { importVaultSecrets, sealVaultFile, writeBackAndroidKeystore } from "./vault-secrets.ts";
 export type { VaultManifestEntry } from "./vault-materialization.ts";
 export type { VaultManifest } from "./vault-materialization.ts";
 export type { ResolvedVaultApp } from "./vault-materialization.ts";
@@ -84,6 +102,8 @@ export interface PushVaultOptions extends VaultTransportOptions {
    * stands in for the key when `vault.manifest.json` does not route it).
    */
   includeLedger?: boolean;
+  /** Vault-relative paths to force-seal as `VaultEnvelope` when staging into the checkout. */
+  sealPaths?: ReadonlySet<string>;
 }
 
 export interface SyncVaultOptions extends VaultTransportOptions {
@@ -111,6 +131,7 @@ export interface ImportVaultSecretsInput extends VaultTransportOptions {
   ascKeyPath?: string;
   ascKeyId?: string;
   ascIssuer?: string;
+  teamId?: string;
   gplayKeyPath?: string;
   eyeConfigPath?: string;
   appKey?: string;
@@ -120,12 +141,34 @@ export interface ImportVaultSecretsInput extends VaultTransportOptions {
   firebaseProjectId?: string;
   googleServicesJsonPath?: string;
   googleServiceInfoPlistPath?: string;
+  storeDefaultsPath?: string;
+  storeDefaults?: VaultStoreDefaults;
   syncAfterImport?: boolean;
 }
 
 export interface ImportVaultSecretsResult {
   importedFiles: string[];
   synced: SyncVaultResult | null;
+  summary: string;
+}
+
+export interface WriteBackAndroidKeystoreInput extends VaultTransportOptions {
+  keystorePath: string;
+  projectRoot: string;
+  appKey?: string;
+  keystorePropertiesPath?: string;
+  storePass?: string;
+  keyPass?: string;
+  keyAlias?: string;
+  syncAfterWriteBack?: boolean;
+}
+
+export interface WriteBackAndroidKeystoreResult {
+  canonicalAppKey: string;
+  writtenVaultFiles: string[];
+  sealedFiles: string[];
+  materializedFiles: string[];
+  pushed: boolean;
   summary: string;
 }
 
@@ -246,7 +289,7 @@ export async function pushVault(paseoHome: string, options: PushVaultOptions = {
     const staged = existsSync(runtimeRoot) ? walkFiles(runtimeRoot, (rel) => rel === "env.json" || isProjectDesignVaultPath(rel)) : [];
     const passphrase = resolveVaultPassphrase(config.passphrase);
     for (const rel of staged) {
-      stageRuntimeFileIntoCheckout(join(runtimeRoot, rel), join(vaultDir, rel), passphrase, rel);
+      stageRuntimeFileIntoCheckout(join(runtimeRoot, rel), join(vaultDir, rel), passphrase, rel, options.sealPaths?.has(rel) === true);
     }
     const pushedFiles = new Set(staged);
     if (options.includeLedger) {

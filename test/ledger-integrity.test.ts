@@ -5,7 +5,14 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { Ledger } from "../src/ledger.ts";
+import type { PendingEvent } from "../src/events.ts";
 import { planLegacyIdentity } from "../src/history-identity.ts";
+import { planHistoryImport } from "../src/history-import.ts";
+import { upgradeFactory } from "../src/history-upgrade.ts";
+import { migrateLegacyRootState } from "../src/ledger-migration.ts";
+import { createFactory } from "../src/factory.ts";
+import { parseLedgerJsonl } from "../src/ledger-validation.ts";
+import { foldTasks, renderLedgerLine } from "../plugin/server/view.ts";
 import { readDriverLedger } from "../plugin/bin/driver.mjs";
 import { disposeDir, factoryErrorCode, makeTempDir, repoRoot } from "./helpers.ts";
 
@@ -229,9 +236,14 @@ test("identified readers enforce each event's typed payload while legacy records
     { row: { event: "retro_written", model: "retro", outcome: "written", durationMs: 1, proposalsPath: "retro.md", proposalCount: 0 }, required: ["proposalsPath", "proposalCount"], invalid: [{ proposalCount: -1 }, { error: 5 }] },
     { row: { event: "release_published", version: "0.14.0", tag: "v0.14.0", commit: "abc1234", branch: "main", url: "https://github.com/org/repo/releases/tag/v0.14.0", mode: "on-request", skipped: ["tag"] }, required: ["version", "tag", "commit", "branch", "mode", "skipped"], invalid: [{ version: "" }, { mode: "manual" }, { skipped: "tag" }, { url: 5 }, { task: "T" }, { attempt: 1 }] },
     { row: { event: "release_failed", version: "0.14.0", step: "github-release", code: "gh-unauthenticated", detail: "not logged in" }, required: ["version", "step", "code", "detail"], invalid: [{ version: "" }, { step: "" }, { code: "" }, { detail: 5 }, { task: "T" }, { attempt: 1 }] },
+    { row: { event: "store_release_started", runId: "run-001", action: "stage", platforms: ["android", "ios"], mode: "auto-staging" }, required: ["runId", "action", "platforms", "mode"], invalid: [{ runId: "" }, { action: "deploy" }, { platforms: "android" }, { platforms: [""] }, { mode: "manual" }, { task: "T" }, { attempt: 1 }] },
+    { row: { event: "store_release_paused", runId: "run-001", holeKind: "final-release-approval", phase: "submit-production" }, required: ["runId", "holeKind", "phase"], invalid: [{ runId: "" }, { holeKind: "" }, { phase: "" }, { holeKind: 5 }, { task: "T" }, { attempt: 1 }] },
+    { row: { event: "store_release_completed", runId: "run-001", action: "stage", platforms: ["android", "ios"], summary: "uploaded to internal and TestFlight" }, required: ["runId", "action", "platforms", "summary"], invalid: [{ runId: "" }, { action: "deploy" }, { platforms: "ios" }, { platforms: [""] }, { summary: 5 }, { task: "T" }, { attempt: 1 }] },
+    { row: { event: "store_release_failed", runId: "run-001", action: "stage", failureClass: "app-repo", code: "gradle-build-failed", detail: "signing config missing" }, required: ["runId", "action", "failureClass", "code", "detail"], invalid: [{ runId: "" }, { action: "deploy" }, { failureClass: "infra" }, { code: "" }, { detail: 5 }, { upstreamIssuePath: 5 }, { upstreamIssuePath: null }, { task: "T" }, { attempt: 1 }] },
+    { row: { event: "store_release_failed", runId: "run-002", action: "submit", failureClass: "tool-bug", code: "asc-schema-changed", detail: "unexpected 422 response", upstreamIssuePath: "release-lab/upstream-issues/01-asc-schema.md" }, required: ["runId", "action", "failureClass", "code", "detail"], invalid: [{ upstreamIssuePath: 5 }, { upstreamIssuePath: null }, { task: "T" }, { attempt: 1 }] },
   ];
   for (const fixture of cases) {
-    const taskless = fixture.row.event === "retro_written" || fixture.row.event === "release_published" || fixture.row.event === "release_failed";
+    const taskless = fixture.row.event === "retro_written" || fixture.row.event === "release_published" || fixture.row.event === "release_failed" || fixture.row.event === "store_release_started" || fixture.row.event === "store_release_paused" || fixture.row.event === "store_release_completed" || fixture.row.event === "store_release_failed";
     const source = fixture.row.event === "contract_set" ? [{ ...fixture.row, seq: 1, ts }] : [base, { ...fixture.row, seq: 2, ts, ...(taskless ? {} : { task: "T" }) }];
     const plan = planLegacyIdentity(source.map(row => JSON.stringify(row) + "\n").join(""), { writerId: "local" });
     assert.equal(plan.ok, true, String(fixture.row.event));
@@ -329,4 +341,72 @@ test("v2 status refuses contradictory green Gates while valid red and historical
   rows[3]!.exit = 7;
   writeFileSync(path, rows.map(event => JSON.stringify(event) + "\n").join(""));
   assert.equal(Ledger.open(path).events.length, 4);
+});
+
+test("store_release_* task-less events work across Ledger append, identity, migration, history import/upgrade, and projection", async (t) => {
+  const storeRows: PendingEvent[] = [
+    { event: "store_release_started", runId: "run-100", action: "stage", platforms: ["android", "ios"], mode: "auto-staging" },
+    { event: "store_release_paused", runId: "run-100", holeKind: "final-release-approval", phase: "submit-production" },
+    { event: "store_release_completed", runId: "run-100", action: "submit", platforms: ["android", "ios"], summary: "submitted android + ios" },
+    { event: "store_release_failed", runId: "run-101", action: "stage", failureClass: "tool-bug", code: "asc-unexpected", detail: "500 from upstream", upstreamIssuePath: "release-lab/upstream-issues/01-asc.md" },
+  ];
+
+  // 1. Direct Ledger.append + projection (foldTasks + renderLedgerLine)
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const v2Path = join(dir, "v2.jsonl");
+  const preparedInit = planLegacyIdentity("", { writerId: "local" });
+  assert.equal(preparedInit.ok, true);
+  writeFileSync(v2Path, preparedInit.events.map((e) => JSON.stringify(e) + "\n").join(""));
+  const v2Ledger = Ledger.open(v2Path, { writerId: "local" });
+  for (const row of storeRows) {
+    v2Ledger.append(row);
+  }
+  const appended = v2Ledger.events.filter((e) => e.event.startsWith("store_release_"));
+  assert.equal(appended.length, 4);
+  assert.equal(foldTasks(v2Ledger.events).length, 0, "task-less store_release_* events create no Task rows");
+  assert.deepEqual(appended.map(renderLedgerLine), [
+    "store release stage started [android,ios] (auto-staging)",
+    "store release paused [submit-production: final-release-approval]",
+    "store release submit completed [android,ios] — submitted android + ios",
+    "store release stage failed [tool-bug: asc-unexpected]",
+  ]);
+
+  // 2. Identity planning (v1 -> v2)
+  const legacyRaw = storeRows.map((row, i) => JSON.stringify({ seq: i + 1, ts, ...row }) + "\n").join("");
+  const planned = planLegacyIdentity(legacyRaw, { writerId: "local" });
+  assert.equal(planned.ok, true, planned.conflicts.join("; "));
+  assert.equal(planned.events.filter((e) => e.event.startsWith("store_release_")).length, 4);
+
+  // 3. History import (v2 additions into an existing local v2 ledger)
+  const localPath = join(dir, "local.jsonl");
+  writeFileSync(localPath, preparedInit.events.map((e) => JSON.stringify(e) + "\n").join(""));
+  const importPlan = planHistoryImport({
+    existingLines: readFileSync(localPath, "utf8"),
+    sources: [{ nodeId: "remote", lines: readFileSync(v2Path, "utf8") }],
+  });
+  assert.equal(importPlan.status, "ready", JSON.stringify(importPlan.conflicts));
+  assert.equal(importPlan.additions.length, 4);
+  assert.equal(parseLedgerJsonl(importPlan.lines).corrupt, undefined);
+
+  // 4. Legacy root migration (single-Project fallback)
+  const migState = join(dir, "mig-state");
+  mkdirSync(migState, { recursive: true });
+  writeFileSync(join(migState, "ledger.jsonl"), legacyRaw);
+  const mig = migrateLegacyRootState(migState, { projects: [{ slug: "mobile-app", gitRoot: join(dir, "mobile-app") }] });
+  assert.equal(mig.migrated, true);
+  assert.deepEqual(mig.projects, ["mobile-app"]);
+  const migratedParsed = parseLedgerJsonl(readFileSync(join(migState, "projects/mobile-app/ledger.jsonl"), "utf8"));
+  assert.equal(migratedParsed.corrupt, undefined);
+  assert.equal(migratedParsed.events.filter((e) => e.event.startsWith("store_release_")).length, 4);
+
+  // 5. History upgrade (v1 -> v2 on disk)
+  const upgState = join(dir, "upg-state");
+  mkdirSync(upgState, { recursive: true });
+  writeFileSync(join(upgState, "ledger.jsonl"), legacyRaw);
+  const factory = createFactory({ stateDir: upgState });
+  t.after(() => factory.history.stop());
+  const upgraded = await upgradeFactory(factory, { action: "apply" });
+  assert.ok("id" in upgraded && upgraded.status === "applied");
+  assert.equal(factory.ledger.events.filter((e) => e.event.startsWith("store_release_")).length, 4);
 });

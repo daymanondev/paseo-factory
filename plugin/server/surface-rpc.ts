@@ -3,10 +3,12 @@ import { recentSeatModels } from "./seat-model-history.ts";
 import { readPeerHandover } from "./peer-handoff.ts";
 import { parseHandoffFile } from "./handoff-text.ts";
 import { readHandoffProgress, laneRef } from "./handoff-progress.ts";
-import type { LastReleaseView, PanelView, ReleaseOriginView, ReleaseSettingsView, ScopedLaneRef, TaskView } from "../shared/view.ts";
+import type { LastReleaseView, PanelView, ReleaseOriginView, ReleaseSettingsView, ScopedLaneRef, StoreReleaseRunnerStatus, StoreReleaseView, TaskView } from "../shared/view.ts";
 import type { HandoffProgress, HandoffAction, HandoffRequest, HandoffReply } from "../shared/handoff.ts";
-import { clearReleaseRequest, readProjectSettings, readReleaseRequest, readReleaseSettings, setProjectReleaseSettings, setProjectSkillPacks, resetProjectSkillPacks } from "./core/project-settings.ts";
-import type { ProjectReleaseMode } from "./core/project-settings.ts";
+import { clearReleaseRequest, clearStoreReleaseRequest, readProjectSettings, readReleaseRequest, readReleaseSettings, readStoreReleaseRequest, readStoreReleaseSettings, setProjectReleaseSettings, setProjectSkillPacks, setProjectStoreReleaseSettings, resetProjectSkillPacks } from "./core/project-settings.ts";
+import type { ProjectReleaseMode, ProjectStoreReleaseMode } from "./core/project-settings.ts";
+import { detectMobilePlatforms, readLatestStoreReleaseRun } from "./core/store-release-probe.ts";
+import { resolveReleaseLabWithDaemon } from "./store-release.ts";
 import { linkedPreviewBundle } from "./core/open-design/preview-bundle.ts";
 import { serveLinkedPreview } from "./core/open-design/preview-server.ts";
 import { discoverOpenDesignProjects, exportOpenDesignProject, syncOpenDesignLink, readOpenDesignLink, unlinkOpenDesign, prepareOpenDesignDispatch } from "./core/open-design/open-design-link.ts";
@@ -53,7 +55,7 @@ import { LANE_NAMES, laneError, loadLanes, migrateLegacyZcodeLane, parseLane, sa
 import type { LaneProfile } from "./core/lanes.ts";
 import { listProjectRegistrations, projectNotebookPath, projectStateDir, readProjectRegistration, resolveOrBootstrapProject, resolveProject } from "./core/project.ts";
 import type { ProjectResolution } from "./core/project.ts";
-import { builtinVaultRunner, hydrateVaultDirect, importVaultSecrets, isLocalCompanionGitSource, loadVaultConfig, probeCompanionGitAccess, probeGhAuth, pullVault, pushVault, readVaultStatus, saveVaultConfig, syncVault } from "./core/vault.ts";
+import { builtinVaultRunner, hydrateVaultDirect, importVaultSecrets, isLocalCompanionGitSource, loadVaultConfig, probeCompanionGitAccess, probeGhAuth, pullVault, pushVault, readVaultStatus, readVaultStoreReadiness, saveVaultConfig, syncVault } from "./core/vault.ts";
 import type { ImportVaultSecretsInput, SyncVaultOptions, VaultConfig, VaultRunner } from "./core/vault.ts";
 import { materializeVaultSkillsFromRuntime, resolveVaultUserHome } from "./core/vault-materialization.ts";
 import {
@@ -99,6 +101,7 @@ import {
   pluginsCheckUpdates,
   skillsImport, skillsTogglePack, skillsPackSave, skillsPackDelete, skillsPackReset,
   releaseSettingsRead, releaseSettingsWrite,
+  storeReleaseRead, storeReleaseWrite,
   githubPublishPreflight, githubPublish,
   pluginsInstall,
   pluginsManage,
@@ -356,6 +359,8 @@ export interface SurfaceDeps {
   installPlugin?: typeof installDaemonPlugin;
   managePlugin?: typeof manageDaemonPlugin;
   checkPluginUpdates?: typeof checkDaemonPluginUpdates;
+  /** Optional `factory-release-lab` runner install probe override (tests). */
+  storeReleaseRunnerProbe?: () => Promise<StoreReleaseRunnerStatus>;
   /** The self-update door's `git ls-remote --tags` override (tests) — the real git by default. */
   listRemoteTags?: (remote: string) => Promise<RemoteTagsReply>;
   /** Optional host home override and runner override for companion tools (`factory-skills-pack`; ADR 0040). */
@@ -864,6 +869,49 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         user: ghAuth.ghUser,
       },
       lastRelease,
+    };
+  };
+
+  const resolveStoreReleaseRunnerStatus = async (): Promise<StoreReleaseRunnerStatus> => {
+    if (deps.storeReleaseRunnerProbe !== undefined) {
+      return deps.storeReleaseRunnerProbe();
+    }
+    const install = await resolveReleaseLabWithDaemon(deps.home, deps.listPlugins ?? listDaemonPlugins);
+    return {
+      installed: install.installed,
+      enabled: install.enabled,
+      status: install.status,
+      path: install.path,
+      binPath: install.binPath,
+    };
+  };
+
+  const readStoreReleaseViewForProject = async (project: { slug: string; root: string }): Promise<StoreReleaseView> => {
+    const stored = readStoreReleaseSettings(deps.stateDir, project.slug);
+    const pending = readStoreReleaseRequest(deps.stateDir, project.slug);
+    const vault = readVaultStoreReadiness(deps.home);
+    const platforms = detectMobilePlatforms(project.root);
+    const runner = await resolveStoreReleaseRunnerStatus();
+    const { lastRun, activeHole } = readLatestStoreReleaseRun(deps.home, project);
+    return {
+      project: project.slug,
+      projectRoot: project.root,
+      mode: stored.mode,
+      updatedAt: stored.updatedAt ?? null,
+      pendingRequest: pending === undefined
+        ? null
+        : {
+            target: pending.target,
+            ...(pending.platforms !== undefined ? { platforms: pending.platforms } : {}),
+            ...(pending.resumeRunId !== undefined ? { resumeRunId: pending.resumeRunId } : {}),
+            requestedAt: pending.requestedAt,
+          },
+      vault,
+      platforms,
+      isMobile: platforms.length > 0,
+      runner,
+      lastRun,
+      activeHole,
     };
   };
 
@@ -3182,7 +3230,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         view: {
           ...view,
           machineLanes: machineLanes.lanes,
-          skillHub: inspectSkillHub({ stateDir: deps.stateDir, slpLanes: lanes.lanes, userHome: resolveSurfaceUserHome(), projectRoot: enrichedProject?.root, configuredPacks }),
+          skillHub: inspectSkillHub({ stateDir: deps.stateDir, paseoHome: deps.home, slpLanes: lanes.lanes, userHome: resolveSurfaceUserHome(), projectRoot: enrichedProject?.root, configuredPacks }),
           companionTools: buildCompanionToolsView(),
           helperMcps: helperMcpRoster(discoverHelperMcps({ stateDir: deps.stateDir, userHome: resolveSurfaceUserHome() }).servers),
           ...profileInfo,
@@ -4230,6 +4278,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       }
       try {
         clearReleaseRequest(deps.stateDir, project.slug);
+        clearStoreReleaseRequest(deps.stateDir, project.slug);
       } catch {
         // best-effort
       }
@@ -4408,6 +4457,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       };
       deps.rotateProjectMailbox(project.slug);
       clearReleaseRequest(deps.stateDir, project.slug);
+      clearStoreReleaseRequest(deps.stateDir, project.slug);
 
       // 3. Lead first, then Supervisor — marked archives only. A failed retire stops here: the
       // mail and handovers are already dropped, and the reply says which seat is still bound.
@@ -4442,6 +4492,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       // The retires requeue a Lead's un-acked batch into the mailbox file; drop it and every record again.
       deps.rotateProjectMailbox(project.slug);
       clearReleaseRequest(deps.stateDir, project.slug);
+      clearStoreReleaseRequest(deps.stateDir, project.slug);
 
       const snap = await this.snapshot({ projectRoot: project.root }, context);
       const archivedText = archivedSeats.length === 0
@@ -4505,7 +4556,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
 
     async skillsImport(input: { id: string }) {
       try {
-        const reply = importHostSkillOrPack({ ...input, userHome: resolveSurfaceUserHome(), runner: deps.companionToolRunner });
+        const reply = importHostSkillOrPack({ ...input, userHome: resolveSurfaceUserHome(), paseoHome: deps.home, runner: deps.companionToolRunner });
         return reply.ok ? { ok: true as const, summary: reply.summary } : failure('skill-import-failed', reply.reason);
       } catch (error) { return failure(codeOf(error), messageOf(error)); }
     },
@@ -4969,6 +5020,45 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       }
     },
 
+    async storeReleaseRead(
+      input: { projectRoot?: string; project?: string } = {},
+      _context?: SurfaceCallContext,
+    ) {
+      const target = resolveActTarget(input, "read store release settings");
+      if (!target.ok) return target;
+      try {
+        const settings = await readStoreReleaseViewForProject(target.project);
+        return { ok: true as const, settings };
+      } catch (err) {
+        return failure(codeOf(err), messageOf(err));
+      }
+    },
+
+    async storeReleaseWrite(
+      input: { projectRoot?: string; project?: string; mode: ProjectStoreReleaseMode; seat?: string },
+      context?: SurfaceCallContext & { seat?: string },
+    ) {
+      const callerSeat = callerSeatOf(input, context);
+      if (isProjectSeat(callerSeat)) {
+        return failure(
+          "seat-cannot-grant",
+          `Seat ${callerSeat} cannot change Store release settings; Store release mode is Owner-only.`,
+        );
+      }
+      const target = resolveActTarget(input, "update store release settings");
+      if (!target.ok) return target;
+      try {
+        const hadPending = readStoreReleaseRequest(deps.stateDir, target.project.slug) !== undefined;
+        setProjectStoreReleaseSettings(deps.stateDir, target.project.slug, { mode: input.mode });
+        const droppedPendingRequest = hadPending && readStoreReleaseRequest(deps.stateDir, target.project.slug) === undefined;
+        const settings = await readStoreReleaseViewForProject(target.project);
+        log(`store-release: ${target.project.slug} mode=${settings.mode}`);
+        return { ok: true as const, droppedPendingRequest, settings };
+      } catch (err) {
+        return failure(codeOf(err), messageOf(err));
+      }
+    },
+
     async githubPublishPreflight(
       input: { projectRoot?: string; project?: string } = {},
       _context?: SurfaceCallContext,
@@ -5123,7 +5213,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
   const PROJECT_ACT_HANDLERS: ReadonlySet<string> = new Set(["projectReset", "projectDelete", "projectRotate"]);
   /** The handlers that take their lane's exclusive maintenance — the Project acts plus register. The one place the set is named. */
   const EXCLUSIVE_MAINTENANCE_HANDLERS: ReadonlySet<string> = new Set([...PROJECT_ACT_HANDLERS, "projectRegister"]);
-  const reads = new Set(["cachedProviders", "sanitizeLane", "snapshot", "seatsDirectory", "onboardingBrowse", "onboardingStatus", "pluginsCheckUpdates", "selfUpdateStatus", "selfUpdateApply", "historyImport", "historyImports", "historyUpgrade", "vaultHydrate", "vaultPull", "vaultPush", "vaultSync", "vaultImport", "releaseSettingsRead", "githubPublishPreflight"]);
+  const reads = new Set(["cachedProviders", "sanitizeLane", "snapshot", "seatsDirectory", "onboardingBrowse", "onboardingStatus", "pluginsCheckUpdates", "selfUpdateStatus", "selfUpdateApply", "historyImport", "historyImports", "historyUpgrade", "vaultHydrate", "vaultPull", "vaultPush", "vaultSync", "vaultImport", "releaseSettingsRead", "storeReleaseRead", "githubPublishPreflight"]);
   const nonEmptyString = (value: unknown): string | undefined =>
     typeof value === "string" && value.trim() !== "" ? value.trim() : undefined;
   const surfaceChangeTarget = (
@@ -5268,6 +5358,8 @@ export function registerSurfaceRpc(
   server.handle(vaultImport, (input, context) => handlers.vaultImport(input, pass(context)));
   server.handle(releaseSettingsRead, (input, context) => handlers.releaseSettingsRead(input, pass(context)));
   server.handle(releaseSettingsWrite, (input, context) => handlers.releaseSettingsWrite(input, pass(context)));
+  server.handle(storeReleaseRead, (input, context) => handlers.storeReleaseRead(input, pass(context)));
+  server.handle(storeReleaseWrite, (input, context) => handlers.storeReleaseWrite(input, pass(context)));
   server.handle(githubPublishPreflight, (input, context) => handlers.githubPublishPreflight(input, pass(context)));
   server.handle(githubPublish, (input, context) => handlers.githubPublish(input, pass(context)));
 }

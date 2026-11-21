@@ -4,7 +4,7 @@ import { resolveVaultUserHome } from "./core/vault-materialization.ts";
 import { liveSeatCandidates } from "./seats.ts";
 import { withProjectIngressLock } from "./core/project-ingress-lock.ts";
 import { atomicJson, readOptionalJson } from "./core/json-store.ts";
-import { setReleaseRequest } from "./core/project-settings.ts";
+import { setReleaseRequest, setStoreReleaseRequest } from "./core/project-settings.ts";
 import { commitSeatMemoryOnRoot } from "./core/workspace.ts";
 /**
  * The Lead mailbox runtime (v0.0.20, ADR 0013 Decisions 3–5): the plugin-side
@@ -788,6 +788,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       // Turn-1 packet carries the Project notebook's slug-dependent path and
       // bounded content so the seat never guesses <projectStateDir>/notebook.md.
       stateDir: deps.stateDir,
+      ...(deps.home !== undefined && deps.home.trim() !== "" ? { paseoHome: deps.home } : {}),
       // v0.0.97 (ADR 0047 §1.2): the seat's config.systemPrompt already carries
       // buildRoleKickoffPrompt(role) — the Turn-1 user message keeps only the
       // dynamic repository preflight facts, never a second copy of the linked
@@ -1711,6 +1712,16 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
             directive: request.message,
           });
         }
+        if (request.storeRelease !== undefined && from !== "peer") {
+          setStoreReleaseRequest(deps.stateDir, slug, {
+            target: request.storeRelease.target,
+            ...(request.storeRelease.platforms !== undefined ? { platforms: request.storeRelease.platforms } : {}),
+            ...(request.storeRelease.resumeRunId !== undefined ? { resumeRunId: request.storeRelease.resumeRunId } : {}),
+            ...(request.storeRelease.resolution !== undefined ? { resolution: request.storeRelease.resolution } : {}),
+            requestedBy: from === "supervisor" ? "supervisor" : "owner",
+            directive: request.message,
+          });
+        }
         // ADR 0053 Decision 2 / spec Decision 6: a Peer challenge
         // (`REOPEN_REQUEST` / `DEPENDENCY_REQUEST` / `BLOCKED` via
         // `agent_escalate_blocker`) is a technical reconciliation turn between
@@ -1761,6 +1772,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
         from: "supervisor",
         message: request.message,
         ...(request.release === undefined ? {} : { release: request.release }),
+        ...(request.storeRelease === undefined ? {} : { storeRelease: request.storeRelease }),
         seat: "supervisor",
       });
       if (!leadReply.ok) return leadReply;

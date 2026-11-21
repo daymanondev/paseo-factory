@@ -1,4 +1,4 @@
-import { eventAllowsUnboundEpoch, LEDGER_REFERENCE_KINDS, EVENT_NAMES, NEEDS_HUMAN_REASONS, needsHumanEvidenceIsValid, PEER_DISPOSITIONS, PEER_HANDOFF_OUTCOMES } from "./events.ts";
+import { eventAllowsUnboundEpoch, LEDGER_REFERENCE_KINDS, EVENT_NAMES, NEEDS_HUMAN_REASONS, needsHumanEvidenceIsValid, PEER_DISPOSITIONS, PEER_HANDOFF_OUTCOMES, STORE_RELEASE_ACTIONS, STORE_RELEASE_FAILURE_CLASSES, STORE_RELEASE_MODES } from "./events.ts";
 import { PEER_THINKING_LEVELS } from "./peer-thinking.ts";
 import type { LedgerEvent } from "./events.ts";
 
@@ -223,6 +223,49 @@ function shapeIsValid(evt: LedgerEvent): boolean {
       typeof asRecord.detail === "string"
     );
   }
+  if (evt.event === "store_release_started") {
+    return (
+      asRecord.task === undefined &&
+      asRecord.attempt === undefined &&
+      typeof asRecord.runId === "string" &&
+      typeof asRecord.action === "string" &&
+      Array.isArray(asRecord.platforms) &&
+      asRecord.platforms.every((p) => typeof p === "string") &&
+      typeof asRecord.mode === "string"
+    );
+  }
+  if (evt.event === "store_release_paused") {
+    return (
+      asRecord.task === undefined &&
+      asRecord.attempt === undefined &&
+      typeof asRecord.runId === "string" &&
+      typeof asRecord.holeKind === "string" &&
+      typeof asRecord.phase === "string"
+    );
+  }
+  if (evt.event === "store_release_completed") {
+    return (
+      asRecord.task === undefined &&
+      asRecord.attempt === undefined &&
+      typeof asRecord.runId === "string" &&
+      typeof asRecord.action === "string" &&
+      Array.isArray(asRecord.platforms) &&
+      asRecord.platforms.every((p) => typeof p === "string") &&
+      typeof asRecord.summary === "string"
+    );
+  }
+  if (evt.event === "store_release_failed") {
+    return (
+      asRecord.task === undefined &&
+      asRecord.attempt === undefined &&
+      typeof asRecord.runId === "string" &&
+      typeof asRecord.action === "string" &&
+      typeof asRecord.failureClass === "string" &&
+      typeof asRecord.code === "string" &&
+      typeof asRecord.detail === "string" &&
+      (asRecord.upstreamIssuePath === undefined || typeof asRecord.upstreamIssuePath === "string")
+    );
+  }
   const attempt = asRecord.attempt;
   return taskIsString && typeof attempt === "number" && Number.isInteger(attempt) && attempt >= 1;
 }
@@ -277,7 +320,7 @@ function v2PayloadIsValid(event: Record<string, unknown>): boolean {
   if (event.attempt !== undefined && !["claim_reported", "gate_started", "gate_finished", "fresh_eyes_written", "watch_written", "report_written", "attempt_accepted"].includes(event.event as string)) return false;
   if (event.event === "needs_human" && record(event.evidence) && !Object.values(event.evidence).every(value => Number.isSafeInteger(value) && (value as number) > 0)) return false;
   if (event.arity !== undefined && (!Number.isSafeInteger(event.arity) || (event.arity as number) < 1)) return false;
-  if (event.event === "ledger_schema" || event.event === "retro_written" || event.event === "release_published" || event.event === "release_failed") {
+  if (event.event === "ledger_schema" || event.event === "retro_written" || event.event === "release_published" || event.event === "release_failed" || event.event === "store_release_started" || event.event === "store_release_paused" || event.event === "store_release_completed" || event.event === "store_release_failed") {
     if (event.task !== undefined || event.attempt !== undefined) return false;
   }
   switch (event.event) {
@@ -324,6 +367,38 @@ function v2PayloadIsValid(event: Record<string, unknown>): boolean {
       );
     case "release_failed":
       return nonempty(event.version) && nonempty(event.step) && nonempty(event.code) && string("detail");
+    case "store_release_started":
+      return (
+        nonempty(event.runId) &&
+        typeof event.action === "string" &&
+        (STORE_RELEASE_ACTIONS as readonly string[]).includes(event.action) &&
+        Array.isArray(event.platforms) &&
+        event.platforms.every((item: unknown) => nonempty(item)) &&
+        typeof event.mode === "string" &&
+        (STORE_RELEASE_MODES as readonly string[]).includes(event.mode)
+      );
+    case "store_release_paused":
+      return nonempty(event.runId) && nonempty(event.holeKind) && nonempty(event.phase);
+    case "store_release_completed":
+      return (
+        nonempty(event.runId) &&
+        typeof event.action === "string" &&
+        (STORE_RELEASE_ACTIONS as readonly string[]).includes(event.action) &&
+        Array.isArray(event.platforms) &&
+        event.platforms.every((item: unknown) => nonempty(item)) &&
+        string("summary")
+      );
+    case "store_release_failed":
+      return (
+        nonempty(event.runId) &&
+        typeof event.action === "string" &&
+        (STORE_RELEASE_ACTIONS as readonly string[]).includes(event.action) &&
+        typeof event.failureClass === "string" &&
+        (STORE_RELEASE_FAILURE_CLASSES as readonly string[]).includes(event.failureClass) &&
+        nonempty(event.code) &&
+        string("detail") &&
+        optionalString("upstreamIssuePath")
+      );
     default: return true; // Remaining required fields are checked by the historical shape predicate.
   }
 }

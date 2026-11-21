@@ -1,6 +1,6 @@
 import { FactoryError } from "./errors.ts";
 import { randomBytes, scryptSync, createCipheriv, createDecipheriv } from "node:crypto";
-import { readFileSync, mkdirSync, writeFileSync, copyFileSync } from "node:fs";
+import { readFileSync, mkdirSync, writeFileSync, chmodSync } from "node:fs";
 import { basename, dirname } from "node:path";
 
 /** Canonical Vault envelope codec and push-side sealing policy (ADR 0014). */
@@ -168,7 +168,7 @@ export function decodeEnvelopeField(envelope: VaultEnvelope, field: "salt" | "iv
  *   `vault-push-passphrase-required`: unverifiable is never traded for a
  *   plaintext guess.
  */
-export function stageRuntimeFileIntoCheckout(runtimePath: string, target: string, passphrase: string | undefined, relPath?: string): void {
+export function stageRuntimeFileIntoCheckout(runtimePath: string, target: string, passphrase: string | undefined, relPath?: string, forceSeal = false): void {
   let existing: Buffer | null = null;
   try {
     existing = readFileSync(target);
@@ -176,6 +176,11 @@ export function stageRuntimeFileIntoCheckout(runtimePath: string, target: string
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     existing = null; // no far-end file yet — a new vault path, rides verbatim below
   }
+  const writeCheckoutBytes = (bytes: Buffer): void => {
+    mkdirSync(dirname(target), { recursive: true });
+    if (existing !== null) chmodSync(target, 0o600);
+    writeFileSync(target, bytes);
+  };
   const runtimeBytes = readFileSync(runtimePath);
   const envelope = existing === null ? null : parseEnvelope(existing);
   if (envelope !== null && existing !== null) {
@@ -198,22 +203,23 @@ export function stageRuntimeFileIntoCheckout(runtimePath: string, target: string
         `${JSON.stringify(sealVaultBuffer(runtimeBytes, envelope.mode === "aes-256-gcm" ? passphrase : undefined))}\n`,
         "utf8",
       );
-      mkdirSync(dirname(target), { recursive: true });
-      writeFileSync(target, resealed);
+      writeCheckoutBytes(resealed);
       return;
     }
   }
-  if (
-    (relPath === "secrets/shared/gplay-service-account.json" || relPath === "secrets/shared/eye.json" || relPath === "secrets/shared/mcp-oauth.json") &&
-    parseEnvelope(runtimeBytes) === null
-  ) {
+  const shouldSeal =
+    (forceSeal ||
+      relPath === "secrets/shared/gplay-service-account.json" ||
+      relPath === "secrets/shared/eye.json" ||
+      relPath === "secrets/shared/mcp-oauth.json") &&
+    parseEnvelope(runtimeBytes) === null;
+  if (shouldSeal) {
     const sealed = Buffer.from(`${JSON.stringify(sealVaultBuffer(runtimeBytes, passphrase))}\n`, "utf8");
-    mkdirSync(dirname(target), { recursive: true });
-    writeFileSync(target, sealed);
+    writeCheckoutBytes(sealed);
     return;
   }
-  mkdirSync(dirname(target), { recursive: true });
-  copyFileSync(runtimePath, target);
+  if (existing !== null && existing.equals(runtimeBytes)) return;
+  writeCheckoutBytes(runtimeBytes);
 }
 
 /** Runs `unseal` and maps both refusal codes to `false` — a verification probe, never a hard failure. */

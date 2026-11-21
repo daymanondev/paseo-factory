@@ -20,6 +20,7 @@ import { pendingUpgradeFor } from "./server/core/upgrade-state.ts";
 import { ensureFactoryBinScripts } from "./server/core/agy-home.ts";
 import { PLUGIN_ID, pluginDirFor, resolvePaseoHome, stateDirFor } from "./server/paths.ts";
 import { ensureFactorySkillRootsSafe } from "./server/core/skill.ts";
+import { ensureCompanionPluginSkills } from "./server/core/skill-hub.ts";
 import { provisionPiAgentHome } from "./server/core/pi-home.ts";
 import { effectiveLanesForReconcile, healFactoryRoleProvidersInConfig, reconcilePaseoRoleProviders } from "./server/core/role-providers.ts";
 import { reloadDaemonConfigViaWs, warmPluginDaemonApiViaWs } from "./server/daemon-cli.ts";
@@ -59,6 +60,9 @@ export default function contribute(server: PluginServerContext) {
     const factoryCmd = activePluginDir === undefined ? "factory" : `${runner} ${quoted(join(activePluginDir, "bin", "factory.mjs"))}`;
     for (const skillPath of ensureFactorySkillRootsSafe(homedir(), { factoryCmd }, log)) {
       if (logReconciled) log(`skill: /factory reconciled at ${skillPath}`);
+    }
+    for (const skillName of ensureCompanionPluginSkills({ userHome: homedir(), paseoHome: home, stateDir }, log)) {
+      if (logReconciled) log(`skill: companion ${skillName} reconciled`);
     }
   };
 
@@ -646,6 +650,10 @@ export default function contribute(server: PluginServerContext) {
     // The Per-Project Factory registry (v0.0.89, ADR 0045 §1): every
     // Project-scoped command routes onto the target Project's own Factory.
     registry,
+    storeReleaseNotify: async ({ slug, text }) => {
+      await leadMail.enqueueLeadMail(slug, { from: "system", kind: "report", text });
+      await leadMail.pumpProjectLead(slug);
+    },
   });
 
   log(`spool listening on ${spoolRootFor(stateDir)}/{requests,replies,processed}`);

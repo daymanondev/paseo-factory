@@ -49,8 +49,8 @@ export function stateDirFor(paseoHome: string): string {
  * both during `startExplicit` and if `config.json` ever lags behind a managed
  * checkout rotation.
  */
-export function resolveManagedPluginDir(paseoHome: string, recordedPath: string): string {
-  const managedRoot = join(paseoHome, "plugins", PLUGIN_ID);
+export function resolveManagedPluginDir(paseoHome: string, recordedPath: string, pluginId = PLUGIN_ID): string {
+  const managedRoot = join(paseoHome, "plugins", pluginId);
   const rel = relative(managedRoot, recordedPath);
   if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) return recordedPath;
   const parts = rel.split(sep);

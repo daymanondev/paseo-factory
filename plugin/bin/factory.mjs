@@ -379,7 +379,7 @@ commands:
                                  Project secrets and machine configs, reconcile
                                  multi-node ledgers, then collect local state
                                  and push any changes + ledger snapshots back
-             vault import [--asc-key <path>] [--asc-key-id <id>] [--asc-issuer <id>] [--gplay-key <path>] [--eye-config <path>] [--app <key>] [--keystore <path>] [--store-pass <pass>] [--key-alias <alias>] [--no-sync]
+             vault import [--asc-key <path>] [--asc-key-id <id>] [--asc-issuer <id>] [--team-id <id>] [--gplay-key <path>] [--eye-config <path>] [--store-defaults <path>] [--app <key>] [--keystore <path>] [--store-pass <pass>] [--key-alias <alias>] [--no-sync]
                                  stage shared credentials (ASC .p8 + Key ID /
                                  Issuer ID, Google Play service account JSON,
                                  eye.json) and/or per-app signing (Android
@@ -440,6 +440,15 @@ commands:
                                  with no prompt). With one: aes-256-gcm,
                                  which hydrate opens via
                                  FACTORY_VAULT_PASSPHRASE or the saved config
+             vault keystore-writeback --project <dir> --keystore <path> [--keystore-properties <path>] [--app <key>] [--store-pass <pass>] [--key-pass <pass>] [--key-alias <alias>] [--no-sync]
+                                 write back a generated Day-0 Android upload
+                                 keystore into Private vault (sealed on remote),
+                                 materialize into <project-root>, and register
+                                 .git/info/exclude + .worktreeinclude
+             vault store-note --file <path> [--app <key>] [--no-sync]
+                                 write store-memory/lessons.md (<= 120 lines) or
+                                 store-memory/apps/<key>.md read-only (0o400)
+                                 and push to Private vault unless --no-sync
 
 options:
   --home <paseoHome>   daemon home (default: $PASEO_HOME or ~/.paseo)
@@ -1723,15 +1732,21 @@ if (command === "vault") {
     "asc-key": { type: "string" },
     "asc-key-id": { type: "string" },
     "asc-issuer": { type: "string" },
+    "team-id": { type: "string" },
     "gplay-key": { type: "string" },
     "eye-config": { type: "string" },
     app: { type: "string" },
     keystore: { type: "string" },
+    "keystore-properties": { type: "string" },
+    project: { type: "string" },
     "store-pass": { type: "string" },
+    "key-pass": { type: "string" },
     "key-alias": { type: "string" },
     "firebase-project-id": { type: "string" },
     "google-services-json": { type: "string" },
     "google-service-info-plist": { type: "string" },
+    "store-defaults": { type: "string" },
+    file: { type: "string" },
     "no-sync": { type: "boolean" },
   });
   const sub = parsed.positionals[0];
@@ -1801,6 +1816,7 @@ if (command === "vault") {
         "asc-key",
         "asc-key-id",
         "asc-issuer",
+        "team-id",
         "gplay-key",
         "eye-config",
         "app",
@@ -1810,12 +1826,14 @@ if (command === "vault") {
         "firebase-project-id",
         "google-services-json",
         "google-service-info-plist",
+        "store-defaults",
         "no-sync",
       ]);
       const result = await vault.importVaultSecrets(home, {
         ...(typeof values["asc-key"] === "string" && values["asc-key"].trim() !== "" ? { ascKeyPath: resolvePath(values["asc-key"].trim()) } : {}),
         ...(typeof values["asc-key-id"] === "string" && values["asc-key-id"].trim() !== "" ? { ascKeyId: values["asc-key-id"].trim() } : {}),
         ...(typeof values["asc-issuer"] === "string" && values["asc-issuer"].trim() !== "" ? { ascIssuer: values["asc-issuer"].trim() } : {}),
+        ...(typeof values["team-id"] === "string" && values["team-id"].trim() !== "" ? { teamId: values["team-id"].trim() } : {}),
         ...(typeof values["gplay-key"] === "string" && values["gplay-key"].trim() !== "" ? { gplayKeyPath: resolvePath(values["gplay-key"].trim()) } : {}),
         ...(typeof values["eye-config"] === "string" && values["eye-config"].trim() !== "" ? { eyeConfigPath: resolvePath(values["eye-config"].trim()) } : {}),
         ...(typeof values.app === "string" && values.app.trim() !== "" ? { appKey: values.app.trim() } : {}),
@@ -1830,6 +1848,9 @@ if (command === "vault") {
           : {}),
         ...(typeof values["google-service-info-plist"] === "string" && values["google-service-info-plist"].trim() !== ""
           ? { googleServiceInfoPlistPath: resolvePath(values["google-service-info-plist"].trim()) }
+          : {}),
+        ...(typeof values["store-defaults"] === "string" && values["store-defaults"].trim() !== ""
+          ? { storeDefaultsPath: resolvePath(values["store-defaults"].trim()) }
           : {}),
         ...(values["no-sync"] ? { syncAfterImport: false } : {}),
       });
@@ -1858,7 +1879,56 @@ if (command === "vault") {
       await writeJsonAndExit({ ok: true, ...result });
     }
 
-    fail(`vault: unknown subcommand "${sub}" — use "vault status | hydrate | pull | push | seal | sync | import"`);
+    if (sub === "keystore-writeback") {
+      if (parsed.positionals.length > 1) fail(`vault keystore-writeback: unexpected positional "${parsed.positionals[1]}"`);
+      refuseOptions("keystore-writeback", [
+        "project",
+        "keystore",
+        "keystore-properties",
+        "app",
+        "store-pass",
+        "key-pass",
+        "key-alias",
+        "no-sync",
+      ]);
+      const projectRoot = typeof values.project === "string" ? values.project.trim() : "";
+      const keystorePath = typeof values.keystore === "string" ? values.keystore.trim() : "";
+      if (projectRoot === "") fail("vault keystore-writeback: --project <dir> is required");
+      if (keystorePath === "") fail("vault keystore-writeback: --keystore <path> is required");
+      const result = await vault.writeBackAndroidKeystore(home, {
+        projectRoot: resolvePath(projectRoot),
+        keystorePath: resolvePath(keystorePath),
+        ...(typeof values["keystore-properties"] === "string" && values["keystore-properties"].trim() !== ""
+          ? { keystorePropertiesPath: resolvePath(values["keystore-properties"].trim()) }
+          : {}),
+        ...(typeof values.app === "string" && values.app.trim() !== "" ? { appKey: values.app.trim() } : {}),
+        ...(typeof values["store-pass"] === "string" && values["store-pass"] !== "" ? { storePass: values["store-pass"] } : {}),
+        ...(typeof values["key-pass"] === "string" && values["key-pass"] !== "" ? { keyPass: values["key-pass"] } : {}),
+        ...(typeof values["key-alias"] === "string" && values["key-alias"].trim() !== "" ? { keyAlias: values["key-alias"].trim() } : {}),
+        ...(values["no-sync"] ? { syncAfterWriteBack: false } : {}),
+      });
+      await writeJsonAndExit({ ok: true, ...result, vault: vault.readVaultStatus(home) });
+    }
+
+    if (sub === "store-note") {
+      if (parsed.positionals.length > 1) fail(`vault store-note: unexpected positional "${parsed.positionals[1]}"`);
+      refuseOptions("store-note", ["app", "file", "no-sync"]);
+      const file = typeof values.file === "string" ? values.file.trim() : "";
+      if (file === "") fail("vault store-note: --file <path> is required");
+      const sourceAbs = resolvePath(file);
+      if (!existsSync(sourceAbs)) fail(`vault store-note: ${file} does not exist`);
+      const content = readFileSync(sourceAbs, "utf8");
+      const appKey = typeof values.app === "string" ? values.app.trim() : "";
+      const path = appKey !== "" ? vault.writeStoreAppNotebook(home, appKey, content) : vault.writeStoreLessons(home, content);
+      let pushed = false;
+      if (!values["no-sync"] && (vault.loadVaultConfig(home)?.repo?.trim() ?? "") !== "") {
+        const pushRes = await vault.pushVault(home);
+        pushed = pushRes.pushed;
+      }
+      await writeJsonAndExit({ ok: true, path, scope: appKey !== "" ? `apps/${appKey}` : "lessons", pushed });
+    }
+
+    fail(`vault: unknown subcommand "${sub}" — use "vault status | hydrate | pull | push | seal | sync | import | keystore-writeback | store-note"`);
   } catch (err) {
     const code = err !== null && typeof err === "object" && typeof err.code === "string" ? err.code : "vault-cli-failed";
     die(`vault: ${code}: ${err instanceof Error ? err.message : String(err)}`);

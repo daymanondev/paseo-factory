@@ -12,7 +12,7 @@ import { OpenDesignProjectLinkSchema } from "./view.ts";
  */
 import * as paseoPlugin from "@getpaseo/plugin";
 import { z } from "zod";
-import { GitHubPublishPreflightViewSchema, HelperMcpViewSchema, ImportMaterializationSchema, ImportStatusSchema, FactoryViewSchema, LaneNameSchema, LaneProfileViewSchema, LanesSchema, LanesUpdateSchema, ProjectDirectoryEntrySchema, ProjectViewSchema, ReleaseModeSchema, ReleaseSettingsViewSchema, SeatDirectoryEntrySchema, VaultStatusViewSchema } from "./view.ts";
+import { GitHubPublishPreflightViewSchema, HelperMcpViewSchema, ImportMaterializationSchema, ImportStatusSchema, FactoryViewSchema, LaneNameSchema, LaneProfileViewSchema, LanesSchema, LanesUpdateSchema, ProjectDirectoryEntrySchema, ProjectViewSchema, ReleaseModeSchema, ReleaseSettingsViewSchema, SeatDirectoryEntrySchema, StoreReleaseModeSchema, StoreReleaseViewSchema, VaultStatusViewSchema } from "./view.ts";
 
 const { defineRpc } = paseoPlugin;
 
@@ -679,6 +679,7 @@ export const vaultImport = defineRpc({
     ascKeyPath: z.string().optional(),
     ascKeyId: z.string().optional(),
     ascIssuer: z.string().optional(),
+    teamId: z.string().optional(),
     gplayKeyPath: z.string().optional(),
     eyeConfigPath: z.string().optional(),
     appKey: z.string().optional(),
@@ -688,6 +689,7 @@ export const vaultImport = defineRpc({
     firebaseProjectId: z.string().optional(),
     googleServicesJsonPath: z.string().optional(),
     googleServiceInfoPlistPath: z.string().optional(),
+    storeDefaultsPath: z.string().optional(),
     syncAfterImport: z.boolean().optional(),
   }),
   output: z.union([
@@ -772,6 +774,32 @@ export const releaseSettingsWrite = defineRpc({
       ok: z.literal(true),
       droppedPendingRequest: z.boolean(),
       settings: ReleaseSettingsViewSchema,
+    }),
+    Failure,
+  ]),
+});
+
+export const storeReleaseRead = defineRpc({
+  name: "factory.store_release.read",
+  input: z.object({
+    projectRoot: z.string().optional(),
+    project: z.string().optional(),
+  }),
+  output: z.union([z.object({ ok: z.literal(true), settings: StoreReleaseViewSchema }), Failure]),
+});
+
+export const storeReleaseWrite = defineRpc({
+  name: "factory.store_release.write",
+  input: z.object({
+    projectRoot: z.string().optional(),
+    project: z.string().optional(),
+    mode: StoreReleaseModeSchema,
+  }),
+  output: z.union([
+    z.object({
+      ok: z.literal(true),
+      droppedPendingRequest: z.boolean(),
+      settings: StoreReleaseViewSchema,
     }),
     Failure,
   ]),

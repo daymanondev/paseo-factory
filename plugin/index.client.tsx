@@ -35,7 +35,24 @@ export default function contribute(client: PluginClientContext) {
       title: "Factory",
       icon: "Activity",
       locations: ["explorer", "workspace"],
-      Component: (props) => <FactoryPanel {...props} editorRequests={editorRequests} openSettings={() => client.openSettings("paseo-factory")} />,
+      Component: (props) => (
+        <FactoryPanel
+          {...props}
+          editorRequests={editorRequests}
+          openSettings={() => client.openSettings("paseo-factory")}
+          {...(mobile
+            ? {}
+            : {
+                openReleaseLab: () => {
+                  if (typeof (client as { openScreen?: unknown }).openScreen === "function") {
+                    client.openScreen({ screenId: "factory-release-lab" });
+                    return;
+                  }
+                  client.openPanel?.("factory-release-lab", { workspaceId: props.workspaceId, location: "workspace" });
+                },
+              })}
+        />
+      ),
     }),
     client.addSettingsScreen({ id: "paseo-factory", title: "Factory", icon: "Settings2", Component: FactorySettings }),
     client.addCommandCenterItem({

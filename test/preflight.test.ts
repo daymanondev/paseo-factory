@@ -6,7 +6,8 @@ import { join } from "node:path";
 import { makeTempDir, disposeDir, factoryErrorCode, gitCommitAll } from "./helpers.ts";
 import { buildSeatKickoffPacket, writeProjectNotebook, syncLegacyScratchNotebook, PROJECT_NOTEBOOK_MAX_GUARD_ROWS } from "../src/preflight.ts";
 import { projectNotebookPath } from "../src/project.ts";
-import { setProjectReleaseSettings } from "../src/project-settings.ts";
+import { setProjectReleaseSettings, setProjectStoreReleaseSettings } from "../src/project-settings.ts";
+import { storeMemoryDir } from "../src/vault-materialization.ts";
 import { execFileSync } from "node:child_process";
 import { FactoryError } from "../src/errors.ts";
 import { LEAD_WAVE_LAWS, SUPERVISOR_OUTCOME_BOUNDARY } from "../src/roles-contract.ts";
@@ -126,7 +127,7 @@ test('the Lead kickoff packet is byte-identical to the pre-0.12.4 render (Superv
     '- Build/Test commands: package.json scripts (test: `node --test`, typecheck: `tsc --noEmit`)',
     '- Active lanes: agent=claude',
     '- Ledger tasks: none (clean slate)',
-    '- Role MCP tools (paseo_factory): `lead_set_contract`, `lead_dispatch_agent`, `lead_read_ledger`, `lead_verify`, `lead_merge`, `lead_release`, `lead_report_to_supervisor`',
+    '- Role MCP tools (paseo_factory): `lead_set_contract`, `lead_dispatch_agent`, `lead_read_ledger`, `lead_verify`, `lead_merge`, `lead_release`, `lead_store_release`, `lead_record_store_note`, `lead_report_to_supervisor`',
     '- Law: Fire-and-End-Turn: orient within <= 3 small boundary reads (dispatch a read-only `scout` or `architect` Peer first whenever deeper repo/design discovery is needed), outline the serial-wave roadmap, call `lead_set_contract` then `lead_dispatch_agent` (or `factory contract` + `factory run`) for the current wave only, and IMMEDIATELY end your turn — never poll, never sleep, never grep raw `ledger.jsonl` or `~/.paseo/plugins/**`, and never edit product source code on `<project-root>`.',
     '--- [end seat kickoff packet] ---',
     '',
@@ -282,8 +283,8 @@ test('the kickoff packet renders the SLP MCP tool table and the Project notebook
     const packet = buildSeatKickoffPacket({ role, projectSlug: "repo", projectRoot: root, ledgerEvents: [], stateDir });
     const lines = new Set(packet.split("\n"));
     const tools = role === "supervisor"
-      ? "`supervisor_dispatch_lead`, `supervisor_read_ledger`, `supervisor_end_cycle`"
-      : "`lead_set_contract`, `lead_dispatch_agent`, `lead_read_ledger`, `lead_verify`, `lead_merge`, `lead_release`, `lead_report_to_supervisor`";
+      ? "`supervisor_dispatch_lead`, `supervisor_read_ledger`, `supervisor_record_store_note`, `supervisor_end_cycle`"
+      : "`lead_set_contract`, `lead_dispatch_agent`, `lead_read_ledger`, `lead_verify`, `lead_merge`, `lead_release`, `lead_store_release`, `lead_record_store_note`, `lead_report_to_supervisor`";
     assert.ok(lines.has(`- Role MCP tools (paseo_factory): ${tools}`), `${role} renders the SLP MCP tool table`);
     assert.doesNotMatch(packet, /scrum/i, `${role} packet carries no Scrum vocabulary`);
     // Every deterministic repo preflight line and the Project notebook ride the packet.
@@ -485,4 +486,81 @@ test("seat kickoff packet announces Release mode and resolved Release branch acr
     stateDir,
   });
   assert.match(supAuto, /^- Release: mode=on-request, branch=release$/m);
+});
+
+test("seat kickoff packet includes Store release mode, Vault readiness booleans, detected platforms, and read-only Store notebook path only on mobile/manifest Projects", (t) => {
+  const home = makeTempDir("store-kickoff-home-");
+  disposeDir(t, home);
+  const stateDir = join(home, "plugin-state", "paseo-factory");
+  const plainRoot = makeTempDir("store-kickoff-plain-");
+  disposeDir(t, plainRoot);
+  writeFileSync(join(plainRoot, "README.md"), "plain\n");
+
+  // 1. Non-mobile Project stays clean (no Store release / Store notebook lines)
+  const plainPacket = buildSeatKickoffPacket({
+    role: "lead",
+    projectSlug: "plain-proj",
+    projectRoot: plainRoot,
+    ledgerEvents: [],
+    stateDir,
+    paseoHome: home,
+    omitSystemPromptDuplicates: true,
+  });
+  assert.doesNotMatch(plainPacket, /^- Store release:/m);
+  assert.doesNotMatch(plainPacket, /^- Store notebook/m);
+
+  // 2. Mobile Project (android + ios markers) with Vault env secrets present
+  const mobileRoot = makeTempDir("store-kickoff-mobile-");
+  disposeDir(t, mobileRoot);
+  mkdirSync(join(mobileRoot, "android", "app"), { recursive: true });
+  writeFileSync(join(mobileRoot, "android", "app", "build.gradle"), "android {}\n");
+  mkdirSync(join(mobileRoot, "ios", "Demo.xcodeproj"), { recursive: true });
+  setProjectStoreReleaseSettings(stateDir, "mobile-proj", { mode: "auto-staging" });
+
+  mkdirSync(join(home, "vault-runtime"), { recursive: true });
+  const secretSentinel = "SYNTH_SECRET_TEAM_999";
+  writeFileSync(
+    join(home, "vault-runtime", "env.json"),
+    JSON.stringify({
+      ASC_KEY_PATH: "/tmp/synth-asc.p8",
+      APPLE_TEAM_ID: secretSentinel,
+    }),
+  );
+
+  for (const role of ["lead", "supervisor"] as const) {
+    const packet = buildSeatKickoffPacket({
+      role,
+      projectSlug: "mobile-proj",
+      projectRoot: mobileRoot,
+      ledgerEvents: [],
+      stateDir,
+      paseoHome: home,
+      omitSystemPromptDuplicates: true,
+    });
+    assert.match(
+      packet,
+      /^- Store release: mode=auto-staging, platforms=\[android, ios\], vault=\{ascKey=true, appleTeamId=true, gplayJson=false\}$/m,
+    );
+    assert.ok(
+      packet.includes(`- Store notebook (read-only): ${storeMemoryDir(home)}`),
+      `${role} packet includes read-only Store notebook path`,
+    );
+    assert.equal(packet.includes(secretSentinel), false, "never leak secret values");
+    assert.equal(packet.includes("/tmp/synth-asc.p8"), false, "never leak secret paths");
+  }
+
+  // 3. Project with .store-release/manifest.json only (no native dirs) also surfaces Store release facts
+  const manifestOnlyRoot = makeTempDir("store-kickoff-manifest-");
+  disposeDir(t, manifestOnlyRoot);
+  mkdirSync(join(manifestOnlyRoot, ".store-release"), { recursive: true });
+  writeFileSync(join(manifestOnlyRoot, ".store-release", "manifest.json"), JSON.stringify({ appKey: "demo-app" }));
+  const manifestPacket = buildSeatKickoffPacket({
+    role: "lead",
+    projectSlug: "manifest-proj",
+    projectRoot: manifestOnlyRoot,
+    ledgerEvents: [],
+    stateDir,
+  });
+  assert.match(manifestPacket, /^- Store release: mode=off, platforms=\[none\], vault=\{ascKey=true, appleTeamId=true, gplayJson=false\}$/m);
+  assert.ok(manifestPacket.includes(`- Store notebook (read-only): ${storeMemoryDir(home)}`));
 });

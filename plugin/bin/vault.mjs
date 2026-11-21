@@ -51,7 +51,11 @@ var EVENT_NAMES = [
   "retro_written",
   "task_closed",
   "release_published",
-  "release_failed"
+  "release_failed",
+  "store_release_started",
+  "store_release_paused",
+  "store_release_completed",
+  "store_release_failed"
 ];
 var PEER_DISPOSITIONS = ["engineer", "architect", "reviewer", "scout"];
 var PEER_HANDOFF_OUTCOMES = ["complete", "partial", "blocked", "reopen"];
@@ -76,6 +80,9 @@ function needsHumanEvidenceIsValid(evidence, reason) {
   if (reason !== void 0) return false;
   return isDenialRepoke || isAttemptGate || isSpawnRespawn;
 }
+var STORE_RELEASE_MODES = ["off", "on-request", "auto-staging"];
+var STORE_RELEASE_ACTIONS = ["probe", "stage", "submit", "resume"];
+var STORE_RELEASE_FAILURE_CLASSES = ["app-repo", "tool-bug", "account-policy"];
 
 // src/peer-thinking.ts
 var PEER_THINKING_LEVELS = ["low", "medium", "high", "xhigh", "max"];
@@ -205,6 +212,18 @@ function shapeIsValid(evt) {
   if (evt.event === "release_failed") {
     return asRecord.task === void 0 && asRecord.attempt === void 0 && typeof asRecord.version === "string" && typeof asRecord.step === "string" && typeof asRecord.code === "string" && typeof asRecord.detail === "string";
   }
+  if (evt.event === "store_release_started") {
+    return asRecord.task === void 0 && asRecord.attempt === void 0 && typeof asRecord.runId === "string" && typeof asRecord.action === "string" && Array.isArray(asRecord.platforms) && asRecord.platforms.every((p) => typeof p === "string") && typeof asRecord.mode === "string";
+  }
+  if (evt.event === "store_release_paused") {
+    return asRecord.task === void 0 && asRecord.attempt === void 0 && typeof asRecord.runId === "string" && typeof asRecord.holeKind === "string" && typeof asRecord.phase === "string";
+  }
+  if (evt.event === "store_release_completed") {
+    return asRecord.task === void 0 && asRecord.attempt === void 0 && typeof asRecord.runId === "string" && typeof asRecord.action === "string" && Array.isArray(asRecord.platforms) && asRecord.platforms.every((p) => typeof p === "string") && typeof asRecord.summary === "string";
+  }
+  if (evt.event === "store_release_failed") {
+    return asRecord.task === void 0 && asRecord.attempt === void 0 && typeof asRecord.runId === "string" && typeof asRecord.action === "string" && typeof asRecord.failureClass === "string" && typeof asRecord.code === "string" && typeof asRecord.detail === "string" && (asRecord.upstreamIssuePath === void 0 || typeof asRecord.upstreamIssuePath === "string");
+  }
   const attempt = asRecord.attempt;
   return taskIsString && typeof attempt === "number" && Number.isInteger(attempt) && attempt >= 1;
 }
@@ -236,7 +255,7 @@ function v2PayloadIsValid(event) {
   if (event.attempt !== void 0 && !["claim_reported", "gate_started", "gate_finished", "fresh_eyes_written", "watch_written", "report_written", "attempt_accepted"].includes(event.event)) return false;
   if (event.event === "needs_human" && record(event.evidence) && !Object.values(event.evidence).every((value) => Number.isSafeInteger(value) && value > 0)) return false;
   if (event.arity !== void 0 && (!Number.isSafeInteger(event.arity) || event.arity < 1)) return false;
-  if (event.event === "ledger_schema" || event.event === "retro_written" || event.event === "release_published" || event.event === "release_failed") {
+  if (event.event === "ledger_schema" || event.event === "retro_written" || event.event === "release_published" || event.event === "release_failed" || event.event === "store_release_started" || event.event === "store_release_paused" || event.event === "store_release_completed" || event.event === "store_release_failed") {
     if (event.task !== void 0 || event.attempt !== void 0) return false;
   }
   switch (event.event) {
@@ -277,6 +296,14 @@ function v2PayloadIsValid(event) {
       return nonempty(event.version) && nonempty(event.tag) && nonempty(event.commit) && nonempty(event.branch) && (event.url === null || string("url")) && typeof event.mode === "string" && ["off", "on-request", "auto"].includes(event.mode) && Array.isArray(event.skipped) && event.skipped.every((item) => typeof item === "string");
     case "release_failed":
       return nonempty(event.version) && nonempty(event.step) && nonempty(event.code) && string("detail");
+    case "store_release_started":
+      return nonempty(event.runId) && typeof event.action === "string" && STORE_RELEASE_ACTIONS.includes(event.action) && Array.isArray(event.platforms) && event.platforms.every((item) => nonempty(item)) && typeof event.mode === "string" && STORE_RELEASE_MODES.includes(event.mode);
+    case "store_release_paused":
+      return nonempty(event.runId) && nonempty(event.holeKind) && nonempty(event.phase);
+    case "store_release_completed":
+      return nonempty(event.runId) && typeof event.action === "string" && STORE_RELEASE_ACTIONS.includes(event.action) && Array.isArray(event.platforms) && event.platforms.every((item) => nonempty(item)) && string("summary");
+    case "store_release_failed":
+      return nonempty(event.runId) && typeof event.action === "string" && STORE_RELEASE_ACTIONS.includes(event.action) && typeof event.failureClass === "string" && STORE_RELEASE_FAILURE_CLASSES.includes(event.failureClass) && nonempty(event.code) && string("detail") && optionalString("upstreamIssuePath");
     default:
       return true;
   }
@@ -1993,7 +2020,7 @@ var LedgerAdmission = class _LedgerAdmission {
 
 // src/vault-envelope.ts
 import { randomBytes, scryptSync, createCipheriv, createDecipheriv } from "node:crypto";
-import { readFileSync as readFileSync7, mkdirSync as mkdirSync4, writeFileSync as writeFileSync3, copyFileSync as copyFileSync2 } from "node:fs";
+import { readFileSync as readFileSync7, mkdirSync as mkdirSync4, writeFileSync as writeFileSync3, chmodSync } from "node:fs";
 import { basename as basename6, dirname as dirname6 } from "node:path";
 var OBFUSCATION_MASK = Buffer.from("paseo-factory-vault-obfuscation-v1", "utf8");
 function sealVaultBuffer(plain, passphrase) {
@@ -2082,7 +2109,7 @@ function decodeEnvelopeField(envelope, field, length) {
   }
   return decoded;
 }
-function stageRuntimeFileIntoCheckout(runtimePath, target, passphrase, relPath) {
+function stageRuntimeFileIntoCheckout(runtimePath, target, passphrase, relPath, forceSeal = false) {
   let existing = null;
   try {
     existing = readFileSync7(target);
@@ -2090,6 +2117,11 @@ function stageRuntimeFileIntoCheckout(runtimePath, target, passphrase, relPath) 
     if (error.code !== "ENOENT") throw error;
     existing = null;
   }
+  const writeCheckoutBytes = (bytes) => {
+    mkdirSync4(dirname6(target), { recursive: true });
+    if (existing !== null) chmodSync(target, 384);
+    writeFileSync3(target, bytes);
+  };
   const runtimeBytes = readFileSync7(runtimePath);
   const envelope = existing === null ? null : parseEnvelope(existing);
   if (envelope !== null && existing !== null) {
@@ -2112,20 +2144,19 @@ function stageRuntimeFileIntoCheckout(runtimePath, target, passphrase, relPath) 
 `,
         "utf8"
       );
-      mkdirSync4(dirname6(target), { recursive: true });
-      writeFileSync3(target, resealed);
+      writeCheckoutBytes(resealed);
       return;
     }
   }
-  if ((relPath === "secrets/shared/gplay-service-account.json" || relPath === "secrets/shared/eye.json" || relPath === "secrets/shared/mcp-oauth.json") && parseEnvelope(runtimeBytes) === null) {
+  const shouldSeal = (forceSeal || relPath === "secrets/shared/gplay-service-account.json" || relPath === "secrets/shared/eye.json" || relPath === "secrets/shared/mcp-oauth.json") && parseEnvelope(runtimeBytes) === null;
+  if (shouldSeal) {
     const sealed = Buffer.from(`${JSON.stringify(sealVaultBuffer(runtimeBytes, passphrase))}
 `, "utf8");
-    mkdirSync4(dirname6(target), { recursive: true });
-    writeFileSync3(target, sealed);
+    writeCheckoutBytes(sealed);
     return;
   }
-  mkdirSync4(dirname6(target), { recursive: true });
-  copyFileSync2(runtimePath, target);
+  if (existing !== null && existing.equals(runtimeBytes)) return;
+  writeCheckoutBytes(runtimeBytes);
 }
 function tryUnseal(raw, passphrase, then) {
   try {
@@ -2185,7 +2216,7 @@ import { join as join9 } from "node:path";
 
 // src/helper-mcp-store.ts
 import { randomUUID as randomUUID4 } from "node:crypto";
-import { chmodSync, mkdirSync as mkdirSync5, readFileSync as readFileSync9, renameSync as renameSync2, rmSync as rmSync3, writeFileSync as writeFileSync4 } from "node:fs";
+import { chmodSync as chmodSync2, mkdirSync as mkdirSync5, readFileSync as readFileSync9, renameSync as renameSync2, rmSync as rmSync3, writeFileSync as writeFileSync4 } from "node:fs";
 import { dirname as dirname7 } from "node:path";
 function readHelperJson(path, strict = false) {
   try {
@@ -2203,7 +2234,7 @@ function writeHelperJson(path, value) {
   try {
     writeFileSync4(temporary, JSON.stringify(value, null, 2) + "\n", { mode: 384 });
     renameSync2(temporary, path);
-    chmodSync(path, 384);
+    chmodSync2(path, 384);
   } finally {
     rmSync3(temporary, { force: true });
   }
@@ -2571,7 +2602,7 @@ function hydrateHelperMcpVault(options, runtime, overwrite) {
 }
 
 // src/companion-tools.ts
-import { existsSync as existsSync8, mkdirSync as mkdirSync8, mkdtempSync, readdirSync as readdirSync7, symlinkSync as symlinkSync2, rmSync as rmSync5, writeFileSync as writeFileSync6, readFileSync as readFileSync11, copyFileSync as copyFileSync3, realpathSync as realpathSync5 } from "node:fs";
+import { existsSync as existsSync8, mkdirSync as mkdirSync8, mkdtempSync, readdirSync as readdirSync7, symlinkSync as symlinkSync2, rmSync as rmSync5, writeFileSync as writeFileSync6, readFileSync as readFileSync11, copyFileSync as copyFileSync2, realpathSync as realpathSync5 } from "node:fs";
 import { homedir as homedir3, tmpdir } from "node:os";
 import { delimiter as delimiter2, dirname as dirname10, join as join11 } from "node:path";
 
@@ -2676,7 +2707,8 @@ var LEAD_WAVE_LAWS = [
   "Challenge Reconciliation (live, in place): A Peer challenge with evidence is data to reconcile, not disobedience \u2014 close every challenge against its original Brief. For REOPEN_REQUEST, identify the reopened layer (foundation | dependency | lifecycle | API | ownership | verification) before ruling; a challenge that does not name its layer cannot be ruled on, so ask for the layer. For DEPENDENCY_REQUEST, resolve or schedule the unowned prerequisite or undecided boundary contract. For BLOCKED, diagnose the external blocker or split scope overflow. Deliver your ruling directly into the live Peer session via `lead_repoke_agent`'s `message` parameter, and when the boundary itself changed, update the Brief in place with `lead_set_contract` \u2014 the live Peer session is preserved by default (`resetPeer: false`); replace the Peer (`resetPeer: true`) only when its context is truly misaligned. Resolve technical issues by re-contracting and re-spawning; record terminal stalls (`attempt-ceiling`, `denied-again`) via `lead_needs_human`; escalate Owner-owned decisions (product scope, external cost, irreversible risk) via `lead_report_to_supervisor`.",
   'Independent Reviewer \u2014 default is NO: You plus the Peer already are a separation of judgment (the Peer writes, you accept); a Reviewer (`disposition: "reviewer"`) is a third, cold-start-expensive layer, mandatory only when at least one of five triggers holds: (1) your Brief pre-solved the solution, not just the outcome \u2014 the Peer became your hands and the separation is gone; (2) the change touches a seam the repository marks as decide-first (a contract boundary called out in AGENTS.md / CLAUDE.md / CONTEXT.md); (3) the decision is hard to reverse \u2014 migration, schema, public API, data deletion; (4) the Peer\'s proof is suspect \u2014 first rerun the exact Verification command, then apply the falsification test ("if the claimed behavior disappeared, would this proof still pass?"; a proof that still passes is not evidence: tests written to match the implementation, mocks swallowing failures, output not matching the declared command); (5) the Peer filed a REOPEN_REQUEST and withdrew it without new evidence. No trigger hit \u2192 read the diff yourself; that IS the review.',
   "Project Notebook & Recurrence Guard: Maintain `<projectStateDir>/notebook.md` \u2014 the Lead-only operational memory outside `<project-root>` (its path is announced in the Seat kickoff packet) \u2014 capped at <= 80 lines / <= 4 KB with exactly two sections: `## 1. Verification & Run Recipe` (Worktree & Env Setup, Fast Slice Check, Full Cumulative Gate, Process & Port Cleanup) and `## 2. Recurrence Guard` (columns `| ID | Cause \u2192 Effect Mechanism | Evidence (Task / seq) | State | Enforcement |`) holding <= 12 active Recurrence Guard rows. Update it only through the plugin single writer \u2014 `lead_update_notebook` (or `factory notebook`), which validates the caps and refuses over-limit content \u2014 and never write `<project-root>/.scratch/notebook.md` or any notebook copy inside `<project-root>` (OS-sandboxed seats must not dirty the working tree), nor ever write Lead-only operational or orchestration recipes into `<project-root>/AGENTS.md` or `<project-root>/CONTEXT.md`. Keep it current at every Stable Checkpoint so Lead rotations resume with the exact Gate recipe. Recurrence principle: when a costly failure mechanism bites (RED Gate, diff rejection, repeated denial), log its Cause \u2192 Effect mechanism with a `Task (seq N)` citation \u2014 no permanent rule for a one-off; once it recurs (>= 2 distinct seqs), apply at most 1 highest-leverage hardening per Stable Checkpoint, preferring mechanical structure first (tighten the Gate command, `.worktreeinclude`, or verification script), quoting a 1-line convention into downstream Briefs when prose must change, and proposing any AGENTS.md / CONTEXT.md edit to the Owner via the 4-Line Ratification Card rather than editing unratified. Graduate rows rather than accumulating them (ADR 0052): (1) Fold rows that share one underlying `Cause \u2192 Effect` mechanism into a single row; (2) retire `State: verified` rows once their Tier-1 check or helper has held across 3 subsequent waves; (3) expire `State: observed (1x)` rows that have not recurred within 5 waves. Cap Tier-2 prose: a quoted convention may ride downstream Briefs for at most 2\u20133 waves \u2014 if it still bears on work after 3 waves, encode it as Tier-1 mechanical structure (shared helper, module seam, or Gate check) and stop quoting it.",
-  "Release Discipline (Lead-owned, mode-gated): You own `lead_release` \u2014 the sole act allowed to tag `v<version>`, fast-forward push `<branch>` + tag to `origin`, and create the GitHub Release; working Agents and Supervisor never release or push tags/branches. Check `- Release: mode=..., branch=...` in the kickoff packet: (a) `off` \u2014 never call `lead_release` or prep a versioned release; (b) `on-request` \u2014 run `lead_release` ONLY when an explicit Owner release intent rides Supervisor's dispatch (`release-request.json`), never invent an unrequested release; (c) `auto` \u2014 release after landing the final accepted wave whenever product changes landed since the last `v*` tag (commits restricted to seat-memory paths `AGENTS.md`, `CLAUDE.md`, `CONTEXT.md`, `docs/**`, `.scratch/**` never trigger a release). Whenever version manifests (`package.json`, etc.) or `CHANGELOG.md` (promoting `## [Unreleased]` to `## [x.y.z]`) need edits, run a prep `engineer` wave first before calling `lead_release`. Determine semver from `## [Unreleased]`: `Added` / non-breaking `Changed` features -> minor bump; `Fixed`/docs/chores/refactor-only -> patch bump; never bump major automatically (including `0.x -> 1.0`, which always requires explicit Owner version intent). Call `lead_release({ version })` only from a clean, non-detached `<project-root>` HEAD at the last accepted landing (or seat-memory-only descendants) with no Gate running, and report the release URL/tag or named refusal via `lead_report_to_supervisor`."
+  "Release Discipline (Lead-owned, mode-gated): You own `lead_release` \u2014 the sole act allowed to tag `v<version>`, fast-forward push `<branch>` + tag to `origin`, and create the GitHub Release; working Agents and Supervisor never release or push tags/branches. Check `- Release: mode=..., branch=...` in the kickoff packet: (a) `off` \u2014 never call `lead_release` or prep a versioned release; (b) `on-request` \u2014 run `lead_release` ONLY when an explicit Owner release intent rides Supervisor's dispatch (`release-request.json`), never invent an unrequested release; (c) `auto` \u2014 release after landing the final accepted wave whenever product changes landed since the last `v*` tag (commits restricted to seat-memory paths `AGENTS.md`, `CLAUDE.md`, `CONTEXT.md`, `docs/**`, `.scratch/**` never trigger a release). Whenever version manifests (`package.json`, etc.) or `CHANGELOG.md` (promoting `## [Unreleased]` to `## [x.y.z]`) need edits, run a prep `engineer` wave first before calling `lead_release`. Determine semver from `## [Unreleased]`: `Added` / non-breaking `Changed` features -> minor bump; `Fixed`/docs/chores/refactor-only -> patch bump; never bump major automatically (including `0.x -> 1.0`, which always requires explicit Owner version intent). Call `lead_release({ version })` only from a clean, non-detached `<project-root>` HEAD at the last accepted landing (or seat-memory-only descendants) with no Gate running, and report the release URL/tag or named refusal via `lead_report_to_supervisor`.",
+  'Store Release Discipline (Lead-owned, deterministic server runner): You own `lead_store_release` (`probe` | `stage` | `submit` | `resume`) and `lead_record_store_note` \u2014 never run `release-lab` inside a seat or Peer shell and never let Peers write ad-hoc store upload scripts. Check `- Store release: mode=..., platforms=..., vault=...` and `- Store notebook (read-only): ...` in the kickoff packet: (a) `off` \u2014 never call `lead_store_release` for `stage`/`submit`/`resume`; (b) `on-request` \u2014 run only when an explicit Store release request rides Supervisor\'s dispatch (`staging` vs. `production` / `Hole` resume); (c) `auto-staging` \u2014 right after `lead_release` succeeds on a mobile Project, automatically trigger `lead_store_release({ action: "stage" })` (never unattended production `submit`). Adaptive Store release checklist: (1) read the `Store notebook` (`lessons.md` + `apps/<canonical-app>.md` when present); (2) call `lead_store_release({ action: "probe" })`; (3) dispatch bounded `engineer` Peer prep waves as needed (manifest `.store-release/manifest.json`, version/changelog bump, build/config fixes, store assets/metadata) with the `mobile-store-release` skill; (4) run `lead_release` if GitHub Release mode is enabled; (5) call `lead_store_release({ action: "stage" | "submit" | "resume" })` and IMMEDIATELY end your turn \u2014 it runs asynchronously at zero seat tokens and wakes you via Lead mailbox. Two-route failure policy: on `app-repo`, dispatch bounded Peer repair waves (at most 2 repair attempts per store release) through the SLP Gate before escalating; on `tool-bug` or `account-policy`, halt immediately, NEVER let an app Peer hack around the runner, confirm the `Upstream issue` reference, and report directly to Supervisor via `lead_report_to_supervisor`. On a `Hole` pause (`day0-store-init`, `price-conflict`, `final-release-approval`), report the `Hole` summary (`runId`, `phase`, `holeKind`, options) to Supervisor and end your turn. Record completed submissions and store rejections into the `Store notebook` via `lead_record_store_note` (never dirtying `<project-root>`).'
 ];
 var SUPERVISOR_OUTCOME_BOUNDARY = [
   "Outcome & Architecture Boundary (neutral intent \u2014 framing is the Lead's): Transmit the Owner's product outcomes, boundaries, invariants, and verification criteria faithfully and neutrally downward \u2014 framing is the Lead's. Never impose your own decomposition, technical solution shape, or file architecture on Lead; you are the process-quality seat, not a second project Lead. Preserve file architecture freedom; never invent single-file consolidation constraints such as forcing an entire application into index.html unless the Owner explicitly requested them. If the Owner's prompt bundles a multi-subsystem application into a single file (such as a single index.html) or contains an architectural anti-pattern without explicitly confirming they want to keep that constraint as-is, challenge the trade-off via grilling and recommend a modular multi-file architecture before dispatching.",
@@ -2684,7 +2716,8 @@ var SUPERVISOR_OUTCOME_BOUNDARY = [
   "Active SLP Loop Auditing: Audit the loop, not the artifact: original Lead Brief \u2192 actual Peer response \u2192 explicit Lead disposition; inspect both Lead and Peer activity \u2014 Lead's summary alone is not proof that the loop closed. Coach the Lead (process quality, never product code) when you observe it pre-solving Briefs, micro-splitting waves into horizontal slivers, reading deep source files into its own context instead of dispatching a read-only Scout, bouncing technical decisions that are the Lead's own ruling up to the Owner, staffing by template, or burning context polling files. Send advice to the Lead \u2014 never a parallel command chain to workers \u2014 and intervene only when the coaching can improve the Lead's next action.",
   "Modular Test & Verification Boundary: Never prescribe a single monolithic test file accumulating every unit test or E2E journey across all waves; allow modular per-feature/per-slice test files with isolated fixtures, aggregated by a runner or Gate script. Treat initial wave roadmaps as rolling-wave outlines; Lead re-evaluates and splits oversized waves at each Stable Checkpoint.",
   "4-Line Owner Ratification Boundary: When Lead's completion report carries a hardening Proposal that would change repo prose (backed by >= 2 `Task (seq N)` citations from the Recurrence Guard), present the 4-Line Owner Ratification Card to the Owner \u2014 `1. Chuy\u1EC7n g\xEC \u0111\xE3 l\u1EB7p l\u1EA1i` (with the `Task (seq N)` citations), `2. Nguy\xEAn nh\xE2n g\u1ED1c`, `3. N\u1EBFu duy\u1EC7t s\u1EBD s\u1EEDa g\xEC (Preview diff)`, `4. T\xE1c d\u1EE5ng` \u2014 and edit `<project-root>/AGENTS.md` or `<project-root>/CONTEXT.md` only after explicit Owner Ratification; never edit them on an unratified proposal.",
-  'Release & GitHub Boundary: You never run `lead_release`, never tag or push branches/tags, and never publish or create GitHub repositories (publishing and Release mode configuration live exclusively in the Owner\'s Factory Project panel under the "GitHub & Release" card). When the Owner asks to release a change or specific version, attach `release: { version?: "x.y.z" }` to `supervisor_dispatch_lead` alongside the directive so the daemon records the one-shot Release request atomically, and relay the Lead\'s release results (URL, tag, commit) or named refusals (`no-origin`, `release-not-granted`, `release-not-fast-forward`, etc.) cleanly back to the Owner \u2014 pointing the Owner to the "GitHub & Release" card whenever `origin` is missing or Release mode is `off`.'
+  'Release & GitHub Boundary: You never run `lead_release`, never tag or push branches/tags, and never publish or create GitHub repositories (publishing and Release mode configuration live exclusively in the Owner\'s Factory Project panel under the "GitHub & Release" card). When the Owner asks to release a change or specific version, attach `release: { version?: "x.y.z" }` to `supervisor_dispatch_lead` alongside the directive so the daemon records the one-shot Release request atomically, and relay the Lead\'s release results (URL, tag, commit) or named refusals (`no-origin`, `release-not-granted`, `release-not-fast-forward`, etc.) cleanly back to the Owner \u2014 pointing the Owner to the "GitHub & Release" card whenever `origin` is missing or Release mode is `off`.',
+  'Store Release Boundary: Store release mode configuration (`off` | `on-request` | `auto-staging`) lives exclusively in the Owner\'s Factory Project panel under the "Store Release" card, and store credentials live in Private vault; Supervisor never runs store uploads directly. When Store release mode is `off` or Vault credentials are missing (`store-release-not-granted`, `vault-credentials-missing`), point the Owner to the Project panel\'s "Store Release" card (and Private vault settings) \u2014 never claim you cannot release mobile apps or ask the Owner to upload manually. When the Owner asks to release or upload a mobile app to Google Play or the App Store, relay the intent via `supervisor_dispatch_lead({ message, storeRelease: { target, platforms? } })`, using `target: "staging"` by default and `target: "production"` ONLY when explicitly authorized in the Owner\'s same-turn request. When Lead reports a `Hole` pause (`day0-store-init`, `price-conflict`, `final-release-approval`), surface a clear, actionable `Hole` summary to the Owner in chat, and relay the Owner\'s reply via `supervisor_dispatch_lead({ message, storeRelease: { target, resumeRunId, resolution } })` (setting `target: "production"` only when the Owner explicitly approves production submission). When the Owner reports a store rejection, record it into the `Store notebook` via `supervisor_record_store_note` (`target: "app"` for per-app notes and `target: "lessons"` for cross-project rules, <= 120 lines) without modifying `<project-root>`.'
 ].join(" ");
 function formatCmdPrefix(factoryCmd, home) {
   const base = factoryCmd !== void 0 && factoryCmd.trim() !== "" ? factoryCmd.trim() : "factory";
@@ -2698,7 +2731,8 @@ function renderSeatCommandBlock(seat, cmdPrefix) {
     return [
       "Primary `paseo-factory` / `paseo_factory` MCP tools (prefer calling these directly):",
       "",
-      '  paseo-factory_supervisor_dispatch_lead({ message: "<directive>", workspace: "<project-root>" })  (or supervisor_dispatch_lead)',
+      '  paseo-factory_supervisor_dispatch_lead({ message: "<directive>", workspace: "<project-root>", release?: { version?: "<x.y.z>" }, storeRelease?: { target?: "<staging|production>", platforms?: ["<android|ios>"], resumeRunId?: "<runId>", resolution?: <payload> } })  (or supervisor_dispatch_lead)',
+      '  paseo-factory_supervisor_record_store_note({ target: "<lessons|app>", content: "<markdown>", appKey?: "<canonical-app>", workspace: "<project-root>" })  (or supervisor_record_store_note)',
       "  paseo-factory_supervisor_end_cycle({})  (or supervisor_end_cycle)",
       '  paseo-factory_supervisor_read_ledger({ workspace: "<project-root>" })  (or supervisor_read_ledger)',
       "",
@@ -2724,6 +2758,8 @@ function renderSeatCommandBlock(seat, cmdPrefix) {
     '  paseo-factory_lead_close_task({ task: "<id>", reason: "<one sentence \u2014 why this superseded or split Task retires>" })  (or lead_close_task)',
     '  paseo-factory_lead_update_notebook({ content: "<full notebook text \u2014 both headings, <= 80 lines / <= 4,096 bytes / <= 12 Recurrence Guard rows>" })  (or lead_update_notebook)',
     '  paseo-factory_lead_release({ version: "<x.y.z>" })  (or lead_release)',
+    '  paseo-factory_lead_store_release({ action: "<probe|stage|submit|resume>", platforms?: ["<android|ios>"], runId?: "<runId>", resolution?: <payload>, workspace?: "<project-root>" })  (or lead_store_release)',
+    '  paseo-factory_lead_record_store_note({ target: "<lessons|app>", content: "<markdown>", appKey?: "<canonical-app>", workspace?: "<project-root>" })  (or lead_record_store_note)',
     '  paseo-factory_lead_report_to_supervisor({ message: "<summary>", workspace: "<project-root>" })  (or lead_report_to_supervisor)',
     '  paseo-factory_lead_create_worktree({ task: "<id>" })  (or lead_create_worktree)',
     "",
@@ -3295,9 +3331,9 @@ function stripTrailingNul(text) {
 }
 
 // src/vault-secrets.ts
-import { existsSync as existsSync11, readFileSync as readFileSync14 } from "node:fs";
+import { existsSync as existsSync11, readFileSync as readFileSync14, realpathSync as realpathSync6 } from "node:fs";
 import { homedir as homedir4 } from "node:os";
-import { join as join15 } from "node:path";
+import { dirname as dirname12, isAbsolute as isAbsolute6, join as join15, relative as relative2, sep as sep2 } from "node:path";
 function expandImportPath(rawPath) {
   const trimmed = rawPath.trim();
   if (trimmed === "~") return homedir4();
@@ -3316,6 +3352,7 @@ async function importVaultSecrets(paseoHome, input = {}) {
     input.ascKeyPath,
     input.ascKeyId,
     input.ascIssuer,
+    input.teamId,
     input.gplayKeyPath,
     input.eyeConfigPath,
     input.keystorePath,
@@ -3323,12 +3360,14 @@ async function importVaultSecrets(paseoHome, input = {}) {
     input.keyAlias,
     input.firebaseProjectId,
     input.googleServicesJsonPath,
-    input.googleServiceInfoPlistPath
+    input.googleServiceInfoPlistPath,
+    input.storeDefaultsPath
   ];
-  const hasExplicit = explicitFields.some((val) => val !== void 0 && val.trim() !== "");
+  const hasExplicit = explicitFields.some((val) => val !== void 0 && val.trim() !== "") || input.storeDefaults !== void 0;
   const ascKeyPath = hasExplicit ? input.ascKeyPath?.trim() || void 0 : process.env.ASC_KEY_PATH?.trim() && existsSync11(expandImportPath(process.env.ASC_KEY_PATH)) ? process.env.ASC_KEY_PATH.trim() : void 0;
   const ascKeyId = hasExplicit ? input.ascKeyId?.trim() || void 0 : process.env.ASC_KEY_ID?.trim() || void 0;
   const ascIssuer = hasExplicit ? input.ascIssuer?.trim() || void 0 : process.env.ASC_ISSUER?.trim() || void 0;
+  const teamId = hasExplicit ? input.teamId?.trim() || void 0 : process.env.APPLE_TEAM_ID?.trim() || void 0;
   const gplayKeyPath = hasExplicit ? input.gplayKeyPath?.trim() || void 0 : process.env.GPLAY_KEY_PATH?.trim() && existsSync11(expandImportPath(process.env.GPLAY_KEY_PATH)) ? process.env.GPLAY_KEY_PATH.trim() : void 0;
   const eyeConfigPath = input.eyeConfigPath?.trim() || void 0;
   const config = loadVaultConfig(paseoHome);
@@ -3343,13 +3382,14 @@ async function importVaultSecrets(paseoHome, input = {}) {
       importedFiles.add(rel);
     };
     importFile(ascKeyPath, "ASC .p8 key", `secrets/shared/${SHARED_SECRET_FILES.ascKey}`);
-    if (ascKeyId !== void 0 || ascIssuer !== void 0) {
+    if (ascKeyId !== void 0 || ascIssuer !== void 0 || teamId !== void 0) {
       const rel = `secrets/shared/${SHARED_SECRET_FILES.ascCredentials}`;
       const prior = readJsonFile(join15(runtimeRoot, rel)) ?? {};
       const merged = {
         ...prior,
         ...ascKeyId !== void 0 ? { keyId: ascKeyId } : {},
-        ...ascIssuer !== void 0 ? { issuerId: ascIssuer } : {}
+        ...ascIssuer !== void 0 ? { issuerId: ascIssuer } : {},
+        ...teamId !== void 0 ? { teamId } : {}
       };
       writeRuntimeFile(paseoHome, rel, Buffer.from(`${JSON.stringify(merged, null, 2)}
 `, "utf8"));
@@ -3357,6 +3397,21 @@ async function importVaultSecrets(paseoHome, input = {}) {
     }
     importFile(gplayKeyPath, "Google Play service account JSON", `secrets/shared/${SHARED_SECRET_FILES.gplayServiceAccount}`);
     importFile(eyeConfigPath, "Eye config JSON", `secrets/shared/${SHARED_SECRET_FILES.eyeConfig}`);
+    const storeDefaultsPath2 = input.storeDefaultsPath?.trim() || void 0;
+    if (storeDefaultsPath2 !== void 0) {
+      const rawDefaults = unsealVaultBuffer(readImportFile(storeDefaultsPath2, "Store defaults JSON"), passphrase).toString("utf8");
+      const parsedDefaults = parseStoreDefaults(rawDefaults, storeDefaultsPath2);
+      writeRuntimeFile(paseoHome, STORE_DEFAULTS_FILE, Buffer.from(`${JSON.stringify(parsedDefaults, null, 2)}
+`, "utf8"));
+      importedFiles.add(STORE_DEFAULTS_FILE);
+    } else if (input.storeDefaults !== void 0) {
+      if (typeof input.storeDefaults !== "object" || input.storeDefaults === null || Array.isArray(input.storeDefaults)) {
+        throw new FactoryError("corrupted-store-defaults", `${STORE_DEFAULTS_FILE} must be a JSON object`);
+      }
+      writeRuntimeFile(paseoHome, STORE_DEFAULTS_FILE, Buffer.from(`${JSON.stringify(input.storeDefaults, null, 2)}
+`, "utf8"));
+      importedFiles.add(STORE_DEFAULTS_FILE);
+    }
     const keystorePath = input.keystorePath?.trim() || void 0;
     const storePass = input.storePass?.trim() || void 0;
     const keyAlias = input.keyAlias?.trim() || void 0;
@@ -3445,28 +3500,153 @@ function sealVaultFile(paseoHome, sourcePath, vaultPath, passphrase) {
     return { vaultPath, mode: envelope.mode, source: sourcePath, envelopeBytes: serialized.length };
   });
 }
+function parseKeystoreProperties(propsPath) {
+  const out = {};
+  for (const rawLine of readFileSync14(propsPath, "utf8").split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (line === "" || line.startsWith("#") || line.startsWith("!")) continue;
+    const eq = line.indexOf("=");
+    if (eq === -1) continue;
+    const key = line.slice(0, eq).trim();
+    const val = line.slice(eq + 1).trim();
+    if (val === "") continue;
+    if (key === "storePassword" || key === "keyPassword" || key === "keyAlias") {
+      out[key] = val;
+    }
+  }
+  return out;
+}
+function repoRelativeIfInside(projectRoot, candidatePath) {
+  try {
+    const rootReal = realpathSync6(projectRoot);
+    const targetReal = realpathSync6(candidatePath);
+    const rel = relative2(rootReal, targetReal);
+    if (rel === "" || rel.startsWith("..") || isAbsolute6(rel)) return null;
+    return rel.split(sep2).join("/");
+  } catch {
+    return null;
+  }
+}
+async function writeBackAndroidKeystore(paseoHome, input) {
+  const facts = inspectProjectRootFacts(input.projectRoot);
+  if (facts === null) {
+    throw new FactoryError("vault-project-not-git", `${input.projectRoot} does not resolve to a git checkout`);
+  }
+  const expandedKeystore = expandImportPath(input.keystorePath);
+  const keystoreBytes = readImportFile(expandedKeystore, "Android release keystore");
+  const explicitProps = input.keystorePropertiesPath?.trim() ? expandImportPath(input.keystorePropertiesPath) : void 0;
+  if (explicitProps !== void 0 && !existsSync11(explicitProps)) {
+    throw new FactoryError("vault-import-file-not-found", `Keystore properties file not found at "${explicitProps}"`);
+  }
+  const siblingProps = join15(dirname12(expandedKeystore), "keystore.properties");
+  const propsPath = explicitProps ?? (existsSync11(siblingProps) ? siblingProps : void 0);
+  const propsSigning = propsPath !== void 0 ? parseKeystoreProperties(propsPath) : {};
+  const storePassword = input.storePass?.trim() || propsSigning.storePassword;
+  const keyPassword = input.keyPass?.trim() || propsSigning.keyPassword || storePassword;
+  const keyAlias = input.keyAlias?.trim() || propsSigning.keyAlias;
+  const config = loadVaultConfig(paseoHome);
+  const passphrase = resolveVaultPassphrase(config?.passphrase);
+  const vaultConfigured = (config?.repo?.trim() ?? "") !== "";
+  if (input.syncAfterWriteBack !== false && vaultConfigured && existsSync11(join15(paseoHome, "vault", ".git"))) {
+    await pullVault(paseoHome, { runner: input.runner, mergeLedgers: false });
+  }
+  const runtimeRoot = join15(paseoHome, "vault-runtime");
+  const manifest = existsSync11(join15(runtimeRoot, "vault.manifest.json")) ? readVaultManifestAt(runtimeRoot) : readVaultManifestAt(join15(paseoHome, "vault"));
+  let canonicalAppKey = input.appKey?.trim() || "";
+  if (canonicalAppKey === "") {
+    canonicalAppKey = matchManifestAppKey(manifest, facts) ?? "";
+  }
+  if (canonicalAppKey === "") {
+    const storeManifest = readJsonFile(join15(facts.root, ".store-release", "manifest.json"));
+    canonicalAppKey = jsonStringField(storeManifest, "appKey") ?? facts.basename;
+  }
+  assertSafeVaultPath(`secrets/apps/${canonicalAppKey}`);
+  const keystoreRel = `secrets/apps/${canonicalAppKey}/release.keystore`;
+  const signingRel = `secrets/apps/${canonicalAppKey}/signing.json`;
+  const writtenVaultFiles = await LedgerAdmission.withStateMaintenance(vaultStateDir(paseoHome), () => {
+    const written = [];
+    const unsealedKeystore = unsealVaultBuffer(keystoreBytes, passphrase);
+    writeRuntimeFile(paseoHome, keystoreRel, unsealedKeystore);
+    written.push(keystoreRel);
+    if (storePassword !== void 0 || keyPassword !== void 0 || keyAlias !== void 0) {
+      const prior = readJsonFile(join15(runtimeRoot, signingRel)) ?? {};
+      const merged = {
+        ...prior,
+        ...storePassword !== void 0 ? { storePassword } : {},
+        ...keyPassword !== void 0 ? { keyPassword } : {},
+        ...keyAlias !== void 0 ? { keyAlias } : {}
+      };
+      writeRuntimeFile(paseoHome, signingRel, Buffer.from(`${JSON.stringify(merged, null, 2)}
+`, "utf8"));
+      written.push(signingRel);
+    }
+    const priorEntry = manifest[canonicalAppKey] ?? {};
+    manifest[canonicalAppKey] = {
+      ...priorEntry,
+      repoBasename: facts.basename,
+      ...facts.originUrl !== null && facts.originUrl !== "" ? { gitRemote: facts.originUrl } : {},
+      ...facts.bundleId !== null ? { bundleId: facts.bundleId } : {},
+      ...facts.packageName !== null ? { packageName: facts.packageName } : {}
+    };
+    writeRuntimeFile(paseoHome, "vault.manifest.json", Buffer.from(`${JSON.stringify(manifest, null, 2)}
+`, "utf8"));
+    applyVaultHydration(paseoHome);
+    const extraHygiene = [];
+    for (const candidate of [expandedKeystore, ...propsPath !== void 0 ? [propsPath] : []]) {
+      const rel = repoRelativeIfInside(facts.root, candidate);
+      if (rel !== null) extraHygiene.push(rel);
+    }
+    if (extraHygiene.length > 0) {
+      ensureLocalGitExcludeAndWorktreeInclude(facts.root, extraHygiene);
+    }
+    return written.sort();
+  });
+  const materializedFiles = APP_FILE_TARGETS.map((target) => target.projectRel).filter((rel) => existsSync11(join15(facts.root, rel)));
+  let pushed = false;
+  let sealedFiles = [];
+  if (input.syncAfterWriteBack !== false && vaultConfigured) {
+    const sealSet = new Set(writtenVaultFiles);
+    const pushResult = await pushVault(paseoHome, {
+      runner: input.runner,
+      sealPaths: sealSet
+    });
+    pushed = pushResult.pushed;
+    sealedFiles = writtenVaultFiles.filter((rel) => pushResult.pushedFiles.includes(rel));
+  }
+  return {
+    canonicalAppKey,
+    writtenVaultFiles,
+    sealedFiles,
+    materializedFiles,
+    pushed,
+    summary: `Wrote back ${writtenVaultFiles.join(", ")} for ${canonicalAppKey}${pushed ? " and sealed/pushed to Private vault" : " into local vault-runtime"}.`
+  };
+}
 
 // src/vault-materialization.ts
 import { execFileSync as execFileSync3 } from "node:child_process";
-import { readFileSync as readFileSync15, mkdirSync as mkdirSync9, chmodSync as chmodSync2, writeFileSync as writeFileSync8, readdirSync as readdirSync8, existsSync as existsSync12, copyFileSync as copyFileSync4, statSync as statSync5 } from "node:fs";
-import { join as join16, basename as basename8, isAbsolute as isAbsolute6, resolve as resolvePath, dirname as dirname12 } from "node:path";
+import { readFileSync as readFileSync15, mkdirSync as mkdirSync9, chmodSync as chmodSync3, writeFileSync as writeFileSync8, readdirSync as readdirSync8, existsSync as existsSync12, copyFileSync as copyFileSync3, statSync as statSync5 } from "node:fs";
+import { join as join16, basename as basename8, isAbsolute as isAbsolute7, resolve as resolvePath, dirname as dirname13 } from "node:path";
 function writeRuntimeFile(paseoHome, vaultPath, data) {
   assertSafeVaultPath(vaultPath);
   if (isProjectDesignVaultPath(vaultPath)) throw new FactoryError("vault-project-design-excluded", "Project designs belong in the Project repository");
   const runtimeRoot = join16(paseoHome, "vault-runtime");
   mkdirSync9(runtimeRoot, { recursive: true });
   const segments = vaultPath.split("/");
+  const isPrivateDir = segments[0] === "secrets" || segments[0] === "store-memory";
   let acc = runtimeRoot;
-  let insideSecrets = false;
+  let insidePrivate = false;
   for (const segment of segments.slice(0, -1)) {
     acc = join16(acc, segment);
-    insideSecrets = insideSecrets || segment === "secrets";
+    insidePrivate = insidePrivate || isPrivateDir;
     mkdirSync9(acc, { recursive: true });
-    if (insideSecrets) chmodSync2(acc, 448);
+    if (insidePrivate) chmodSync3(acc, 448);
   }
   const target = join16(runtimeRoot, vaultPath);
+  if (existsSync12(target)) chmodSync3(target, 384);
   writeFileSync8(target, data);
-  chmodSync2(target, segments[0] === "secrets" ? 384 : 420);
+  const mode = segments[0] === "store-memory" ? 256 : segments[0] === "secrets" || vaultPath === STORE_DEFAULTS_FILE ? 384 : 420;
+  chmodSync3(target, mode);
 }
 function isProjectDesignVaultPath(path) {
   return path.split("/").some((segment) => ["design", "mockups", ".od-frames"].includes(segment)) || /(?:^|\/)(?:design-manifest|open-design-link)\.json$/.test(path);
@@ -3659,7 +3839,7 @@ function ensureLocalGitExcludeAndWorktreeInclude(projectRoot, relPaths) {
   if (commonDirRaw === null || commonDirRaw === "") {
     throw new FactoryError("vault-project-not-git", `${projectRoot} does not resolve to a git checkout \u2014 vault hygiene has nothing to register against`);
   }
-  const gitCommonDir = isAbsolute6(commonDirRaw) ? commonDirRaw : resolvePath(projectRoot, commonDirRaw);
+  const gitCommonDir = isAbsolute7(commonDirRaw) ? commonDirRaw : resolvePath(projectRoot, commonDirRaw);
   appendUniqueLines(join16(gitCommonDir, "info", "exclude"), [...relPaths, ".worktreeinclude"]);
   appendUniqueLines(join16(projectRoot, ".worktreeinclude"), relPaths);
 }
@@ -3675,7 +3855,7 @@ function appendUniqueLines(path, lines) {
   if (missing.length === 0) return;
   const base = existing === "" ? "" : existing.endsWith("\n") ? existing : `${existing}
 `;
-  mkdirSync9(dirname12(path), { recursive: true });
+  mkdirSync9(dirname13(path), { recursive: true });
   writeFileSync8(path, `${base}${missing.join("\n")}
 `);
 }
@@ -3700,9 +3880,9 @@ function materializeVaultAppFiles(paseoHome, canonicalAppKey, projectRoot) {
       data = readFileSync15(source);
     }
     const dest = join16(projectRoot, target.projectRel);
-    mkdirSync9(dirname12(dest), { recursive: true });
+    mkdirSync9(dirname13(dest), { recursive: true });
     writeFileSync8(dest, data, { mode: 384 });
-    chmodSync2(dest, 384);
+    chmodSync3(dest, 384);
     written.push(target.projectRel);
   }
   return written;
@@ -3719,7 +3899,7 @@ function resolveVaultUserHome(paseoHome, explicitUserHome) {
   }
   const resolved = resolvePath(paseoHome);
   if (basename8(resolved).startsWith(".paseo")) {
-    return dirname12(resolved);
+    return dirname13(resolved);
   }
   return resolved;
 }
@@ -3797,8 +3977,8 @@ function materializeVaultSkillsFromRuntime(paseoHome, overwriteConfigs = false, 
   if (existsSync12(runtimeLockPath)) {
     const destLockPath = join16(userHome, ".agents", ".skill-lock.json");
     if (overwriteConfigs || !existsSync12(destLockPath)) {
-      mkdirSync9(dirname12(destLockPath), { recursive: true });
-      copyFileSync4(runtimeLockPath, destLockPath);
+      mkdirSync9(dirname13(destLockPath), { recursive: true });
+      copyFileSync3(runtimeLockPath, destLockPath);
     }
   }
   if (!existsSync12(runtimeSkillsDir)) return [];
@@ -3822,8 +4002,8 @@ function materializeVaultSkillsFromRuntime(paseoHome, overwriteConfigs = false, 
       const src = join16(srcSkillDir, rel);
       const dest = join16(agentsSkillsDir, skillName, rel);
       if (!overwriteConfigs && existsSync12(dest)) continue;
-      mkdirSync9(dirname12(dest), { recursive: true });
-      copyFileSync4(src, dest);
+      mkdirSync9(dirname13(dest), { recursive: true });
+      copyFileSync3(src, dest);
     }
     materializedSkills.push(skillName);
   }
@@ -3867,6 +4047,41 @@ function collectLocalStateIntoRuntime(paseoHome, options) {
   const localEye = join16(stateDir, "eye.json");
   if (existsSync12(localEye) && !sharedSecretExists(paseoHome, SHARED_SECRET_FILES.eyeConfig)) {
     writeRuntimeFile(paseoHome, `secrets/shared/${SHARED_SECRET_FILES.eyeConfig}`, readFileSync15(localEye));
+  }
+  const localStoreDefaults = join16(stateDir, STORE_DEFAULTS_FILE);
+  const runtimeStoreDefaults = storeDefaultsPath(paseoHome);
+  if (existsSync12(localStoreDefaults) && !existsSync12(runtimeStoreDefaults)) {
+    const parsedDefaults = parseStoreDefaults(readFileSync15(localStoreDefaults, "utf8"), localStoreDefaults);
+    writeRuntimeFile(paseoHome, STORE_DEFAULTS_FILE, Buffer.from(`${JSON.stringify(parsedDefaults, null, 2)}
+`, "utf8"));
+  } else if (existsSync12(runtimeStoreDefaults)) {
+    chmodSync3(runtimeStoreDefaults, 384);
+  }
+  const localStoreMemoryDir = join16(stateDir, STORE_MEMORY_DIR);
+  const localLessonsPath = join16(localStoreMemoryDir, "lessons.md");
+  const runtimeLessonsPath = storeLessonsPath(paseoHome);
+  if (existsSync12(localLessonsPath) && !existsSync12(runtimeLessonsPath)) {
+    const lessonsText = readFileSync15(localLessonsPath, "utf8");
+    assertStoreLessonsWithinLimit(lessonsText, localLessonsPath);
+    writeRuntimeFile(paseoHome, `${STORE_MEMORY_DIR}/lessons.md`, Buffer.from(lessonsText, "utf8"));
+  } else if (existsSync12(runtimeLessonsPath)) {
+    assertStoreLessonsWithinLimit(readFileSync15(runtimeLessonsPath, "utf8"), runtimeLessonsPath);
+    chmodSync3(runtimeLessonsPath, 256);
+  }
+  const localAppsMemoryDir = join16(localStoreMemoryDir, "apps");
+  if (existsSync12(localAppsMemoryDir)) {
+    for (const file of walkFiles(localAppsMemoryDir, () => false)) {
+      const vaultRel = `${STORE_MEMORY_DIR}/apps/${file}`;
+      if (!existsSync12(join16(paseoHome, "vault-runtime", vaultRel))) {
+        writeRuntimeFile(paseoHome, vaultRel, readFileSync15(join16(localAppsMemoryDir, file)));
+      }
+    }
+  }
+  const runtimeAppsMemoryDir = join16(storeMemoryDir(paseoHome), "apps");
+  if (existsSync12(runtimeAppsMemoryDir)) {
+    for (const file of walkFiles(runtimeAppsMemoryDir, () => false)) {
+      chmodSync3(join16(runtimeAppsMemoryDir, file), 256);
+    }
   }
   const config = loadVaultConfig(paseoHome);
   const passphrase = resolveVaultPassphrase(config?.passphrase);
@@ -3954,8 +4169,8 @@ function materializeConfigsFromRuntime(paseoHome, overwriteConfigs = false, opti
   for (const { src, dest } of targets) {
     if (!existsSync12(src)) continue;
     if (!overwriteConfigs && existsSync12(dest)) continue;
-    mkdirSync9(dirname12(dest), { recursive: true });
-    copyFileSync4(src, dest);
+    mkdirSync9(dirname13(dest), { recursive: true });
+    copyFileSync3(src, dest);
   }
   const stateDir = vaultStateDir(paseoHome);
   const runtimeProfiles = join16(runtimeConfigDir, "profiles.json");
@@ -3964,7 +4179,7 @@ function materializeConfigsFromRuntime(paseoHome, overwriteConfigs = false, opti
     const remote = readLaneProfilesCacheOrNull(runtimeProfiles);
     if (remote !== null) {
       const merged = mergeLaneProfilesFiles(local, remote, { preferRemote: overwriteConfigs });
-      mkdirSync9(dirname12(join16(stateDir, "profiles.json")), { recursive: true });
+      mkdirSync9(dirname13(join16(stateDir, "profiles.json")), { recursive: true });
       writeFileSync8(join16(stateDir, "profiles.json"), `${JSON.stringify(merged, null, 2)}
 `);
     }
@@ -3986,8 +4201,8 @@ function materializeConfigsFromRuntime(paseoHome, overwriteConfigs = false, opti
       if (!existsSync12(src)) continue;
       const dest = projectLanesPath(stateDir, app.projectSlug);
       if (!overwriteConfigs && existsSync12(dest)) continue;
-      mkdirSync9(dirname12(dest), { recursive: true });
-      copyFileSync4(src, dest);
+      mkdirSync9(dirname13(dest), { recursive: true });
+      copyFileSync3(src, dest);
     }
   }
 }
@@ -4007,7 +4222,7 @@ function writeVaultRuntimeEnv(paseoHome) {
   const path = join16(runtimeRoot, "env.json");
   writeFileSync8(path, `${JSON.stringify(buildVaultRuntimeEnv(paseoHome), null, 2)}
 `, { mode: 384 });
-  chmodSync2(path, 384);
+  chmodSync3(path, 384);
 }
 function buildVaultRuntimeEnv(paseoHome) {
   const shared = join16(paseoHome, "vault-runtime", "secrets", "shared");
@@ -4017,8 +4232,10 @@ function buildVaultRuntimeEnv(paseoHome) {
   const ascCredentials = readJsonFile(join16(shared, SHARED_SECRET_FILES.ascCredentials));
   const keyId = jsonStringField(ascCredentials, "keyId") ?? jsonStringField(ascCredentials, "key_id");
   const issuerId = jsonStringField(ascCredentials, "issuerId") ?? jsonStringField(ascCredentials, "issuer_id");
+  const teamId = jsonStringField(ascCredentials, "teamId") ?? jsonStringField(ascCredentials, "team_id") ?? jsonStringField(ascCredentials, "appleTeamId") ?? jsonStringField(ascCredentials, "apple_team_id");
   if (keyId !== null) env.ASC_KEY_ID = keyId;
   if (issuerId !== null) env.ASC_ISSUER = issuerId;
+  if (teamId !== null) env.APPLE_TEAM_ID = teamId;
   const gplay = join16(shared, SHARED_SECRET_FILES.gplayServiceAccount);
   if (existsSync12(gplay)) env.GPLAY_KEY_PATH = gplay;
   for (const canonicalAppKey of hydratedAppKeys(paseoHome)) {
@@ -4036,6 +4253,34 @@ function buildVaultRuntimeEnv(paseoHome) {
   }
   return env;
 }
+function readVaultRuntimeEnv(paseoHome) {
+  const derived = buildVaultRuntimeEnv(paseoHome);
+  const disk = readJsonFile(join16(paseoHome, "vault-runtime", "env.json"));
+  if (disk === null) return derived;
+  const merged = { ...derived };
+  for (const key of [
+    "ASC_KEY_PATH",
+    "ASC_KEY_ID",
+    "ASC_ISSUER",
+    "APPLE_TEAM_ID",
+    "GPLAY_KEY_PATH",
+    "RELEASE_LAB_KEYSTORE_STOREPASS",
+    "FIREBASE_PROJECT_ID"
+  ]) {
+    const val = jsonStringField(disk, key);
+    if (val !== null) merged[key] = val;
+  }
+  return merged;
+}
+function readVaultStoreReadiness(paseoHome) {
+  const env = readVaultRuntimeEnv(paseoHome);
+  const present = (value) => typeof value === "string" && value.trim() !== "";
+  return {
+    ascKey: present(env.ASC_KEY_PATH),
+    appleTeamId: present(env.APPLE_TEAM_ID),
+    gplayJson: present(env.GPLAY_KEY_PATH)
+  };
+}
 function hydratedAppKeys(paseoHome) {
   try {
     return readdirSync8(join16(paseoHome, "vault-runtime", "secrets", "apps"), { withFileTypes: true }).filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort();
@@ -4043,10 +4288,110 @@ function hydratedAppKeys(paseoHome) {
     return [];
   }
 }
+function storeDefaultsPath(paseoHome) {
+  return join16(paseoHome, "vault-runtime", STORE_DEFAULTS_FILE);
+}
+function parseStoreDefaults(raw, pathLabel = STORE_DEFAULTS_FILE) {
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new FactoryError("corrupted-store-defaults", `${pathLabel} is not valid JSON`);
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new FactoryError("corrupted-store-defaults", `${pathLabel} must be a JSON object`);
+  }
+  return parsed;
+}
+function readStoreDefaults(paseoHome) {
+  const target = storeDefaultsPath(paseoHome);
+  let raw;
+  try {
+    raw = readFileSync15(target, "utf8");
+  } catch (err) {
+    if (err.code === "ENOENT") return null;
+    throw err;
+  }
+  return parseStoreDefaults(raw, target);
+}
+function writeStoreDefaults(paseoHome, defaults) {
+  if (typeof defaults !== "object" || defaults === null || Array.isArray(defaults)) {
+    throw new FactoryError("corrupted-store-defaults", `${STORE_DEFAULTS_FILE} must be a JSON object`);
+  }
+  return LedgerAdmission.stateMutation(vaultStateDir(paseoHome), () => {
+    writeRuntimeFile(paseoHome, STORE_DEFAULTS_FILE, Buffer.from(`${JSON.stringify(defaults, null, 2)}
+`, "utf8"));
+    return storeDefaultsPath(paseoHome);
+  });
+}
+var STORE_MEMORY_DIR = "store-memory";
+var STORE_LESSONS_MAX_LINES = 120;
+function storeMemoryDir(paseoHome) {
+  return join16(paseoHome, "vault-runtime", STORE_MEMORY_DIR);
+}
+function storeLessonsPath(paseoHome) {
+  return join16(storeMemoryDir(paseoHome), "lessons.md");
+}
+function storeAppNotebookPath(paseoHome, canonicalAppKey) {
+  const key = canonicalAppKey.trim();
+  if (key === "" || key.includes("/") || key.includes("\\")) {
+    throw new FactoryError("vault-invalid-path", `refusing unsafe store notebook app key "${canonicalAppKey}"`);
+  }
+  const vaultRel = `${STORE_MEMORY_DIR}/apps/${key}.md`;
+  assertSafeVaultPath(vaultRel);
+  return join16(paseoHome, "vault-runtime", vaultRel);
+}
+function countStoreLessonLines(content) {
+  if (content === "") return 0;
+  const stripped = content.endsWith("\n") ? content.slice(0, -1) : content;
+  return stripped === "" ? 0 : stripped.split("\n").length;
+}
+function assertStoreLessonsWithinLimit(content, pathLabel = `${STORE_MEMORY_DIR}/lessons.md`) {
+  const lines = countStoreLessonLines(content);
+  if (lines > STORE_LESSONS_MAX_LINES) {
+    throw new FactoryError(
+      "store-notebook-limit-exceeded",
+      `${pathLabel} exceeds the ${STORE_LESSONS_MAX_LINES}-line cap (${lines} lines) \u2014 compact rows or graduate checks into factory-release-lab probe instead of truncating`
+    );
+  }
+  return lines;
+}
+function readStoreLessons(paseoHome) {
+  try {
+    return readFileSync15(storeLessonsPath(paseoHome), "utf8");
+  } catch (err) {
+    if (err.code === "ENOENT") return null;
+    throw err;
+  }
+}
+function writeStoreLessons(paseoHome, content) {
+  assertStoreLessonsWithinLimit(content);
+  return LedgerAdmission.stateMutation(vaultStateDir(paseoHome), () => {
+    writeRuntimeFile(paseoHome, `${STORE_MEMORY_DIR}/lessons.md`, Buffer.from(content, "utf8"));
+    return storeLessonsPath(paseoHome);
+  });
+}
+function readStoreAppNotebook(paseoHome, canonicalAppKey) {
+  const target = storeAppNotebookPath(paseoHome, canonicalAppKey);
+  try {
+    return readFileSync15(target, "utf8");
+  } catch (err) {
+    if (err.code === "ENOENT") return null;
+    throw err;
+  }
+}
+function writeStoreAppNotebook(paseoHome, canonicalAppKey, content) {
+  const target = storeAppNotebookPath(paseoHome, canonicalAppKey);
+  const key = canonicalAppKey.trim();
+  return LedgerAdmission.stateMutation(vaultStateDir(paseoHome), () => {
+    writeRuntimeFile(paseoHome, `${STORE_MEMORY_DIR}/apps/${key}.md`, Buffer.from(content, "utf8"));
+    return target;
+  });
+}
 
 // src/vault-history.ts
 import { mkdirSync as mkdirSync10, writeFileSync as writeFileSync9, existsSync as existsSync13, readFileSync as readFileSync16, readdirSync as readdirSync9 } from "node:fs";
-import { dirname as dirname13, join as join17 } from "node:path";
+import { dirname as dirname14, join as join17 } from "node:path";
 function reconcileVaultLedgers(existingLines, sources, options = {}) {
   return reconcileHistory(existingLines, sources, options);
 }
@@ -4075,7 +4420,7 @@ function snapshotVaultLedger(source, target) {
   }
   const parsed = parseLedgerJsonl(text);
   if (parsed.corrupt !== void 0) throw new FactoryError("vault-ledger-corrupt", `Cannot publish Ledger ${source}: ${parsed.corrupt}`);
-  mkdirSync10(dirname13(target), { recursive: true });
+  mkdirSync10(dirname14(target), { recursive: true });
   writeFileSync9(target, prefix);
 }
 function stageFetchedVaultHistory(paseoHome, files) {
@@ -4084,9 +4429,9 @@ function stageFetchedVaultHistory(paseoHome, files) {
   if (upgrade !== void 0) throw new FactoryError("upgrade-recovery-required", `Upgrade ${upgrade} is incomplete; resume or restore before staging new Vault history`);
   const manifestBytes = files.get("vault.manifest.json");
   const manifest = manifestBytes === void 0 ? readVaultManifestAt(join17(paseoHome, "vault-runtime")) : parseVaultManifest(manifestBytes.toString("utf8"));
-  const snapshots = (relative2) => [...files].flatMap(([path, bytes]) => {
+  const snapshots = (relative3) => [...files].flatMap(([path, bytes]) => {
     const match = /^state\/nodes\/([^/]+)\/(.+)$/.exec(path);
-    return match?.[2] === relative2 ? [{ nodeId: match[1], lines: bytes.toString("utf8"), bytes }] : [];
+    return match?.[2] === relative3 ? [{ nodeId: match[1], lines: bytes.toString("utf8"), bytes }] : [];
   });
   const hold = { status: "pending", diagnostics: ["downloaded history retained; associated Vault files await owner materialization before admission"] };
   const stage = (target, sources) => sources.length === 0 ? [] : [stageLedgerImport(target, sources, { materialization: hold })];
@@ -4099,9 +4444,10 @@ function stageFetchedVaultHistory(paseoHome, files) {
 }
 
 // src/vault-config.ts
-import { readFileSync as readFileSync17, mkdirSync as mkdirSync11, writeFileSync as writeFileSync10, chmodSync as chmodSync3, existsSync as existsSync14 } from "node:fs";
+import { readFileSync as readFileSync17, mkdirSync as mkdirSync11, writeFileSync as writeFileSync10, chmodSync as chmodSync4, existsSync as existsSync14 } from "node:fs";
 import { hostname } from "node:os";
-import { dirname as dirname14, join as join18 } from "node:path";
+import { dirname as dirname15, join as join18 } from "node:path";
+var STORE_DEFAULTS_FILE = "store-defaults.json";
 var STATE_PLUGIN_DIR = "paseo-factory";
 var SHARED_SECRET_FILES = {
   ascKey: "asc-api-key.p8",
@@ -4132,10 +4478,10 @@ function saveVaultConfig(paseoHome, config) {
   return LedgerAdmission.stateMutation(vaultStateDir(paseoHome), () => {
     const full = withConfigDefaults(config);
     const path = vaultConfigPath(paseoHome);
-    mkdirSync11(dirname14(path), { recursive: true });
+    mkdirSync11(dirname15(path), { recursive: true });
     writeFileSync10(path, `${JSON.stringify(full, null, 2)}
 `, { mode: 384 });
-    chmodSync3(path, 384);
+    chmodSync4(path, 384);
     return full;
   });
 }
@@ -4230,7 +4576,7 @@ function vaultStateDir(paseoHome) {
 
 // src/vault.ts
 import { existsSync as existsSync15, mkdirSync as mkdirSync12, readFileSync as readFileSync18 } from "node:fs";
-import { join as join19, dirname as dirname15 } from "node:path";
+import { join as join19, dirname as dirname16 } from "node:path";
 import { gunzipSync } from "node:zlib";
 async function hydrateVaultDirect(paseoHome, options = {}) {
   const config = loadVaultConfig(paseoHome);
@@ -4297,7 +4643,7 @@ async function pushVault(paseoHome, options = {}) {
     const staged = existsSync15(runtimeRoot) ? walkFiles(runtimeRoot, (rel) => rel === "env.json" || isProjectDesignVaultPath(rel)) : [];
     const passphrase = resolveVaultPassphrase(config.passphrase);
     for (const rel of staged) {
-      stageRuntimeFileIntoCheckout(join19(runtimeRoot, rel), join19(vaultDir, rel), passphrase, rel);
+      stageRuntimeFileIntoCheckout(join19(runtimeRoot, rel), join19(vaultDir, rel), passphrase, rel, options.sealPaths?.has(rel) === true);
     }
     const pushedFiles2 = new Set(staged);
     if (options.includeLedger) {
@@ -4305,7 +4651,7 @@ async function pushVault(paseoHome, options = {}) {
       const globalLedger = join19(stateDir, "ledger.jsonl");
       if (existsSync15(globalLedger)) {
         const target = join19(vaultDir, "state", "nodes", config.nodeId, "global-ledger.jsonl");
-        mkdirSync12(dirname15(target), { recursive: true });
+        mkdirSync12(dirname16(target), { recursive: true });
         snapshotVaultLedger(globalLedger, target);
         pushedFiles2.add(`state/nodes/${config.nodeId}/global-ledger.jsonl`);
       }
@@ -4318,7 +4664,7 @@ async function pushVault(paseoHome, options = {}) {
         if (!existsSync15(projectLedger)) continue;
         const key = slugToKey.get(slug) ?? slug;
         const target = join19(vaultDir, "state", "nodes", config.nodeId, "projects", key, "ledger.jsonl");
-        mkdirSync12(dirname15(target), { recursive: true });
+        mkdirSync12(dirname16(target), { recursive: true });
         snapshotVaultLedger(projectLedger, target);
         pushedFiles2.add(`state/nodes/${config.nodeId}/projects/${key}/ledger.jsonl`);
       }
@@ -4408,9 +4754,13 @@ async function materializeFetchedVault(paseoHome, files, options, stamp) {
   }
 }
 export {
+  STORE_LESSONS_MAX_LINES,
+  STORE_MEMORY_DIR,
+  assertStoreLessonsWithinLimit,
   buildVaultPath,
   builtinVaultRunner,
   clearGhAuthCache,
+  countStoreLessonLines,
   createDefaultVaultRunner,
   ensureLocalGitExcludeAndWorktreeInclude,
   ensureRemoteVaultRepo,
@@ -4419,18 +4769,33 @@ export {
   isLocalCompanionGitSource,
   loadVaultConfig,
   normalizeCompanionGitRemote,
+  parseEnvelope,
+  parseStoreDefaults,
   parseVaultManifest,
   probeCompanionGitAccess,
   probeGhAuth,
   pullVault,
   pushVault,
+  readStoreAppNotebook,
+  readStoreDefaults,
+  readStoreLessons,
+  readVaultRuntimeEnv,
   readVaultStatus,
+  readVaultStoreReadiness,
   reconcileVaultLedgers,
   resolveVaultApps,
   saveVaultConfig,
   sealVaultBuffer,
   sealVaultFile,
+  storeAppNotebookPath,
+  storeDefaultsPath,
+  storeLessonsPath,
+  storeMemoryDir,
   syncVault,
   unsealVaultBuffer,
-  withConfigDefaults
+  withConfigDefaults,
+  writeBackAndroidKeystore,
+  writeStoreAppNotebook,
+  writeStoreDefaults,
+  writeStoreLessons
 };

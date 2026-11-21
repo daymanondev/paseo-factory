@@ -46,11 +46,13 @@ export interface VaultImportInput {
   ascKeyPath?: string;
   ascKeyId?: string;
   ascIssuer?: string;
+  teamId?: string;
   gplayKeyPath?: string;
   eyeConfigPath?: string;
   appKey?: string;
   keystorePath?: string;
   storePass?: string;
+  storeDefaultsPath?: string;
   syncAfterImport?: boolean;
 }
 
@@ -134,11 +136,13 @@ export function VaultSyncBar({
   const [ascKeyPath, setAscKeyPath] = useState("");
   const [ascKeyId, setAscKeyId] = useState("");
   const [ascIssuer, setAscIssuer] = useState("");
+  const [teamId, setTeamId] = useState("");
   const [gplayKeyPath, setGplayKeyPath] = useState("");
   const [eyeConfigPath, setEyeConfigPath] = useState("");
   const [appKey, setAppKey] = useState("");
   const [keystorePath, setKeystorePath] = useState("");
   const [storePass, setStorePass] = useState("");
+  const [storeDefaultsPath, setStoreDefaultsPath] = useState("");
 
   const [repo, setRepo] = useState(vault.repo ?? vault.suggestedRepo ?? "");
   const [branch, setBranch] = useState(vault.branch || "main");
@@ -346,11 +350,13 @@ export function VaultSyncBar({
             <VaultField theme={theme} label="ASC .p8 Key Path (ascKeyPath)" value={ascKeyPath} onChange={setAscKeyPath} placeholder="~/Downloads/AuthKey_ABC123.p8" />
             <VaultField theme={theme} label="ASC Key ID (ascKeyId)" value={ascKeyId} onChange={setAscKeyId} placeholder="ABC123DEFG" />
             <VaultField theme={theme} label="ASC Issuer ID (ascIssuer)" value={ascIssuer} onChange={setAscIssuer} placeholder="00000000-0000-0000-0000-000000000000" />
+            <VaultField theme={theme} label="Apple Team ID (teamId)" value={teamId} onChange={setTeamId} placeholder="TEAM123456" />
             <VaultField theme={theme} label="Google Play JSON Path (gplayKeyPath)" value={gplayKeyPath} onChange={setGplayKeyPath} placeholder="~/Downloads/service-account.json" />
             <VaultField theme={theme} label="Eye Config Path (eyeConfigPath)" value={eyeConfigPath} onChange={setEyeConfigPath} placeholder="~/.paseo-factory/plugin-state/paseo-factory/eye.json" />
             <VaultField theme={theme} label="App Key (appKey)" value={appKey} onChange={setAppKey} placeholder="patigame" />
             <VaultField theme={theme} label="Android Keystore Path (keystorePath)" value={keystorePath} onChange={setKeystorePath} placeholder="~/keys/release.keystore" />
             <VaultField theme={theme} label="Keystore Password (storePass)" value={storePass} onChange={setStorePass} placeholder="optional keystore password" secure />
+            <VaultField theme={theme} label="Store Defaults JSON Path (storeDefaultsPath)" value={storeDefaultsPath} onChange={setStoreDefaultsPath} placeholder="~/store-defaults.json" />
           </View>
           <View style={{ flexDirection: "row", alignItems: "center", gap: SPACING[1.5] }}>
             <Btn
@@ -365,11 +371,13 @@ export function VaultSyncBar({
                   ...(ascKeyPath.trim() === "" ? {} : { ascKeyPath: ascKeyPath.trim() }),
                   ...(ascKeyId.trim() === "" ? {} : { ascKeyId: ascKeyId.trim() }),
                   ...(ascIssuer.trim() === "" ? {} : { ascIssuer: ascIssuer.trim() }),
+                  ...(teamId.trim() === "" ? {} : { teamId: teamId.trim() }),
                   ...(gplayKeyPath.trim() === "" ? {} : { gplayKeyPath: gplayKeyPath.trim() }),
                   ...(eyeConfigPath.trim() === "" ? {} : { eyeConfigPath: eyeConfigPath.trim() }),
                   ...(appKey.trim() === "" ? {} : { appKey: appKey.trim() }),
                   ...(keystorePath.trim() === "" ? {} : { keystorePath: keystorePath.trim() }),
                   ...(storePass.trim() === "" ? {} : { storePass: storePass.trim() }),
+                  ...(storeDefaultsPath.trim() === "" ? {} : { storeDefaultsPath: storeDefaultsPath.trim() }),
                   syncAfterImport: true,
                 })
               }

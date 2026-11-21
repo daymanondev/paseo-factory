@@ -14,8 +14,9 @@ import { join } from "node:path";
 import { isSeatMemoryRelativePathAllowed } from "./core/choke.ts";
 import { isReadOnlyPeerDisposition, type LedgerEvent } from "./core/events.ts";
 import type { Factory } from "./core/factory.ts";
-import { clearReleaseRequest, readReleaseRequest, readReleaseSettings } from "./core/project-settings.ts";
+import { clearReleaseRequest, readReleaseRequest, readReleaseSettings, readStoreReleaseSettings } from "./core/project-settings.ts";
 import type { ProjectReleaseMode } from "./core/project-settings.ts";
+import { detectMobilePlatforms } from "./core/store-release-probe.ts";
 import { builtinVaultRunner, isGhMissingError, isGhUnauthenticatedError } from "./core/vault-transport.ts";
 import type { VaultRunner } from "./core/vault-transport.ts";
 
@@ -40,6 +41,7 @@ export type ReleaseProjectResult =
       url: string | null;
       mode: ProjectReleaseMode;
       skipped: string[];
+      storeReleaseAutoStaging?: boolean;
     }
   | {
       ok: false;
@@ -187,6 +189,77 @@ async function resolveEffectiveBranch(
   return checkedOutBranch;
 }
 
+export type RepoIntegrityResult =
+  | { ok: true; branch: string; commit: string }
+  | { ok: false; code: string; message: string };
+
+/**
+ * Verifies `<project-root>` is clean, non-detached, has no running Contract
+ * Gate, and `HEAD` equals the last accepted landing or descends from it only
+ * through seat-memory commits. Shared by `releaseProject` and `storeReleaseProject`.
+ */
+export async function checkRepoReleaseIntegrity(input: {
+  factory: Factory;
+  projectRoot: string;
+  runner?: VaultRunner;
+}): Promise<RepoIntegrityResult> {
+  const runner = input.runner ?? builtinVaultRunner;
+
+  const statusRes = await runCli(runner, "git", ["status", "--porcelain"], input.projectRoot);
+  if (!statusRes.ok) {
+    return { ok: false, code: "root-dirty", message: `could not read repository status: ${statusRes.message}` };
+  }
+  if (statusRes.stdout.trim() !== "") {
+    return { ok: false, code: "root-dirty", message: "<project-root> has uncommitted or untracked changes — clean the tree before releasing." };
+  }
+
+  const branchRes = await runCli(runner, "git", ["symbolic-ref", "--short", "HEAD"], input.projectRoot);
+  if (!branchRes.ok || branchRes.stdout.trim() === "") {
+    return { ok: false, code: "root-detached", message: "<project-root> HEAD is detached — check out a branch before releasing." };
+  }
+  const checkedOutBranch = branchRes.stdout.trim();
+
+  const headRes = await runCli(runner, "git", ["rev-parse", "HEAD"], input.projectRoot);
+  if (!headRes.ok || headRes.stdout.trim() === "") {
+    return { ok: false, code: "root-detached", message: "could not resolve HEAD commit" };
+  }
+  const headCommit = headRes.stdout.trim();
+
+  if (hasRunningGateInLedger(input.factory.ledger.events)) {
+    return { ok: false, code: "gate-running", message: "a Contract Gate is currently running for this Project — wait for its verdict before releasing." };
+  }
+
+  const claimedCommit = lastAcceptedLandingSha(input.factory.ledger.events);
+  if (claimedCommit === undefined) {
+    return { ok: false, code: "head-not-accepted", message: "no accepted wave landing exists in this Project's Ledger — land an engineer wave first." };
+  }
+  const landingCommit = await resolveLandingCommit(runner, input.projectRoot, claimedCommit, headCommit);
+  if (landingCommit === undefined) {
+    return {
+      ok: false,
+      code: "head-not-accepted",
+      message: `HEAD (${headCommit.slice(0, 7)}) does not descend from the last accepted landing (${claimedCommit.slice(0, 7)}).`,
+    };
+  }
+  if (landingCommit !== headCommit) {
+    const postCommits = await runCli(runner, "git", ["log", "--format=", "--name-only", `${landingCommit}..${headCommit}`], input.projectRoot);
+    if (!postCommits.ok) {
+      return { ok: false, code: "head-not-accepted", message: `could not inspect commits since last landing: ${postCommits.message}` };
+    }
+    const touched = postCommits.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    const nonMemory = touched.filter((file) => !isSeatMemoryRelativePathAllowed(file));
+    if (nonMemory.length > 0) {
+      return {
+        ok: false,
+        code: "head-not-accepted",
+        message: `HEAD has unaccepted product changes since the last landing: ${nonMemory.slice(0, 5).join(", ")}`,
+      };
+    }
+  }
+
+  return { ok: true, branch: checkedOutBranch, commit: headCommit };
+}
+
 export async function releaseProject(input: ReleaseProjectInput): Promise<ReleaseProjectResult> {
   const runner = input.runner ?? builtinVaultRunner;
   const cleanVersion = normalizeVersion(input.version);
@@ -231,55 +304,13 @@ export async function releaseProject(input: ReleaseProjectInput): Promise<Releas
     return preFail("no-origin", "Project has no `origin` remote — publish it to GitHub from the panel first.");
   }
 
-  // 3. <project-root> is clean and not detached
-  const statusRes = await runCli(runner, "git", ["status", "--porcelain"], input.projectRoot);
-  if (!statusRes.ok) {
-    return preFail("root-dirty", `could not read repository status: ${statusRes.message}`);
+  // 3–5. Repo clean, non-detached, no running gate, accepted HEAD
+  const integrity = await checkRepoReleaseIntegrity({ factory: input.factory, projectRoot: input.projectRoot, runner });
+  if (!integrity.ok) {
+    return preFail(integrity.code, integrity.message);
   }
-  if (statusRes.stdout.trim() !== "") {
-    return preFail("root-dirty", "<project-root> has uncommitted or untracked changes — clean the tree before releasing.");
-  }
-
-  const branchRes = await runCli(runner, "git", ["symbolic-ref", "--short", "HEAD"], input.projectRoot);
-  if (!branchRes.ok || branchRes.stdout.trim() === "") {
-    return preFail("root-detached", "<project-root> HEAD is detached — check out a branch before releasing.");
-  }
-  const checkedOutBranch = branchRes.stdout.trim();
-
-  const headRes = await runCli(runner, "git", ["rev-parse", "HEAD"], input.projectRoot);
-  if (!headRes.ok || headRes.stdout.trim() === "") {
-    return preFail("root-detached", "could not resolve HEAD commit");
-  }
-  const headCommit = headRes.stdout.trim();
-
-  // 4. No Gate running
-  if (hasRunningGateInLedger(input.factory.ledger.events)) {
-    return preFail("gate-running", "a Contract Gate is currently running for this Project — wait for its verdict before releasing.");
-  }
-
-  // 5. HEAD equals last Accepted landing or descends from it only through seat-memory paths
-  const claimedCommit = lastAcceptedLandingSha(input.factory.ledger.events);
-  if (claimedCommit === undefined) {
-    return preFail("head-not-accepted", "no accepted wave landing exists in this Project's Ledger — land an engineer wave first.");
-  }
-  const landingCommit = await resolveLandingCommit(runner, input.projectRoot, claimedCommit, headCommit);
-  if (landingCommit === undefined) {
-    return preFail("head-not-accepted", `HEAD (${headCommit.slice(0, 7)}) does not descend from the last accepted landing (${claimedCommit.slice(0, 7)}).`);
-  }
-  if (landingCommit !== headCommit) {
-    const postCommits = await runCli(runner, "git", ["log", "--format=", "--name-only", `${landingCommit}..${headCommit}`], input.projectRoot);
-    if (!postCommits.ok) {
-      return preFail("head-not-accepted", `could not inspect commits since last landing: ${postCommits.message}`);
-    }
-    const touched = postCommits.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-    const nonMemory = touched.filter((file) => !isSeatMemoryRelativePathAllowed(file));
-    if (nonMemory.length > 0) {
-      return preFail(
-        "head-not-accepted",
-        `HEAD has unaccepted product changes since the last landing: ${nonMemory.slice(0, 5).join(", ")}`,
-      );
-    }
-  }
+  const checkedOutBranch = integrity.branch;
+  const headCommit = integrity.commit;
 
   // 6. CHANGELOG.md, if present, has ## [x.y.z]
   let notes: string | undefined;
@@ -464,6 +495,12 @@ export async function releaseProject(input: ReleaseProjectInput): Promise<Releas
     skipped,
   });
 
+  const storeSettings = readStoreReleaseSettings(input.stateDir, input.projectSlug);
+  const isMobileProject =
+    detectMobilePlatforms(input.projectRoot).length > 0 ||
+    existsSync(join(input.projectRoot, ".store-release", "manifest.json"));
+  const storeReleaseAutoStaging = storeSettings.mode === "auto-staging" && isMobileProject;
+
   return {
     ok: true,
     version: cleanVersion,
@@ -473,5 +510,6 @@ export async function releaseProject(input: ReleaseProjectInput): Promise<Releas
     url: releaseUrl,
     mode: settings.mode,
     skipped,
+    ...(storeReleaseAutoStaging ? { storeReleaseAutoStaging: true } : {}),
   };
 }
