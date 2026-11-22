@@ -44,8 +44,8 @@ import { handoffLines } from "./core/report.ts";
 import type { Factory } from "./core/factory.ts";
 import type { LedgerEvent, MeterUsage, NeedsHumanEvidence, NeedsHumanReason, PeerDisposition, PeerHandoffFields, Verdict } from "./core/events.ts";
 import { CorrelationRegistry, readCorrelations } from "./core/correlations.ts";
-import { loadLanes, parseLane, PEER_THINKING_LEVELS, resolvePeerThinkingLane } from "./core/lanes.ts";
-import type { LaneThinkingCatalogEntry, PeerThinkingLevel } from "./core/lanes.ts";
+import { loadLanes, normalizeLanesWithProviders, parseLane, PEER_THINKING_LEVELS, providerCatalogAlias, resolvePeerThinkingLane } from "./core/lanes.ts";
+import type { Lanes, LaneThinkingCatalogEntry, PeerThinkingLevel } from "./core/lanes.ts";
 import { listProjectRegistrations, readProjectRegistration, resolveProject, writeProjectRegistration } from "./core/project.ts";
 import { writeProjectNotebook } from "./core/preflight.ts";
 import { releaseProject } from "./release.ts";
@@ -1490,7 +1490,7 @@ export async function providerCatalogForLane(
     let catalogProvider = parsed.provider;
     let listed = await daemon.providers?.listModels?.(catalogProvider);
     if (!Array.isArray(listed?.models) || listed.models.length === 0) {
-      const alias = parsed.provider === "agy" ? "antigravity" : parsed.provider === "claude-code" ? "claude" : undefined;
+      const alias = providerCatalogAlias(parsed.provider);
       if (alias !== undefined) {
         const aliasListed = await daemon.providers?.listModels?.(alias);
         if (Array.isArray(aliasListed?.models) && aliasListed.models.length > 0) {
@@ -1504,6 +1504,30 @@ export async function providerCatalogForLane(
   } catch {
     return undefined; // best-effort catalog lookup — the configured lane stands
   }
+}
+
+/**
+ * Best-effort catalog normalization of a whole `Lanes` table against the
+ * daemon's `providers.listModels` (ADR 0067). Never throws when `listModels` is
+ * absent or unreachable, returning `lanes` verbatim on any failure.
+ */
+export async function normalizeLanesWithDaemon(
+  daemon: SurfaceDaemonApi | undefined,
+  lanes: Lanes,
+): Promise<Lanes> {
+  if (daemon?.providers?.listModels === undefined) return lanes;
+  const seenProviders = new Set<string>();
+  const uniqueProviderLanes: string[] = [];
+  for (const lane of Object.values(lanes)) {
+    const parsed = parseLane(lane);
+    if (parsed === undefined || seenProviders.has(parsed.provider)) continue;
+    seenProviders.add(parsed.provider);
+    uniqueProviderLanes.push(lane);
+  }
+  if (uniqueProviderLanes.length === 0) return lanes;
+  const entries = (await Promise.all(uniqueProviderLanes.map((lane) => providerCatalogForLane(daemon, lane))))
+    .flatMap((entry) => entry ?? []);
+  return normalizeLanesWithProviders(lanes, entries);
 }
 
 /**

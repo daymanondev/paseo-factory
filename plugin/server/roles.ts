@@ -17,7 +17,8 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { provisionAgyPlugin, ensureFactoryBinScripts } from "./core/agy-home.ts";
 import { CorrelationRegistry } from "./core/correlations.ts";
-import { parseLane } from "./core/lanes.ts";
+import { normalizeLaneWithProviders, parseLane } from "./core/lanes.ts";
+import type { LaneThinkingCatalogEntry } from "./core/lanes.ts";
 import { resolveOrBootstrapProject, resolveProject } from "./core/project.ts";
 import { parseLedgerJsonl } from "./core/ledger-validation.ts";
 import { projectTask } from "./core/task-state.ts";
@@ -246,7 +247,7 @@ export interface SupervisorCandidateAgent {
  */
 export function isSupervisorCandidate(
   agent: SupervisorCandidateAgent,
-  input: { stateDir: string; slug: string },
+  input: { stateDir: string; slug: string; providers?: readonly LaneThinkingCatalogEntry[] },
 ): boolean {
   const provider = typeof agent.provider === "string" ? agent.provider.trim() : "";
   const inferred = inferRoleFromProviderId(provider);
@@ -257,7 +258,8 @@ export function isSupervisorCandidate(
   if (labels.seat === "lead" || labels.task !== undefined) return false; // a Lead or task-bound Peer
   // Arm 3 — the picker on the Supervisor lane's provider/model.
   const lane = resolveRoleLane(input.stateDir, input.slug, "supervisor");
-  const parsed = lane !== undefined ? parseLane(lane) : undefined;
+  const normalizedLane = lane !== undefined ? normalizeLaneWithProviders(lane, input.providers) : undefined;
+  const parsed = normalizedLane !== undefined ? parseLane(normalizedLane) : undefined;
   if (parsed === undefined || provider === "") return false;
   const familyOf = (value: string): string => value.split("/")[0]?.trim().toLowerCase() ?? "";
   if (familyOf(provider) !== familyOf(parsed.provider)) return false;
@@ -643,6 +645,75 @@ export function injectRoleOnCreate<R extends AgentCreateRequest>(
     bound.projectSlug === request.env?.PASEO_FACTORY_PROJECT && bound.task === task;
 
 
+  const finalizeRoleCreate = (target: {
+    role: RoleName;
+    envProject: ProjectIdentity;
+    promptProject: ProjectIdentity;
+    title: string | null | undefined;
+    task?: string;
+    factoryCmd?: string;
+  }): R => {
+    const issued = correlations.issue({
+      role: target.role,
+      projectSlug: target.promptProject.slug,
+      projectRoot: target.envProject.root !== "" ? target.envProject.root : request.config.cwd,
+      ...(target.task !== undefined ? { task: target.task } : {}),
+    });
+    // Resolve `factory-*` role providers through Lane config so Layer-1 fences
+    // target the underlying harness rather than no-oping on `factory-*`.
+    const effectiveFamily = resolveEffectiveProviderFamily(
+      request.config.provider,
+      target.role,
+      stateDir,
+      target.promptProject.slug,
+    );
+    const isLiveContract = options?.liveRoleContract === true && effectiveFamily !== "pi";
+    const fencedConfig = applyProviderExecutionFence(
+      {
+        ...request.config,
+        title: target.title,
+        ...(isLiveContract
+          ? {}
+          : {
+              systemPrompt: appendContract(
+                request.config.systemPrompt,
+                buildRoleKickoffPrompt(target.role, {
+                  ...(target.factoryCmd !== undefined ? { factoryCmd: target.factoryCmd } : {}),
+                  ...(target.task !== undefined ? { task: target.task } : {}),
+                  project: target.promptProject,
+                  helperMcps: discoverHelperMcps({ stateDir, userHome }).servers,
+                }),
+              ),
+            }),
+      },
+      {
+        role: target.role,
+        stateDir,
+        correlationId: issued.correlationId,
+        projectSlug: target.promptProject.slug,
+        ...(target.task !== undefined ? { task: target.task } : {}),
+        userHome,
+        ...(options?.agyPluginsDir !== undefined ? { agyPluginsDir: options.agyPluginsDir } : {}),
+        ...(options?.perSessionAgyMcp !== undefined ? { perSessionAgyMcp: options.perSessionAgyMcp } : {}),
+        ...(isLiveContract ? { liveRoleContract: true } : {}),
+        providerFamily: effectiveFamily,
+      },
+    );
+    const nextFactoryEnv = factoryEnvFor(target.role, {
+      stateDir,
+      project: target.envProject,
+      ...(target.task !== undefined ? { task: target.task } : {}),
+      correlationId: issued.correlationId,
+      userHome,
+      provider: request.config.provider,
+      environment: request.env,
+    });
+    return sanitizeAgentCreateHookResult({
+      config: fencedConfig,
+      env: buildCreateEnv(request.env, nextFactoryEnv, isLiveContract),
+    }) as R;
+  };
+
   // A managed Task worktree keeps its task-bound path — the correlation and
   // the contract both carry the task id — whatever named the role.
   if (role === undefined || role === "agent") {
@@ -651,54 +722,15 @@ export function injectRoleOnCreate<R extends AgentCreateRequest>(
       const reg = listProjectRegistrations(stateDir).find((r) => r.slug === worktree.slug);
       const projectRoot = reg?.root ?? "";
       if (alreadyProvisioned(worktree.slug, worktree.task)) return undefined;
-      const issued = correlations.issue({
+      return finalizeRoleCreate({
         role: "agent",
-        projectSlug: worktree.slug,
-        projectRoot: projectRoot !== "" ? projectRoot : request.config.cwd,
+        envProject: { root: projectRoot, slug: worktree.slug },
+        promptProject: { root: request.config.cwd, slug: worktree.slug },
+        // The Agent tab inside the Task worktree Workspace reads `Peer · <Task>`
+        // (ADR 0017 §2) — never the bare task id or the raw spawn prompt.
+        title: formatPeerAgentTitle(worktree.task),
         task: worktree.task,
       });
-      const effectiveFamily = resolveEffectiveProviderFamily(request.config.provider, "agent", stateDir, worktree.slug);
-      const isLiveContract = options?.liveRoleContract === true && effectiveFamily !== "pi";
-      const fencedConfig = applyProviderExecutionFence(
-        {
-          ...request.config,
-          // The Agent tab inside the Task worktree Workspace reads `Peer · <Task>`
-          // (ADR 0017 §2) — never the bare task id or the raw spawn prompt.
-          title: formatPeerAgentTitle(worktree.task),
-          ...(isLiveContract
-            ? {}
-            : {
-                systemPrompt: appendContract(
-                  request.config.systemPrompt,
-                  buildRoleKickoffPrompt("agent", {
-                    task: worktree.task,
-                    project: { root: request.config.cwd, slug: worktree.slug },
-                    helperMcps: discoverHelperMcps({ stateDir, userHome }).servers,
-                  }),
-                ),
-              }),
-        },
-        {
-          role: "agent",
-          stateDir,
-          correlationId: issued.correlationId,
-          projectSlug: worktree.slug,
-          task: worktree.task,
-          userHome,
-          ...(options?.agyPluginsDir !== undefined ? { agyPluginsDir: options.agyPluginsDir } : {}),
-          ...(options?.perSessionAgyMcp !== undefined ? { perSessionAgyMcp: options.perSessionAgyMcp } : {}),
-          ...(isLiveContract ? { liveRoleContract: true } : {}),
-          // A `factory-peer` spawn (ADR 0017 §2) fences under the worker
-          // lane's harness — without this, `providerFamilyOf("factory-peer")`
-          // matches no family and the Layer-1 agent fence silently no-ops.
-          providerFamily: effectiveFamily,
-        },
-      );
-      const taskEnv = factoryEnvFor("agent", { stateDir, project: { root: projectRoot, slug: worktree.slug }, task: worktree.task, correlationId: issued.correlationId, userHome, provider: request.config.provider, environment: request.env });
-      return sanitizeAgentCreateHookResult({
-        config: fencedConfig,
-        env: buildCreateEnv(request.env, taskEnv, isLiveContract),
-      }) as R;
     }
     if (role === undefined) return undefined;
   }
@@ -719,49 +751,15 @@ export function injectRoleOnCreate<R extends AgentCreateRequest>(
     ? { root: registered.root, slug: registered.slug }
     : { root: project.root, slug: project.slug };
   if (alreadyProvisioned(projectIdentity.slug)) return undefined;
-  const issued = correlations.issue({
+  return finalizeRoleCreate({
     role,
-    projectSlug: projectIdentity.slug,
-    projectRoot: projectIdentity.root,
+    envProject: projectIdentity,
+    promptProject: projectIdentity,
+    // The Agent tab inside the main Workspace reads the clean seat title
+    // (ADR 0017 §2) — `Supervisor` / `Lead`, never the raw first message.
+    title: role === "supervisor" || role === "lead" ? SEAT_TITLES[role] : request.config.title,
+    factoryCmd: "factory",
   });
-  const effectiveFamily = resolveEffectiveProviderFamily(request.config.provider, role, stateDir, projectIdentity.slug);
-  const isLiveContract = options?.liveRoleContract === true && effectiveFamily !== "pi";
-  const fencedConfig = applyProviderExecutionFence(
-    {
-      ...request.config,
-      // The Agent tab inside the main Workspace reads the clean seat title
-      // (ADR 0017 §2) — `Supervisor` / `Lead`, never the raw first message.
-      title: role === "supervisor" || role === "lead" ? SEAT_TITLES[role] : request.config.title,
-      ...(isLiveContract
-        ? {}
-        : {
-            systemPrompt: appendContract(
-              request.config.systemPrompt,
-              buildRoleKickoffPrompt(role, {
-                factoryCmd: "factory",
-                project: projectIdentity,
-                helperMcps: discoverHelperMcps({ stateDir, userHome }).servers,
-              }),
-            ),
-          }),
-    },
-    {
-      role,
-      stateDir,
-      correlationId: issued.correlationId,
-      projectSlug: projectIdentity.slug,
-      userHome,
-      ...(options?.agyPluginsDir !== undefined ? { agyPluginsDir: options.agyPluginsDir } : {}),
-      ...(options?.perSessionAgyMcp !== undefined ? { perSessionAgyMcp: options.perSessionAgyMcp } : {}),
-      ...(isLiveContract ? { liveRoleContract: true } : {}),
-      providerFamily: effectiveFamily,
-    },
-  );
-  const seatEnv = factoryEnvFor(role, { stateDir, project: projectIdentity, correlationId: issued.correlationId, userHome, provider: request.config.provider, environment: request.env });
-  return sanitizeAgentCreateHookResult({
-    config: fencedConfig,
-    env: buildCreateEnv(request.env, seatEnv, isLiveContract),
-  }) as R;
 }
 
 const ROLE_CONTEXT_MARK = "<!-- paseo-factory injected role contract -->";
@@ -935,6 +933,13 @@ export function injectSessionEnv<
       effectiveContractMode !== "live" ||
       effectiveFamily === "pi"
     ) {
+      if (options?.liveRoleContract !== true || request.purpose === "history") {
+        const { appendSystemPrompt: _ignored, ...rest } = request;
+        return {
+          ...rest,
+          env: nextEnv,
+        } as R & { appendSystemPrompt?: string[] };
+      }
       return {
         ...request,
         env: nextEnv,

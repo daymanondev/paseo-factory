@@ -45,6 +45,7 @@ interface FakeAgent {
   title?: string;
   status?: string;
   provider?: string;
+  model?: string | null;
   labels?: Record<string, string>;
   requiresAttention?: boolean;
   cwd?: string;
@@ -77,7 +78,7 @@ function fakeDaemon(agents: FakeAgent[]) {
               provider: agent.provider ?? "pi/zai/glm-5.3",
               title: agent.title ?? null,
               status: agent.status ?? "idle",
-              model: null,
+              model: agent.model ?? null,
               labels: agent.labels ?? {},
               archivedAt: null,
               requiresAttention: agent.requiresAttention ?? false,
@@ -2566,6 +2567,59 @@ test("factory.supervisor.adopt refuses an agent outside the Project workspace an
   assert.equal(asLead.code, "agent-bound-elsewhere");
   assert.equal(readProjectRegistration(stateDir, slug)?.supervisor ?? null, null, "a refused adopt binds nothing");
   assert.equal(fake.sent.length, 0);
+});
+
+test("supervisorSessionOpened, supervisorAdopt, and kickoffSupervisorSeat normalize legacy Antigravity lanes against live catalog (ADR 0067)", async (t) => {
+  const { stateDir, slug, projectRoot, surface, fake } = makeSpooledSurface(t);
+  writeLanes(stateDir, {
+    supervisor: "antigravity/gemini-4-argon-high",
+    lead: "antigravity/gemini-4-argon-medium",
+    worker: "antigravity/gemini-4-argon-low",
+  });
+  fake.daemon.providers = {
+    listAvailable: async () => ({ providers: [{ provider: "antigravity", available: true }] }),
+    listModels: async () => ({
+      models: [
+        {
+          id: "gemini-4-argon",
+          label: "Gemini 4 Argon",
+          thinkingOptions: [{ id: "low" }, { id: "medium" }, { id: "high" }],
+        },
+      ],
+    }),
+  };
+
+  fake.agents.push({
+    id: "agy-picker-1",
+    title: "Antigravity picker chat",
+    status: "idle",
+    provider: "antigravity",
+    model: "gemini-4-argon",
+    cwd: projectRoot,
+    labels: {},
+  });
+  await surface.supervisorSessionOpened({ agentId: "agy-picker-1", cwd: projectRoot });
+  assert.equal(readProjectRegistration(stateDir, slug)?.supervisor, "agy-picker-1");
+  assert.equal(fake.sent.length, 1);
+  assert.match(fake.sent[0]!.text, /supervisor=antigravity\/gemini-4-argon:high/);
+  assert.match(fake.sent[0]!.text, /lead=antigravity\/gemini-4-argon:medium/);
+  assert.match(fake.sent[0]!.text, /worker=antigravity\/gemini-4-argon:low/);
+
+  // Explicit adopt also matches catalog-normalized Antigravity picker chat and emits normalized kickoff lanes.
+  fake.agents.push({
+    id: "agy-picker-2",
+    title: "Replacement Antigravity chat",
+    status: "idle",
+    provider: "antigravity",
+    model: "gemini-4-argon",
+    cwd: projectRoot,
+    labels: {},
+  });
+  const adopted = await surface.supervisorAdopt({ projectRoot, agentId: "agy-picker-2" });
+  assert.ok(adopted.ok, adopted.ok ? "" : adopted.error);
+  assert.equal(readProjectRegistration(stateDir, slug)?.supervisor, "agy-picker-2");
+  assert.equal(fake.sent.length, 2);
+  assert.match(fake.sent[1]!.text, /supervisor=antigravity\/gemini-4-argon:high/);
 });
 
 test("spool kind release enforces preconditions, seat-memory vs product commits, auto mode, tag-conflict, push failures, and generated notes", async (t) => {

@@ -2017,6 +2017,37 @@ test("isSupervisorCandidate recognises the three candidate arms — the factory-
   assert.equal(isSupervisorCandidate({ provider: "factory-peer" }, { stateDir, slug }), false);
   assert.equal(isSupervisorCandidate({ provider: "claude/opus-4-8", labels: { seat: "lead" } }, { stateDir, slug }), false);
   assert.equal(isSupervisorCandidate({ provider: "claude/opus-4-8", labels: { task: "T-01" } }, { stateDir, slug }), false);
+
+  // Catalog-normalized Antigravity lane: legacy antigravity/gemini-4-argon-high matches gemini-4-argon when catalog advertises thinkingOptions.
+  const agyStateDir = join(dir, "agy-state");
+  mkdirSync(agyStateDir, { recursive: true });
+  writeFileSync(
+    join(agyStateDir, "lanes.json"),
+    `${JSON.stringify({ supervisor: "antigravity/gemini-4-argon-high", lead: "pi/zai/glm-5.3", worker: "pi/zai/glm-5.3" }, null, 2)}\n`,
+  );
+  const agyProviders = [
+    {
+      provider: "antigravity",
+      models: [{ id: "gemini-4-argon", thinkingOptions: [{ id: "low" }, { id: "high" }] }],
+    },
+  ];
+  assert.equal(
+    isSupervisorCandidate({ provider: "antigravity", model: "gemini-4-argon" }, { stateDir: agyStateDir, slug, providers: agyProviders }),
+    true,
+  );
+  assert.equal(
+    isSupervisorCandidate({ provider: "antigravity/gemini-4-argon" }, { stateDir: agyStateDir, slug, providers: agyProviders }),
+    true,
+  );
+  assert.equal(
+    isSupervisorCandidate({ provider: "antigravity", model: "gemini-2.5-pro" }, { stateDir: agyStateDir, slug, providers: agyProviders }),
+    false,
+  );
+  assert.equal(
+    isSupervisorCandidate({ provider: "antigravity", model: "gemini-4-argon" }, { stateDir: agyStateDir, slug }),
+    false,
+    "without catalog providers, legacy suffixed lane keeps its literal model",
+  );
 });
 
 test("Lead contracts enforce Scout-First Context Discipline (<= 3 targeted boundary reads), Missing-Capability Fail-Fast Guard, and keep both MCP + CLI fallback", () => {
@@ -2625,7 +2656,7 @@ test("injectSessionEnv delivers fresh live role contracts and Peer skill scope v
   assert.match(peerResumed.appendSystemPrompt?.[0] ?? "", /figma/);
   assert.match(peerResumed.appendSystemPrompt?.[0] ?? "", /updated-skill/);
 
-  // 3. Negative gates: history open never appends or returns appendSystemPrompt
+  // 3. Negative gates: history open strips even pre-populated appendSystemPrompt
   const historyOpen = injectSessionEnv(
     {
       agentId: "sup-live-1",
@@ -2633,6 +2664,7 @@ test("injectSessionEnv delivers fresh live role contracts and Peer skill scope v
       provider: "codex/gpt-5.4",
       reason: "resume",
       purpose: "history",
+      appendSystemPrompt: ["[other-plugin] pre-populated"],
       env: { ...(supCreate.env ?? {}) },
     },
     stateDir,
@@ -2640,9 +2672,9 @@ test("injectSessionEnv delivers fresh live role contracts and Peer skill scope v
     { liveRoleContract: true },
   );
   assert.ok(historyOpen !== undefined);
-  assert.equal("appendSystemPrompt" in historyOpen, false, "history open never sets appendSystemPrompt");
+  assert.equal("appendSystemPrompt" in historyOpen, false, "history open never returns appendSystemPrompt even when pre-populated");
 
-  // 4. Negative gate: legacy agent without PASEO_FACTORY_CONTRACT_MODE=live receives no appendSystemPrompt
+  // 4. Negative gate: legacy agent without PASEO_FACTORY_CONTRACT_MODE=live receives no factory appendSystemPrompt (and preserves upstream entries)
   const legacyEnv = { ...supCreate.env };
   delete legacyEnv.PASEO_FACTORY_CONTRACT_MODE;
   const legacyOpen = injectSessionEnv(
@@ -2652,6 +2684,7 @@ test("injectSessionEnv delivers fresh live role contracts and Peer skill scope v
       provider: "codex/gpt-5.4",
       reason: "resume",
       purpose: "interactive",
+      appendSystemPrompt: ["[other-plugin] keep-legacy"],
       env: legacyEnv,
     },
     stateDir,
@@ -2659,9 +2692,9 @@ test("injectSessionEnv delivers fresh live role contracts and Peer skill scope v
     { liveRoleContract: true },
   );
   assert.ok(legacyOpen !== undefined);
-  assert.equal("appendSystemPrompt" in legacyOpen, false, "legacy session without live mode receives no appendSystemPrompt");
+  assert.deepEqual(legacyOpen.appendSystemPrompt, ["[other-plugin] keep-legacy"], "legacy interactive session preserves upstream appendSystemPrompt untouched");
 
-  // 5. Negative gate: Pi never receives appendSystemPrompt (even if PASEO_FACTORY_CONTRACT_MODE=live were present)
+  // 5. Negative gate: Pi never receives factory appendSystemPrompt (and preserves upstream entries)
   const piOpen = injectSessionEnv(
     {
       agentId: "sup-pi-1",
@@ -2669,6 +2702,7 @@ test("injectSessionEnv delivers fresh live role contracts and Peer skill scope v
       provider: "pi/zai/glm-5.3",
       reason: "create",
       purpose: "interactive",
+      appendSystemPrompt: ["[other-plugin] keep-pi"],
       env: { ...(supCreate.env ?? {}), PASEO_FACTORY_CONTRACT_MODE: "live" },
     },
     stateDir,
@@ -2676,9 +2710,9 @@ test("injectSessionEnv delivers fresh live role contracts and Peer skill scope v
     { liveRoleContract: true },
   );
   assert.ok(piOpen !== undefined);
-  assert.equal("appendSystemPrompt" in piOpen, false, "Pi session never receives appendSystemPrompt");
+  assert.deepEqual(piOpen.appendSystemPrompt, ["[other-plugin] keep-pi"], "Pi interactive session preserves upstream appendSystemPrompt untouched");
 
-  // 6. Negative gate: <0.17.1 host (liveRoleContract false/omitted) never sets appendSystemPrompt
+  // 6. Negative gate: <0.17.1 host (liveRoleContract false/omitted) strips even pre-populated appendSystemPrompt
   const pre017Open = injectSessionEnv(
     {
       agentId: "sup-live-1",
@@ -2686,6 +2720,7 @@ test("injectSessionEnv delivers fresh live role contracts and Peer skill scope v
       provider: "codex/gpt-5.4",
       reason: "create",
       purpose: "interactive",
+      appendSystemPrompt: ["[other-plugin] strip-pre017"],
       env: { ...(supCreate.env ?? {}) },
     },
     stateDir,
@@ -2693,5 +2728,5 @@ test("injectSessionEnv delivers fresh live role contracts and Peer skill scope v
     { liveRoleContract: false },
   );
   assert.ok(pre017Open !== undefined);
-  assert.equal("appendSystemPrompt" in pre017Open, false, "<0.17.1 host never sets appendSystemPrompt");
+  assert.equal("appendSystemPrompt" in pre017Open, false, "<0.17.1 host never returns appendSystemPrompt even when pre-populated");
 });
