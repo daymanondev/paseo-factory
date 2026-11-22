@@ -699,3 +699,40 @@ test("auto context-mark Peer handoff preserves the epoch spawn thinking via sibl
   assert.equal(f.created.length, 2);
   assert.deepEqual(f.created[1]!.config, { provider: "antigravity/gemini-4-argon-medium" }, "explicit Owner handoff lane override is never overridden by spawn thinking");
 });
+
+test("auto context-mark Peer handoff normalizes legacy effort-suffixed Antigravity lanes onto Paseo 0.17.1 base model + thinkingOptions (ADR 0067)", async t => {
+  const f = fixture(t);
+  saveLanes(f.stateDir, { worker: "antigravity/gemini-4-hydrogen-high" }, f.slug);
+  const projectLanesFile = join(projectStateDir(f.stateDir, f.slug), "lanes.json");
+  const lanesBefore = readFileSync(projectLanesFile, "utf8");
+  f.daemon.providers.listModels = async (provider: string) =>
+    provider === "antigravity"
+      ? {
+          models: [
+            {
+              id: "gemini-4-hydrogen",
+              thinkingOptions: [{ id: "low" }, { id: "medium" }, { id: "high" }, { id: "xhigh" }],
+            },
+          ],
+        }
+      : { models: [] };
+
+  // 1. With spawn_dispatched.thinking: "low"
+  f.factory.setContract({ task: "T-04", workspace: f.root, gate: "true", description: "Complete the bounded slice" });
+  f.factory.requestSpawn({ task: "T-04", provider: "antigravity/gemini-4-hydrogen-high", arity: 1, worktree: f.cwd, thinking: "low", thinkingReason: "Mechanical slice" });
+
+  await f.runtime.onLeadTurnEnded(ended(f.peer.id));
+  writeFileSync(f.handoff, "# Completed & Verified Slice\nCarry on with the remaining check.");
+  await f.runtime.onLeadTurnEnded(ended(f.peer.id));
+
+  assert.equal(f.created.length, 1);
+  assert.deepEqual(f.created[0]!.config, { provider: "antigravity/gemini-4-hydrogen", thinkingOptionId: "low" });
+
+  // 2. Owner replaceNow with explicit legacy lane normalizes onto base + thinkingOptionId too
+  const ownerOverride = await f.surface.handoff({ projectRoot: f.root, seat: "peer:T-04", lane: "antigravity/gemini-4-hydrogen-medium" }, "replaceNow");
+  assert.equal(ownerOverride.ok, true);
+  assert.equal(f.created.length, 2);
+  assert.deepEqual(f.created[1]!.config, { provider: "antigravity/gemini-4-hydrogen", thinkingOptionId: "medium" });
+
+  assert.equal(readFileSync(projectLanesFile, "utf8"), lanesBefore, "lanes.json on disk stays unmutated");
+});

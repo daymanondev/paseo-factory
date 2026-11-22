@@ -1,5 +1,12 @@
 /** The lane and provider configuration shared by create and permission hooks. */
-import { loadLanes, migrateLegacyZcodeLane, parseLane } from "./core/lanes.ts";
+import {
+  findCatalogModel,
+  findCatalogProviderEntry,
+  loadLanes,
+  migrateLegacyZcodeLane,
+  normalizeLaneWithProviders,
+  parseLane,
+} from "./core/lanes.ts";
 import type { RoleName } from "./core/roles-contract.ts";
 export interface ProviderCatalogModel {
   id: string;
@@ -17,19 +24,8 @@ export function findCatalogModelMeta(
   model: string,
   providers?: readonly ProviderCatalogEntry[],
 ): ProviderCatalogModel | undefined {
-  if (providers === undefined || providers.length === 0) return undefined;
-  const entry = providers.find((p) => (p.provider ?? p.id) === provider);
-  const models = entry?.models;
-  if (models === undefined || models === null) return undefined;
-  const strippedModel = model.replace(/^[^/]+\//, "");
-  return models.find(
-    (m) =>
-      m.id === model ||
-      `${provider}/${m.id}` === model ||
-      m.id === `${provider}/${model}` ||
-      m.id === strippedModel ||
-      m.id.replace(/^[^/]+\//, "") === strippedModel,
-  );
+  const found = findCatalogProviderEntry(provider, providers);
+  return found === undefined ? undefined : findCatalogModel(found.catalogProvider, model, found.entry.models);
 }
 
 export function resolveRoleLane(
@@ -47,7 +43,7 @@ export function laneProviderConfig(
   raw: string,
   providers?: readonly ProviderCatalogEntry[],
 ): { provider: string; model: string; thinkingOptionId?: string } {
-  const lane = parseLane(migrateLegacyZcodeLane(raw));
+  const lane = parseLane(normalizeLaneWithProviders(migrateLegacyZcodeLane(raw), providers));
   if (!lane) throw new Error(`Invalid lane: ${raw}`);
   const provider =
     lane.provider === "claude-code"
