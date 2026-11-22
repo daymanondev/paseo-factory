@@ -240,7 +240,9 @@ function shapeIsValid(evt: LedgerEvent): boolean {
       asRecord.attempt === undefined &&
       typeof asRecord.runId === "string" &&
       typeof asRecord.holeKind === "string" &&
-      typeof asRecord.phase === "string"
+      typeof asRecord.phase === "string" &&
+      (asRecord.hasConsoleGuide === undefined || typeof asRecord.hasConsoleGuide === "boolean") &&
+      (asRecord.guidePath === undefined || typeof asRecord.guidePath === "string")
     );
   }
   if (evt.event === "store_release_completed") {
@@ -378,7 +380,13 @@ function v2PayloadIsValid(event: Record<string, unknown>): boolean {
         (STORE_RELEASE_MODES as readonly string[]).includes(event.mode)
       );
     case "store_release_paused":
-      return nonempty(event.runId) && nonempty(event.holeKind) && nonempty(event.phase);
+      return (
+        nonempty(event.runId) &&
+        nonempty(event.holeKind) &&
+        nonempty(event.phase) &&
+        (event.hasConsoleGuide === undefined || typeof event.hasConsoleGuide === "boolean") &&
+        optionalString("guidePath")
+      );
     case "store_release_completed":
       return (
         nonempty(event.runId) &&

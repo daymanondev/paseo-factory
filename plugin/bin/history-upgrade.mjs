@@ -209,7 +209,7 @@ function shapeIsValid(evt) {
     return asRecord.task === void 0 && asRecord.attempt === void 0 && typeof asRecord.runId === "string" && typeof asRecord.action === "string" && Array.isArray(asRecord.platforms) && asRecord.platforms.every((p) => typeof p === "string") && typeof asRecord.mode === "string";
   }
   if (evt.event === "store_release_paused") {
-    return asRecord.task === void 0 && asRecord.attempt === void 0 && typeof asRecord.runId === "string" && typeof asRecord.holeKind === "string" && typeof asRecord.phase === "string";
+    return asRecord.task === void 0 && asRecord.attempt === void 0 && typeof asRecord.runId === "string" && typeof asRecord.holeKind === "string" && typeof asRecord.phase === "string" && (asRecord.hasConsoleGuide === void 0 || typeof asRecord.hasConsoleGuide === "boolean") && (asRecord.guidePath === void 0 || typeof asRecord.guidePath === "string");
   }
   if (evt.event === "store_release_completed") {
     return asRecord.task === void 0 && asRecord.attempt === void 0 && typeof asRecord.runId === "string" && typeof asRecord.action === "string" && Array.isArray(asRecord.platforms) && asRecord.platforms.every((p) => typeof p === "string") && typeof asRecord.summary === "string";
@@ -292,7 +292,7 @@ function v2PayloadIsValid(event) {
     case "store_release_started":
       return nonempty(event.runId) && typeof event.action === "string" && STORE_RELEASE_ACTIONS.includes(event.action) && Array.isArray(event.platforms) && event.platforms.every((item) => nonempty(item)) && typeof event.mode === "string" && STORE_RELEASE_MODES.includes(event.mode);
     case "store_release_paused":
-      return nonempty(event.runId) && nonempty(event.holeKind) && nonempty(event.phase);
+      return nonempty(event.runId) && nonempty(event.holeKind) && nonempty(event.phase) && (event.hasConsoleGuide === void 0 || typeof event.hasConsoleGuide === "boolean") && optionalString("guidePath");
     case "store_release_completed":
       return nonempty(event.runId) && typeof event.action === "string" && STORE_RELEASE_ACTIONS.includes(event.action) && Array.isArray(event.platforms) && event.platforms.every((item) => nonempty(item)) && string("summary");
     case "store_release_failed":

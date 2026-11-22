@@ -1019,3 +1019,219 @@ test("A1: buildCliArgs forwards explicit --platforms filter for probe, stage, an
   assert.deepEqual(recordedArgs[1], ["run", "--playbook", "stage-release", "--project", repoDir, "--slug", project.slug, "--platforms", "android,ios"]);
   assert.deepEqual(recordedArgs[2], ["submit-production", "--project", repoDir, "--slug", project.slug, "--run", "run-a1", "--platforms", "android", "--approve"]);
 });
+
+test("paused-hole with consoleGuide formats lossless guide into Lead wakeup and keeps ledger compact while preserving legacy fallback", async (t) => {
+  const dir = makeTempDir("store-release-console-guide-");
+  disposeDir(t, dir);
+  const paseoHome = join(dir, "paseo-home");
+  const stateDir = join(paseoHome, "plugin-state", "paseo-factory");
+  const repoDir = makeMobileRepo(dir, ["android", "ios"]);
+  const project = ensureProjectRegistered(stateDir, repoDir);
+  assert.ok(project.ok);
+  const factory = createFactory({ stateDir: join(stateDir, "projects", project.slug) });
+  t.after(() => factory.history.stop());
+
+  acceptCommitOnRepo(factory, repoDir, "T-GUIDE");
+  await factory.accept({ task: "T-GUIDE", attempt: 1, accepted_by: "lead" });
+  installFakeRunnerPlugin(paseoHome);
+  writeVaultStoreEnv(paseoHome, {
+    ASC_KEY_PATH: "/tmp/synth-asc.p8",
+    ASC_KEY_ID: "SYNTHKEY",
+    ASC_ISSUER: "00000000-0000-0000-0000-000000000001",
+    APPLE_TEAM_ID: "SYNTHTEAM",
+    GPLAY_KEY_PATH: "/tmp/synth-gplay.json",
+  });
+  setProjectStoreReleaseSettings(stateDir, project.slug, { mode: "on-request" });
+  setStoreReleaseRequest(stateDir, project.slug, { target: "staging", platforms: ["android", "ios"] });
+
+  const guidePath = join(repoDir, ".store-release", "day0-kit", "CONSOLE_GUIDE.md");
+  const day0KitPath = join(repoDir, ".store-release", "day0-kit", "listing-copy.json");
+  const listPlugins = async () => ({ ok: false as const, reason: "offline" });
+  const notifications: Array<{ slug: string; text: string }> = [];
+
+  const guidedRes = await storeReleaseProject({
+    factory,
+    stateDir,
+    paseoHome,
+    projectSlug: project.slug,
+    projectRoot: repoDir,
+    action: "stage",
+    listPlugins,
+    notifyLead: (n) => { notifications.push(n); },
+    runner: async () => ({
+      exitCode: 0,
+      stdout: JSON.stringify({
+        id: "run-guide-1",
+        playbook: "stage-release",
+        status: "paused-hole",
+        phases: [{ id: "phase-2-day0-and-signing", state: "paused-hole", hole: "day0-store-init" }],
+        pausedAtHole: {
+          phase: "phase-2-day0-and-signing",
+          kind: "day0-store-init",
+          resolutionSpec: { kind: "day0-store-init", type: "object", properties: { completed: "boolean" } },
+          payload: {
+            platforms: ["android", "ios"],
+            bundleId: "com.example.demoapp",
+            packageName: "com.example.demoapp",
+            consoleGuidePath: guidePath,
+            day0KitPath,
+            consoleGuide: {
+              version: "2026-11",
+              consoleGuideVersion: "2026-11",
+              generatedAt: "2026-11-22T00:00:00.000Z",
+              appName: "Demo App",
+              slug: "demo-app",
+              platforms: ["android", "ios"],
+              completedByApi: [
+                {
+                  id: "ios-bundle-id",
+                  platform: "ios",
+                  label: "Apple Bundle ID registered",
+                  detail: "com.example.demoapp created with push capability",
+                },
+              ],
+              antiRejectionWarnings: [
+                {
+                  id: "warn-data-safety",
+                  platform: "android",
+                  title: "Data Safety must match SDKs",
+                  lesson: "Declare crash telemetry if Crashlytics is bundled.",
+                  matchedTraits: ["crashlytics"],
+                },
+              ],
+              sections: [
+                {
+                  id: "android-play",
+                  platform: "android",
+                  title: "Google Play Console Setup",
+                  steps: [
+                    {
+                      id: "gplay-create",
+                      order: 1,
+                      title: "Create Android app",
+                      menuPath: "All apps -> Create app",
+                      url: "https://console.example.invalid/play/create",
+                      instructions: ["Enter exact app name and select Free."],
+                      copyFields: [{ id: "pkg", label: "Package name", value: "com.example.demoapp" }],
+                      answers: [
+                        {
+                          question: "Does your app contain ads?",
+                          answer: "No",
+                          reason: "No ad SDK detected",
+                        },
+                      ],
+                    },
+                  ],
+                },
+                {
+                  id: "shared-legal",
+                  platform: "shared",
+                  title: "Legal Pages",
+                  steps: [
+                    {
+                      id: "legal-host",
+                      order: 1,
+                      title: "Host privacy policy",
+                      menuPath: "Store Listing -> Privacy Policy URL",
+                      instructions: ["Publish generated HTML to HTTPS URL."],
+                      copyFields: [{ id: "pp", label: "Privacy Policy URL", value: "https://example.invalid/privacy" }],
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        },
+      }),
+      stderr: "",
+    }),
+  });
+
+  assert.equal(guidedRes.ok, true);
+  assert.ok("settled" in guidedRes);
+  const guidedOutcome = await guidedRes.settled;
+  assert.deepEqual(guidedOutcome, {
+    status: "paused-hole",
+    runId: "run-guide-1",
+    holeKind: "day0-store-init",
+    phase: "phase-2-day0-and-signing",
+    hasConsoleGuide: true,
+    guidePath,
+  });
+
+  const wakeupText = notifications[0]?.text ?? "";
+  assert.match(wakeupText, /Console handoff guide/i);
+  assert.match(wakeupText, /2026-11/);
+  assert.match(wakeupText, /Data Safety must match SDKs/);
+  assert.match(wakeupText, /Declare crash telemetry if Crashlytics is bundled\./);
+  assert.match(wakeupText, /crashlytics/);
+  assert.match(wakeupText, /Apple Bundle ID registered/);
+  assert.match(wakeupText, /com\.example\.demoapp created with push capability/);
+  assert.match(wakeupText, /Google Play Console Setup/);
+  assert.match(wakeupText, /1\. Create Android app/);
+  assert.match(wakeupText, /All apps -> Create app/);
+  assert.match(wakeupText, /https:\/\/console\.example\.invalid\/play\/create/);
+  assert.match(wakeupText, /Package name.*com\.example\.demoapp/);
+  assert.match(wakeupText, /Does your app contain ads\?/);
+  assert.match(wakeupText, /No ad SDK detected/);
+  assert.match(wakeupText, /1\. Host privacy policy/);
+  assert.match(wakeupText, /https:\/\/example\.invalid\/privacy/);
+  assert.ok(wakeupText.includes(guidePath), "wakeup includes CONSOLE_GUIDE.md path");
+  assert.ok(wakeupText.includes(day0KitPath), "wakeup includes day0KitPath");
+  assert.doesNotMatch(wakeupText, /^Payload: \{"platforms"/m, "does not dump raw JSON payload when consoleGuide is formatted");
+
+  const pausedEvent = factory.ledger.events.find(
+    (e) => e.event === "store_release_paused" && e.runId === "run-guide-1",
+  );
+  assert.ok(pausedEvent !== undefined && pausedEvent.event === "store_release_paused");
+  assert.equal(pausedEvent.holeKind, "day0-store-init");
+  assert.equal(pausedEvent.phase, "phase-2-day0-and-signing");
+  assert.equal(pausedEvent.hasConsoleGuide, true);
+  assert.equal(pausedEvent.guidePath, guidePath);
+  const serializedPaused = JSON.stringify(pausedEvent);
+  assert.ok(serializedPaused.length < 512, `store_release_paused must remain compact, got ${serializedPaused.length} chars`);
+  assert.doesNotMatch(serializedPaused, /Data Safety must match SDKs/);
+  assert.doesNotMatch(serializedPaused, /console\.example\.invalid/);
+
+  // Legacy run without consoleGuide preserves minimal summary + omitted guide metadata
+  const legacyRes = await storeReleaseProject({
+    factory,
+    stateDir,
+    paseoHome,
+    projectSlug: project.slug,
+    projectRoot: repoDir,
+    action: "stage",
+    listPlugins,
+    notifyLead: (n) => { notifications.push(n); },
+    runner: async () => ({
+      exitCode: 0,
+      stdout: JSON.stringify({
+        id: "run-legacy-1",
+        playbook: "stage-release",
+        status: "paused-hole",
+        phases: [{ id: "phase-4-pricing", state: "paused-hole", hole: "price-conflict" }],
+        pausedAtHole: {
+          phase: "phase-4-pricing",
+          kind: "price-conflict",
+          payload: { packageName: "com.example.demoapp", conflicts: ["tier-mismatch"] },
+        },
+      }),
+      stderr: "",
+    }),
+  });
+  assert.equal(legacyRes.ok, true);
+  assert.ok("settled" in legacyRes);
+  const legacyOutcome = await legacyRes.settled;
+  assert.deepEqual(legacyOutcome, {
+    status: "paused-hole",
+    runId: "run-legacy-1",
+    holeKind: "price-conflict",
+    phase: "phase-4-pricing",
+    hasConsoleGuide: false,
+  });
+  assert.match(notifications[1]?.text ?? "", /Payload: \{"packageName":"com\.example\.demoapp"/);
+  const legacyEvent = factory.ledger.events.find((e) => e.event === "store_release_paused" && e.runId === "run-legacy-1");
+  assert.ok(legacyEvent !== undefined && legacyEvent.event === "store_release_paused");
+  assert.equal(legacyEvent.hasConsoleGuide, undefined);
+  assert.equal(legacyEvent.guidePath, undefined);
+});

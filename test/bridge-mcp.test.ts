@@ -2866,6 +2866,8 @@ test("bridge.mjs: lead_store_release, supervisor_dispatch_lead({ storeRelease })
   });
 
   const runnerCalls: string[][] = [];
+  let pauseWithConsoleGuide = false;
+  const guideFilePath = join(repoDir, ".store-release", "day0-kit", "CONSOLE_GUIDE.md");
   const spool = startSpool(stateDir, registry.root, {
     pollMs: 25,
     home: homeDir,
@@ -2884,6 +2886,61 @@ test("bridge.mjs: lead_store_release, supervisor_dispatch_lead({ storeRelease })
       runnerCalls.push([...call.args]);
       if (call.args[0] === "probe") {
         return { exitCode: 0, stdout: JSON.stringify({ ok: true, platforms: ["android"], nextVersionCode: 12 }), stderr: "" };
+      }
+      if (pauseWithConsoleGuide) {
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify({
+            id: "run-bridge-guide-1",
+            playbook: "stage-release",
+            status: "paused-hole",
+            platforms: ["android"],
+            phases: [{ id: "phase-2-day0-and-signing", state: "paused-hole", hole: "day0-store-init" }],
+            pausedAtHole: {
+              phase: "phase-2-day0-and-signing",
+              kind: "day0-store-init",
+              resolutionSpec: { kind: "day0-store-init", type: "object", properties: { completed: "boolean" } },
+              payload: {
+                packageName: "com.example.demoapp",
+                consoleGuidePath: guideFilePath,
+                consoleGuide: {
+                  version: "2026-11",
+                  consoleGuideVersion: "2026-11",
+                  generatedAt: "2026-11-22T00:00:00.000Z",
+                  appName: "Demo App",
+                  slug: "demo-app",
+                  platforms: ["android"],
+                  completedByApi: [
+                    { id: "gplay-draft", platform: "android", label: "Upload keystore generated", detail: "Backed up to Private vault" },
+                  ],
+                  antiRejectionWarnings: [
+                    { id: "warn-ads", platform: "android", title: "Ads declaration accuracy", lesson: "Match Play Console ads toggle with manifest SDKs.", matchedTraits: ["no-ads"] },
+                  ],
+                  sections: [
+                    {
+                      id: "android-console",
+                      platform: "android",
+                      title: "Google Play Console",
+                      steps: [
+                        {
+                          id: "gplay-init",
+                          order: 1,
+                          title: "Create Play Console listing",
+                          menuPath: "All apps -> Create app",
+                          url: "https://console.example.invalid/play/setup",
+                          instructions: ["Create the initial Play Console app record."],
+                          copyFields: [{ id: "pkg", label: "Package name", value: "com.example.demoapp" }],
+                          answers: [{ question: "Contains ads?", answer: "No", reason: "No ad SDKs present" }],
+                        },
+                      ],
+                    },
+                  ],
+                },
+              },
+            },
+          }),
+          stderr: "",
+        };
       }
       return {
         exitCode: 0,
@@ -2993,6 +3050,56 @@ test("bridge.mjs: lead_store_release, supervisor_dispatch_lead({ storeRelease })
     assert.ok(pf.ledger.events.some((e) => e.event === "store_release_completed" && e.runId === "run-bridge-1"));
     assert.equal(readStoreReleaseRequest(stateDir, project.slug), undefined, "stage completion consumes on-request");
     assert.ok(sentToLead.some((msg) => /Store release completed/.test(msg)), "Lead woken via mailbox on completion");
+
+    // 5b. Lead stage pausing at Hole with consoleGuide delivers formatted guide via Lead mailbox while keeping Ledger compact
+    await mailRuntime.onLeadTurnEnded({ agentId: "lead-store-1", outcome: { kind: "completed" }, timeline: [] });
+    pauseWithConsoleGuide = true;
+    const dispGuide = await runMcpSession({
+      args: ["--correlation", supCorr.correlationId, "--state-dir", stateDir],
+      cwd: repoDir,
+      requests: [{
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: {
+          name: "supervisor_dispatch_lead",
+          arguments: {
+            message: "Stage Android build with Day-0 guide.",
+            storeRelease: { target: "staging", platforms: ["android"] },
+          },
+        },
+      }],
+    });
+    assert.notEqual((dispGuide[0].result as { isError?: boolean }).isError, true);
+    await mailRuntime.onLeadTurnEnded({ agentId: "lead-store-1", outcome: { kind: "completed" }, timeline: [] });
+    const guidedStageRes = await runMcpSession({
+      args: ["--correlation", leadCorr.correlationId, "--state-dir", stateDir],
+      cwd: repoDir,
+      requests: [{ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_store_release", arguments: { action: "stage", platforms: ["android"] } } }],
+    });
+    assert.notEqual((guidedStageRes[0].result as { isError?: boolean }).isError, true);
+
+    const guideDeadline = Date.now() + 3000;
+    while (
+      Date.now() < guideDeadline &&
+      (!pf.ledger.events.some((e) => e.event === "store_release_paused" && e.runId === "run-bridge-guide-1") ||
+        !sentToLead.some((msg) => /run-bridge-guide-1/.test(msg)))
+    ) {
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    const pausedMail = sentToLead.find((msg) => /run-bridge-guide-1/.test(msg)) ?? "";
+    assert.match(pausedMail, /Console handoff guide/);
+    assert.match(pausedMail, /2026-11/);
+    assert.match(pausedMail, /https:\/\/console\.example\.invalid\/play\/setup/);
+    assert.match(pausedMail, /com\.example\.demoapp/);
+    assert.match(pausedMail, /Contains ads\? -> No/);
+    assert.match(pausedMail, /Ads declaration accuracy/);
+    assert.ok(pausedMail.includes(guideFilePath), "Lead mailbox wakeup includes CONSOLE_GUIDE.md path");
+    const pausedLedgerEvt = pf.ledger.events.find((e) => e.event === "store_release_paused" && e.runId === "run-bridge-guide-1");
+    assert.ok(pausedLedgerEvt !== undefined && pausedLedgerEvt.event === "store_release_paused");
+    assert.equal(pausedLedgerEvt.hasConsoleGuide, true);
+    assert.equal(pausedLedgerEvt.guidePath, guideFilePath);
+    assert.doesNotMatch(JSON.stringify(pausedLedgerEvt), /console\.example\.invalid/);
 
     // 6. Supervisor records Store note (lessons <= 120 lines + app card); over-limit refused; Agent refused; repo stays git-clean
     const noteBad = await runMcpSession({

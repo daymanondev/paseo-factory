@@ -2144,6 +2144,11 @@ test("Lead and Supervisor role laws teach Store release contracts, Hole relay, 2
     assert.match(surface, /supervisor_record_store_note/);
     assert.match(surface, /Store notebook/);
     assert.match(surface, /Store release mode.*off|Vault credentials/i);
+    assert.match(surface, /Console handoff guide/);
+    assert.match(surface, /verbatim/);
+    assert.match(surface, /anti-rejection warnings/);
+    assert.match(surface, /CONSOLE_GUIDE\.md/);
+    assert.match(surface, /confirm in chat/i);
   }
   assert.match(supContract, /paseo-factory_supervisor_record_store_note/);
   assert.doesNotMatch(supContract, /lead_release\(/);
@@ -2173,6 +2178,11 @@ test("Lead and Supervisor role laws teach Store release contracts, Hole relay, 2
     assert.match(surface, /Upstream issue/);
     assert.match(surface, /lead_record_store_note/);
     assert.match(surface, /never.*hack around/i);
+    assert.match(surface, /Console handoff guide/);
+    assert.match(surface, /verbatim/);
+    assert.match(surface, /anti-rejection warnings/);
+    assert.match(surface, /CONSOLE_GUIDE\.md/);
+    assert.match(surface, /confirm in chat/i);
   }
   assert.match(leadContract, /paseo-factory_lead_store_release/);
   assert.match(leadContract, /paseo-factory_lead_record_store_note/);
