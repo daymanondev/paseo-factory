@@ -1699,3 +1699,63 @@ test("effectiveCreateLane prefers the spool's thinking-resolved lane when a tier
     "without a tier the configured lane the driver resolved locally stands",
   );
 });
+
+test("ADR 0068 idleIsFinish and observeTasks hold an idle Peer peacefully while gate_queued is open until settlement", async (t) => {
+  const mk = (seq: number, event: string, extra: Record<string, unknown> = {}) =>
+    ({ seq, event, task: "LEAD1", ts: "2026-11-22T00:00:00.000Z", ...extra }) as never;
+  assert.equal(
+    idleIsFinish([mk(1, "contract_set"), mk(2, "spawn_dispatched"), mk(3, "gate_queued", { attempt: 1, sha: "abc" })], "LEAD1"),
+    false,
+    "open gate_queued is NOT a Peer-terminal outcome — idle Peer stays held",
+  );
+
+  const harness = await leadHarness(
+    t,
+    () => ({ status: "idle", attentionReason: "finished", pendingPermissions: [] }),
+    () => ({ entries: [] }),
+  );
+  let settled = false;
+  let run: Promise<unknown> | undefined;
+  try {
+    harness.factory.ledger.append({ event: "gate_queued", task: "LEAD1", attempt: 1, sha: "deadbeef", id: "gq-drv-1", agent: "ag-lead1" });
+    const logs: string[] = [];
+    const terminals: { fate?: string; reason?: string }[] = [];
+    run = observeTasks(harness.rpc, [{ task: "LEAD1", agentId: "ag-lead1" }], {
+      pollMs: 15,
+      stateDir: harness.stateDir,
+      spoolRoot: harness.spoolRoot,
+      graceMs: 10,
+      missingDeadMs: 80,
+      log: (message) => logs.push(message),
+      onTerminal: (entry) => {
+        terminals.push({ ...(entry.terminal as { fate?: string; reason?: string }) });
+      },
+    });
+    await new Promise((r) => setTimeout(r, 150));
+    const holdsCount = terminals.length;
+    const processed = harness.processedKinds();
+    harness.claimGreen();
+    settled = true;
+    let guardTimer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        run,
+        new Promise<never>((_, reject) => {
+          guardTimer = setTimeout(() => reject(new Error("observeTasks did not settle after claimGreen")), 3_000);
+        }),
+      ]);
+    } finally {
+      clearTimeout(guardTimer);
+    }
+    assert.equal(holdsCount, 0, "idle Peer held past missingDeadMs while gate_queued is open");
+    assert.deepEqual(processed, [], "driver submits no repoke/needs_human while gate_queued is open");
+    assert.ok(logs.some((m) => /Gate is queued\/running/i.test(m)), `expected Gate queued hold log, got: ${logs.join(" | ")}`);
+    assert.deepEqual(terminals.map((x) => x.fate), ["finished"]);
+  } finally {
+    if (!settled) {
+      harness.claimGreen();
+      await run?.catch(() => {});
+    }
+    harness.stop();
+  }
+});

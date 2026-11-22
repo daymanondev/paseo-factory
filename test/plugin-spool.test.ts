@@ -397,6 +397,7 @@ test("peer hooks: verdicts and needs_human land peer mail; a Driver wave holds d
   dropRequest(spoolRoot, { id: "cl-1", kind: "claim", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" }, task: "T1", sha, agent: "agent-worker-1" });
   await until(() => {
     assert.equal(readReply(spoolRoot, "cl-1").ok, true);
+    assert.equal(readMailbox(stateDir, slug).filter((evt) => evt.type === "mail_queued").length, 1, "the verdict mail landed");
   });
   const midWave = readMailbox(stateDir, slug);
   assert.equal(midWave.filter((evt) => evt.type === "mail_queued").length, 1, "the verdict mail landed");
@@ -414,6 +415,7 @@ test("peer hooks: verdicts and needs_human land peer mail; a Driver wave holds d
   dropRequest(spoolRoot, { id: "cl-2", kind: "claim", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" }, task: "T2", sha, agent: "agent-worker-2" });
   await until(() => {
     assert.equal(readReply(spoolRoot, "cl-2").ok, true);
+    assert.equal(readMailbox(stateDir, slug).filter((evt) => evt.type === "mail_delivered").length, 1, "one consolidated delivery for the whole wave");
   });
   const flushed = readMailbox(stateDir, slug);
   const deliveries = flushed.filter((evt) => evt.type === "mail_delivered");
@@ -779,18 +781,19 @@ test("startSpool deduplicates pre-seeded duplicate claim files into ONE Gate att
 
   await until(() => {
     for (const id of ids) assert.ok(existsSync(join(spoolRoot, "replies", `${id}.json`)), `reply for ${id} landed`);
+    assert.ok(factory.ledger.eventsFor("DEDUP-B").some((e) => e.event === "report_written"), "single Gate attempt settled");
   });
 
   // ONE Gate attempt: a single claim round against the contract, attempt 1.
   assert.deepEqual(
     factory.ledger.eventsFor("DEDUP-B").map((e) => e.event),
-    ["contract_set", "claim_reported", "gate_started", "gate_finished", "report_written"],
+    ["contract_set", "gate_queued", "claim_reported", "gate_started", "gate_finished", "report_written"],
     "exactly one claim round — no second Gate, no second Ledger mutation",
   );
   const primary = readReply(spoolRoot, "dup-a"); // filename order makes dup-a the primary
   assert.equal(primary.ok, true);
   assert.equal(primary.attempt, 1);
-  assert.equal(primary.verdict, "green");
+  assert.equal(primary.status, "queued");
 
   // The duplicates' replies are mirrored from the primary under their own ids.
   for (const dup of ["dup-b", "dup-c"]) {
@@ -798,7 +801,7 @@ test("startSpool deduplicates pre-seeded duplicate claim files into ONE Gate att
     assert.equal(mirrored.id, dup, "the mirrored reply carries the duplicate's own id");
     assert.equal(mirrored.ok, primary.ok);
     assert.equal(mirrored.attempt, primary.attempt);
-    assert.equal(mirrored.verdict, primary.verdict);
+    assert.equal(mirrored.status, primary.status);
     assert.equal(mirrored.summary, primary.summary);
     assert.ok(existsSync(join(spoolRoot, "processed", `${dup}.json`)), `${dup} moved to processed/`);
   }
@@ -976,7 +979,10 @@ test("a turn ending at >= 160k acks its batch, locks handing_over, holds arrivin
   assert.ok(resolvedRoot.ok);
   factory.setContract({ task: "T1", workspace: resolvedRoot.ok ? resolvedRoot.root : projectRoot, gate: "true", disposition: "scout" });
   const sha = execSync("git rev-parse HEAD", { cwd: projectRoot, encoding: "utf8" }).trim();
-  dropRequest(spoolRoot, { id: "rot-spawn", kind: "spawn", task: "T1", provider: "pi/zai/glm-5.3", arity: 1, worktree: taskWorktreePath(stateDir, slug, "T1") });
+  const t1Worktree = taskWorktreePath(stateDir, slug, "T1");
+  mkdirSync(join(stateDir, "projects", slug, "worktrees"), { recursive: true });
+  execFileSync("git", ["worktree", "add", "-B", "factory/T1", t1Worktree, sha], { cwd: resolvedRoot.ok ? resolvedRoot.root : projectRoot, stdio: "ignore" });
+  dropRequest(spoolRoot, { id: "rot-spawn", kind: "spawn", task: "T1", provider: "pi/zai/glm-5.3", arity: 1, worktree: t1Worktree });
   await until(() => {
     assert.equal(readReply(spoolRoot, "rot-spawn").ok, true);
   });
@@ -1300,8 +1306,14 @@ test("Seam 1: two Projects contract and claim the same Task id through dropped s
   dropRequest(spoolRootFor(stateDir), { id: "cl-a", kind: "claim", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" }, task: "T-01", sha: shaA, agent: "peer-a" });
   dropRequest(spoolRootFor(stateDir), { id: "cl-b", kind: "claim", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" }, task: "T-01", sha: shaB, agent: "peer-b" });
   await until(() => {
-    assert.equal(readReply(spoolRootFor(stateDir), "cl-a").verdict, "green", "project-a's claim ends green");
-    assert.equal(readReply(spoolRootFor(stateDir), "cl-b").verdict, "green", "project-b's claim ends green");
+    assert.equal(readReply(spoolRootFor(stateDir), "cl-a").ok, true);
+    assert.equal(readReply(spoolRootFor(stateDir), "cl-b").ok, true);
+    const ledgerA = readFileSync(join(projectStateDir(stateDir, a.slug), "ledger.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    const ledgerB = readFileSync(join(projectStateDir(stateDir, b.slug), "ledger.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    assert.equal(ledgerA.findLast((e) => e.event === "gate_finished")?.verdict, "green", "project-a's claim ends green");
+    assert.equal(ledgerB.findLast((e) => e.event === "gate_finished")?.verdict, "green", "project-b's claim ends green");
+    assert.ok(ledgerA.some((e) => e.event === "report_written"));
+    assert.ok(ledgerB.some((e) => e.event === "report_written"));
   });
 
   // Every event and artifact lives strictly under the owning Project's directory.
@@ -1554,8 +1566,14 @@ test("Seam 1 (ADR 0053 §4): a scout claim with the six-field handoff and no com
   });
   await until(() => assert.equal(readReply(spoolRoot, "cl-6f").ok, true, "the scout claim replies ok"));
   const reply = readReply(spoolRoot, "cl-6f");
-  assert.equal(reply.verdict, "green", "the 6-field pipeline runs to a GREEN Attempt");
+  assert.equal(reply.status, "queued");
   assert.equal(reply.attempt, 1);
+  await until(() => {
+    assert.ok(factory.ledger.eventsFor("SCOUT-6F").some((e) => e.event === "report_written"));
+    assert.ok(readMailbox(stateDir, slug).some((evt) => evt.type === "mail_queued" && evt.kind === "verdict"), "the verdict mail landed");
+  });
+  const gate6f = factory.ledger.eventsFor("SCOUT-6F").findLast((e) => e.event === "gate_finished");
+  assert.equal(gate6f?.event === "gate_finished" ? gate6f.verdict : undefined, "green", "the 6-field pipeline runs to a GREEN Attempt");
 
   // claim_reported carries the admitted handoff with the defaulted ownership,
   // and the omitted commit resolved to the worktree's HEAD.
@@ -1572,7 +1590,9 @@ test("Seam 1 (ADR 0053 §4): a scout claim with the six-field handoff and no com
 
   // The report renders all six fields in PEER.md's handback order, with the
   // Snapshot synthesized from the attempt's own facts — never Peer free text.
-  const report = readFileSync(String(reply.reportPath), "utf8");
+  const reportEvt = factory.ledger.eventsFor("SCOUT-6F").findLast((e) => e.event === "report_written");
+  assert.ok(reportEvt && reportEvt.event === "report_written");
+  const report = readFileSync(reportEvt.path, "utf8");
   const canonical = [
     "- Outcome: complete",
     "- Snapshot:",
@@ -1720,11 +1740,16 @@ test("Seam 1 (ADR 0053 §4): an incomplete six-field handoff never opens an Atte
   await until(() => assert.ok(existsSync(join(spoolRoot, "replies", "lead-verify.json")), "the mechanical claim replied"));
   const mechanicalReply = readReply(spoolRoot, "lead-verify");
   assert.equal(mechanicalReply.ok, true, JSON.stringify(mechanicalReply));
-  assert.match(String(mechanicalReply.summary), /GREEN/i);
+  assert.equal(mechanicalReply.status, "queued");
+  await until(() => assert.ok(factory.ledger.eventsFor("ENG-6F").some((e) => e.event === "report_written")));
+  const mechanicalGate = factory.ledger.eventsFor("ENG-6F").find((e) => e.event === "gate_finished");
+  assert.equal(mechanicalGate?.event === "gate_finished" ? mechanicalGate.verdict : undefined, "green");
   const mechanicalLine = factory.ledger.eventsFor("ENG-6F").find((e) => e.event === "claim_reported");
   assert.equal(mechanicalLine?.mechanical, "lead_verify", "the claim line carries the mechanical marker");
   assert.equal(mechanicalLine?.handoff, undefined, "the mechanical claim forges no handoff");
-  const mechanicalReport = readFileSync(String(mechanicalReply.reportPath), "utf8");
+  const mechanicalReportEvt = factory.ledger.eventsFor("ENG-6F").find((e) => e.event === "report_written");
+  assert.ok(mechanicalReportEvt && mechanicalReportEvt.event === "report_written");
+  const mechanicalReport = readFileSync(mechanicalReportEvt.path, "utf8");
   assert.match(mechanicalReport, /- Lead verification \(`lead_verify`\): mechanical re-run of the Contract Gate by the Lead — no Peer handoff on this claim/);
   assert.doesNotMatch(mechanicalReport, /- Outcome:/, "the mechanical re-run renders no Peer outcome");
 });
@@ -1757,7 +1782,11 @@ test("Seam 1 (ADR 0053): the spawn-path re-contract onto a moved HEAD preserves 
   writeFileSync(join(root, "upstream.txt"), "landed upstream\n");
   const upstreamSha = gitCommitAll(root, "upstream work");
   dropRequest(spoolRootFor(stateDir), { id: "cl-b", kind: "claim", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" }, task: "T-02", sha: upstreamSha });
-  await until(() => assert.equal(readReply(spoolRootFor(stateDir), "cl-b").verdict, "green", "T-02's claim ends green"));
+  await until(() => {
+    assert.equal(readReply(spoolRootFor(stateDir), "cl-b").ok, true);
+    assert.equal(registry.factoryForProject(resolved.slug).ledger.eventsFor("T-02").findLast((e) => e.event === "gate_finished")?.verdict, "green", "T-02's claim ends green");
+    assert.ok(registry.factoryForProject(resolved.slug).ledger.eventsFor("T-02").some((e) => e.event === "report_written"));
+  });
   dropRequest(spoolRootFor(stateDir), { id: "ac-b", kind: "accept", task: "T-02", attempt: 1, submitter: "owner" });
   await until(() => assert.equal(readReply(spoolRootFor(stateDir), "ac-b").ok, true, "T-02 is accepted"));
 
@@ -1836,7 +1865,11 @@ test("Seam 1 (ADR 0053): lead accept on a GREEN read-only Task records attempt_a
     },
     projectSlug: resolved.slug,
   });
-  await until(() => assert.equal(readReply(spoolRootFor(stateDir), "cl-scout").verdict, "green", "the scout claim ends green"));
+  await until(() => {
+    assert.equal(readReply(spoolRootFor(stateDir), "cl-scout").ok, true);
+    assert.equal(projectFactory().ledger.eventsFor("RO-1").findLast((e) => e.event === "gate_finished")?.verdict, "green", "the scout claim ends green");
+    assert.ok(projectFactory().ledger.eventsFor("RO-1").some((e) => e.event === "report_written"));
+  });
 
   // 2. Accept: merge-free. No landing fields, root HEAD unchanged, worktree gone.
   dropRequest(spoolRootFor(stateDir), { id: "ac-scout", kind: "accept", task: "RO-1", attempt: 1, submitter: "owner", projectSlug: resolved.slug });
@@ -1872,7 +1905,11 @@ test("Seam 1 (ADR 0053): lead accept on a GREEN read-only Task records attempt_a
     },
     projectSlug: resolved.slug,
   });
-  await until(() => assert.equal(readReply(spoolRootFor(stateDir), "cl-eng").verdict, "green", "the engineer claim ends green"));
+  await until(() => {
+    assert.equal(readReply(spoolRootFor(stateDir), "cl-eng").ok, true);
+    assert.equal(projectFactory().ledger.eventsFor("ENG-1").findLast((e) => e.event === "gate_finished")?.verdict, "green", "the engineer claim ends green");
+    assert.ok(projectFactory().ledger.eventsFor("ENG-1").some((e) => e.event === "report_written"));
+  });
   dropRequest(spoolRootFor(stateDir), { id: "ac-eng", kind: "accept", task: "ENG-1", attempt: 1, submitter: "owner", projectSlug: resolved.slug });
   await until(() => assert.equal(readReply(spoolRootFor(stateDir), "ac-eng").ok, true, "the engineer accept replies ok"));
   const engineerAccepted = acceptedLine("ENG-1") as Record<string, unknown> | undefined;

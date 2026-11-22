@@ -1602,7 +1602,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     const peerHandoffState = readHandoffProgress(deps.stateDir, slug, `peer:${task}`)?.state;
     if (peerHandoffState !== undefined && peerHandoffState !== "done" && peerHandoffState !== "failed") return false;
     const last =events.findLast((evt) => "task" in evt && evt.task === task);
-    if (last === undefined || last.event === "permit_denied" || last.event === "gate_started" || last.event === "claim_reported") return false;
+    if (last === undefined || last.event === "permit_denied" || last.event === "gate_queued" || last.event === "gate_started" || last.event === "claim_reported") return false;
     let escalated = false;
     try {
       escalated = readMailboxEvents(mailboxPath(slug)).some(
@@ -2203,8 +2203,14 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     const gates = new Set<string>();
     for (const events of eventStreamsOf()) {
       for (const event of events) {
-        if (event.event === "gate_started") gates.add(`${event.task}:${event.attempt}`);
+        if (event.event === "gate_queued" || event.event === "gate_started") gates.add(`${event.task}:${event.attempt}`);
         else if (event.event === "gate_finished") gates.delete(`${event.task}:${event.attempt}`);
+        else if (event.event === "contract_set" || event.event === "task_closed") {
+          const prefix = `${event.task}:`;
+          for (const key of gates) {
+            if (key.startsWith(prefix)) gates.delete(key);
+          }
+        }
       }
     }
     if (gates.size > 0 || handingOverBySlug.size > 0) return true;
@@ -2497,7 +2503,7 @@ function agentOfTask(
       contractSetCountByTask.set(evt.task, (contractSetCountByTask.get(evt.task) ?? 0) + 1);
       continue;
     }
-    if (evt.event !== "claim_reported" && evt.event !== "meter_written" && evt.event !== "repoke_dispatched") continue;
+    if (evt.event !== "gate_queued" && evt.event !== "claim_reported" && evt.event !== "meter_written" && evt.event !== "repoke_dispatched") continue;
     if (typeof evt.agent === "string" && evt.agent !== "") ledgerAgents.set(evt.task, evt.agent);
   }
   if (context === undefined) return ledgerAgents;

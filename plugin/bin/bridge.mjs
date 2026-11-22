@@ -78,6 +78,7 @@ var GATE_OUTPUT_CAP_BYTES = 2 * 1024 * 1024;
 var EVENT_NAMES = [
   "ledger_schema",
   "contract_set",
+  "gate_queued",
   "claim_reported",
   "gate_started",
   "gate_finished",
@@ -229,6 +230,10 @@ function shapeIsValid(evt) {
   if (evt.event === "contract_set") {
     return taskIsString && (asRecord.timeoutSeconds === void 0 || isValidContractTimeoutSeconds(asRecord.timeoutSeconds));
   }
+  if (evt.event === "gate_queued") {
+    const attempt2 = asRecord.attempt;
+    return taskIsString && typeof attempt2 === "number" && Number.isInteger(attempt2) && attempt2 >= 1 && typeof asRecord.sha === "string" && (asRecord.id === void 0 || typeof asRecord.id === "string");
+  }
   if (evt.event === "retro_written") {
     return typeof asRecord.model === "string" && (asRecord.outcome === "written" || asRecord.outcome === "failed") && typeof asRecord.durationMs === "number" && Number.isFinite(asRecord.durationMs) && asRecord.durationMs >= 0;
   }
@@ -302,7 +307,7 @@ function v2PayloadIsValid(event) {
   const duration = () => typeof event.durationMs === "number" && Number.isFinite(event.durationMs) && event.durationMs >= 0;
   if (event.task !== void 0 && !nonempty(event.task)) return false;
   if (event.attempt !== void 0 && (!Number.isSafeInteger(event.attempt) || event.attempt < 1)) return false;
-  if (event.attempt !== void 0 && !["claim_reported", "gate_started", "gate_finished", "fresh_eyes_written", "watch_written", "report_written", "attempt_accepted"].includes(event.event)) return false;
+  if (event.attempt !== void 0 && !["gate_queued", "claim_reported", "gate_started", "gate_finished", "fresh_eyes_written", "watch_written", "report_written", "attempt_accepted"].includes(event.event)) return false;
   if (event.event === "needs_human" && record(event.evidence) && !Object.values(event.evidence).every((value) => Number.isSafeInteger(value) && value > 0)) return false;
   if (event.arity !== void 0 && (!Number.isSafeInteger(event.arity) || event.arity < 1)) return false;
   if (event.event === "ledger_schema" || event.event === "retro_written" || event.event === "release_published" || event.event === "release_failed" || event.event === "store_release_started" || event.event === "store_release_paused" || event.event === "store_release_completed" || event.event === "store_release_failed") {
@@ -313,6 +318,8 @@ function v2PayloadIsValid(event) {
       return true;
     case "contract_set":
       return string("workspace") && string("gate") && string("artifact") && strings("scope") && strings("skills") && optionalString("base") && optionalString("description") && optionalString("by") && (event.freshEyes === void 0 || event.freshEyes === true) && (event.watch === void 0 || event.watch === true) && (event.disposition === void 0 || PEER_DISPOSITIONS.includes(event.disposition)) && (event.timeoutSeconds === void 0 || isValidContractTimeoutSeconds(event.timeoutSeconds));
+    case "gate_queued":
+      return string("sha") && (event.id === void 0 || nonempty(event.id)) && optionalString("agent") && handoffIsValid(event.handoff) && mechanicalClaimIsValid(event);
     case "claim_reported":
       return string("sha") && optionalString("agent") && handoffIsValid(event.handoff) && mechanicalClaimIsValid(event);
     case "gate_started":
@@ -1308,6 +1315,7 @@ var GATE_OUTPUT_CAP_BYTES = 2 * 1024 * 1024;
 var EVENT_NAMES = [
   "ledger_schema",
   "contract_set",
+  "gate_queued",
   "claim_reported",
   "gate_started",
   "gate_finished",
@@ -1459,6 +1467,10 @@ function shapeIsValid(evt) {
   if (evt.event === "contract_set") {
     return taskIsString && (asRecord.timeoutSeconds === void 0 || isValidContractTimeoutSeconds(asRecord.timeoutSeconds));
   }
+  if (evt.event === "gate_queued") {
+    const attempt2 = asRecord.attempt;
+    return taskIsString && typeof attempt2 === "number" && Number.isInteger(attempt2) && attempt2 >= 1 && typeof asRecord.sha === "string" && (asRecord.id === void 0 || typeof asRecord.id === "string");
+  }
   if (evt.event === "retro_written") {
     return typeof asRecord.model === "string" && (asRecord.outcome === "written" || asRecord.outcome === "failed") && typeof asRecord.durationMs === "number" && Number.isFinite(asRecord.durationMs) && asRecord.durationMs >= 0;
   }
@@ -1532,7 +1544,7 @@ function v2PayloadIsValid(event) {
   const duration = () => typeof event.durationMs === "number" && Number.isFinite(event.durationMs) && event.durationMs >= 0;
   if (event.task !== void 0 && !nonempty(event.task)) return false;
   if (event.attempt !== void 0 && (!Number.isSafeInteger(event.attempt) || event.attempt < 1)) return false;
-  if (event.attempt !== void 0 && !["claim_reported", "gate_started", "gate_finished", "fresh_eyes_written", "watch_written", "report_written", "attempt_accepted"].includes(event.event)) return false;
+  if (event.attempt !== void 0 && !["gate_queued", "claim_reported", "gate_started", "gate_finished", "fresh_eyes_written", "watch_written", "report_written", "attempt_accepted"].includes(event.event)) return false;
   if (event.event === "needs_human" && record(event.evidence) && !Object.values(event.evidence).every((value) => Number.isSafeInteger(value) && value > 0)) return false;
   if (event.arity !== void 0 && (!Number.isSafeInteger(event.arity) || event.arity < 1)) return false;
   if (event.event === "ledger_schema" || event.event === "retro_written" || event.event === "release_published" || event.event === "release_failed" || event.event === "store_release_started" || event.event === "store_release_paused" || event.event === "store_release_completed" || event.event === "store_release_failed") {
@@ -1543,6 +1555,8 @@ function v2PayloadIsValid(event) {
       return true;
     case "contract_set":
       return string("workspace") && string("gate") && string("artifact") && strings("scope") && strings("skills") && optionalString("base") && optionalString("description") && optionalString("by") && (event.freshEyes === void 0 || event.freshEyes === true) && (event.watch === void 0 || event.watch === true) && (event.disposition === void 0 || PEER_DISPOSITIONS.includes(event.disposition)) && (event.timeoutSeconds === void 0 || isValidContractTimeoutSeconds(event.timeoutSeconds));
+    case "gate_queued":
+      return string("sha") && (event.id === void 0 || nonempty(event.id)) && optionalString("agent") && handoffIsValid(event.handoff) && mechanicalClaimIsValid(event);
     case "claim_reported":
       return string("sha") && optionalString("agent") && handoffIsValid(event.handoff) && mechanicalClaimIsValid(event);
     case "gate_started":
@@ -1667,12 +1681,13 @@ function projectTask(events, task) {
     const own = epoch.filter((event) => "attempt" in event && event.attempt === attempt);
     const gate = last(own, "gate_finished");
     const review = last(own, "fresh_eyes_written");
+    const queued = own.some((event) => event.event === "gate_queued");
     const started = own.some((event) => event.event === "claim_reported" || event.event === "gate_started");
     const reportComplete = last(own, "report_written") !== void 0;
     const reviewState = review?.outcome ?? (contract?.freshEyes === true ? reportComplete ? "incomplete" : "pending" : "off");
     const ownerEligible = !settled && gate?.verdict === "green";
     const leadRefusal = needsHuman ? "task is in needs_human" : void 0;
-    return { attempt, events: own, gate, review, reviewState, gateOpen: started && gate === void 0, reportComplete, open: started && !reportComplete, ownerEligible, leadEligible: ownerEligible && leadRefusal === void 0, leadRefusal };
+    return { attempt, events: own, gate, review, reviewState, gateOpen: (queued || started) && gate === void 0, reportComplete, open: (queued || started) && !reportComplete, ownerEligible, leadEligible: ownerEligible && leadRefusal === void 0, leadRefusal };
   });
   const dispatch = epoch.findLast((event) => event.event === "spawn_dispatched" || event.event === "respawn_dispatched");
   const status = closure !== void 0 ? "closed" : acceptance !== void 0 ? "accepted" : needsHuman ? "needs-human" : attempts.some((attempt) => attempt.open) || dispatch !== void 0 && dispatch.seq > (latestGate?.seq ?? -1) ? "running" : numbers.length === 0 ? "waiting" : latestGate?.verdict === "green" ? "ready-to-accept" : "red";
@@ -2287,7 +2302,7 @@ async function handleToolCall(name, rawArgs) {
         mechanical: "lead_verify",
         agent: ctx.agentId ?? ctx.correlationId ?? "lead",
       });
-      return toolResult(JSON.stringify(reply), !reply.ok || reply.verdict === "red");
+      return toolResult(JSON.stringify(reply), !reply.ok || (reply.status !== "queued" && reply.verdict === "red"));
     }
     const result = bridgePrimitives.removeTaskWorktree(ctx.stateDir, contract, task, events);
     return toolResult(JSON.stringify(result), !result.ok);
@@ -3027,6 +3042,19 @@ async function handleToolCall(name, rawArgs) {
       ...(ctx.agentId ? { agent: ctx.agentId } : ctx.correlationId ? { agent: ctx.correlationId } : {}),
     });
     if (!reply.ok) return toolResult(`${reply.code}: ${reply.message}`, true);
+    if (reply.status === "queued") {
+      const aheadList = Array.isArray(reply.ahead) ? reply.ahead : [];
+      const lines = [
+        `Claim queued: ${reply.summary}`,
+        `Status: QUEUED`,
+        ...(reply.attempt !== undefined ? [`Attempt: ${reply.attempt}`] : []),
+        ...(reply.queueId ? [`Queue ID: ${reply.queueId}`] : []),
+        ...(reply.position !== undefined ? [`Position: ${reply.position} (${aheadList.length} ahead)`] : []),
+        ...(reply.paused ? [`Queue state: PAUSED`] : []),
+        "Your claim is queued in the daemon Gate queue. End your turn now and wait at zero tokens for outcome notification.",
+      ];
+      return toolResult(lines.join("\n"), false);
+    }
     const lines = [
       `Claim outcome: ${reply.summary}`,
       `Verdict: ${String(reply.verdict ?? "").toUpperCase()}`,

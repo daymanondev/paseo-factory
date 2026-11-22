@@ -129,6 +129,17 @@ function shapeIsValid(evt: LedgerEvent): boolean {
   if (evt.event === "contract_set") {
     return taskIsString && (asRecord.timeoutSeconds === undefined || isValidContractTimeoutSeconds(asRecord.timeoutSeconds));
   }
+  if (evt.event === "gate_queued") {
+    const attempt = asRecord.attempt;
+    return (
+      taskIsString &&
+      typeof attempt === "number" &&
+      Number.isInteger(attempt) &&
+      attempt >= 1 &&
+      typeof asRecord.sha === "string" &&
+      (asRecord.id === undefined || typeof asRecord.id === "string")
+    );
+  }
   if (evt.event === "retro_written") {
     return (
       typeof asRecord.model === "string" &&
@@ -322,7 +333,7 @@ function v2PayloadIsValid(event: Record<string, unknown>): boolean {
   const duration = () => typeof event.durationMs === "number" && Number.isFinite(event.durationMs) && event.durationMs >= 0;
   if (event.task !== undefined && !nonempty(event.task)) return false;
   if (event.attempt !== undefined && (!Number.isSafeInteger(event.attempt) || (event.attempt as number) < 1)) return false;
-  if (event.attempt !== undefined && !["claim_reported", "gate_started", "gate_finished", "fresh_eyes_written", "watch_written", "report_written", "attempt_accepted"].includes(event.event as string)) return false;
+  if (event.attempt !== undefined && !["gate_queued", "claim_reported", "gate_started", "gate_finished", "fresh_eyes_written", "watch_written", "report_written", "attempt_accepted"].includes(event.event as string)) return false;
   if (event.event === "needs_human" && record(event.evidence) && !Object.values(event.evidence).every(value => Number.isSafeInteger(value) && (value as number) > 0)) return false;
   if (event.arity !== undefined && (!Number.isSafeInteger(event.arity) || (event.arity as number) < 1)) return false;
   if (event.event === "ledger_schema" || event.event === "retro_written" || event.event === "release_published" || event.event === "release_failed" || event.event === "store_release_started" || event.event === "store_release_paused" || event.event === "store_release_completed" || event.event === "store_release_failed") {
@@ -335,6 +346,7 @@ function v2PayloadIsValid(event: Record<string, unknown>): boolean {
       (event.freshEyes === undefined || event.freshEyes === true) && (event.watch === undefined || event.watch === true) &&
       (event.disposition === undefined || (PEER_DISPOSITIONS as readonly string[]).includes(event.disposition as string)) &&
       (event.timeoutSeconds === undefined || isValidContractTimeoutSeconds(event.timeoutSeconds));
+    case "gate_queued": return string("sha") && (event.id === undefined || nonempty(event.id)) && optionalString("agent") && handoffIsValid(event.handoff) && mechanicalClaimIsValid(event);
     case "claim_reported": return string("sha") && optionalString("agent") && handoffIsValid(event.handoff) && mechanicalClaimIsValid(event);
     case "gate_started": return string("cmd");
     case "gate_finished": return (event.exit === null || Number.isSafeInteger(event.exit)) &&

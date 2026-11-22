@@ -21,12 +21,13 @@ function projectTask(events, task) {
     const own = epoch.filter((event) => "attempt" in event && event.attempt === attempt);
     const gate = last(own, "gate_finished");
     const review = last(own, "fresh_eyes_written");
+    const queued = own.some((event) => event.event === "gate_queued");
     const started = own.some((event) => event.event === "claim_reported" || event.event === "gate_started");
     const reportComplete = last(own, "report_written") !== void 0;
     const reviewState = review?.outcome ?? (contract?.freshEyes === true ? reportComplete ? "incomplete" : "pending" : "off");
     const ownerEligible = !settled && gate?.verdict === "green";
     const leadRefusal = needsHuman ? "task is in needs_human" : void 0;
-    return { attempt, events: own, gate, review, reviewState, gateOpen: started && gate === void 0, reportComplete, open: started && !reportComplete, ownerEligible, leadEligible: ownerEligible && leadRefusal === void 0, leadRefusal };
+    return { attempt, events: own, gate, review, reviewState, gateOpen: (queued || started) && gate === void 0, reportComplete, open: (queued || started) && !reportComplete, ownerEligible, leadEligible: ownerEligible && leadRefusal === void 0, leadRefusal };
   });
   const dispatch = epoch.findLast((event) => event.event === "spawn_dispatched" || event.event === "respawn_dispatched");
   const status = closure !== void 0 ? "closed" : acceptance !== void 0 ? "accepted" : needsHuman ? "needs-human" : attempts.some((attempt) => attempt.open) || dispatch !== void 0 && dispatch.seq > (latestGate?.seq ?? -1) ? "running" : numbers.length === 0 ? "waiting" : latestGate?.verdict === "green" ? "ready-to-accept" : "red";

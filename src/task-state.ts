@@ -50,12 +50,13 @@ export function projectTask(events: readonly LedgerEvent[], task: string) {
     const own = epoch.filter((event) => "attempt" in event && event.attempt === attempt);
     const gate = last(own, "gate_finished");
     const review = last(own, "fresh_eyes_written");
+    const queued = own.some((event) => event.event === "gate_queued");
     const started = own.some((event) => event.event === "claim_reported" || event.event === "gate_started");
     const reportComplete = last(own, "report_written") !== undefined;
     const reviewState: ReviewState = review?.outcome ?? (contract?.freshEyes === true ? reportComplete ? "incomplete" : "pending" : "off");
     const ownerEligible = !settled && gate?.verdict === "green";
     const leadRefusal = needsHuman ? "task is in needs_human" : undefined;
-    return { attempt, events: own, gate, review, reviewState, gateOpen: started && gate === undefined, reportComplete, open: started && !reportComplete, ownerEligible, leadEligible: ownerEligible && leadRefusal === undefined, leadRefusal };
+    return { attempt, events: own, gate, review, reviewState, gateOpen: (queued || started) && gate === undefined, reportComplete, open: (queued || started) && !reportComplete, ownerEligible, leadEligible: ownerEligible && leadRefusal === undefined, leadRefusal };
   });
   const dispatch = epoch.findLast((event) => event.event === "spawn_dispatched" || event.event === "respawn_dispatched");
   // v0.5.0 (ADR 0054 §5): the clean retirement is terminal beside acceptance —

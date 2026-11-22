@@ -77,8 +77,8 @@ function answerForTaskPrefix(fake: { requests: { body: unknown }[] }): string {
   return `${answer.outcome === "concern" ? "CONCERN" : "CLEAR"}\n${answer.finding}`;
 }
 
-/** The six events one settled battery arm must leave, in order. */
-const ARM_SEQUENCE = ["contract_set", "claim_reported", "gate_started", "gate_finished", "fresh_eyes_written", "report_written"];
+/** The seven events one settled async battery arm must leave, in order. */
+const ARM_SEQUENCE = ["contract_set", "gate_queued", "claim_reported", "gate_started", "gate_finished", "fresh_eyes_written", "report_written"];
 
 function eventsOf(factory: Factory, task: string): LedgerEvent[] {
   const events = factory.ledger.eventsFor(task);

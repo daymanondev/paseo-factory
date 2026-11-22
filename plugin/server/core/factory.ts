@@ -28,9 +28,10 @@ import { changedFiles, checkCleanAt, deleteTaskWorktreeBranch, headCommitSync, l
 import { MEMORY_FILES } from "./choke.ts";
 import { projectStateDir } from "./project.ts";
 import { FactoryError } from "./errors.ts";
-import type { AttemptAccepted, ClaimReported, ContractSet, GateFinished, GitBlocked, LedgerEvent, MeterWritten, MeterUsage, NeedsHuman, NeedsHumanEvidence, NeedsHumanReason, PeerDisposition, PeerHandoffFields, RepokeDispatched, RepokeRefused, RespawnDispatched, RespawnRefused, SpawnDispatched, SpawnRefused, TaskClosed, Verdict } from "./events.ts";
+import type { AttemptAccepted, ClaimReported, ContractSet, GateFinished, GateQueued, GitBlocked, LedgerEvent, MeterWritten, MeterUsage, NeedsHuman, NeedsHumanEvidence, NeedsHumanReason, PeerDisposition, PeerHandoffFields, RepokeDispatched, RepokeRefused, RespawnDispatched, RespawnRefused, SpawnDispatched, SpawnRefused, TaskClosed, Verdict } from "./events.ts";
 import type { GateResult } from "./gate.ts";
 import { LedgerAdmission } from "./history-admission.ts";
+import { readOptionalJson } from "./json-store.ts";
 
 /** Task ids become report filenames, so they stay flat and filename-safe. */
 const TASK_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
@@ -312,6 +313,41 @@ export interface ClaimOutcome {
   mechanical?: "lead_verify";
 }
 
+export interface AdmitClaimInput extends ClaimInput {
+  /** Optional queue item id stamped onto `gate_queued` when enqueued. */
+  queueId?: string;
+}
+
+export type AdmitClaimResult =
+  | { status: "replayed"; outcome: ClaimOutcome }
+  | { status: "executed"; outcome: ClaimOutcome }
+  | {
+      status: "queued";
+      attempt: number;
+      sha: string;
+      contract: ContractSet;
+      executionDir: string;
+      timeoutMs: number;
+      handoff?: PeerHandoffFields;
+      mechanical?: "lead_verify";
+      agent?: string;
+      queuedEvent: GateQueued;
+    };
+
+export interface ExecuteQueuedClaimInput {
+  task: string;
+  attempt: number;
+  sha: string;
+  handoff?: PeerHandoffFields;
+  mechanical?: "lead_verify";
+  agent?: string;
+  timeoutMs?: number;
+  signal?: AbortSignal;
+  shutdownSignal?: AbortSignal;
+  cancelNote?: string;
+  onSpawn?: (pid: number | undefined) => void;
+}
+
 export interface AcceptInput {
   task: string;
   attempt: number;
@@ -455,6 +491,25 @@ export interface Factory {
    * Peer opens no Attempt and replays no closed evidence (v0.5.0, ADR 0054 §5).
    */
   claim(input: ClaimInput): Promise<ClaimOutcome>;
+  /**
+   * Synchronous phase of async Claim (ADR 0068): validates handoff/mechanical,
+   * commit SHA, clean worktree state, and ceiling; returns idempotent green
+   * replays or read-only empty-gate synthetic executions immediately, and
+   * records `gate_queued` for non-empty shell Gates without running `runGate`.
+   */
+  admitClaim(input: AdmitClaimInput): Promise<AdmitClaimResult>;
+  /**
+   * Dequeued execution phase of an admitted `gate_queued` Attempt (ADR 0068):
+   * records `claim_reported` + `gate_started` and runs the Gate with timeout
+   * anchored strictly to `gate_started`.
+   */
+  executeQueuedClaim(input: ExecuteQueuedClaimInput): Promise<ClaimOutcome | undefined>;
+  /**
+   * Boot-recovery settlement for a Gate that was `running` in `gate-queue.json`
+   * when the daemon restarted: closes it `verdict: "red"` (`daemon-restarted`)
+   * with a rendered Attempt report.
+   */
+  recordDaemonRestarted(input: { task: string; attempt: number }): ClaimOutcome;
   /**
    * The Owner accepts one green Attempt (ADR 0002). Green is necessary, not
    * sufficient — this is the only acceptance act in the factory, and it is
@@ -600,9 +655,358 @@ export function createFactory(options: FactoryOptions): Factory {
     LedgerAdmission.assertAvailable(join(dataDir, "ledger.jsonl"));
     const pendingUpgrade = pendingUpgradeFor(stateDir);
     ledger = Ledger.open(join(dataDir, "ledger.jsonl"), { writerId: options.writerId ?? readLocalWriterIdentity(stateDir, options.projectSlug), recoverTail: pendingUpgrade === undefined });
-    recoveredAttempts = pendingUpgrade === undefined ? recoverInterruptedAttempts(ledger, dataDir) : [];
+    recoveredAttempts = pendingUpgrade === undefined ? recoverInterruptedAttempts(ledger, dataDir, stateDir, options.projectSlug) : [];
     history = new LedgerAdmission(ledger, stateDir, { fault: options.historyFault });
   } finally { release(); }
+
+  const admitLocks = new Map<string, Promise<void>>();
+  const withAdmitLock = async <T>(task: string, fn: () => Promise<T>): Promise<T> => {
+    const prev = admitLocks.get(task) ?? Promise.resolve();
+    let releaseLock!: () => void;
+    const gate = new Promise<void>((resolve) => { releaseLock = resolve; });
+    admitLocks.set(task, gate);
+    await prev.catch(() => {});
+    try {
+      return await fn();
+    } finally {
+      if (admitLocks.get(task) === gate) admitLocks.delete(task);
+      releaseLock();
+    }
+  };
+
+  type PreparedClaim =
+    | { kind: "replayed"; outcome: ClaimOutcome }
+    | {
+        kind: "ready";
+        contract: ContractSet;
+        disposition: PeerDisposition;
+        executionDir: string;
+        claimedSha: string;
+        attempt: number;
+        admittedHandoff: PeerHandoffFields | undefined;
+        mechanical: "lead_verify" | undefined;
+        agent: string | undefined;
+      };
+
+  const prepareClaim = (self: Factory, { task, sha, agent, handoff, mechanical }: ClaimInput): PreparedClaim => {
+    assertTaskId(task);
+    const contract = self.contractFor(task);
+    if (!contract) throw new FactoryError("unknown-task", `no contract set for task ${task} — register one first`);
+    const fullHistory = ledger.eventsFor(task);
+    const history = epochEventsFor(ledger, task);
+
+    // Admission (ADR 0053 §4) — the six-field handoff law and the
+    // disposition's commit rule, both judged BEFORE any event is appended
+    // and before Station 1 runs: a malformed claim opens no Attempt.
+    if (mechanical !== undefined && mechanical !== "lead_verify") {
+      throw new FactoryError("invalid-claim", `\`mechanical\` must be exactly "lead_verify" when present — got ${JSON.stringify(mechanical)}`);
+    }
+    if (mechanical === "lead_verify" && handoff !== undefined) {
+      throw new FactoryError("invalid-claim", "a `lead_verify` mechanical re-run carries no six-field handoff — pass the mechanical marker or the Peer handoff, never both (ADR 0053 §4)");
+    }
+    const admittedHandoff = mechanical === "lead_verify" ? undefined : admitHandoff(handoff);
+    const disposition = contract.disposition ?? "engineer";
+    const executionDir = self.worktreeFor(task) ?? contract.workspace;
+    let claimedSha = sha.trim();
+    if (claimedSha === "") {
+      if (disposition === "engineer") {
+        throw new FactoryError(
+          "invalid-claim",
+          `the six-field handoff is complete but the claim attests no commit: \`commit\` is mandatory for the ${disposition} disposition — the Claim attests an exact commit (ADR 0053 §4)`,
+        );
+      }
+      const head = headCommitSync(executionDir);
+      if (head === undefined) {
+        throw new FactoryError("invalid-claim", `could not resolve HEAD in ${executionDir} to default the omitted commit for the ${disposition} disposition`);
+      }
+      claimedSha = head;
+    }
+
+    const priorAccept = acceptedAttempt(fullHistory);
+    if (priorAccept !== undefined) {
+      throw new FactoryError(
+        "already-accepted",
+        `task ${task} was already accepted at attempt ${priorAccept.attempt}; the ledger is append-only`,
+      );
+    }
+
+    const closure = closureEvent(fullHistory);
+    if (closure !== undefined) {
+      throw new FactoryError(
+        "already-closed",
+        `task ${task} was closed (reason: ${closure.reason}) — the retirement is terminal; the ledger is append-only`,
+      );
+    }
+
+    const lastAttempt = maxAttempt(history);
+    if (lastAttempt > 0 && attemptIsOpen(history, lastAttempt)) {
+      throw new FactoryError(
+        "gate-running",
+        `attempt ${lastAttempt} of task ${task} is still open — wait for its verdict before claiming again`,
+      );
+    }
+
+    const completed = projectTask(fullHistory, task).attempts.findLast(
+      (entry) => !entry.open && entry.gate?.verdict === "green" &&
+        (entry.gate.sha === claimedSha || entry.events.some(event => event.event === "claim_reported" && event.sha === claimedSha)),
+    );
+    if (completed?.gate !== undefined) {
+      const report = completed.events.findLast((event) => event.event === "report_written");
+      const replayedClaim = completed.events.findLast((event): event is ClaimReported => event.event === "claim_reported");
+      const repoked = replayedClaim !== undefined && history.some(
+        (event) => event.event === "repoke_dispatched" && event.seq > replayedClaim.seq,
+      );
+      if (report?.event === "report_written" && replayedClaim !== undefined && !repoked &&
+        replayedClaim.mechanical === mechanical && sameHandoff(replayedClaim.handoff, admittedHandoff)) {
+        return {
+          kind: "replayed",
+          outcome: {
+            attempt: completed.attempt,
+            verdict: "green",
+            gate: completed.gate,
+            reportPath: report.path,
+            ...(replayedClaim?.handoff === undefined ? {} : { handoff: replayedClaim.handoff }),
+            ...(replayedClaim?.mechanical === undefined ? {} : { mechanical: replayedClaim.mechanical }),
+          },
+        };
+      }
+    }
+
+    if (lastAttempt >= MAX_ATTEMPTS) {
+      throw new FactoryError(
+        "attempt-ceiling",
+        `task ${task} reached the attempt ceiling (${MAX_ATTEMPTS} attempts) — no further Claim may open an Attempt`,
+      );
+    }
+
+    return {
+      kind: "ready",
+      contract,
+      disposition,
+      executionDir,
+      claimedSha,
+      attempt: lastAttempt + 1,
+      admittedHandoff,
+      mechanical,
+      agent,
+    };
+  };
+
+  const executeClaimPipeline = async (input: {
+    task: string;
+    attempt: number;
+    claimedSha: string;
+    contract: ContractSet;
+    disposition: PeerDisposition;
+    executionDir: string;
+    admittedHandoff: PeerHandoffFields | undefined;
+    mechanical: "lead_verify" | undefined;
+    agent: string | undefined;
+    timeoutMs?: number;
+    signal?: AbortSignal;
+    shutdownSignal?: AbortSignal;
+    cancelNote?: string;
+    onSpawn?: (pid: number | undefined) => void;
+  }): Promise<ClaimOutcome | undefined> => {
+    const { task, attempt, claimedSha, contract, disposition, executionDir, admittedHandoff, mechanical, agent, timeoutMs, signal, shutdownSignal, cancelNote, onSpawn } = input;
+    let scopeViolations: string[] | undefined;
+    const watchContext = () => ({
+      agent,
+      scopeViolations,
+      fetchTimeline: options.fetchTimeline,
+      budgetMs: options.watchBudgetMs,
+      copilotRunner: options.watchCopilotRunner,
+    });
+    const finishCtx = {
+      task,
+      ledger,
+      stateDir,
+      dataDir,
+      contract,
+      eyeBudgetMs: options.eyeBudgetMs,
+      eyeRunner: options.eyeCliRunner,
+      handoff: admittedHandoff,
+      mechanical,
+    };
+
+    ledger.append({
+      event: "claim_reported",
+      task,
+      attempt,
+      sha: claimedSha,
+      handoff: admittedHandoff,
+      ...(mechanical === undefined ? {} : { mechanical }),
+      ...(agent === undefined || agent.trim() === "" ? {} : { agent }),
+    });
+    ledger.append({ event: "gate_started", task, attempt, cmd: contract.gate });
+
+    // Station 1 — the claimed commit must exist as one full object.
+    const resolved = await resolveClaimedCommit(executionDir, claimedSha);
+    if (!resolved.ok) {
+      return finish(finishCtx, attempt, { exit: null, verdict: "red", note: resolved.reason, timedOut: false }, undefined, watchContext());
+    }
+
+    // Read-only synthetic empty Gate (ADR 0054 §2).
+    if (isReadOnlyPeerDisposition(contract.disposition) && contract.gate.trim() === "") {
+      const clean = await checkCleanAt(executionDir, resolved.full);
+      if (!clean.ok) {
+        return finish(
+          finishCtx,
+          attempt,
+          { exit: null, verdict: "red", note: `dirty-worktree-before-gate: ${clean.reason}`, timedOut: false },
+          resolved.full,
+          watchContext(),
+        );
+      }
+      if (contract.base !== undefined) {
+        const diff = await changedFiles(executionDir, contract.base, resolved.full);
+        if (!diff.ok) {
+          return finish(
+            finishCtx,
+            attempt,
+            { exit: null, verdict: "red", note: `memory fence check failed: ${diff.reason}`, timedOut: false },
+            resolved.full,
+            watchContext(),
+          );
+        }
+        const fenced = diff.files.filter((file) => (MEMORY_FILES as readonly string[]).includes(file));
+        if (fenced.length > 0) {
+          return finish(
+            finishCtx,
+            attempt,
+            {
+              exit: null,
+              verdict: "red",
+              note:
+                `changes to fenced memory files: ${fenced.join(", ")} — project memory (AGENTS.md/CLAUDE.md/CONTEXT.md) ` +
+                "is the Supervisor's and Lead's act, never a read-only Peer's",
+              timedOut: false,
+            },
+            resolved.full,
+            watchContext(),
+          );
+        }
+      }
+      return finish(
+        finishCtx,
+        attempt,
+        {
+          exit: 0,
+          verdict: "green",
+          note: `read-only disposition (${disposition}) — 6-field handoff recorded, no shell gate required`,
+          timedOut: false,
+          output: `read-only disposition (${disposition}) — 6-field handoff recorded, worktree clean at ${resolved.full}`,
+        },
+        resolved.full,
+        watchContext(),
+      );
+    }
+
+    // Station 2 — clean tree, HEAD at the claimed commit, before the gate.
+    const before = await checkCleanAt(executionDir, resolved.full);
+    if (!before.ok) {
+      return finish(
+        finishCtx,
+        attempt,
+        {
+          exit: null,
+          verdict: "red",
+          note: `workspace not clean at the claimed commit before the gate: ${before.reason}`,
+          timedOut: false,
+        },
+        resolved.full,
+        watchContext(),
+      );
+    }
+
+    let result: GateResult;
+    try {
+      result = await runGate({
+        cmd: contract.gate,
+        cwd: executionDir,
+        ...(contract.artifact.trim() === "" ? {} : { artifact: contract.artifact }),
+        timeoutMs: timeoutMs ?? options.timeoutMs ?? contractTimeoutMs(contract),
+        ...(signal === undefined ? {} : { signal }),
+        ...(shutdownSignal === undefined ? {} : { shutdownSignal }),
+        ...(cancelNote === undefined ? {} : { cancelNote }),
+        ...(onSpawn === undefined ? {} : { onSpawn }),
+      });
+    } catch (err) {
+      result = {
+        exit: null,
+        verdict: "red",
+        note: `gate failed to start: ${err instanceof Error ? err.message : String(err)}`,
+        timedOut: false,
+      };
+    }
+
+    if (result.abortedOnShutdown || shutdownSignal?.aborted) {
+      return undefined;
+    }
+    if (result.cancelled) {
+      return finish(finishCtx, attempt, result, resolved.full, watchContext());
+    }
+
+    // Station 3 — same check after the gate.
+    const after = await checkCleanAt(executionDir, resolved.full);
+    if (!after.ok) {
+      return finish(
+        finishCtx,
+        attempt,
+        { exit: result.exit, verdict: "red", note: `workspace moved during the gate: ${after.reason}`, timedOut: false },
+        resolved.full,
+        watchContext(),
+      );
+    }
+
+    // Station 4 — scope & memory write fence.
+    const scopeDeclared = contract.scope !== undefined && contract.scope.length > 0;
+    if (scopeDeclared && contract.base === undefined) {
+      return finish(
+        finishCtx,
+        attempt,
+        { exit: result.exit, verdict: "red", note: "scoped contract has no recorded base commit", timedOut: false },
+        resolved.full,
+        watchContext(),
+      );
+    }
+    if (contract.base !== undefined) {
+      const diff = await changedFiles(executionDir, contract.base, resolved.full);
+      if (!diff.ok) {
+        scopeViolations = undefined;
+        return finish(
+          finishCtx,
+          attempt,
+          { exit: result.exit, verdict: "red", note: `${scopeDeclared ? "scope check" : "memory fence check"} failed: ${diff.reason}`, timedOut: false },
+          resolved.full,
+          watchContext(),
+        );
+      }
+      if (scopeDeclared) {
+        scopeViolations = diff.files.filter((file) => !scopeCoversFile(contract.scope!, file));
+      }
+      const fenced = diff.files.filter((file) => (MEMORY_FILES as readonly string[]).includes(file) && !scopeCoversFile(contract.scope ?? [], file));
+      if (fenced.length > 0) {
+        scopeViolations = fenced;
+        return finish(
+          finishCtx,
+          attempt,
+          {
+            exit: result.exit,
+            verdict: "red",
+            note:
+              `changes to fenced memory files: ${fenced.join(", ")} — project memory (AGENTS.md/CLAUDE.md/CONTEXT.md) ` +
+              "is the Supervisor's and Lead's act; scope the file explicitly to contract the edit",
+            timedOut: false,
+          },
+          resolved.full,
+          watchContext(),
+        );
+      }
+    }
+
+    return finish(finishCtx, attempt, result, resolved.full, watchContext());
+  };
 
 
   const factory: Factory = {
@@ -849,349 +1253,187 @@ export function createFactory(options: FactoryOptions): Factory {
       });
     },
 
-    async claim({ task, sha, agent, handoff, mechanical }) {
+    async claim(input) {
+      const prepared = await withAdmitLock(input.task, async () => prepareClaim(this, input));
+      if (prepared.kind === "replayed") return prepared.outcome;
+      const outcome = await executeClaimPipeline({
+        task: input.task,
+        attempt: prepared.attempt,
+        claimedSha: prepared.claimedSha,
+        contract: prepared.contract,
+        disposition: prepared.disposition,
+        executionDir: prepared.executionDir,
+        admittedHandoff: prepared.admittedHandoff,
+        mechanical: prepared.mechanical,
+        agent: prepared.agent,
+      });
+      if (outcome === undefined) throw new FactoryError("daemon-shutdown", "gate aborted on daemon shutdown");
+      return outcome;
+    },
+
+    async admitClaim(input) {
+      return withAdmitLock(input.task, async () => {
+        const prepared = prepareClaim(this, input);
+        if (prepared.kind === "replayed") return { status: "replayed", outcome: prepared.outcome };
+        const { contract, disposition, executionDir, claimedSha, attempt, admittedHandoff, mechanical, agent } = prepared;
+        // Read-only empty gates bypass the machine-wide Gate queue completely.
+        if (isReadOnlyPeerDisposition(contract.disposition) && contract.gate.trim() === "") {
+          const outcome = await executeClaimPipeline({
+            task: input.task,
+            attempt,
+            claimedSha,
+            contract,
+            disposition,
+            executionDir,
+            admittedHandoff,
+            mechanical,
+            agent,
+          });
+          if (outcome === undefined) throw new FactoryError("daemon-shutdown", "gate aborted on daemon shutdown");
+          return { status: "executed", outcome };
+        }
+        // Shell-command Gates validate commit + clean tree synchronously before enqueueing.
+        const resolved = await resolveClaimedCommit(executionDir, claimedSha);
+        if (!resolved.ok) {
+          throw new FactoryError("invalid-claim", resolved.reason);
+        }
+        // Handle cross-form replay (short vs full SHA) when Attempt 1 attested resolved.full.
+        if (resolved.full !== claimedSha) {
+          const fullHistory = ledger.eventsFor(input.task);
+          const history = epochEventsFor(ledger, input.task);
+          const completed = projectTask(fullHistory, input.task).attempts.findLast(
+            (entry) => !entry.open && entry.gate?.verdict === "green" && entry.gate.sha === resolved.full,
+          );
+          if (completed?.gate !== undefined) {
+            const report = completed.events.findLast((event) => event.event === "report_written");
+            const replayedClaim = completed.events.findLast((event): event is ClaimReported => event.event === "claim_reported");
+            const repoked = replayedClaim !== undefined && history.some(
+              (event) => event.event === "repoke_dispatched" && event.seq > replayedClaim.seq,
+            );
+            if (report?.event === "report_written" && replayedClaim !== undefined && !repoked &&
+              replayedClaim.mechanical === mechanical && sameHandoff(replayedClaim.handoff, admittedHandoff)) {
+              return {
+                status: "replayed",
+                outcome: {
+                  attempt: completed.attempt,
+                  verdict: "green",
+                  gate: completed.gate,
+                  reportPath: report.path,
+                  ...(replayedClaim?.handoff === undefined ? {} : { handoff: replayedClaim.handoff }),
+                  ...(replayedClaim?.mechanical === undefined ? {} : { mechanical: replayedClaim.mechanical }),
+                },
+              };
+            }
+          }
+        }
+        const clean = await checkCleanAt(executionDir, resolved.full);
+        if (!clean.ok) {
+          throw new FactoryError("invalid-claim", `workspace not clean at the claimed commit before the gate: ${clean.reason}`);
+        }
+        const queuedEvent = ledger.append({
+          event: "gate_queued",
+          task: input.task,
+          attempt,
+          sha: resolved.full,
+          ...(input.queueId === undefined || input.queueId.trim() === "" ? {} : { id: input.queueId.trim() }),
+          ...(admittedHandoff === undefined ? {} : { handoff: admittedHandoff }),
+          ...(mechanical === undefined ? {} : { mechanical }),
+          ...(agent === undefined || agent.trim() === "" ? {} : { agent }),
+        });
+        return {
+          status: "queued",
+          attempt,
+          sha: resolved.full,
+          contract,
+          executionDir,
+          timeoutMs: options.timeoutMs ?? contractTimeoutMs(contract),
+          ...(admittedHandoff === undefined ? {} : { handoff: admittedHandoff }),
+          ...(mechanical === undefined ? {} : { mechanical }),
+          ...(agent === undefined || agent.trim() === "" ? {} : { agent }),
+          queuedEvent,
+        };
+      });
+    },
+
+    async executeQueuedClaim({ task, attempt, sha, handoff, mechanical, agent, timeoutMs, signal, shutdownSignal, cancelNote, onSpawn }) {
       assertTaskId(task);
       const contract = this.contractFor(task);
       if (!contract) throw new FactoryError("unknown-task", `no contract set for task ${task} — register one first`);
-      const fullHistory = ledger.eventsFor(task);
       const history = epochEventsFor(ledger, task);
-
-      // Admission (ADR 0053 §4) — the six-field handoff law and the
-      // disposition's commit rule, both judged BEFORE any event is appended
-      // and before Station 1 runs: a malformed claim opens no Attempt. The
-      // law's one scoped exception is the Lead's `lead_verify` mechanical
-      // re-run — a non-Peer claim that carries the marker instead of a
-      // handoff, never both, so no Peer outcome is forged on it.
-      if (mechanical !== undefined && mechanical !== "lead_verify") {
-        throw new FactoryError("invalid-claim", `\`mechanical\` must be exactly "lead_verify" when present — got ${JSON.stringify(mechanical)}`);
+      const events = attemptEvents(history, attempt);
+      if (!events.some((e) => e.event === "gate_queued")) {
+        throw new FactoryError("invalid-claim", `task ${task} attempt ${attempt} has no gate_queued record`);
       }
-      if (mechanical === "lead_verify" && handoff !== undefined) {
-        throw new FactoryError("invalid-claim", "a `lead_verify` mechanical re-run carries no six-field handoff — pass the mechanical marker or the Peer handoff, never both (ADR 0053 §4)");
+      if (events.some((e) => e.event === "claim_reported" || e.event === "gate_finished")) {
+        throw new FactoryError("gate-running", `task ${task} attempt ${attempt} was already started or finished`);
       }
-      const admittedHandoff = mechanical === "lead_verify" ? undefined : admitHandoff(handoff);
       const disposition = contract.disposition ?? "engineer";
       const executionDir = this.worktreeFor(task) ?? contract.workspace;
-      let claimedSha = sha.trim();
-      if (claimedSha === "") {
-        if (disposition === "engineer") {
-          throw new FactoryError(
-            "invalid-claim",
-            `the six-field handoff is complete but the claim attests no commit: \`commit\` is mandatory for the ${disposition} disposition — the Claim attests an exact commit (ADR 0053 §4)`,
-          );
-        }
-        const head = headCommitSync(executionDir);
-        if (head === undefined) {
-          throw new FactoryError("invalid-claim", `could not resolve HEAD in ${executionDir} to default the omitted commit for the ${disposition} disposition`);
-        }
-        claimedSha = head;
-      }
-
-      // The watch's read of the scope station: undefined until it runs, then
-      // the outside-scope files it found (empty = clean). Set where station 4
-      // decides, read by the watch pass inside finish().
-      let scopeViolations: string[] | undefined;
-      const watchContext = () => ({
-        agent,
-        scopeViolations,
-        fetchTimeline: options.fetchTimeline,
-        budgetMs: options.watchBudgetMs,
-        copilotRunner: options.watchCopilotRunner,
-      });
-
-      // H6 rider (v0.0.5 ticket 02): an accepted task is closed — a Claim on it
-      // used to fall through to a fresh Attempt; it refuses like accept does.
-      const priorAccept = acceptedAttempt(fullHistory);
-      if (priorAccept !== undefined) {
-        throw new FactoryError(
-          "already-accepted",
-          `task ${task} was already accepted at attempt ${priorAccept.attempt}; the ledger is append-only`,
-        );
-      }
-
-      // The H6 rider's close-side mirror (v0.5.0, ADR 0054 §5): a retired Task
-      // is terminal the same way — a straggler Peer's Claim opens no fresh
-      // Attempt and replays no closed green evidence.
-      const closure = closureEvent(fullHistory);
-      if (closure !== undefined) {
-        throw new FactoryError(
-          "already-closed",
-          `task ${task} was closed (reason: ${closure.reason}) — the retirement is terminal; the ledger is append-only`,
-        );
-      }
-
-      // ADR 0003: Attempts never overlap. The previous one must have reached
-      // its report before a new Claim opens the next Attempt.
-      const lastAttempt = maxAttempt(history);
-      if (lastAttempt > 0 && attemptIsOpen(history, lastAttempt)) {
-        throw new FactoryError(
-          "gate-running",
-          `attempt ${lastAttempt} of task ${task} is still open — wait for its verdict before claiming again`,
-        );
-      }
-      const completed = projectTask(fullHistory, task).attempts.findLast(
-        (entry) => !entry.open && entry.gate?.verdict === "green" &&
-          (entry.gate.sha === claimedSha || entry.events.some(event => event.event === "claim_reported" && event.sha === claimedSha)),
-      );
-      if (completed?.gate !== undefined) {
-        const report = completed.events.findLast((event) => event.event === "report_written");
-        const replayedClaim = completed.events.findLast((event): event is ClaimReported => event.event === "claim_reported");
-        // A poke after the claim began requests another reconciliation turn;
-        // a poke answered by that claim does not invalidate its retries.
-        const repoked = replayedClaim !== undefined && history.some(
-          (event) => event.event === "repoke_dispatched" && event.seq > replayedClaim.seq,
-        );
-        if (report?.event === "report_written" && replayedClaim !== undefined && !repoked &&
-          replayedClaim.mechanical === mechanical && sameHandoff(replayedClaim.handoff, admittedHandoff)) {
-          // The replayed outcome is the attempt's own evidence — the admitted
-          // handoff rides it exactly as the first delivery did (ADR 0053 §4).
-          return {
-            attempt: completed.attempt,
-            verdict: "green",
-            gate: completed.gate,
-            reportPath: report.path,
-            ...(replayedClaim?.handoff === undefined ? {} : { handoff: replayedClaim.handoff }),
-            ...(replayedClaim?.mechanical === undefined ? {} : { mechanical: replayedClaim.mechanical }),
-          };
-        }
-      }
-      if (lastAttempt >= MAX_ATTEMPTS) {
-        throw new FactoryError(
-          "attempt-ceiling",
-          `task ${task} reached the attempt ceiling (${MAX_ATTEMPTS} attempts) — no further Claim may open an Attempt`,
-        );
-      }
-      const attempt = lastAttempt + 1;
-
-      // Everything the Attempt's closing window fixes up front (F10): the
-      // per-call facts — verdict, sha, the watch context — stay arguments;
-      // the rest rides one context object.
-      const finishCtx = {
-        task,
-        ledger,
-        stateDir,
-        dataDir,
-        contract,
-        eyeBudgetMs: options.eyeBudgetMs,
-        eyeRunner: options.eyeCliRunner,
-        handoff: admittedHandoff,
-      };
-
-      ledger.append({
-        event: "claim_reported",
+      return executeClaimPipeline({
         task,
         attempt,
-        sha: claimedSha,
-        handoff: admittedHandoff,
-        ...(mechanical === undefined ? {} : { mechanical }),
-        ...(agent === undefined || agent.trim() === "" ? {} : { agent }),
+        claimedSha: sha,
+        contract,
+        disposition,
+        executionDir,
+        admittedHandoff: handoff,
+        mechanical,
+        agent,
+        ...(timeoutMs === undefined ? {} : { timeoutMs }),
+        signal,
+        shutdownSignal,
+        cancelNote,
+        onSpawn,
       });
-      ledger.append({ event: "gate_started", task, attempt, cmd: contract.gate });
+    },
 
-      // The execution tree (v0.0.14, ADR 0010 §4): a task spawned with a
-      // managed Task worktree claims, gates, and diffs THERE — the Contract's
-      // workspace stays <project-root>, the recorded home of the work and the
-      // landing target; the worktree is the driver-level execution detail the
-      // spawn line carries. Legacy spawns (no worktree on the line) execute
-      // at the contract workspace, v0.0.5's law. `executionDir` was fixed at
-      // admission — the omitted-commit default needs it before any append.
-
-      // Station 1 — the claimed commit must exist as one full object. An empty,
-      // unknown or ambiguous sha is a red Verdict (ADR 0002), and the gate
-      // command never runs on an unverified tree.
-      const resolved = await resolveClaimedCommit(executionDir, claimedSha);
-      if (!resolved.ok) {
-        return finish(finishCtx, attempt, { exit: null, verdict: "red", note: resolved.reason, timedOut: false }, undefined, watchContext());
-      }
-
-      // The read-only synthetic Gate (ADR 0054 §2): a read-only Contract with
-      // an empty gate owns no shell command — an empty string through runGate
-      // cannot even start, so the Factory verifies the execution tree itself
-      // and records the verdict. The branch sits before Station 2 because its
-      // dirty outcome is this gate's own refusal (dirty-worktree-before-gate),
-      // not the shell path's generic pre-gate note.
-      if (isReadOnlyPeerDisposition(contract.disposition) && contract.gate.trim() === "") {
-        const clean = await checkCleanAt(executionDir, resolved.full);
-        if (!clean.ok) {
-          return finish(
-            finishCtx,
-            attempt,
-            {
-              exit: null,
-              verdict: "red",
-              note: `dirty-worktree-before-gate: ${clean.reason}`,
-              timedOut: false,
-            },
-            resolved.full,
-            watchContext(),
-          );
-        }
-        // The memory write fence's read-only arm (spec Implementation Decision
-        // 2: "no unauthorized root memory edits"): a read-only Contract's scope
-        // is always [], so any fenced root memory file inside the Contract's
-        // diff range reds — project memory is never a read-only Peer's to move.
-        if (contract.base !== undefined) {
-          const diff = await changedFiles(executionDir, contract.base, resolved.full);
-          if (!diff.ok) {
-            return finish(
-              finishCtx,
-              attempt,
-              { exit: null, verdict: "red", note: `memory fence check failed: ${diff.reason}`, timedOut: false },
-              resolved.full,
-              watchContext(),
-            );
-          }
-          const fenced = diff.files.filter((file) => (MEMORY_FILES as readonly string[]).includes(file));
-          if (fenced.length > 0) {
-            return finish(
-              finishCtx,
-              attempt,
-              {
-                exit: null,
-                verdict: "red",
-                note:
-                  `changes to fenced memory files: ${fenced.join(", ")} — project memory (AGENTS.md/CLAUDE.md/CONTEXT.md) ` +
-                  "is the Supervisor's and Lead's act, never a read-only Peer's",
-                timedOut: false,
-              },
-              resolved.full,
-              watchContext(),
-            );
-          }
-        }
-        return finish(
-          finishCtx,
+    recordDaemonRestarted({ task, attempt }) {
+      assertTaskId(task);
+      const contract = this.contractFor(task);
+      if (!contract) throw new FactoryError("unknown-task", `no contract set for task ${task} — register one first`);
+      const history = epochEventsFor(ledger, task);
+      const events = attemptEvents(history, attempt);
+      const queued = events.findLast((e): e is GateQueued => e.event === "gate_queued");
+      let claimEvt = events.findLast((e): e is ClaimReported => e.event === "claim_reported");
+      if (claimEvt === undefined && queued !== undefined) {
+        claimEvt = ledger.append({
+          event: "claim_reported",
+          task,
           attempt,
-          {
-            exit: 0,
-            verdict: "green",
-            note: `read-only disposition (${disposition}) — 6-field handoff recorded, no shell gate required`,
-            timedOut: false,
-            output: `read-only disposition (${disposition}) — 6-field handoff recorded, worktree clean at ${resolved.full}`,
-          },
-          resolved.full,
-          watchContext(),
-        );
-      }
-
-      // Station 2 — clean tree, HEAD at the claimed commit, before the gate.
-      const before = await checkCleanAt(executionDir, resolved.full);
-      if (!before.ok) {
-        return finish(
-          finishCtx,
-          attempt,
-          {
-            exit: null,
-            verdict: "red",
-            note: `workspace not clean at the claimed commit before the gate: ${before.reason}`,
-            timedOut: false,
-          },
-          resolved.full,
-          watchContext(),
-        );
-      }
-
-      let result: GateResult;
-      try {
-        result = await runGate({
-          cmd: contract.gate,
-          cwd: executionDir,
-          ...(contract.artifact.trim() === "" ? {} : { artifact: contract.artifact }),
-          timeoutMs: options.timeoutMs ?? contractTimeoutMs(contract),
+          sha: queued.sha,
+          ...(queued.handoff === undefined ? {} : { handoff: queued.handoff }),
+          ...(queued.mechanical === undefined ? {} : { mechanical: queued.mechanical }),
+          ...(queued.agent === undefined ? {} : { agent: queued.agent }),
         });
-      } catch (err) {
-        // A gate that cannot even start is a red fact, not an aborted sequence —
-        // the ledger must still reach gate_finished.
-        result = {
+      }
+      if (!events.some((e) => e.event === "gate_started")) {
+        ledger.append({ event: "gate_started", task, attempt, cmd: contract.gate });
+      }
+      let gate = events.findLast((e): e is GateFinished => e.event === "gate_finished");
+      if (gate === undefined) {
+        gate = ledger.append({
+          event: "gate_finished",
+          task,
+          attempt,
           exit: null,
           verdict: "red",
-          note: `gate failed to start: ${err instanceof Error ? err.message : String(err)}`,
-          timedOut: false,
-        };
+          note: "daemon-restarted",
+        });
       }
-
-      // Station 3 — same check after the gate: a green exit on a tree that moved
-      // during the run attests nothing.
-      const after = await checkCleanAt(executionDir, resolved.full);
-      if (!after.ok) {
-        return finish(
-          finishCtx,
-          attempt,
-          {
-            exit: result.exit,
-            verdict: "red",
-            note: `workspace moved during the gate: ${after.reason}`,
-            timedOut: false,
-          },
-          resolved.full,
-          watchContext(),
-        );
-      }
-
-      // Station 4 — the mechanical task boundary (ticket 14, fenced in
-      // v0.0.14): every file the diff touches must fall inside a declared
-      // scope prefix, and the three memory files at the workspace root
-      // (AGENTS.md, CLAUDE.md, CONTEXT.md) red EVERY contract that does not
-      // explicitly scope them — unrestricted ones included (ADR 0010 §6:
-      // project memory is the Supervisor's and Lead's act, never a worker's
-      // side effect) — WHEN the Contract carries a base commit, which the
-      // diff below needs (every Contract since v0.0.2 records one; only
-      // pre-0.0.2 ledger lines are base-less). A base-less Contract skips
-      // this claim-time fence; the ask-time Choke fence (MEMORY_FILES in
-      // choke.ts) still covers its writes live. A task that overreaches is
-      // refused here, never prompted back to polite behavior.
-      const scopeDeclared = contract.scope !== undefined && contract.scope.length > 0;
-      if (scopeDeclared && contract.base === undefined) {
-        return finish(
-          finishCtx,
-          attempt,
-          { exit: result.exit, verdict: "red", note: "scoped contract has no recorded base commit", timedOut: false },
-          resolved.full,
-          watchContext(),
-        );
-      }
-      if (contract.base !== undefined) {
-        const diff = await changedFiles(executionDir, contract.base, resolved.full);
-        if (!diff.ok) {
-          // A failed diff leaves the station with no measurement — undefined,
-          // never an empty list posing as "clean".
-          scopeViolations = undefined;
-          return finish(
-            finishCtx,
-            attempt,
-            {
-              exit: result.exit,
-              verdict: "red",
-              note: `${scopeDeclared ? "scope check" : "memory fence check"} failed: ${diff.reason}`,
-              timedOut: false,
-            },
-            resolved.full,
-            watchContext(),
-          );
-        }
-        if (scopeDeclared) {
-          scopeViolations = diff.files.filter((file) => !scopeCoversFile(contract.scope!, file));
-        }
-        const fenced = diff.files.filter((file) => (MEMORY_FILES as readonly string[]).includes(file) && !scopeCoversFile(contract.scope ?? [], file));
-        if (fenced.length > 0) {
-          scopeViolations = fenced;
-          return finish(
-            finishCtx,
-            attempt,
-            {
-              exit: result.exit,
-              verdict: "red",
-              note:
-                `changes to fenced memory files: ${fenced.join(", ")} — project memory (AGENTS.md/CLAUDE.md/CONTEXT.md) ` +
-                "is the Supervisor's and Lead's act; scope the file explicitly to contract the edit",
-              timedOut: false,
-            },
-            resolved.full,
-            watchContext(),
-          );
-        }
-      }
-
-      return finish(finishCtx, attempt, result, resolved.full, watchContext());
+      const existingReport = events.findLast((e) => e.event === "report_written");
+      const reportPath = existingReport?.event === "report_written"
+        ? existingReport.path
+        : writeAttemptReport(task, attempt, ledger, dataDir);
+      const handoff = claimEvt?.handoff ?? queued?.handoff;
+      const mechanical = claimEvt?.mechanical ?? queued?.mechanical;
+      return {
+        attempt,
+        verdict: gate.verdict,
+        gate,
+        reportPath,
+        ...(handoff === undefined ? {} : { handoff }),
+        ...(mechanical === undefined ? {} : { mechanical }),
+      };
     },
 
     async accept({ task, attempt, accepted_by, authority }) {
@@ -1845,8 +2087,8 @@ export function createFactory(options: FactoryOptions): Factory {
     },
 
   };
-  const asyncOperations = new Set(["claim", "accept"]);
-  const syncOperations = new Set(["setContract", "requestSpawn", "meter", "repoke", "respawn", "needsHuman", "resetProject"]);
+  const asyncOperations = new Set(["claim", "admitClaim", "executeQueuedClaim", "accept"]);
+  const syncOperations = new Set(["setContract", "requestSpawn", "meter", "repoke", "respawn", "needsHuman", "recordDaemonRestarted", "resetProject"]);
   const wrappers = new Map<PropertyKey, unknown>();
   return new Proxy(factory, {
     get(target, key, receiver) {
@@ -1970,6 +2212,8 @@ async function finish(
   eyeRunner: LaneCliRunner | undefined;
   /** The admitted handoff (ADR 0053 §4) — rides the outcome for the notification pipeline; absent on a `lead_verify` mechanical re-run. */
   handoff: PeerHandoffFields | undefined;
+  /** Replayed alongside the handoff when the recorded claim was a `lead_verify` mechanical re-run. */
+  mechanical?: "lead_verify";
   },
   attempt: number,
   result: GateResult,
@@ -2049,7 +2293,14 @@ async function finish(
     });
   }
   const reportPath = writeAttemptReport(task, attempt, ledger, dataDir);
-  return { attempt, verdict: result.verdict, gate, reportPath, handoff: ctx.handoff };
+  return {
+    attempt,
+    verdict: result.verdict,
+    gate,
+    reportPath,
+    ...(ctx.handoff === undefined ? {} : { handoff: ctx.handoff }),
+    ...(ctx.mechanical === undefined ? {} : { mechanical: ctx.mechanical }),
+  };
 }
 
 /** V2 evidence belongs to a stable Contract epoch; legacy paths remain usable. */
@@ -2098,8 +2349,26 @@ function attemptIsOpen(history: readonly LedgerEvent[], attempt: number): boolea
  * landed (ticket 03 R1). The interrupted pass itself is never re-run: its line
  * simply never exists, recovery's report says so by omission.
  */
-function recoverInterruptedAttempts(ledger: Ledger, dataDir: string): { task: string; attempt: number }[] {
+function readGateQueueItemsSafe(stateDir: string): Array<{ projectSlug?: string; useRootFactory?: boolean; task?: string; attempt?: number; status?: string }> {
+  try {
+    const raw = readOptionalJson(join(stateDir, "gate-queue.json"));
+    if (typeof raw !== "object" || raw === null || !Array.isArray((raw as { items?: unknown }).items)) return [];
+    return (raw as { items: Array<{ projectSlug?: string; useRootFactory?: boolean; task?: string; attempt?: number; status?: string }> }).items;
+  } catch {
+    return [];
+  }
+}
+
+function recoverInterruptedAttempts(ledger: Ledger, dataDir: string, stateDir: string, projectSlug?: string): { task: string; attempt: number }[] {
   const recovered: { task: string; attempt: number }[] = [];
+  const queueItems = readGateQueueItemsSafe(stateDir);
+  const isManagedByGateQueue = (task: string, attempt: number): boolean =>
+    queueItems.some((item) =>
+      item.task === task &&
+      item.attempt === attempt &&
+      (item.status === "running" || item.status === "queued") &&
+      (projectSlug === undefined ? item.useRootFactory === true || item.projectSlug === "root" : item.projectSlug === projectSlug && item.useRootFactory !== true),
+    );
   // `retro_written` carries no task — only tasked events can need recovery.
   const tasks = [...new Set(ledger.events.flatMap((e) => ("task" in e && typeof e.task === "string" ? [e.task] : [])))];
   for (const task of tasks) {
@@ -2108,6 +2377,11 @@ function recoverInterruptedAttempts(ledger: Ledger, dataDir: string): { task: st
       if (!attemptIsOpen(history, attempt)) continue;
       const events = attemptEvents(history, attempt);
       const gateStarted = events.some((e) => e.event === "gate_started");
+      const claimReported = events.some((e) => e.event === "claim_reported");
+      // Unstarted `gate_queued` attempts are resumed in FIFO order by GateQueue boot recovery.
+      if (!gateStarted && !claimReported) continue;
+      // Persisted `running` items in gate-queue.json are settled with `daemon-restarted` by GateQueue boot recovery.
+      if (isManagedByGateQueue(task, attempt)) continue;
       const alreadyFinished = events.some((e) => e.event === "gate_finished");
       if (!alreadyFinished) {
         ledger.append({

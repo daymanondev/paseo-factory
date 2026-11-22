@@ -302,15 +302,26 @@ test("Full SLP lifecycle: Owner -> Supervisor -> Lead -> Agent -> Lead -> Superv
   execFileSync("git", ["commit", "-m", "feat: add greet"], { cwd: worktreeDir });
   const sha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: worktreeDir, encoding: "utf8" }).trim();
 
+  const waitForReport = async (task: string, attempt: number): Promise<void> => {
+    const deadline = Date.now() + 8_000;
+    while (Date.now() < deadline) {
+      if (factory.ledger.eventsFor(task).some((e) => e.event === "report_written" && e.attempt === attempt)) return;
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    assert.fail(`timed out waiting for ${task}#${attempt} report_written`);
+  };
+
   const claimStart = Date.now();
   const claimRes = await callMcpTool({
     args: ["--correlation", taskAgent.env.PASEO_FACTORY_CORRELATION!, "--state-dir", stateDir],
     toolName: "agent_claim",
     toolArgs: { commit: sha, outcome: "complete", scope: "src/greet.ts", verification: "gate ran green", unknowns: "none" },
   });
-  const claimElapsed = Date.now() - claimStart;
   assert.notEqual(claimRes.isError, true, claimRes.text);
-  assert.match(claimRes.text, /GREEN/i);
+  assert.match(claimRes.text, /Status: QUEUED/);
+  await waitForReport("T-01", 1);
+  const claimElapsed = Date.now() - claimStart;
+  assert.equal(factory.ledger.eventsFor("T-01").findLast((e) => e.event === "gate_finished")?.verdict, "green");
   assert.ok(claimElapsed < 4_000, `Gate reaped background 'sleep 30 &' promptly (${claimElapsed}ms)`);
 
   // Pre-contract the dependent wave before acceptance to exercise CLI base advancement.
@@ -377,7 +388,9 @@ test("Full SLP lifecycle: Owner -> Supervisor -> Lead -> Agent -> Lead -> Superv
     toolName: "agent_claim", toolArgs: { commit: finalSha, outcome: "complete", scope: "src/consumer.ts", verification: "gate ran green", unknowns: "none" },
   });
   assert.notEqual(secondClaim.isError, true, secondClaim.text);
-  assert.match(secondClaim.text, /GREEN/);
+  assert.match(secondClaim.text, /Status: QUEUED/);
+  await waitForReport("T-02", 1);
+  assert.equal(factory.ledger.eventsFor("T-02").findLast((e) => e.event === "gate_finished")?.verdict, "green");
   const finalAccept = await callMcpTool({
     args: ["--correlation", leadAgent.env.PASEO_FACTORY_CORRELATION!, "--state-dir", stateDir],
     toolName: "lead_merge", toolArgs: { task: "T-02", attempt: 1 },

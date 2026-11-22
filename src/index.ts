@@ -6,7 +6,7 @@
  * forever (`research/03-hands-on/04-andrew-room.md` §12).
  */
 export { createFactory } from "./factory.ts";
-export type { Factory, FactoryOptions, ContractInput, ClaimInput, ClaimOutcome, AcceptInput, CloseInput, SpawnInput, SpawnDecision, RespawnInput, RespawnDecision, MeterInput } from "./factory.ts";
+export type { Factory, FactoryOptions, ContractInput, ClaimInput, AdmitClaimInput, AdmitClaimResult, ExecuteQueuedClaimInput, ClaimOutcome, AcceptInput, CloseInput, SpawnInput, SpawnDecision, RespawnInput, RespawnDecision, MeterInput } from "./factory.ts";
 export { resolveProject, resolveOrBootstrapProject, ensureGitRepository, projectStateDir, projectNotebookPath, readProjectNotebook, writeProjectNotebook, syncLegacyScratchNotebook, PROJECT_NOTEBOOK_FILENAME, PROJECT_NOTEBOOK_MAX_LINES, PROJECT_NOTEBOOK_MAX_BYTES, PROJECT_NOTEBOOK_MAX_GUARD_ROWS, readProjectRegistration, writeProjectRegistration, ensureProjectRegistered, listProjectRegistrations, discoverProjects } from "./project.ts";
 export type { ProjectResolution, BootstrapProjectOptions, BootstrapProjectResolution, DiscoveredProject, ProjectRegistration, LegacyNotebookSync } from "./project.ts";
 export { resolveClaimedCommit, checkCleanAt, diffBetween, changedFiles, scopeCoversFile, headCommitSync, changesOutsideScope, landTaskWorktree, commitSeatMemoryOnRoot, reapWorktreeProcesses, taskWorktreePath, parseTaskWorktreePath, taskWorktreeBranch, prepareTaskWorktree, deleteTaskWorktreeBranch } from "./workspace.ts";
@@ -149,6 +149,7 @@ export type {
   LedgerEvent,
   PendingEvent,
   ContractSet,
+  GateQueued,
   ClaimReported,
   GateStarted,
   GateFinished,

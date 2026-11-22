@@ -105,12 +105,16 @@ test("the whole loop over the spool: contract → red claim → green claim → 
   assert.equal(contract.status, 0, contract.stderr);
   assert.match(contract.stdout, /contract set for LOOP1/);
 
-  // Attempt 1: the agent claims unfinished work — the factory says red, with the note.
+  // Attempt 1: the agent claims unfinished work — queued immediately, then gate settles red with the note.
   const red = await run(claimCli, ["--task", "LOOP1", "--outcome", "complete", "--scope", "s", "--verification", "v", "--unknowns", "none", "--sha", brokenSha], agentEnv);
-  assert.equal(red.status, 1, `red verdict must exit 1\nstdout: ${red.stdout}\nstderr: ${red.stderr}`);
-  assert.match(red.stdout, /LOOP1 attempt 1 — RED/);
-  assert.match(red.stdout, /report: .*report-LOOP1-1\.md/);
-  assert.match(red.stdout, /note: .+fail 2/, "the agent sees the real gate note");
+  assert.equal(red.status, 0, `queued ack must exit 0\nstdout: ${red.stdout}\nstderr: ${red.stderr}`);
+  assert.match(red.stdout, /LOOP1 attempt 1 — QUEUED/);
+  await until(() => {
+    assert.ok(factory.ledger.eventsFor("LOOP1").some((e) => e.event === "report_written" && e.attempt === 1));
+  });
+  const redGate = factory.ledger.eventsFor("LOOP1").find((e) => e.event === "gate_finished" && e.attempt === 1);
+  assert.equal(redGate?.event === "gate_finished" ? redGate.verdict : undefined, "red");
+  assert.match(redGate?.event === "gate_finished" ? redGate.note : "", /fail 2/, "the real gate note landed in ledger");
 
   // The agent fixes the work for real and claims the new commit.
   writeFileSync(
@@ -125,8 +129,11 @@ test("the whole loop over the spool: contract → red claim → green claim → 
   );
   const fixedSha = gitCommitChanges(workspace, "fix pad to truncate and pad correctly");
   const green = await run(claimCli, ["--task", "LOOP1", "--outcome", "complete", "--scope", "s", "--verification", "v", "--unknowns", "none", "--sha", fixedSha], agentEnv);
-  assert.equal(green.status, 0, `green verdict must exit 0\nstdout: ${green.stdout}\nstderr: ${green.stderr}`);
-  assert.match(green.stdout, /LOOP1 attempt 2 — GREEN/);
+  assert.equal(green.status, 0, `queued green ack must exit 0\nstdout: ${green.stdout}\nstderr: ${green.stderr}`);
+  assert.match(green.stdout, /LOOP1 attempt 2 — QUEUED/);
+  await until(() => {
+    assert.ok(factory.ledger.eventsFor("LOOP1").some((e) => e.event === "report_written" && e.attempt === 2));
+  });
 
   // The Owner accepts the green attempt; acceptance is not the agent's act.
   const accept = await run(ownerCli, ["accept", "LOOP1", "--attempt", "2"], ownerEnv);
@@ -136,8 +143,8 @@ test("the whole loop over the spool: contract → red claim → green claim → 
   const events = factory.ledger.eventsFor("LOOP1").map((e) => e.event);
   assert.deepEqual(events, [
     "contract_set",
-    "claim_reported", "gate_started", "gate_finished", "report_written",
-    "claim_reported", "gate_started", "gate_finished", "report_written",
+    "gate_queued", "claim_reported", "gate_started", "gate_finished", "report_written",
+    "gate_queued", "claim_reported", "gate_started", "gate_finished", "report_written",
     "attempt_accepted",
   ]);
   assert.ok(existsSync(join(stateDir, "report-LOOP1-1.md")));
@@ -186,7 +193,10 @@ test("the delegated Owner seat's env stamps its id on both acts (v0.0.9)", async
   assert.match(contract.stdout, /contract set for SEAT1: .* by agent-supervisor-1/);
 
   const green = await run(claimCli, ["--task", "SEAT1", "--outcome", "complete", "--scope", "s", "--verification", "v", "--unknowns", "none", "--sha", sha], { FACTORY_STATE_DIR: stateDir, PASEO_AGENT_ID: "agent-worker-1" });
-  assert.equal(green.status, 0, `expected green\nstdout: ${green.stdout}\nstderr: ${green.stderr}`);
+  assert.equal(green.status, 0, `expected queued\nstdout: ${green.stdout}\nstderr: ${green.stderr}`);
+  await until(() => {
+    assert.ok(factory.ledger.eventsFor("SEAT1").some((e) => e.event === "report_written" && e.attempt === 1));
+  });
 
   const accept = await run(ownerCli, ["accept", "SEAT1", "--attempt", "1"], seatEnv);
   assert.equal(accept.status, 0, accept.stderr);
@@ -415,7 +425,10 @@ test("factory-claim round-trips the six-field handoff (ADR 0053 §4): the requir
     "--wait-secs", "10",
   ], agentEnv);
   assert.equal(scout.status, 0, scout.stderr);
-  assert.match(scout.stdout, /SCOUT-CLI attempt 1 — GREEN/);
+  assert.match(scout.stdout, /SCOUT-CLI attempt 1 — QUEUED/);
+  await until(() => {
+    assert.ok(factory.ledger.eventsFor("SCOUT-CLI").some((e) => e.event === "report_written"));
+  });
 
   // An engineer claim without --sha is refused at admission — no Attempt
   // opens (User Story 14's mandatory-commit law).
@@ -515,10 +528,13 @@ test("three identical claims while the watcher is stopped leave ONE request file
   const reply = JSON.parse(readFileSync(replyPath, "utf8")) as Record<string, unknown>;
   assert.equal(reply.ok, true);
   assert.equal(reply.attempt, 1, "one Gate attempt — attempt: 1");
-  assert.equal(reply.verdict, "green");
+  assert.equal(reply.status, "queued");
+  await until(() => {
+    assert.ok(factory.ledger.eventsFor("DEDUP1").some((e) => e.event === "report_written"));
+  });
   assert.deepEqual(
     factory.ledger.eventsFor("DEDUP1").map((e) => e.event),
-    ["contract_set", "claim_reported", "gate_started", "gate_finished", "report_written"],
+    ["contract_set", "gate_queued", "claim_reported", "gate_started", "gate_finished", "report_written"],
     "exactly one claim round — no second Gate, no second Ledger mutation",
   );
   assert.deepEqual(queuedRequestIds(spoolRoot), [], "the drained queue is empty");
@@ -554,7 +570,10 @@ test("the loop with --fresh-eyes: the eye's line lands through the real CLIs and
 
   // The red attempt never asks the eye.
   const red = await run(claimCli, ["--task", "LOOP2", "--outcome", "complete", "--scope", "s", "--verification", "v", "--unknowns", "none", "--sha", brokenSha], agentEnv);
-  assert.equal(red.status, 1);
+  assert.equal(red.status, 0);
+  await until(() => {
+    assert.ok(factory.ledger.eventsFor("LOOP2").some((e) => e.event === "report_written" && e.attempt === 1));
+  });
   assert.equal(fake.requests.length, 0, "red verdicts never call the eye");
 
   // The real fix: green, and the eye reads contract + diff + gate output.
@@ -570,7 +589,10 @@ test("the loop with --fresh-eyes: the eye's line lands through the real CLIs and
   );
   const fixedSha = gitCommitChanges(workspace, "fix pad to truncate and pad correctly");
   const green = await run(claimCli, ["--task", "LOOP2", "--outcome", "complete", "--scope", "s", "--verification", "v", "--unknowns", "none", "--sha", fixedSha], agentEnv);
-  assert.equal(green.status, 0, `expected green\nstdout: ${green.stdout}\nstderr: ${green.stderr}`);
+  assert.equal(green.status, 0, `expected queued green\nstdout: ${green.stdout}\nstderr: ${green.stderr}`);
+  await until(() => {
+    assert.ok(factory.ledger.eventsFor("LOOP2").some((e) => e.event === "report_written" && e.attempt === 2));
+  });
 
   assert.equal(fake.requests.length, 1, "one green attempt, one eye pass");
   const prompt = (fake.requests[0]!.body as { messages: { content: string }[] }).messages[0]!.content;
@@ -580,8 +602,8 @@ test("the loop with --fresh-eyes: the eye's line lands through the real CLIs and
   const events = factory.ledger.eventsFor("LOOP2").map((e) => e.event);
   assert.deepEqual(events, [
     "contract_set",
-    "claim_reported", "gate_started", "gate_finished", "report_written",
-    "claim_reported", "gate_started", "gate_finished", "fresh_eyes_written", "report_written",
+    "gate_queued", "claim_reported", "gate_started", "gate_finished", "report_written",
+    "gate_queued", "claim_reported", "gate_started", "gate_finished", "fresh_eyes_written", "report_written",
   ]);
   const claim = factory.ledger.eventsFor("LOOP2").filter((e) => e.event === "claim_reported").at(-1);
   assert.equal((claim as { agent?: string }).agent, "agent-eye-1", "the spool stamps the submitter (ticket 02b)");
@@ -775,7 +797,10 @@ test("factory accept --by <seat>: the flag rides the spool; the Lead's rules ans
   ], ownerEnv);
   assert.equal(contract.status, 0, contract.stderr);
   const green = await run(claimCli, ["--task", "SEAT2", "--outcome", "complete", "--scope", "s", "--verification", "v", "--unknowns", "none", "--sha", sha], agentEnv);
-  assert.equal(green.status, 0, `expected green\nstdout: ${green.stdout}\nstderr: ${green.stderr}`);
+  assert.equal(green.status, 0, `expected queued\nstdout: ${green.stdout}\nstderr: ${green.stderr}`);
+  await until(() => {
+    assert.ok(factory.ledger.eventsFor("SEAT2").some((e) => e.event === "report_written" && e.attempt === 1));
+  });
   assert.equal(fake.requests.length, 1, "the eye ran on the green attempt");
 
   // Needs-human remains a hard stop even with historical Fresh-eyes evidence.
@@ -823,6 +848,9 @@ test("factory accept --by <seat>: the flag rides the spool; the Lead's rules ans
   assert.equal(contract2.status, 0, contract2.stderr);
   const green2 = await run(claimCli, ["--task", "SEAT3", "--outcome", "complete", "--scope", "s", "--verification", "v", "--unknowns", "none", "--sha", sha], { FACTORY_STATE_DIR: stateDir2, PASEO_AGENT_ID: "agent-worker-2" });
   assert.equal(green2.status, 0, green2.stderr);
+  await until(() => {
+    assert.ok(factory2.ledger.eventsFor("SEAT3").some((e) => e.event === "report_written" && e.attempt === 1));
+  });
   const lead = await run(ownerCli, ["accept", "SEAT3", "--attempt", "1", "--by", "lead"], { PASEO_HOME: home2 });
   assert.equal(lead.status, 0, lead.stderr);
   assert.match(lead.stdout, /SEAT3 accepted at attempt 1 by lead/);
@@ -941,6 +969,9 @@ test("factory CLI stamps PASEO_FACTORY_SEAT onto spool requests and enforces sea
     PASEO_FACTORY_SEAT: "agent",
   });
   assert.equal(claimed.status, 0, claimed.stderr);
+  await until(() => {
+    assert.ok(factory.ledger.eventsFor("T-AUTH").some((e) => e.event === "report_written" && e.attempt === 1));
+  });
 
   // Working Agent still cannot accept its own green attempt.
   const agAccept = await run(ownerCli, ["accept", "T-AUTH", "--attempt", "1"], workerEnv);
@@ -1447,16 +1478,21 @@ test("Seam 1: the CLI plumbs --project through the spool router", async (t) => {
   const shaA = gitCommitAll(a.root, "work-a");
   const shaB = gitCommitAll(b.root, "work-b");
   const claimA = await run(claimCli, ["--task", "T-09", "--outcome", "complete", "--scope", "s", "--verification", "v", "--unknowns", "none", "--sha", shaA, "--wait-secs", "60"], { FACTORY_STATE_DIR: stateDir, PASEO_AGENT_ID: "peer-a" });
-  assert.equal(claimA.status, 0, `project-a's claim ends green\nstdout: ${claimA.stdout}\nstderr: ${claimA.stderr}`);
+  assert.equal(claimA.status, 0, `project-a's claim queued\nstdout: ${claimA.stdout}\nstderr: ${claimA.stderr}`);
   const claimB = await run(claimCli, ["--task", "T-09", "--outcome", "complete", "--scope", "s", "--verification", "v", "--unknowns", "none", "--sha", shaB, "--wait-secs", "60"], { FACTORY_STATE_DIR: stateDir, PASEO_AGENT_ID: "peer-b" });
-  assert.equal(claimB.status, 0, `project-b's claim ends green\nstdout: ${claimB.stdout}\nstderr: ${claimB.stderr}`);
+  assert.equal(claimB.status, 0, `project-b's claim queued\nstdout: ${claimB.stdout}\nstderr: ${claimB.stderr}`);
+
+  const ledgerOf = (slug: string): Record<string, unknown>[] =>
+    readFileSync(join(stateDir, "projects", slug, "ledger.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
+  await until(() => {
+    assert.ok(ledgerOf(a.slug).some((e) => e.event === "report_written"));
+    assert.ok(ledgerOf(b.slug).some((e) => e.event === "report_written"));
+  });
 
   // The explicit --project routes the shared Task id's acceptance onto exactly
   // the named Project's ledger — project-a never sees project-b's acceptance.
   const acceptB = await run(ownerCli, ["accept", "T-09", "--attempt", "1", "--by", "owner", "--project", b.slug], ownerEnv);
   assert.equal(acceptB.status, 0, acceptB.stderr);
-  const ledgerOf = (slug: string): Record<string, unknown>[] =>
-    readFileSync(join(stateDir, "projects", slug, "ledger.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
   assert.ok(ledgerOf(b.slug).some((event) => event.event === "attempt_accepted"), "the acceptance landed in project-b's ledger");
   assert.ok(!ledgerOf(a.slug).some((event) => event.event === "attempt_accepted"), "project-a's ledger never saw project-b's acceptance");
 });
@@ -1508,4 +1544,29 @@ test("factory contract --timeout-seconds accepts 60..3600 integers, rejects inva
   const reqB = { id: "2", kind: "contract", task: "T", workspace: "/w", gate: "true", timeoutSeconds: 120, submitter: "owner" };
   assert.equal(binSemanticKey(reqA), spoolRequestSemanticKey(reqA));
   assert.notEqual(binSemanticKey(reqA), binSemanticKey(reqB));
+});
+
+test("factory-claim async queued ack: returns exit 0 immediately with queue position while slow Gate runs in background", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const workspace = join(dir, "workspace");
+  copyFixture("sample-workspace", workspace);
+  const sha = gitCommitAll(workspace);
+  const home = join(dir, "paseo-home");
+  const stateDir = join(home, "plugin-state", "paseo-factory");
+  const factory = createFactory({ stateDir, eyeCliProbe: () => false });
+  const spool = startSpool(stateDir, factory, { pollMs: 15 });
+  t.after(() => spool.stop());
+
+  const slowGate = `${JSON.stringify(process.execPath)} -e "setTimeout(() => process.exit(0), 250)"`;
+  const contract = await run(ownerCli, ["contract", "--task", "ASYNC-CLI", "--workspace", workspace, "--gate", slowGate, "--artifact", "src/format.ts"], { PASEO_HOME: home });
+  assert.equal(contract.status, 0, contract.stderr);
+
+  const startedAt = Date.now();
+  const claim = await run(claimCli, ["--task", "ASYNC-CLI", "--sha", sha, "--outcome", "complete", "--scope", "src/format.ts", "--verification", "pass", "--unknowns", "none"], { FACTORY_STATE_DIR: stateDir });
+  const elapsedMs = Date.now() - startedAt;
+  assert.equal(claim.status, 0, `factory-claim queued must exit 0\nstdout: ${claim.stdout}\nstderr: ${claim.stderr}`);
+  assert.match(claim.stdout, /QUEUED/i);
+  assert.match(claim.stdout, /position 1/);
+  assert.ok(elapsedMs < 2000, `expected immediate queued return, took ${elapsedMs}ms`);
 });

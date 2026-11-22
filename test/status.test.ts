@@ -78,8 +78,12 @@ test("status tracks a whole loop: contract → red claim → green claim → acc
   assert.equal(fresh.status, 0, fresh.stderr);
   assert.match(fresh.stdout, /no tasks yet/);
 
+  const passFlag = join(dir, "gate-pass");
+  const gateScript = join(dir, "gate-check.mjs");
+  writeFileSync(gateScript, `import { existsSync } from "node:fs";\nprocess.exit(existsSync(${JSON.stringify(passFlag)}) ? 0 : 1);\n`);
+  const gateCmd = `${JSON.stringify(process.execPath)} ${JSON.stringify(gateScript)}`;
   const contract = await run(ownerCli, [
-    "contract", "--task", "LOOP9", "--workspace", workspace, "--gate", "true", "--artifact", "src/format.ts",
+    "contract", "--task", "LOOP9", "--workspace", workspace, "--gate", gateCmd, "--artifact", "src/format.ts",
   ], ownerEnv);
   assert.equal(contract.status, 0, contract.stderr);
 
@@ -88,17 +92,32 @@ test("status tracks a whole loop: contract → red claim → green claim → acc
   assert.equal(idle.status, 0, idle.stderr);
   assert.equal(establishedFields(idle.stdout), "LOOP9 attempts=0 verdict=- sha=- accepted=no eye=- choke=0/0/0\n");
 
-  // Attempt 1: a claim whose sha resolves to nothing is red before the gate
-  // even runs — so this attempt has no attested sha to show.
-  const red = await run(claimCli, ["--task", "LOOP9", "--sha", "deadbeef", "--outcome", "complete", "--scope", "s", "--verification", "v", "--unknowns", "none", "--wait-secs", "60"], agentEnv);
-  assert.equal(red.status, 1, `expected red\nstdout: ${red.stdout}\nstderr: ${red.stderr}`);
+  const waitForReport = async (attempt: number) => {
+    const deadline = Date.now() + 8_000;
+    while (Date.now() < deadline) {
+      if (factory.ledger.eventsFor("LOOP9").some((e) => e.event === "report_written" && e.attempt === attempt)) return;
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    assert.fail(`timed out waiting for LOOP9#${attempt}`);
+  };
+
+  // Unresolvable SHA is rejected at async admission without opening Attempt 1.
+  const badSha = await run(claimCli, ["--task", "LOOP9", "--sha", "deadbeef", "--outcome", "complete", "--scope", "s", "--verification", "v", "--unknowns", "none", "--wait-secs", "60"], agentEnv);
+  assert.equal(badSha.status, 2);
+
+  // Attempt 1: queued -> red when passFlag does not exist yet.
+  const red = await run(claimCli, ["--task", "LOOP9", "--sha", baseSha, "--outcome", "complete", "--scope", "s", "--verification", "v", "--unknowns", "none", "--wait-secs", "60"], agentEnv);
+  assert.equal(red.status, 0, `expected queued claim\nstdout: ${red.stdout}\nstderr: ${red.stderr}`);
+  await waitForReport(1);
   const afterRed = await run(ownerCli, ["status"], ownerEnv);
   assert.equal(afterRed.status, 0, afterRed.stderr);
-  assert.equal(establishedFields(afterRed.stdout), "LOOP9 attempts=1 verdict=red sha=- accepted=no eye=- choke=0/0/0\n");
+  assert.equal(establishedFields(afterRed.stdout), `LOOP9 attempts=1 verdict=red sha=${baseSha.slice(0, 7)} accepted=no eye=- choke=0/0/0\n`);
 
-  // Attempt 2: the real commit — green, and the verdict attests it (short sha).
+  // Attempt 2: the real commit — green once gate passes, and the verdict attests it (short sha).
+  writeFileSync(passFlag, "ok\n");
   const green = await run(claimCli, ["--task", "LOOP9", "--sha", baseSha, "--outcome", "complete", "--scope", "s", "--verification", "v", "--unknowns", "none", "--wait-secs", "60"], agentEnv);
   assert.equal(green.status, 0, `expected green\nstdout: ${green.stdout}\nstderr: ${green.stderr}`);
+  await waitForReport(2);
   const afterGreen = await run(ownerCli, ["status"], ownerEnv);
   assert.equal(afterGreen.status, 0, afterGreen.stderr);
   assert.equal(establishedFields(afterGreen.stdout), `LOOP9 attempts=2 verdict=green sha=${baseSha.slice(0, 7)} accepted=no eye=- choke=0/0/0\n`);

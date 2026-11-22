@@ -157,9 +157,19 @@ try {
       "factory-claim (the planted flaw must stay gate-green)",
     );
 
-    const mine = ledgerLines(stateDir).filter((e) => e.task === task);
+    const expected = ["contract_set", "gate_queued", "claim_reported", "gate_started", "gate_finished", "fresh_eyes_written", "report_written"];
+    const waitDeadline = Date.now() + 60_000;
+    const sleepBuf = new Int32Array(new SharedArrayBuffer(4));
+    let mine = ledgerLines(stateDir).filter((e) => e.task === task);
+    while (!mine.some((e) => e.event === "report_written") && Date.now() < waitDeadline) {
+      Atomics.wait(sleepBuf, 0, 0, 25);
+      mine = ledgerLines(stateDir).filter((e) => e.task === task);
+    }
+    const gateEvt = mine.find((e) => e.event === "gate_finished");
+    if (gateEvt?.verdict !== "green") {
+      die(`battery arm ${task} ended ${gateEvt?.verdict ?? "unsettled"} (expected green): ${gateEvt?.note ?? ""}`);
+    }
     const names = mine.map((e) => e.event);
-    const expected = ["contract_set", "claim_reported", "gate_started", "gate_finished", "fresh_eyes_written", "report_written"];
     if (JSON.stringify(names) !== JSON.stringify(expected)) {
       die(`ledger sequence for ${task}:\n  got      ${JSON.stringify(names)}\n  expected ${JSON.stringify(expected)}`);
     }
