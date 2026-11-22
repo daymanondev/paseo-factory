@@ -302,6 +302,28 @@ test("antigravity: step_type 15 rows accumulate beyond the row cursor; enum 1417
   assert.equal(extractor.metrics.sqliteOpens, opensBefore, "an unchanged db answers from the stat gate");
 });
 
+test("antigravity: Paseo 0.17.1 ACP plugin: sessionId wrapper resolves SQLite steps via data.sessionId", async t => {
+  const { dir, userHome } = tempHomes(t);
+  const db = await openSqlite(t, join(userHome, ".gemini", "antigravity-cli", "conversations", "acp-ses-1.db"));
+  db.exec("CREATE TABLE steps (idx INTEGER PRIMARY KEY, step_type INTEGER, metadata BLOB)");
+  db.prepare("INSERT INTO steps VALUES (?, ?, ?)").run(1, 15, antigravityMetadata({ modelEnum: 1417, inputTokens: 8_000, outputTokens: 1_200, cacheReadTokens: 20_000, thinkingTokens: 300, responseTokens: 900 }));
+  const agent: UsageAgentSource = {
+    id: "sup-acp-1",
+    provider: "antigravity/gemini-4-argon",
+    persistence: { sessionId: `plugin:${JSON.stringify({ version: 1, data: { conversationId: "", sessionId: "acp-ses-1" } })}` },
+  };
+  assert.equal(antigravityConversationIdOf(agent), "acp-ses-1", "blank conversationId falls back to ACP data.sessionId");
+  const usage = await createUsageExtractor({ userHome, stateDir: dir }).extract(agent);
+  assert.ok(usage);
+  assert.equal(usage.harness, "antigravity");
+  assert.equal(usage.turns, 1);
+  assert.equal(usage.inputUncachedTokens, 8_000);
+  assert.equal(usage.outputTokens, 1_200);
+  assert.equal(usage.cacheReadTokens, 20_000);
+  assert.equal(usage.reasoningTokens, 300);
+  assert.equal(usage.latestContextWindowTokens, 8_000 + 20_000 + 1_200);
+});
+
 test("antigravity: the Brain transcript.jsonl is the fallback when the conversations db is absent", async t => {
   const { dir, userHome } = tempHomes(t);
   const transcript = join(userHome, ".gemini", "antigravity", "brain", "conv-9", ".system_generated", "logs", "transcript.jsonl");
@@ -316,6 +338,42 @@ test("antigravity: the Brain transcript.jsonl is the fallback when the conversat
   assert.equal(usage.cacheReadTokens, 11_000);
   assert.equal(usage.reasoningTokens, 200);
   assert.equal(usage.latestContextWindowTokens, 300 + 6_000 + 200);
+});
+
+test("antigravity: Paseo 0.17.1 pluginProviderPersistence.data.sessionId resolves Brain transcript fallback (and preserves conversationId precedence)", async t => {
+  const { dir, userHome } = tempHomes(t);
+  const transcript = join(userHome, ".gemini", "antigravity", "brain", "acp-brain-2", ".system_generated", "logs", "transcript.jsonl");
+  writeLines(transcript, [
+    { type: "PLANNER_RESPONSE", usage: { input_tokens: 400, output_tokens: 150, cache_read_tokens: 3_000, thinking_tokens: 40 } },
+  ]);
+  const extractor = createUsageExtractor({ userHome, stateDir: dir });
+  const structuredAgent: UsageAgentSource = {
+    id: "sup-acp-2",
+    provider: "antigravity",
+    persistence: { metadata: { pluginProviderPersistence: { data: { sessionId: "acp-brain-2" } } } },
+  };
+  const usage = await extractor.extract(structuredAgent);
+  assert.ok(usage);
+  assert.equal(usage.turns, 1);
+  assert.equal(usage.inputUncachedTokens, 400);
+  assert.equal(usage.cacheReadTokens, 3_000);
+  assert.equal(usage.outputTokens, 150);
+  assert.equal(usage.reasoningTokens, 40);
+  assert.equal(usage.latestContextWindowTokens, 400 + 3_000 + 150);
+
+  const jsonMetadataAgent: UsageAgentSource = {
+    id: "sup-acp-3",
+    provider: "antigravity",
+    persistence: { metadata: JSON.stringify({ pluginProviderPersistence: { data: { sessionId: "acp-brain-2" } } }) },
+  };
+  assert.equal(antigravityConversationIdOf(jsonMetadataAgent), "acp-brain-2");
+
+  const bothPresent: UsageAgentSource = {
+    id: "sup-mixed",
+    provider: "antigravity",
+    persistence: { metadata: { pluginProviderPersistence: { data: { conversationId: "legacy-conv", sessionId: "acp-brain-2" } } } },
+  };
+  assert.equal(antigravityConversationIdOf(bothPresent), "legacy-conv", "conversationId takes precedence when non-empty");
 });
 
 // ---- claude -----------------------------------------------------------------------------------

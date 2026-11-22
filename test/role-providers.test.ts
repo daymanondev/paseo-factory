@@ -888,3 +888,33 @@ test("ADR 0055: laneProviderConfig migrates zcode/* and pi/zai/glm-* lanes onto 
     model: "glm-5.1",
   });
 });
+
+test("ADR 0067: Paseo 0.17.1 ProviderOverridesSchema still rejects extends: 'antigravity' while reconciled role providers pass validation and keep >=0.13.0 floor", async (t) => {
+  const { ProviderOverridesSchema } = await import("@getpaseo/protocol/provider-config");
+  const manifest = JSON.parse(readFileSync(join(process.cwd(), "plugin", "paseo-plugin.json"), "utf8")) as {
+    requirements?: { paseo?: string };
+  };
+  assert.equal(manifest.requirements?.paseo, ">=0.13.0");
+  assert.equal(
+    ProviderOverridesSchema.safeParse({
+      "factory-supervisor": { extends: "antigravity", label: "Supervisor (Factory)" },
+    }).success,
+    false,
+    "0.17.1 ProviderOverridesSchema still omits antigravity from BUILTIN_PROVIDER_IDS",
+  );
+
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const home = join(dir, "paseo-home");
+  writeConfig(home, liveLikeConfig());
+  const reconciled = reconcilePaseoRoleProviders(home, {
+    ...LANES,
+    supervisor: "antigravity/gemini-4-argon",
+    lead: "antigravity/gemini-4-argon",
+    worker: "antigravity/gemini-4-argon",
+  });
+  assert.ok(reconciled.ok);
+  const providers = (readConfig(home).agents as { providers: Record<string, unknown> }).providers;
+  const parsed = ProviderOverridesSchema.safeParse(providers);
+  assert.equal(parsed.success, true, parsed.success ? "" : parsed.error.message);
+});

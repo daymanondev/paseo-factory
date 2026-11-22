@@ -727,17 +727,20 @@ export function decodeAntigravityUsage(blob: Uint8Array): AntigravityStepUsage |
 
 /**
  * Resolves the Antigravity conversation id: the plugin persistence
- * metadata's `conversationId`, the `plugin:{...}` JSON wrapper Paseo stamps
- * into `persistence.sessionId`, or a bare conversation id.
+ * metadata's `conversationId` or ACP `sessionId`, the `plugin:{...}` JSON
+ * wrapper Paseo stamps into `persistence.sessionId`, or a bare conversation id.
  */
 export function antigravityConversationIdOf(agent: UsageAgentSource): string | undefined {
+  const fromData = (data: unknown): string | undefined => {
+    if (typeof data !== "object" || data === null) return undefined;
+    const record = data as { conversationId?: unknown; sessionId?: unknown };
+    return asString(record.conversationId) ?? asString(record.sessionId);
+  };
   const fromObject = (value: unknown): string | undefined => {
     if (typeof value !== "object" || value === null) return undefined;
     const plugin = (value as { pluginProviderPersistence?: unknown }).pluginProviderPersistence;
     if (typeof plugin !== "object" || plugin === null) return undefined;
-    const data = (plugin as { data?: unknown }).data;
-    if (typeof data !== "object" || data === null) return undefined;
-    return asString((data as { conversationId?: unknown }).conversationId);
+    return fromData((plugin as { data?: unknown }).data);
   };
   const metadata = agent.persistence?.metadata;
   if (typeof metadata === "string") {
@@ -758,9 +761,7 @@ export function antigravityConversationIdOf(agent: UsageAgentSource): string | u
     try {
       const parsed: unknown = JSON.parse(sessionId.slice("plugin:".length));
       if (typeof parsed === "object" && parsed !== null) {
-        const data = (parsed as { data?: unknown }).data;
-        if (typeof data === "object" && data === null) return undefined;
-        const id = typeof data === "object" && data !== null ? asString((data as { conversationId?: unknown }).conversationId) : undefined;
+        const id = fromData((parsed as { data?: unknown }).data);
         if (id !== undefined) return id;
       }
     } catch {

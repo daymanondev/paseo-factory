@@ -196,14 +196,15 @@ function bootPluginAt(t: TestContext, dir: string): () => void {
   return contribute(fakeServer as unknown as Parameters<typeof contribute>[0]);
 }
 
-/** The three harness skill roots under one home — pi / opencode, claude, and (ADR 0036) the pi agent dir. */
+/** The four harness skill roots under one home — pi / opencode, claude, pi agent dir (ADR 0036), and antigravity (ADR 0067). */
 const skillRoots = (home: string): string[] => [
   join(home, ".agents", "skills"),
   join(home, ".claude", "skills"),
   join(home, ".pi", "agent", "skills"),
+  join(home, ".gemini", "config", "skills"),
 ];
 
-test("plugin boot reconciles factory/SKILL.md into all three roots including ~/.pi/agent/skills (ADR 0036)", (t) => {
+test("plugin boot reconciles factory/SKILL.md into all four roots including ~/.pi/agent/skills and ~/.gemini/config/skills (ADR 0036, ADR 0067)", (t) => {
   const dir = makeTempDir();
   disposeDir(t, dir);
   const stop = bootPluginAt(t, dir);
@@ -218,7 +219,7 @@ test("plugin boot reconciles factory/SKILL.md into all three roots including ~/.
   }
 });
 
-test("a hand-edited copy in any of the three roots reverts to the canonical content on the next boot", (t) => {
+test("a hand-edited copy in any of the four roots reverts to the canonical content on the next boot", (t) => {
   const dir = makeTempDir();
   disposeDir(t, dir);
   for (const root of skillRoots(dir)) {
@@ -236,7 +237,7 @@ test("a hand-edited copy in any of the three roots reverts to the canonical cont
   }
 });
 
-test("an unusable third root warns once and boot still reconciles the other roots", (t) => {
+test("an unusable root warns once and boot still reconciles the other roots", (t) => {
   const dir = makeTempDir();
   disposeDir(t, dir);
   // A regular FILE where ~/.pi must be a directory: the pi root cannot be written.
@@ -254,8 +255,34 @@ test("an unusable third root warns once and boot still reconciles the other root
     const expected = renderFactorySkill({ factoryCmd: "factory" });
     assert.equal(readFileSync(factorySkillPath(join(dir, ".agents", "skills")), "utf8"), expected);
     assert.equal(readFileSync(factorySkillPath(join(dir, ".claude", "skills")), "utf8"), expected);
+    assert.equal(readFileSync(factorySkillPath(join(dir, ".gemini", "config", "skills")), "utf8"), expected);
     const piWarnings = logs.filter((line) => line.includes("skill: could not reconcile") && line.includes(join(".pi", "agent", "skills")));
     assert.equal(piWarnings.length, 1, "the unusable pi root warns exactly once");
+  } finally {
+    stop?.();
+  }
+});
+
+test("an unusable Antigravity skills root warns once and boot still reconciles the remaining three roots", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  writeFileSync(join(dir, ".gemini"), "occupied by a file\n");
+  const logs: string[] = [];
+  const realLog = console.log;
+  console.log = (...args: unknown[]) => { logs.push(args.join(" ")); };
+  let stop: (() => void) | undefined;
+  try {
+    stop = bootPluginAt(t, dir);
+  } finally {
+    console.log = realLog;
+  }
+  try {
+    const expected = renderFactorySkill({ factoryCmd: "factory" });
+    assert.equal(readFileSync(factorySkillPath(join(dir, ".agents", "skills")), "utf8"), expected);
+    assert.equal(readFileSync(factorySkillPath(join(dir, ".claude", "skills")), "utf8"), expected);
+    assert.equal(readFileSync(factorySkillPath(join(dir, ".pi", "agent", "skills")), "utf8"), expected);
+    const geminiWarnings = logs.filter((line) => line.includes("skill: could not reconcile") && line.includes(join(".gemini", "config", "skills")));
+    assert.equal(geminiWarnings.length, 1, "the unusable Antigravity root warns exactly once");
   } finally {
     stop?.();
   }
