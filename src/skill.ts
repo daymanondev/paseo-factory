@@ -1,9 +1,10 @@
 /**
  * The global `/factory` skill (v0.0.20, ADR 0013 Decision 3; v0.0.23, ADR 0015
- * Decision 5): the managed `SKILL.md` reconciled across all three roots:
- * `~/.agents/skills/factory/SKILL.md` (`pi` / `opencode`) and
- * `~/.claude/skills/factory/SKILL.md` (`claude`) and
- * `~/.pi/agent/skills/factory/SKILL.md` (pi agent dir, ADR 0036) that lets the Owner type
+ * Decision 5; ADR 0067): the managed `SKILL.md` reconciled across all four roots:
+ * `~/.agents/skills/factory/SKILL.md` (`pi` / `opencode`),
+ * `~/.claude/skills/factory/SKILL.md` (`claude`),
+ * `~/.pi/agent/skills/factory/SKILL.md` (pi agent dir, ADR 0036), and
+ * `~/.gemini/config/skills/factory/SKILL.md` (antigravity, ADR 0067) that lets the Owner type
  * `/factory <directive>` in any session and have that session bootstrap or
  * dispatch deterministically into the Project's SLP loop —
  * `factory supervisor dispatch` for the directive arm (seat-aware routing into
@@ -41,14 +42,20 @@ export interface FactorySkillInput {
 
 /**
  * The harness skill roots the managed skill lives under for one home — the
- * three places a session discovers `/factory`: `~/.agents/skills` (`pi` /
- * `opencode`), `~/.claude/skills` (`claude`), and `~/.pi/agent/skills` (the pi
- * agent dir, ADR 0036 §2 — the precedent that already mirrors skills there).
+ * four places a session discovers `/factory`: `~/.agents/skills` (`pi` /
+ * `opencode`), `~/.claude/skills` (`claude`), `~/.pi/agent/skills` (the pi
+ * agent dir, ADR 0036 §2 — the precedent that already mirrors skills there),
+ * and `~/.gemini/config/skills` (antigravity, ADR 0067).
  * Every root is plugin-managed: a drifted or hand-edited copy in any of them
  * reconciles back to the canonical render.
  */
 export function factorySkillRoots(userHome: string): string[] {
-  return [join(userHome, ".agents", "skills"), join(userHome, ".claude", "skills"), join(userHome, ".pi", "agent", "skills")];
+  return [
+    join(userHome, ".agents", "skills"),
+    join(userHome, ".claude", "skills"),
+    join(userHome, ".pi", "agent", "skills"),
+    join(userHome, ".gemini", "config", "skills"),
+  ];
 }
 
 /** Where the skill lives under a skills root — `<agentsSkillsDir>/factory/SKILL.md`. */

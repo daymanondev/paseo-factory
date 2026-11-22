@@ -97,6 +97,7 @@ import { boundTaskPeers, peerIsRunning } from "./task-peers.ts";
 import { driverWavesInFlight, projectEventsOf as sharedProjectEventsOf, projectFactoryOf, projectPeersInFlight, projectStreamOf as sharedProjectStreamOf, taskFactoryOf as sharedTaskFactoryOf, taskHasSettledPeerOutcome } from "./peer-in-flight.ts";
 import { foldTasks, renderLedgerLine } from "./view.ts";
 import type { TaskView } from "../shared/view.ts";
+import { normalizeLanesWithDaemon } from "./spool.ts";
 import type {
   SpoolLeadDispatchRequest,
   SpoolReply,
@@ -753,7 +754,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     const mailPrompt = state.queued.length === 0 ? "" : renderMailPrompt(state.queued);
     const body = pendingHandoff !== undefined ? (mailPrompt === "" ? pendingHandoff : `${pendingHandoff}\n\n${mailPrompt}`) : mailPrompt;
     const isFirstTurn = !hasSeatReceivedFirstTurn(lead);
-    const prompt = prependKickoffPacketIfFirstTurn("lead", slug, lead, body);
+    const prompt = await prependKickoffPacketIfFirstTurn("lead", slug, lead, body, daemon);
     await daemon.agents.ref(lead.id).send(prompt);
     if (isFirstTurn) {
       failedFirstTurnAgentIds.delete(lead.id);
@@ -768,22 +769,24 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     log(`lead-mailbox: delivered ${state.queued.length} item(s) to the lead of ${slug} (${lead.id})`);
   };
 
-  const prependKickoffPacketIfFirstTurn = (
+  const prependKickoffPacketIfFirstTurn = async (
     role: "supervisor" | "lead",
     slug: string,
     agent: { id: string; cwd?: string | null; lastUserMessageAt?: string | null },
     prompt: string,
-  ): string => {
+    daemon: SurfaceDaemonApi,
+  ): Promise<string> => {
     if (hasSeatReceivedFirstTurn(agent)) return prompt;
     const reg = readProjectRegistration(deps.stateDir, slug);
     const loadedLanes = loadLanes(deps.stateDir, slug);
+    const lanes = loadedLanes.ok ? await normalizeLanesWithDaemon(daemon, loadedLanes.lanes) : undefined;
     const kickoff = buildSeatKickoffPacket({
       role,
       projectSlug: slug,
       projectRoot: reg?.root ?? agent.cwd ?? "",
       ledgerEvents: projectStreamOf(slug),
       helperMcps: discoverHelperMcps({ stateDir: deps.stateDir, ...(deps.home ? { userHome: resolveVaultUserHome(deps.home) } : {}) }).servers,
-      ...(loadedLanes.ok ? { lanes: loadedLanes.lanes } : {}),
+      ...(lanes !== undefined ? { lanes } : {}),
       // v0.1.0 (ADR 0048 §3): every newly created or rotated Supervisor/Lead
       // Turn-1 packet carries the Project notebook's slug-dependent path and
       // bounded content so the seat never guesses <projectStateDir>/notebook.md.
@@ -832,7 +835,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     }
     if (!isSeatReadyForMail(supervisor)) return;
     const isFirstTurn = !hasSeatReceivedFirstTurn(supervisor);
-    const prompt = prependKickoffPacketIfFirstTurn("supervisor", slug, supervisor, renderSupervisorMailBatch(state.supervisorQueued));
+    const prompt = await prependKickoffPacketIfFirstTurn("supervisor", slug, supervisor, renderSupervisorMailBatch(state.supervisorQueued), daemon);
     await daemon.agents.ref(supervisor.id).send(prompt);
     if (isFirstTurn) {
       failedFirstTurnAgentIds.delete(supervisor.id);

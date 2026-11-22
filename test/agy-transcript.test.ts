@@ -70,3 +70,45 @@ test('transcript CLI exports SQLite steps by agent prefix, direct conversation, 
   assert.match(fromJsonl, /Tool call: run_command\(\{"cmd":"npm test"\}\)/);
   assert.match(fromJsonl, /PASS test\/design-provenance\.test\.ts/);
 });
+
+test('transcript CLI resolves Paseo 0.17.1 ACP data.sessionId across metadata and plugin: wrappers without throwing', t => {
+  const dir = mkdtempSync(join(tmpdir(), 'factory-transcript-acp-')); t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const home = join(dir, 'home'), project = join(dir, 'project'), conversations = join(dir, 'conversations');
+  for (const path of [join(home, 'agents'), project, conversations]) mkdirSync(path, { recursive: true });
+  execFileSync('git', ['init', '-q', project]);
+  const resolution = resolveProject(project); assert.ok(resolution.ok);
+  const state = join(home, 'plugin-state/paseo-factory/projects', resolution.slug); mkdirSync(state, { recursive: true });
+  const agentId = 'a1234567-0000-4000-8000-123456789abc', sessionId = 'acp-conv-99';
+  writeFileSync(join(state, 'project.json'), JSON.stringify({ root: project, supervisor: agentId, lead: agentId }));
+  const dbPath = join(conversations, sessionId + '.db');
+  const db = new DatabaseSync(dbPath);
+  db.exec('CREATE TABLE steps (idx INTEGER, step_type INTEGER, status INTEGER, step_payload BLOB)');
+  const put = db.prepare('INSERT INTO steps VALUES (?, ?, 1, ?)');
+  put.run(0, 14, field('Recover ACP transcript'));
+  put.run(1, 15, field('ACP transcript recovered cleanly'));
+  db.close();
+
+  const agentPath = join(home, 'agents', agentId + '.json');
+  const cli = (...args: string[]) => execFileSync(process.execPath, [resolve('plugin/bin/factory.mjs'), '--home', home, 'transcript', ...args, '--conversations-dir', conversations], { encoding: 'utf8' });
+
+  // 1. Structured pluginProviderPersistence.data.sessionId (with empty conversationId)
+  writeFileSync(agentPath, JSON.stringify({ id: agentId, persistence: { metadata: { pluginProviderPersistence: { data: { conversationId: '', sessionId } } } } }));
+  const md = cli('a1234567');
+  assert.match(md, /Conversation: acp-conv-99/);
+  assert.match(md, /Recover ACP transcript[\s\S]*ACP transcript recovered cleanly/);
+
+  // 2. HTML rendering with plugin:{...} in persistence.sessionId and runtimeInfo.sessionId
+  for (const location of ['persistence', 'runtimeInfo']) {
+    writeFileSync(agentPath, JSON.stringify({ [location]: { sessionId: 'plugin:' + JSON.stringify({ version: 1, data: { sessionId } }) } }));
+    const html = cli('supervisor', '--project', project, '--format', 'html');
+    assert.match(html, /<!doctype html>/i);
+    assert.match(html, /Recover ACP transcript/);
+    assert.match(html, /ACP transcript recovered cleanly/);
+  }
+
+  // 3. Path-traversal sessionId is still rejected by safeName
+  writeFileSync(agentPath, JSON.stringify({ id: agentId, persistence: { metadata: { pluginProviderPersistence: { data: { sessionId: '../escape' } } } } }));
+  const rejected = spawnSync(process.execPath, [resolve('plugin/bin/factory.mjs'), '--home', home, 'transcript', 'a1234567', '--conversations-dir', conversations], { encoding: 'utf8' });
+  assert.equal(rejected.status, 2);
+  assert.match(rejected.stderr, /no Antigravity conversation id/i);
+});

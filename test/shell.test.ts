@@ -3,9 +3,11 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
+import contribute from "../plugin/index.server.ts";
 import { pluginDirFor, resolvePaseoHome, stateDirFor } from "../plugin/server/paths.ts";
 import { claimCliBinDir, ensureClaimCli, ensureGitShim, injectClaimCliPath } from "../plugin/server/shell.ts";
 import { Ledger } from "../plugin/server/core/ledger.ts";
+import { resolveProject } from "../plugin/server/core/project.ts";
 import { disposeDir, gitCommitAll, makeTempDir, repoRoot } from "./helpers.ts";
 import type { PluginSessionOpenRequest } from "@getpaseo/plugin/server";
 
@@ -471,6 +473,634 @@ test("ensureClaimCli and ensureGitShim stage self-contained runtime-bin scripts 
     env: { ...process.env, FACTORY_STATE_DIR: stateDir, PATH: pathWithShim, PASEO_FACTORY_SEAT: "lead" },
   });
   assert.equal(statusOut.status, 0, `git wrapper failed after plugin checkout deletion: ${statusOut.stderr}`);
+});
+
+test("contribute gates Antigravity per-session MCP and stale mcp_config.json cleanup via server.registerWorktreeManager (ADR 0067)", async (t) => {
+  const prevHome = process.env.HOME;
+  const prevPaseoHome = process.env.PASEO_HOME;
+  const prevAgyPlugins = process.env.PASEO_FACTORY_AGY_PLUGINS_DIR;
+  delete process.env.PASEO_FACTORY_AGY_PLUGINS_DIR;
+  t.after(() => {
+    if (prevHome === undefined) delete process.env.HOME;
+    else process.env.HOME = prevHome;
+    if (prevPaseoHome === undefined) delete process.env.PASEO_HOME;
+    else process.env.PASEO_HOME = prevPaseoHome;
+    if (prevAgyPlugins === undefined) delete process.env.PASEO_FACTORY_AGY_PLUGINS_DIR;
+    else process.env.PASEO_FACTORY_AGY_PLUGINS_DIR = prevAgyPlugins;
+  });
+
+  // 1. >=0.17.1 host (server.registerWorktreeManager present, never invoked)
+  {
+    const homeDir = makeTempDir("shell-v0171-");
+    disposeDir(t, homeDir);
+    const paseoHome = join(homeDir, ".paseo");
+    const stateDir = stateDirFor(paseoHome);
+    process.env.HOME = homeDir;
+    process.env.PASEO_HOME = paseoHome;
+
+    const repoDir = join(homeDir, "repo");
+    mkdirSync(repoDir, { recursive: true });
+    writeFileSync(join(repoDir, "README.md"), "# repo\n");
+    gitCommitAll(repoDir, "init");
+    const resolved = resolveProject(repoDir);
+    assert.ok(resolved.ok);
+    const slug = resolved.ok ? resolved.slug : "";
+
+    mkdirSync(stateDir, { recursive: true });
+    writeFileSync(join(stateDir, "lanes.json"), JSON.stringify({ worker: "antigravity/gemini-4-argon" }));
+    mkdirSync(join(homeDir, ".pi", "agent"), { recursive: true });
+    writeFileSync(
+      join(homeDir, ".pi", "agent", "mcp.json"),
+      JSON.stringify({ mcpServers: { docs: { command: process.execPath, args: ["--version"] } } }),
+    );
+
+    const agyPluginDir = join(homeDir, ".gemini", "config", "plugins", "paseo-factory");
+    mkdirSync(agyPluginDir, { recursive: true });
+    writeFileSync(join(agyPluginDir, "mcp_config.json"), JSON.stringify({ stale: true }));
+
+    const hooks = new Map<string, (payload: unknown, context: unknown) => Promise<unknown>>();
+    const server = {
+      addHook: (name: string, handler: (payload: unknown, context: unknown) => Promise<unknown>) => {
+        hooks.set(name, handler);
+        return () => { hooks.delete(name); };
+      },
+      handle: () => () => {},
+      registerWorktreeManager: () => {
+        throw new Error("registerWorktreeManager must not be invoked at boot");
+      },
+    } as unknown as Parameters<typeof contribute>[0];
+
+    const stop = contribute(server);
+    t.after(() => stop());
+
+    // Ordinary boot cleans stale mcp_config.json while keeping plugin.json and hooks.json
+    assert.equal(existsSync(join(agyPluginDir, "plugin.json")), true);
+    assert.equal(existsSync(join(agyPluginDir, "hooks.json")), true);
+    assert.equal(existsSync(join(agyPluginDir, "mcp_config.json")), false, "boot cleans stale global mcp_config.json on >=0.17.1");
+
+    const createHook = hooks.get("agent.create.before")!;
+    const supOut = await createHook(
+      { request: { config: { provider: "antigravity/gemini-2.5-pro", cwd: repoDir, title: "Supervisor — repo", modeId: "default" } } },
+      {},
+    ) as {
+      config: { mcpServers?: Record<string, { args?: string[]; env?: Record<string, string> }>; modeId?: string };
+      env?: Record<string, string>;
+    };
+    assert.ok(supOut?.config.mcpServers?.paseo_factory !== undefined, "Supervisor receives per-session paseo_factory");
+    assert.equal(supOut.config.mcpServers.paseo_factory.env?.ELECTRON_RUN_AS_NODE, "1");
+    assert.ok(supOut.config.mcpServers.paseo_factory.args?.includes(supOut.env!.PASEO_FACTORY_CORRELATION!));
+    assert.ok(supOut.config.mcpServers.paseo_factory.args?.includes("supervisor"));
+    assert.ok(supOut.config.mcpServers.paseo_factory.args?.includes(slug));
+    assert.ok(supOut.config.mcpServers.paseo_factory.args?.includes(repoDir));
+    assert.equal(supOut.config.mcpServers.docs, undefined, "Supervisor never receives Helper MCPs");
+    assert.equal("modeId" in supOut.config, false, "Antigravity keeps modeId unset");
+
+    const worktreeDir = join(stateDir, "projects", slug, "worktrees", "T-03");
+    mkdirSync(worktreeDir, { recursive: true });
+    const peerOut = await createHook(
+      { request: { config: { provider: "factory-peer", cwd: worktreeDir, title: "T-03" } } },
+      {},
+    ) as {
+      config: { mcpServers?: Record<string, { args?: string[]; env?: Record<string, string> }>; modeId?: string };
+      env?: Record<string, string>;
+    };
+    assert.ok(peerOut?.config.mcpServers?.paseo_factory !== undefined, "Antigravity Peer receives per-session paseo_factory");
+    assert.equal(peerOut.config.mcpServers.paseo_factory.env?.ELECTRON_RUN_AS_NODE, "1");
+    assert.ok(peerOut.config.mcpServers.paseo_factory.args?.includes(peerOut.env!.PASEO_FACTORY_CORRELATION!));
+    assert.ok(peerOut.config.mcpServers.paseo_factory.args?.includes("agent"));
+    assert.ok(peerOut.config.mcpServers.paseo_factory.args?.includes(slug));
+    assert.ok(peerOut.config.mcpServers.paseo_factory.args?.includes(worktreeDir));
+    assert.ok(peerOut.config.mcpServers.paseo_factory.args?.includes("--task") && peerOut.config.mcpServers.paseo_factory.args?.includes("T-03"));
+    assert.ok(peerOut.config.mcpServers.docs !== undefined, "Antigravity Peer receives enabled Helper MCPs");
+    assert.equal("modeId" in peerOut.config, false);
+    assert.equal(existsSync(join(agyPluginDir, "mcp_config.json")), false);
+  }
+
+  // 2. <0.17.1 host (no registerWorktreeManager): fails closed to global mcp_config.json
+  // 2a. Pre-existing paseo-factory dir (e.g. after downgrade from >=0.17.1): refreshes plugin.json, hooks.json, and restores canonical mcp_config.json
+  {
+    const homeDir = makeTempDir("shell-legacy-");
+    disposeDir(t, homeDir);
+    const paseoHome = join(homeDir, ".paseo");
+    process.env.HOME = homeDir;
+    process.env.PASEO_HOME = paseoHome;
+
+    const repoDir = join(homeDir, "repo");
+    mkdirSync(repoDir, { recursive: true });
+    writeFileSync(join(repoDir, "README.md"), "# repo\n");
+    gitCommitAll(repoDir, "init");
+
+    const agyPluginDir = join(homeDir, ".gemini", "config", "plugins", "paseo-factory");
+    mkdirSync(agyPluginDir, { recursive: true });
+    writeFileSync(join(agyPluginDir, "plugin.json"), JSON.stringify({ name: "paseo-factory", version: "stale" }));
+
+    const hooks = new Map<string, (payload: unknown, context: unknown) => Promise<unknown>>();
+    const server = {
+      addHook: (name: string, handler: (payload: unknown, context: unknown) => Promise<unknown>) => {
+        hooks.set(name, handler);
+        return () => { hooks.delete(name); };
+      },
+      handle: () => () => {},
+    } as unknown as Parameters<typeof contribute>[0];
+
+    const stop = contribute(server);
+    t.after(() => stop());
+
+    // <0.17.1 boot refreshes plugin.json, hooks.json, and restores canonical mcp_config.json when dir already exists
+    assert.equal(existsSync(join(agyPluginDir, "plugin.json")), true);
+    const refreshedPlugin = JSON.parse(readFileSync(join(agyPluginDir, "plugin.json"), "utf8")) as { version?: string };
+    assert.notEqual(refreshedPlugin.version, "stale", "boot refreshes stale plugin.json on <0.17.1 downgrade");
+    assert.equal(existsSync(join(agyPluginDir, "hooks.json")), true, "boot restores hooks.json on <0.17.1 downgrade");
+    assert.equal(existsSync(join(agyPluginDir, "mcp_config.json")), true, "boot restores canonical mcp_config.json on <0.17.1 downgrade");
+    const canonicalMcp = JSON.parse(readFileSync(join(agyPluginDir, "mcp_config.json"), "utf8")) as {
+      mcpServers?: { paseo_factory?: { args?: string[] } };
+    };
+    assert.ok(canonicalMcp.mcpServers?.paseo_factory !== undefined, "restored mcp_config.json defines paseo_factory");
+
+    const createHook = hooks.get("agent.create.before")!;
+    const out = await createHook(
+      { request: { config: { provider: "antigravity/gemini-2.5-pro", cwd: repoDir, title: "Supervisor — repo" } } },
+      {},
+    ) as { config: Record<string, unknown> };
+    assert.equal("mcpServers" in out.config, false, "<0.17.1 host omits config.mcpServers on Antigravity");
+    assert.equal(existsSync(join(agyPluginDir, "mcp_config.json")), true);
+    assert.equal(existsSync(join(agyPluginDir, "plugin.json")), true);
+    assert.equal(existsSync(join(agyPluginDir, "hooks.json")), true);
+  }
+
+  // 2b. Non-Antigravity <0.17.1 host (absent paseo-factory dir): boot leaves plugins dir untouched
+  {
+    const homeDir = makeTempDir("shell-legacy-clean-");
+    disposeDir(t, homeDir);
+    const paseoHome = join(homeDir, ".paseo");
+    process.env.HOME = homeDir;
+    process.env.PASEO_HOME = paseoHome;
+
+    const agyPluginDir = join(homeDir, ".gemini", "config", "plugins", "paseo-factory");
+    const server = {
+      addHook: () => () => {},
+      handle: () => () => {},
+    } as unknown as Parameters<typeof contribute>[0];
+
+    const stop = contribute(server);
+    t.after(() => stop());
+
+    assert.equal(existsSync(agyPluginDir), false, "non-Antigravity <0.17.1 boot never creates .gemini/config/plugins/paseo-factory");
+  }
+
+  // 3. >=0.17.1 boot fails open if ~/.gemini is blocked / unwritable
+  {
+    const homeDir = makeTempDir("shell-v0171-unwritable-");
+    disposeDir(t, homeDir);
+    const paseoHome = join(homeDir, ".paseo");
+    process.env.HOME = homeDir;
+    process.env.PASEO_HOME = paseoHome;
+    writeFileSync(join(homeDir, ".gemini"), "blocked by file\n");
+
+    const server = {
+      addHook: () => () => {},
+      handle: () => () => {},
+      registerWorktreeManager: () => () => {},
+    } as unknown as Parameters<typeof contribute>[0];
+
+    const logs: string[] = [];
+    const realLog = console.log;
+    console.log = (...args: unknown[]) => { logs.push(args.join(" ")); };
+    let stop: (() => void) | undefined;
+    try {
+      stop = contribute(server);
+    } finally {
+      console.log = realLog;
+    }
+    stop?.();
+    assert.equal(
+      logs.some((line) => line.includes("antigravity: could not reconcile plugin bundle")),
+      true,
+      "unwritable .gemini logs warning without failing boot",
+    );
+  }
+});
+
+test("contribute gates live role contracts via server.registerWorktreeManager and agent.open.before appendSystemPrompt across harnesses (ADR 0067)", async (t) => {
+  const prevHome = process.env.HOME;
+  const prevPaseoHome = process.env.PASEO_HOME;
+  const prevAgyPlugins = process.env.PASEO_FACTORY_AGY_PLUGINS_DIR;
+  delete process.env.PASEO_FACTORY_AGY_PLUGINS_DIR;
+  t.after(() => {
+    if (prevHome === undefined) delete process.env.HOME;
+    else process.env.HOME = prevHome;
+    if (prevPaseoHome === undefined) delete process.env.PASEO_HOME;
+    else process.env.PASEO_HOME = prevPaseoHome;
+    if (prevAgyPlugins === undefined) delete process.env.PASEO_FACTORY_AGY_PLUGINS_DIR;
+    else process.env.PASEO_FACTORY_AGY_PLUGINS_DIR = prevAgyPlugins;
+  });
+
+  // 1. >=0.17.1 host (server.registerWorktreeManager present)
+  {
+    const homeDir = makeTempDir("shell-live-contracts-");
+    disposeDir(t, homeDir);
+    const paseoHome = join(homeDir, ".paseo");
+    const stateDir = stateDirFor(paseoHome);
+    process.env.HOME = homeDir;
+    process.env.PASEO_HOME = paseoHome;
+
+    const repoDir = join(homeDir, "repo");
+    mkdirSync(repoDir, { recursive: true });
+    writeFileSync(join(repoDir, "README.md"), "# repo\n");
+    gitCommitAll(repoDir, "init");
+    const resolved = resolveProject(repoDir);
+    assert.ok(resolved.ok);
+    const slug = resolved.ok ? resolved.slug : "";
+
+    mkdirSync(join(homeDir, ".pi", "agent"), { recursive: true });
+    writeFileSync(
+      join(homeDir, ".pi", "agent", "mcp.json"),
+      JSON.stringify({ mcpServers: { docs: { command: process.execPath, args: ["--version"] } } }),
+    );
+    mkdirSync(join(stateDir, "projects", slug), { recursive: true });
+    writeFileSync(
+      join(stateDir, "projects", slug, "ledger.jsonl"),
+      JSON.stringify({
+        event: "contract_set",
+        seq: 1,
+        ts: new Date().toISOString(),
+        task: "T-SHELL",
+        workspace: repoDir,
+        gate: "true",
+        skills: ["shell-live-skill"],
+      }) + "\n",
+    );
+
+    const hooks = new Map<string, (payload: unknown, context: unknown) => Promise<unknown>>();
+    const server = {
+      addHook: (name: string, handler: (payload: unknown, context: unknown) => Promise<unknown>) => {
+        hooks.set(name, handler);
+        return () => { hooks.delete(name); };
+      },
+      handle: () => () => {},
+      registerWorktreeManager: () => () => {},
+    } as unknown as Parameters<typeof contribute>[0];
+
+    const stop = contribute(server);
+    t.after(() => stop());
+
+    const createHook = hooks.get("agent.create.before")!;
+    const openHook = hooks.get("agent.open.before")!;
+
+    const nonPiProviders = [
+      "antigravity/gemini-4-argon",
+      "claude-code/claude-sonnet-4-6",
+      "codex/gpt-5.4",
+      "opencode/glm-5.1",
+      "copilot/gpt-4.1",
+      "omp/claude-3.7-sonnet",
+    ] as const;
+
+    for (const [idx, provider] of nonPiProviders.entries()) {
+      const supCreated = await createHook(
+        {
+          request: {
+            config: { provider, cwd: repoDir, title: "Supervisor — repo", systemPrompt: "caller base" },
+          },
+        },
+        {},
+      ) as { config: { systemPrompt?: string }; env?: Record<string, string> } | undefined;
+      assert.ok(supCreated !== undefined, `${provider}: Supervisor created`);
+      assert.equal(supCreated.env?.PASEO_FACTORY_CONTRACT_MODE, "live");
+      assert.equal(supCreated.config.systemPrompt, "caller base");
+
+      // Idempotent second create invocation produces undefined without duplicate tokens
+      const supRetry = await createHook(
+        { request: { config: supCreated.config, env: supCreated.env } },
+        {},
+      );
+      assert.equal(supRetry, undefined, `${provider}: repeated create is idempotent`);
+
+      // Interactive open appends live contract without clobbering existing appendSystemPrompt
+      const supOpen = await openHook(
+        {
+          request: {
+            agentId: `sup-${idx}`,
+            workspaceId: "ws-1",
+            provider,
+            cwd: repoDir,
+            reason: "create",
+            purpose: "interactive",
+            title: "Supervisor",
+            background: false,
+            labels: {},
+            metadata: {},
+            appendSystemPrompt: ["[other-plugin] keep"],
+            tools: [],
+            env: { ...(supCreated.env ?? {}) },
+            mcpServers: {},
+          },
+        },
+        {},
+      ) as { appendSystemPrompt?: string[] } | undefined;
+      assert.ok(supOpen !== undefined);
+      assert.equal(supOpen.appendSystemPrompt?.length, 2);
+      assert.equal(supOpen.appendSystemPrompt?.[0], "[other-plugin] keep");
+      assert.match(supOpen.appendSystemPrompt?.[1] ?? "", /Supervisor seat of the paseo-factory/);
+
+      // History open never appends or returns appendSystemPrompt (even if pre-populated)
+      const supHistory = await openHook(
+        {
+          request: {
+            agentId: `sup-${idx}`,
+            workspaceId: "ws-1",
+            provider,
+            cwd: repoDir,
+            reason: "resume",
+            purpose: "history",
+            title: "Supervisor",
+            background: false,
+            labels: {},
+            metadata: {},
+            appendSystemPrompt: ["[other-plugin] strip-on-history"],
+            tools: [],
+            env: { ...(supCreated.env ?? {}) },
+            mcpServers: {},
+          },
+        },
+        {},
+      ) as Record<string, unknown> | undefined;
+      assert.ok(supHistory !== undefined);
+      assert.equal("appendSystemPrompt" in supHistory, false, `${provider}: history open omits appendSystemPrompt`);
+    }
+
+    // Unbound (withEnv === undefined) history open also strips pre-populated appendSystemPrompt
+    const unboundDir = makeTempDir("shell-unbound-history-");
+    disposeDir(t, unboundDir);
+    const unboundHistory = await openHook(
+      {
+        request: {
+          agentId: "unbound-1",
+          workspaceId: "ws-1",
+          provider: "codex/gpt-5.4",
+          cwd: unboundDir,
+          reason: "resume",
+          purpose: "history",
+          title: "Unbound",
+          background: false,
+          labels: {},
+          metadata: {},
+          appendSystemPrompt: ["[other-plugin] strip-unbound-history"],
+          tools: [],
+          env: {},
+          mcpServers: {},
+        },
+      },
+      {},
+    ) as Record<string, unknown> | undefined;
+    assert.ok(unboundHistory !== undefined);
+    assert.equal("appendSystemPrompt" in unboundHistory, false, "unbound history open strips pre-populated appendSystemPrompt");
+
+    // Peer live contract + Helper MCP + Peer skill scope on interactive resume
+    const worktreeDir = join(stateDir, "projects", slug, "worktrees", "T-SHELL");
+    mkdirSync(worktreeDir, { recursive: true });
+    const peerCreated = await createHook(
+      { request: { config: { provider: "codex/gpt-5.4", cwd: worktreeDir, title: "T-SHELL" } } },
+      {},
+    ) as { config: { systemPrompt?: string }; env?: Record<string, string> } | undefined;
+    assert.ok(peerCreated !== undefined);
+    assert.equal(peerCreated.env?.PASEO_FACTORY_CONTRACT_MODE, "live");
+    assert.equal(peerCreated.config.systemPrompt, undefined);
+
+    const peerOpened = await openHook(
+      {
+        request: {
+          agentId: "peer-shell-1",
+          workspaceId: "ws-peer",
+          provider: "codex/gpt-5.4",
+          cwd: worktreeDir,
+          reason: "resume",
+          purpose: "interactive",
+          title: "Peer · T-SHELL",
+          background: false,
+          labels: {},
+          metadata: {},
+          tools: [],
+          env: { ...(peerCreated.env ?? {}) },
+          mcpServers: {},
+        },
+      },
+      {},
+    ) as { appendSystemPrompt?: string[] } | undefined;
+    assert.ok(peerOpened !== undefined);
+    assert.equal(peerOpened.appendSystemPrompt?.length, 1);
+    assert.match(peerOpened.appendSystemPrompt?.[0] ?? "", /Peer of the paseo-factory verification loop \(task T-SHELL/);
+    assert.match(peerOpened.appendSystemPrompt?.[0] ?? "", /docs/);
+    assert.match(peerOpened.appendSystemPrompt?.[0] ?? "", /shell-live-skill/);
+
+    // Lead live create -> interactive open delivers Lead role contract
+    const leadCreated = await createHook(
+      { request: { config: { provider: "claude-code/claude-sonnet-4-6", cwd: repoDir, title: "Lead — repo" } } },
+      {},
+    ) as { config: { systemPrompt?: string }; env?: Record<string, string> } | undefined;
+    assert.ok(leadCreated !== undefined);
+    assert.equal(leadCreated.env?.PASEO_FACTORY_CONTRACT_MODE, "live");
+    assert.equal(leadCreated.config.systemPrompt, undefined);
+
+    const leadOpened = await openHook(
+      {
+        request: {
+          agentId: "lead-shell-1",
+          workspaceId: "ws-1",
+          provider: "claude-code/claude-sonnet-4-6",
+          cwd: repoDir,
+          reason: "create",
+          purpose: "interactive",
+          title: "Lead",
+          background: false,
+          labels: {},
+          metadata: {},
+          tools: [],
+          env: { ...(leadCreated.env ?? {}) },
+          mcpServers: {},
+        },
+      },
+      {},
+    ) as { appendSystemPrompt?: string[] } | undefined;
+    assert.ok(leadOpened !== undefined);
+    assert.equal(leadOpened.appendSystemPrompt?.length, 1);
+    assert.match(leadOpened.appendSystemPrompt?.[0] ?? "", /Lead seat of the paseo-factory/);
+
+    // factory-supervisor resolves effective provider family from lanes.json (pi stays on APPEND_SYSTEM.md)
+    writeFileSync(join(stateDir, "lanes.json"), JSON.stringify({ supervisor: "pi/zcode/glm-5.3" }));
+    const piRoleCreated = await createHook(
+      { request: { config: { provider: "factory-supervisor", cwd: repoDir, title: "Start" } } },
+      {},
+    ) as { config: { provider?: string; systemPrompt?: string }; env?: Record<string, string> } | undefined;
+    assert.ok(piRoleCreated !== undefined);
+    assert.equal(piRoleCreated.env?.PASEO_FACTORY_CONTRACT_MODE, undefined);
+    const piRoleOpened = await openHook(
+      {
+        request: {
+          agentId: "sup-pi-lane-1",
+          workspaceId: "ws-1",
+          provider: piRoleCreated.config.provider ?? "factory-supervisor",
+          cwd: repoDir,
+          reason: "create",
+          purpose: "interactive",
+          title: "Supervisor",
+          background: false,
+          labels: {},
+          metadata: {},
+          tools: [],
+          env: { ...(piRoleCreated.env ?? {}) },
+          mcpServers: {},
+        },
+      },
+      {},
+    ) as Record<string, unknown> | undefined;
+    assert.ok(piRoleOpened !== undefined);
+    assert.equal("appendSystemPrompt" in piRoleOpened, false);
+
+    // Pi keeps APPEND_SYSTEM.md and receives neither live mode nor appendSystemPrompt
+    const piCreated = await createHook(
+      { request: { config: { provider: "pi/zai/glm-5.3", cwd: repoDir, title: "Lead — repo" } } },
+      {},
+    ) as { config: { systemPrompt?: string }; env?: Record<string, string> } | undefined;
+    assert.ok(piCreated !== undefined);
+    assert.equal(piCreated.env?.PASEO_FACTORY_CONTRACT_MODE, undefined);
+    assert.match(piCreated.config.systemPrompt ?? "", /paseo-factory role skills:/);
+
+    const piOpened = await openHook(
+      {
+        request: {
+          agentId: "lead-pi-1",
+          workspaceId: "ws-1",
+          provider: "pi/zai/glm-5.3",
+          cwd: repoDir,
+          reason: "create",
+          purpose: "interactive",
+          title: "Lead",
+          background: false,
+          labels: {},
+          metadata: {},
+          tools: [],
+          env: { ...(piCreated.env ?? {}) },
+          mcpServers: {},
+        },
+      },
+      {},
+    ) as Record<string, unknown> | undefined;
+    assert.ok(piOpened !== undefined);
+    assert.equal("appendSystemPrompt" in piOpened, false);
+
+    // Legacy pre-0.17.1 session (no PASEO_FACTORY_CONTRACT_MODE=live) receives no duplicate appendSystemPrompt
+    const legacyOpened = await openHook(
+      {
+        request: {
+          agentId: "sup-legacy-shell",
+          workspaceId: "ws-1",
+          provider: "claude/claude-sonnet-4-6",
+          cwd: repoDir,
+          reason: "resume",
+          purpose: "interactive",
+          title: "Supervisor",
+          background: false,
+          labels: { seat: "supervisor", project: slug },
+          metadata: {},
+          tools: [],
+          env: { PASEO_FACTORY_SEAT: "supervisor", PASEO_FACTORY_PROJECT: slug },
+          mcpServers: {},
+        },
+      },
+      {},
+    ) as Record<string, unknown> | undefined;
+    assert.ok(legacyOpened !== undefined);
+    assert.equal("appendSystemPrompt" in legacyOpened, false);
+  }
+
+  // 2. <0.17.1 host (no registerWorktreeManager): bakes systemPrompt and never emits appendSystemPrompt
+  {
+    const homeDir = makeTempDir("shell-legacy-contracts-");
+    disposeDir(t, homeDir);
+    const paseoHome = join(homeDir, ".paseo");
+    process.env.HOME = homeDir;
+    process.env.PASEO_HOME = paseoHome;
+
+    const repoDir = join(homeDir, "repo");
+    mkdirSync(repoDir, { recursive: true });
+    writeFileSync(join(repoDir, "README.md"), "# repo\n");
+    gitCommitAll(repoDir, "init");
+
+    const hooks = new Map<string, (payload: unknown, context: unknown) => Promise<unknown>>();
+    const server = {
+      addHook: (name: string, handler: (payload: unknown, context: unknown) => Promise<unknown>) => {
+        hooks.set(name, handler);
+        return () => { hooks.delete(name); };
+      },
+      handle: () => () => {},
+    } as unknown as Parameters<typeof contribute>[0];
+
+    const stop = contribute(server);
+    t.after(() => stop());
+
+    const createHook = hooks.get("agent.create.before")!;
+    const openHook = hooks.get("agent.open.before")!;
+
+    const created = await createHook(
+      { request: { config: { provider: "codex/gpt-5.4", cwd: repoDir, title: "Supervisor — repo" } } },
+      {},
+    ) as { config: { systemPrompt?: string }; env?: Record<string, string> } | undefined;
+    assert.ok(created !== undefined);
+    assert.equal(created.env?.PASEO_FACTORY_CONTRACT_MODE, undefined);
+    assert.match(created.config.systemPrompt ?? "", /paseo-factory role skills:/);
+
+    const opened = await openHook(
+      {
+        request: {
+          agentId: "sup-pre017",
+          workspaceId: "ws-1",
+          provider: "codex/gpt-5.4",
+          cwd: repoDir,
+          reason: "create",
+          purpose: "interactive",
+          title: "Supervisor",
+          background: false,
+          labels: {},
+          metadata: {},
+          appendSystemPrompt: ["[other-plugin] strip-on-pre017"],
+          tools: [],
+          env: { ...(created.env ?? {}) },
+          mcpServers: {},
+        },
+      },
+      {},
+    ) as Record<string, unknown> | undefined;
+    assert.ok(opened !== undefined);
+    assert.equal("appendSystemPrompt" in opened, false, "<0.17.1 host never returns appendSystemPrompt");
+
+    // Unbound (withEnv === undefined) <0.17.1 open also strips pre-populated appendSystemPrompt
+    const unboundPre017Dir = makeTempDir("shell-unbound-pre017-");
+    disposeDir(t, unboundPre017Dir);
+    const unboundPre017 = await openHook(
+      {
+        request: {
+          agentId: "unbound-pre017",
+          workspaceId: "ws-1",
+          provider: "codex/gpt-5.4",
+          cwd: unboundPre017Dir,
+          reason: "create",
+          purpose: "interactive",
+          title: "Unbound",
+          background: false,
+          labels: {},
+          metadata: {},
+          appendSystemPrompt: ["[other-plugin] strip-unbound-pre017"],
+          tools: [],
+          env: {},
+          mcpServers: {},
+        },
+      },
+      {},
+    ) as Record<string, unknown> | undefined;
+    assert.ok(unboundPre017 !== undefined);
+    assert.equal("appendSystemPrompt" in unboundPre017, false, "unbound <0.17.1 open strips pre-populated appendSystemPrompt");
+  }
 });
 
 test("check-bundle stays green under the git hook environment (GIT_DIR/GIT_INDEX_FILE exported)", { timeout: 120_000 }, () => {

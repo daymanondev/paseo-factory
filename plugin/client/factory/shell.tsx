@@ -39,7 +39,8 @@ import type { ActivePluginAct, PluginsNote } from "./plugin-feedback.ts";
 
 /** The navigation slice the shell uses — `openAgent` jumps to a session. */
 export interface Navigation {
-  openAgent(input: { agentId: string; serverId?: string }): void;
+  supportsFocusHost?: boolean;
+  openAgent(input: { agentId: string; serverId?: string; focusHost?: boolean }): void;
 }
 
 export function FactoryShell({
@@ -229,6 +230,8 @@ export function FactoryShell({
     }
   };
 
+  const focusHostOption = navigation?.supportsFocusHost === true ? { focusHost: true } : {};
+
   const onboardingTracker = useOnboardingRunTracker({
     activeFolder: onboardingCanBeActive ? onboardingFolder : null,
     subscriptionLive,
@@ -238,7 +241,7 @@ export function FactoryShell({
       toast.show(result.summary, { variant: "success" });
       setOnboardingHoldFolder(null);
       refresh();
-      navigation?.openAgent({ agentId: result.agentId, serverId });
+      navigation?.openAgent({ agentId: result.agentId, serverId, ...focusHostOption });
       return { ok: true as const };
     },
     onBackgroundComplete: (result) => {
@@ -555,7 +558,7 @@ export function FactoryShell({
   };
   /** A Needs-you item's primary action: a bare navigation jump to the agent's conversation. */
   const openAgent = (agentId: string): void => {
-    navigation?.openAgent({ agentId, serverId });
+    navigation?.openAgent({ agentId, serverId, ...focusHostOption });
   };
   /** Returns the outcome so the Hand off… modal can stay open when the server refuses; the alert buttons ignore it. */
   const startHandoff = (seat: string): Promise<boolean> | void => {
@@ -587,7 +590,7 @@ export function FactoryShell({
     if (projectRoot === undefined) return;
     void act("Use this chat as Supervisor", async () => {
       const reply = await supervisorAdoptCall({ projectRoot, agentId });
-      if (reply.ok) navigation?.openAgent({ agentId: reply.agentId, serverId });
+      if (reply.ok) navigation?.openAgent({ agentId: reply.agentId, serverId, ...focusHostOption });
       return reply;
     });
   };
@@ -596,7 +599,7 @@ export function FactoryShell({
     if (projectRoot === undefined || mobile) return;
     void act("Start Supervisor", async () => {
       const reply = await supervisorStartCall({ projectRoot });
-      if (reply.ok) navigation?.openAgent({ agentId: reply.agentId, serverId });
+      if (reply.ok) navigation?.openAgent({ agentId: reply.agentId, serverId, ...focusHostOption });
       return reply;
     });
   };

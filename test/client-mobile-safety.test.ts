@@ -1725,3 +1725,141 @@ test("FactoryShell Store Release card switches modes (off -> on-request -> auto-
     });
   } finally { g.__factoryClientRpc = prior; }
 });
+
+test("FactoryShell startSupervisor forwards focusHost: true only when navigation.supportsFocusHost === true", async () => {
+  const { FactoryShell } = await load("plugin/client/factory/shell.tsx", "web");
+  const { testTheme } = await import("./client-markup.ts");
+  const { createElement } = await import("react");
+  const view = {
+    ...modelPickerFixture,
+    machineLanes: modelPickerFixture.lanes,
+    hasProjectLaneOverride: false,
+    panel: modelPanelFixture(),
+    project: { root: "/snapshot-project", slug: "my-app", missingRoot: false },
+    kpis: { running: 0, needsHuman: 0 },
+    companionTools: [],
+    corePlugin: {},
+    vault: {},
+    skillHub: { skillPacksExplicit: false, projectPacks: [] },
+    daemonError: null,
+  };
+  const g = globalThis as Record<string, any>, prior = g.__factoryClientRpc;
+  g.__factoryClientRpc = async (method: string) => {
+    if (method === "factory.snapshot") return { ok: true, view };
+    if (method === "factory.self.update.status") return { ok: true, current: "0.17.1", latest: "0.17.1", updateAvailable: false };
+    if (method === "factory.supervisor.start") return { ok: true, agentId: "agent-sup-focus", summary: "Supervisor started." };
+    return { ok: true };
+  };
+  try {
+    for (const supportsFocusHost of [true, false, undefined] as const) {
+      const opened: Array<Record<string, unknown>> = [];
+      await mountUnderNativeWindow(async (createRoot, container, act) => {
+        const root = createRoot(container);
+        try {
+          await act(() =>
+            root.render(
+              createElement(FactoryShell, {
+                theme: testTheme,
+                dir: "/snapshot-project",
+                serverId: "srv-remote",
+                layout: { compact: false, platform: "web" },
+                navigation: {
+                  ...(supportsFocusHost === undefined ? {} : { supportsFocusHost }),
+                  openAgent: (target: Record<string, unknown>) => opened.push(target),
+                },
+              }),
+            ),
+          );
+          const startButton = container.querySelector('[data-testid="factory-panel-start-supervisor"]') as HTMLButtonElement | null;
+          assert.ok(startButton);
+          await act(() => startButton.click());
+          assert.equal(opened.length, 1);
+          if (supportsFocusHost === true) {
+            assert.deepEqual(opened[0], { agentId: "agent-sup-focus", serverId: "srv-remote", focusHost: true });
+          } else {
+            assert.deepEqual(opened[0], { agentId: "agent-sup-focus", serverId: "srv-remote" });
+            assert.equal("focusHost" in opened[0]!, false, `focusHost omitted when supportsFocusHost=${String(supportsFocusHost)}`);
+          }
+        } finally { await act(() => root.unmount()); }
+      });
+    }
+  } finally { g.__factoryClientRpc = prior; }
+});
+
+test("FactoryShell adoptSupervisor and ProjectPanel openAgent (Supervisor, Lead, Peer, Needs-you) forward focusHost: true only when navigation.supportsFocusHost === true", async () => {
+  const { FactoryShell } = await load("plugin/client/factory/shell.tsx", "web");
+  const { testTheme } = await import("./client-markup.ts");
+  const { createElement } = await import("react");
+  const panel = modelPanelFixture();
+  panel.seats.supervisor = { ...panel.seats.lead, role: "supervisor", vacant: false, agentId: "sup-live" };
+  panel.seats.supervisorCandidates = [{ agentId: "candidate-1", title: "Owner chat", statusLabel: "idle", tone: "normal", model: "opus" }];
+  panel.needsYou = [
+    { key: "waiting-sup", kind: "supervisor-waiting", title: "Supervisor waiting", detail: null, action: { kind: "open-agent", agentId: "sup-needs", label: "Open chat" } },
+  ];
+  const view = {
+    ...modelPickerFixture,
+    machineLanes: modelPickerFixture.lanes,
+    hasProjectLaneOverride: false,
+    panel,
+    project: { root: "/snapshot-project", slug: "my-app", missingRoot: false },
+    kpis: { running: 0, needsHuman: 0 },
+    companionTools: [],
+    corePlugin: {},
+    vault: {},
+    skillHub: { skillPacksExplicit: false, projectPacks: [] },
+    daemonError: null,
+  };
+  const g = globalThis as Record<string, any>, prior = g.__factoryClientRpc;
+  g.__factoryClientRpc = async (method: string) => {
+    if (method === "factory.snapshot") return { ok: true, view };
+    if (method === "factory.self.update.status") return { ok: true, current: "0.17.1", latest: "0.17.1", updateAvailable: false };
+    if (method === "factory.supervisor.adopt") return { ok: true, agentId: "candidate-1" };
+    return { ok: true };
+  };
+  try {
+    for (const supportsFocusHost of [true, false, undefined] as const) {
+      const opened: Array<Record<string, unknown>> = [];
+      await mountUnderNativeWindow(async (createRoot, container, act) => {
+        const root = createRoot(container);
+        try {
+          await act(() =>
+            root.render(
+              createElement(FactoryShell, {
+                theme: testTheme,
+                dir: "/snapshot-project",
+                serverId: "srv-remote",
+                layout: { compact: false, platform: "web" },
+                navigation: {
+                  ...(supportsFocusHost === undefined ? {} : { supportsFocusHost }),
+                  openAgent: (target: Record<string, unknown>) => opened.push(target),
+                },
+              }),
+            ),
+          );
+          for (const testId of [
+            "factory-panel-needs-you-action-waiting-sup",
+            "factory-panel-open-supervisor",
+            "factory-panel-open-lead",
+            "factory-panel-open-peer-task-1",
+            "factory-panel-adopt-supervisor",
+          ]) {
+            const btn = container.querySelector(`[data-testid="${testId}"]`) as HTMLButtonElement | null;
+            assert.ok(btn, `expected button ${testId}`);
+            await act(() => btn.click());
+          }
+          const expectedIds = ["sup-needs", "sup-live", "lead", "peer", "candidate-1"];
+          assert.equal(opened.length, expectedIds.length);
+          for (let i = 0; i < expectedIds.length; i++) {
+            const expectedBase = { agentId: expectedIds[i], serverId: "srv-remote" };
+            if (supportsFocusHost === true) {
+              assert.deepEqual(opened[i], { ...expectedBase, focusHost: true });
+            } else {
+              assert.deepEqual(opened[i], expectedBase);
+              assert.equal("focusHost" in opened[i]!, false, `focusHost omitted for ${expectedIds[i]} when supportsFocusHost=${String(supportsFocusHost)}`);
+            }
+          }
+        } finally { await act(() => root.unmount()); }
+      });
+    }
+  } finally { g.__factoryClientRpc = prior; }
+});

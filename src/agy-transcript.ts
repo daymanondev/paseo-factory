@@ -15,15 +15,23 @@ function agentFiles(dir: string): string[] {
   if (!existsSync(dir)) return [];
   return readdirSync(dir, { withFileTypes: true }).flatMap(entry => entry.isDirectory() ? agentFiles(join(dir, entry.name)) : entry.isFile() && entry.name.endsWith('.json') ? [join(dir, entry.name)] : []);
 }
+function idFromData(data: unknown): string | undefined {
+  if (typeof data !== 'object' || data === null) return undefined;
+  const record = data as { conversationId?: unknown; sessionId?: unknown };
+  for (const candidate of [record.conversationId, record.sessionId]) {
+    if (typeof candidate === 'string' && safeName(candidate)) return candidate;
+  }
+  return undefined;
+}
 function conversationFrom(record: Record<string, any>): string | undefined {
   const persistence = record.persistence;
-  const metadataId = persistence?.metadata?.pluginProviderPersistence?.data?.conversationId;
-  if (typeof metadataId === 'string' && safeName(metadataId)) return metadataId;
+  const metadataId = idFromData(persistence?.metadata?.pluginProviderPersistence?.data);
+  if (metadataId) return metadataId;
   for (const session of [persistence?.sessionId, record.runtimeInfo?.sessionId]) {
     if (typeof session !== 'string' || !session.startsWith('plugin:')) continue;
     try {
-      const id = JSON.parse(session.slice(7)).data?.conversationId;
-      if (typeof id === 'string' && safeName(id)) return id;
+      const id = idFromData(JSON.parse(session.slice(7))?.data);
+      if (id) return id;
     } catch { /* Try the other persisted session id. */ }
   }
   return undefined;

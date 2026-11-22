@@ -137,11 +137,13 @@ try {
   const interactiveEnv = await sessionOpenHook(supervisorOpen("interactive"), { paseo: daemon });
   await new Promise((done) => setTimeout(done, 150)); // let the fire-and-forget sweep settle
   assert.equal(interactiveEnv?.env?.PASEO_FACTORY_SEAT, "supervisor", "the interactive supervisor open is recognized");
+  assert.equal("appendSystemPrompt" in (interactiveEnv ?? {}), false, "<0.17.1 partial request never emits appendSystemPrompt");
   assert.ok(listProjectRegistrations(stateDir).some((r) => r.supervisor === "sup-open"), "the interactive open binds the supervisor seat");
   console.log("SWEEP_ARM_HISTORY");
   const historyEnv = await sessionOpenHook(supervisorOpen("history"), { paseo: daemon });
   await new Promise((done) => setTimeout(done, 150));
   assert.equal(historyEnv?.env?.PASEO_FACTORY_SEAT, "supervisor", "the history open still re-carries the seat env");
+  assert.equal("appendSystemPrompt" in (historyEnv ?? {}), false, "<0.17.1 history open never emits appendSystemPrompt");
   // The lost-Lead door's registration (v0.6.1, ADR 0057 §4): an
   // agent.archive.after for a STRANGER agent — not any Project's bound Lead —
   // reaches the runtime and correctly does nothing: no binding clears, no

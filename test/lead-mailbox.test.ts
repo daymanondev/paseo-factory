@@ -924,6 +924,75 @@ test("drainSupervisorMailbox and drainLeadMailbox prepend the Seat kickoff packe
   assert.equal(readProjectRegistration(stateDir, slug)?.lead, leadId);
 });
 
+test("prependKickoffPacketIfFirstTurn normalizes legacy Antigravity lanes against live catalog and degrades cleanly when listModels fails (ADR 0067)", async (t) => {
+  // 1. Live catalog normalizes legacy effort-suffixed lanes in Turn-1 Lead & Supervisor kickoff packets without mutating lanes.json
+  {
+    const { stateDir, slug, projectRoot, leadMail, surface, fake } = makeSpooledRuntime(t);
+    writeFileSync(
+      join(stateDir, "lanes.json"),
+      `${JSON.stringify({
+        supervisor: "antigravity/gemini-4-argon-high",
+        lead: "antigravity/gemini-4-argon-medium",
+        worker: "antigravity/gemini-4-argon-low",
+      }, null, 2)}\n`,
+    );
+    fake.daemon.providers = {
+      listAvailable: async () => ({ providers: [{ provider: "antigravity", available: true }] }),
+      listModels: async (provider: string) =>
+        provider === "antigravity"
+          ? { models: [{ id: "gemini-4-argon", thinkingOptions: [{ id: "low" }, { id: "medium" }, { id: "high" }] }] }
+          : { models: [] },
+    };
+
+    await surface.supervisorStart({ projectRoot });
+    await leadMail.dispatchSupervisor({
+      id: "sd-agy-norm-1",
+      kind: "supervisor_dispatch",
+      workspace: projectRoot,
+      message: "Check normalized kickoff",
+    });
+    assert.equal(fake.sent.length, 1);
+    assert.match(fake.sent[0]!.text, /supervisor=antigravity\/gemini-4-argon:high/);
+    assert.match(fake.sent[0]!.text, /lead=antigravity\/gemini-4-argon:medium/);
+    assert.match(fake.sent[0]!.text, /worker=antigravity\/gemini-4-argon:low/);
+
+    await leadMail.dispatchLead({
+      id: "ld-agy-norm-1",
+      kind: "lead_dispatch",
+      workspace: projectRoot,
+      message: "Lead normalized kickoff",
+    });
+    assert.equal(fake.sent.length, 2);
+    assert.match(fake.sent[1]!.text, /lead=antigravity\/gemini-4-argon:medium/);
+    assert.match(fake.sent[1]!.text, /worker=antigravity\/gemini-4-argon:low/);
+  }
+
+  // 2. When listModels throws or is unavailable, kickoff still succeeds with the configured lanes verbatim
+  {
+    const { stateDir, projectRoot, leadMail, fake } = makeSpooledRuntime(t);
+    writeFileSync(
+      join(stateDir, "lanes.json"),
+      `${JSON.stringify({
+        supervisor: "antigravity/gemini-4-argon-high",
+        lead: "antigravity/gemini-4-argon-medium",
+        worker: "antigravity/gemini-4-argon-low",
+      }, null, 2)}\n`,
+    );
+    fake.daemon.providers = {
+      listAvailable: async () => { throw new Error("catalog offline"); },
+      listModels: async () => { throw new Error("catalog offline"); },
+    };
+    await leadMail.dispatchLead({
+      id: "ld-agy-offline-1",
+      kind: "lead_dispatch",
+      workspace: projectRoot,
+      message: "Lead offline fallback",
+    });
+    assert.equal(fake.sent.length, 1);
+    assert.match(fake.sent[0]!.text, /lead=antigravity\/gemini-4-argon-medium/);
+  }
+});
+
 test("completeHandoff resolves Attempt-1 working Agents via live daemon worktree cwd/labels, CorrelationRegistry, and ignores stale records after a contract_set epoch reset (v0.0.28, ADR 0018 §1)", async (t) => {
   const lead: FakeAgent = {
     id: "agent-lead-1",

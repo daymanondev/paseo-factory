@@ -197,6 +197,115 @@ const SIBLING_LADDER_BASE: Record<PeerThinkingLevel, readonly PeerThinkingLevel[
   low: ["low", "medium", "high", "xhigh", "max"],
 };
 
+/** Maps legacy lane provider IDs (`claude-code`, `agy`) onto their canonical daemon catalog IDs. */
+export function providerCatalogAlias(provider: string): string | undefined {
+  return provider === "claude-code" ? "claude" : provider === "agy" ? "antigravity" : undefined;
+}
+
+/** Resolves a provider catalog entry, honoring canonical `claude-code`/`agy` aliases when exact entries are absent. */
+export function findCatalogProviderEntry<T extends LaneThinkingCatalogEntry>(
+  provider: string,
+  providers?: readonly T[],
+): { entry: T; catalogProvider: string } | undefined {
+  if (providers === undefined || providers.length === 0) return undefined;
+  const exact = providers.find((p) => (p.provider ?? p.id) === provider);
+  if (exact !== undefined) return { entry: exact, catalogProvider: provider };
+  const alias = providerCatalogAlias(provider);
+  if (alias === undefined) return undefined;
+  const aliased = providers.find((p) => (p.provider ?? p.id) === alias);
+  return aliased === undefined ? undefined : { entry: aliased, catalogProvider: alias };
+}
+
+/** Finds a catalog model entry matching `model` directly or via stripped/provider-prefixed forms. */
+export function findCatalogModel<M extends LaneThinkingCatalogModel>(
+  provider: string,
+  model: string,
+  models?: readonly M[] | null,
+): M | undefined {
+  if (!Array.isArray(models)) return undefined;
+  const strippedModel = model.replace(/^[^/]+\//, "");
+  return models.find(
+    (m) =>
+      m.id === model ||
+      `${provider}/${m.id}` === model ||
+      m.id === `${provider}/${model}` ||
+      m.id === strippedModel ||
+      m.id.replace(/^[^/]+\//, "") === strippedModel,
+  );
+}
+
+function splitSuffixBaseModel(model: string): { baseModel: string; tier: PeerThinkingLevel } | undefined {
+  const strippedModel = model.replace(/^[^/]+\//, "");
+  const match = SIBLING_TIER_SUFFIX.exec(strippedModel);
+  if (match === null || match[1] === "") return undefined;
+  const innerPrefix = model.slice(0, model.length - strippedModel.length);
+  return { baseModel: `${innerPrefix}${match[1]}`, tier: match[2] as PeerThinkingLevel };
+}
+
+function findSuffixedBaseThinkingOptions(
+  catalogProvider: string,
+  model: string,
+  models: readonly LaneThinkingCatalogModel[],
+): { baseModel: string; tier: PeerThinkingLevel; thinkingOptions: readonly { id: string }[] } | undefined {
+  const split = splitSuffixBaseModel(model);
+  if (split === undefined) return undefined;
+  const baseMeta = findCatalogModel(catalogProvider, split.baseModel, models);
+  if (baseMeta === undefined || !Array.isArray(baseMeta.thinkingOptions) || baseMeta.thinkingOptions.length === 0) {
+    return undefined;
+  }
+  return { baseModel: split.baseModel, tier: split.tier, thinkingOptions: baseMeta.thinkingOptions };
+}
+
+/**
+ * Normalizes a legacy effort-suffixed lane `<provider>/<base>-<tier>` to
+ * `<provider>/<base>:<tier>` when the lane has no `:thinking` suffix, its model
+ * has no direct catalog match, and the live catalog advertises `<base>` with
+ * `thinkingOptions` containing `<tier>` (ADR 0067). Passes through unchanged in
+ * all other cases.
+ */
+export function normalizeLaneWithProviders(
+  laneValue: string,
+  providers?: readonly LaneThinkingCatalogEntry[],
+): string {
+  const parsed = parseLane(laneValue);
+  if (parsed === undefined || parsed.thinking !== undefined) return laneValue;
+  const found = findCatalogProviderEntry(parsed.provider, providers);
+  if (found === undefined || !Array.isArray(found.entry.models)) return laneValue;
+  if (findCatalogModel(found.catalogProvider, parsed.model, found.entry.models) !== undefined) return laneValue;
+  const match = findSuffixedBaseThinkingOptions(found.catalogProvider, parsed.model, found.entry.models);
+  if (match === undefined || !match.thinkingOptions.some((o) => o.id === match.tier)) return laneValue;
+  return `${parsed.provider}/${match.baseModel}:${match.tier}`;
+}
+
+/** Projects a whole `Lanes` table through `normalizeLaneWithProviders` without mutating disk files. */
+export function normalizeLanesWithProviders(
+  lanes: Lanes,
+  providers?: readonly LaneThinkingCatalogEntry[],
+): Lanes {
+  if (providers === undefined || providers.length === 0) return lanes;
+  return {
+    supervisor: normalizeLaneWithProviders(lanes.supervisor, providers),
+    lead: normalizeLaneWithProviders(lanes.lead, providers),
+    worker: normalizeLaneWithProviders(lanes.worker, providers),
+    watch: normalizeLaneWithProviders(lanes.watch, providers),
+    freshEyes: normalizeLaneWithProviders(lanes.freshEyes, providers),
+  };
+}
+
+function pickSupportedThinkingOption(
+  options: readonly { id: string }[],
+  requestedThinking: PeerThinkingLevel,
+  configuredThinking: string | undefined,
+): string {
+  if (options.some((o) => o.id === requestedThinking)) return requestedThinking;
+  // The nearest supported option — the Owner's configured suffix first for the
+  // medium ladder, max first for xhigh; high next; the catalog's last word last.
+  const supports = (tier: string | undefined) => tier !== undefined && options.some((o) => o.id === tier);
+  return requestedThinking === "xhigh"
+    ? (supports("max") ? "max" : supports("high") ? "high" : options[options.length - 1].id)
+    : (supports(configuredThinking) ? configuredThinking! : supports("high") ? "high" : options[options.length - 1].id);
+}
+
 function resolveSiblingThinkingModel(
   provider: string,
   laneModel: string,
@@ -231,22 +340,23 @@ function resolveSiblingThinkingModel(
 /**
  * Resolves one per-dispatch `thinking` override against the configured
  * `worker` lane and the provider model catalog (ADR 0054 §4, amended by
- * ADR 0062; the inverse of `sanitizeLaneWithProviders` — this mapping never
- * strips thinking):
+ * ADR 0062 and ADR 0067; the inverse of `sanitizeLaneWithProviders` — this
+ * mapping never strips thinking):
  *
- * 1. No override requested → the configured lane verbatim (the Owner's
- *    `lanes.json` word is the whole truth).
- * 2. Unknown model or unreachable catalog → the configured lane verbatim.
- * 3. A model with no `thinkingOptions` (`[]` / absent):
+ * 1. Normalizes legacy `<provider>/<base>-<tier>` to `<provider>/<base>:<tier>`
+ *    when the catalog advertises `<base>` with matching `thinkingOptions`.
+ * 2. No override requested → the normalized (or configured) lane.
+ * 3. Unknown model or unreachable catalog → the normalized (or configured) lane.
+ * 4. A model with no `thinkingOptions` (`[]` / absent):
  *    a. Sibling effort models (ADR 0062): when `lane.model` ends in
  *       `-(low|medium|high|xhigh|max)` and the provider catalog advertises
  *       `>= 2` same-base fixed-effort siblings (`<base>-<tier>`), resolve to
  *       the matching same-base sibling via the nearest-tier ladder (never
  *       cross-family, no `:thinking` suffix).
  *    b. Single fixed-effort model (no siblings) → the configured lane verbatim.
- * 4. The catalog carries the requested tier in `thinkingOptions` →
+ * 5. The catalog carries the requested tier in `thinkingOptions` →
  *    `<provider>/<model>:<tier>`.
- * 5. A non-empty `thinkingOptions` catalog without the requested tier → the
+ * 6. A non-empty `thinkingOptions` catalog without the requested tier → the
  *    nearest supported option, never a bare `<provider>/<model>`: `"medium"`
  *    lands on the Owner's configured suffix when the catalog carries it (else
  *    `"high"`, else the last option); `"xhigh"` lands on `"max"` (else
@@ -261,36 +371,29 @@ export function resolvePeerThinkingLane(
   requestedThinking: PeerThinkingLevel | undefined,
   providers?: readonly LaneThinkingCatalogEntry[],
 ): string {
-  if (requestedThinking === undefined) return configuredWorkerLane;
-  const lane = parseLane(configuredWorkerLane);
-  if (lane === undefined) return configuredWorkerLane;
-  const entry = providers?.find((p) => (p.provider ?? p.id) === lane.provider);
-  const models = entry?.models;
-  if (models === undefined || models === null) return configuredWorkerLane;
+  const normalizedLane = normalizeLaneWithProviders(configuredWorkerLane, providers);
+  if (requestedThinking === undefined) return normalizedLane;
+  const lane = parseLane(normalizedLane);
+  if (lane === undefined) return normalizedLane;
+  const found = findCatalogProviderEntry(lane.provider, providers);
+  const models = found?.entry.models;
+  if (models === undefined || models === null) return normalizedLane;
   const strippedModel = lane.model.replace(/^[^/]+\//, "");
-  const meta = models.find(
-    (m) =>
-      m.id === lane.model ||
-      `${lane.provider}/${m.id}` === lane.model ||
-      m.id === `${lane.provider}/${lane.model}` ||
-      m.id === strippedModel ||
-      m.id.replace(/^[^/]+\//, "") === strippedModel,
-  );
-  if (meta === undefined) return configuredWorkerLane;
+  const meta = findCatalogModel(found!.catalogProvider, lane.model, models);
+  if (meta === undefined) {
+    if (lane.thinking === undefined) {
+      const match = findSuffixedBaseThinkingOptions(found!.catalogProvider, lane.model, models);
+      if (match !== undefined) {
+        return `${lane.provider}/${match.baseModel}:${pickSupportedThinkingOption(match.thinkingOptions, requestedThinking, match.tier)}`;
+      }
+    }
+    return normalizedLane;
+  }
   const options = meta.thinkingOptions;
   if (!Array.isArray(options) || options.length === 0) {
-    return resolveSiblingThinkingModel(lane.provider, lane.model, strippedModel, requestedThinking, models) ?? configuredWorkerLane;
+    return resolveSiblingThinkingModel(lane.provider, lane.model, strippedModel, requestedThinking, models) ?? normalizedLane;
   }
-  const carried = options.some((o) => o.id === requestedThinking);
-  if (carried) return `${lane.provider}/${lane.model}:${requestedThinking}`;
-  // The nearest supported option — the Owner's configured suffix first for the
-  // medium ladder, max first for xhigh; high next; the catalog's last word last.
-  const supports = (tier: string | undefined) => tier !== undefined && options.some((o) => o.id === tier);
-  const resolved =
-    requestedThinking === "xhigh"
-      ? (supports("max") ? "max" : supports("high") ? "high" : options[options.length - 1].id)
-      : (supports(lane.thinking) ? lane.thinking! : supports("high") ? "high" : options[options.length - 1].id);
-  return `${lane.provider}/${lane.model}:${resolved}`;
+  return `${lane.provider}/${lane.model}:${pickSupportedThinkingOption(options, requestedThinking, lane.thinking)}`;
 }
 
 /**
