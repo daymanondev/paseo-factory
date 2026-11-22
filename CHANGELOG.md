@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.4] - 2026-11-23
+
+**Extend Antigravity (`agy`) MCP schema self-healing to directory inspection (`list_dir`, `find_by_name`, `grep_search`), shell inspection (`ls`), and `call_mcp_tool` across concurrent multi-role seats.**
+
+### Fixed
+
+- **Multi-seat MCP schema directory overwrite recovery (`src/agy-mcp-schema-heal.ts`, `plugin/bin/agy-pre-tool-hook.mjs`, `test/agy-mcp-schema-heal.test.ts`):** Because concurrent Antigravity seats (Supervisor, Lead, Peer) share `~/.gemini/antigravity-cli/mcp/paseo-factory_paseo_factory/`, a newly spawned Peer overwrites the directory down to Peer's 2 schemas only. `agy-pre-tool-hook.mjs` now additively restores all missing role-permitted schema files on directory inspection tools (`list_dir`, `list_directory`, `find_by_name`, `grep_search`, `LS`, `Glob`, `Grep`) and allowed shell commands referencing `paseo-factory_paseo_factory` / `paseo_factory`, and warms the called schema on `call_mcp_tool` — strictly additive (never pruning sibling files), role-fenced, and fail-open.
+
 ## [0.20.3] - 2026-11-23
 
 **Restore lazy plugin `mcp_config.json` delivery for Antigravity (`agy 1.5.14`) while keeping all other Paseo `0.17.1+` features (live role contracts, dual persistence decoding, lane normalization, `antigravity.paseoTools.enabled = false`).**

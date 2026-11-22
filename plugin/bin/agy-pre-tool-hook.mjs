@@ -638,8 +638,26 @@ const SHELL_TOOL_NAMES = new Set([
 
 const READ_TOOL_NAMES = new Set(["read_file", "view_file"]);
 
+const DIR_READ_TOOL_NAMES = new Set([
+  "list_dir",
+  "list_directory",
+  "find_by_name",
+  "grep_search",
+  "LS",
+  "Glob",
+  "Grep",
+]);
+
 function extractTargetPath(toolInput) {
   for (const key of ["Path", "AbsolutePath", "TargetFile", "file_path", "filePath", "path"]) {
+    const value = toolInput[key];
+    if (typeof value === "string" && value.trim() !== "") return value.trim();
+  }
+  return "";
+}
+
+function extractDirectoryPath(toolInput) {
+  for (const key of ["DirectoryPath", "SearchDirectory", "SearchPath", "Path", "AbsolutePath", "dir", "directory", "path"]) {
     const value = toolInput[key];
     if (typeof value === "string" && value.trim() !== "") return value.trim();
   }
@@ -1219,7 +1237,10 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 // src/agy-mcp-schema-heal.ts
 var agy_mcp_schema_heal_exports = {};
 __export(agy_mcp_schema_heal_exports, {
-  healAgyMcpSchemaFile: () => healAgyMcpSchemaFile
+  healAgyMcpSchemaFile: () => healAgyMcpSchemaFile,
+  healAgyMcpSchemaForCall: () => healAgyMcpSchemaForCall,
+  healAgyMcpSchemasForCommand: () => healAgyMcpSchemasForCommand,
+  healAgyMcpSchemasForDirectory: () => healAgyMcpSchemasForDirectory
 });
 module.exports = __toCommonJS(agy_mcp_schema_heal_exports);
 var import_node_crypto = require("node:crypto");
@@ -1600,13 +1621,58 @@ var catalog = slpCatalog;
 var ALLOWED_ROLES = /* @__PURE__ */ new Set(["supervisor", "lead", "agent"]);
 var AGY_APP_DATA_NAMES = ["antigravity", "antigravity-cli"];
 var AGY_SERVER_DIR_NAMES = ["paseo-factory_paseo_factory", "paseo_factory"];
+function resolveEffectiveHome() {
+  const effectiveHome = process.env.HOME?.trim() || (0, import_node_os.homedir)();
+  return effectiveHome ? (0, import_node_path.resolve)(effectiveHome) : null;
+}
+function hasUnsafeRelativeSegment(raw) {
+  return raw.split(/[/\\]/).some((seg) => seg === "." || seg === "..");
+}
+function writeMissingSchemaFile(serverDir, tool) {
+  let tempPath = null;
+  try {
+    const targetFile = (0, import_node_path.join)(serverDir, `${tool.name}.json`);
+    if (!isMissingPath(targetFile)) return false;
+    (0, import_node_fs.mkdirSync)(serverDir, { recursive: true });
+    tempPath = (0, import_node_path.join)(serverDir, `.${tool.name}.json.${process.pid}.${(0, import_node_crypto.randomUUID)()}.tmp`);
+    (0, import_node_fs.writeFileSync)(tempPath, serializeAgyMcpSchema(tool), { encoding: "utf8", flag: "wx" });
+    if (!isMissingPath(targetFile)) {
+      removeQuietly(tempPath);
+      tempPath = null;
+      return false;
+    }
+    (0, import_node_fs.renameSync)(tempPath, targetFile);
+    tempPath = null;
+    return true;
+  } catch {
+    if (tempPath !== null) removeQuietly(tempPath);
+    return false;
+  }
+}
+function resolveAllowedToolsForSeat(seat) {
+  if (!ALLOWED_ROLES.has(seat)) return [];
+  const allowedTools = catalog.roles[seat];
+  if (!Array.isArray(allowedTools)) return [];
+  const defs = [];
+  for (const name of allowedTools) {
+    const tool = catalog.tools[name];
+    if (tool) defs.push(tool);
+  }
+  return defs;
+}
+function healMissingSchemasInDir(serverDir, seat) {
+  let healed = 0;
+  for (const tool of resolveAllowedToolsForSeat(seat)) {
+    if (writeMissingSchemaFile(serverDir, tool)) healed += 1;
+  }
+  return healed;
+}
 function resolveHealTarget(targetPath) {
   const raw = typeof targetPath === "string" ? targetPath.trim() : "";
   if (raw === "" || !(0, import_node_path.isAbsolute)(raw) || raw.endsWith("/") || raw.endsWith("\\")) return null;
-  if (raw.split(/[/\\]/).some((seg) => seg === "." || seg === "..")) return null;
-  const effectiveHome = process.env.HOME?.trim() || (0, import_node_os.homedir)();
-  if (!effectiveHome) return null;
-  const resolvedHome = (0, import_node_path.resolve)(effectiveHome);
+  if (hasUnsafeRelativeSegment(raw)) return null;
+  const resolvedHome = resolveEffectiveHome();
+  if (!resolvedHome) return null;
   const resolvedTarget = (0, import_node_path.resolve)(raw);
   const parentDir = (0, import_node_path.dirname)(resolvedTarget);
   const fileName = (0, import_node_path.basename)(resolvedTarget);
@@ -1651,32 +1717,98 @@ function removeQuietly(path) {
   }
 }
 function healAgyMcpSchemaFile(options) {
-  let tempPath = null;
   try {
     const target = resolveHealTarget(options.targetPath);
     if (target === null) return false;
     const tool = resolveAllowedToolForSeat(options.seat, target.toolName);
     if (tool === null) return false;
-    if (!isMissingPath(target.targetFile)) return false;
-    (0, import_node_fs.mkdirSync)(target.serverDir, { recursive: true });
-    tempPath = (0, import_node_path.join)(target.serverDir, `.${target.toolName}.json.${process.pid}.${(0, import_node_crypto.randomUUID)()}.tmp`);
-    (0, import_node_fs.writeFileSync)(tempPath, serializeAgyMcpSchema(tool), { encoding: "utf8", flag: "wx" });
-    if (!isMissingPath(target.targetFile)) {
-      removeQuietly(tempPath);
-      tempPath = null;
-      return false;
-    }
-    (0, import_node_fs.renameSync)(tempPath, target.targetFile);
-    tempPath = null;
-    return true;
+    return writeMissingSchemaFile(target.serverDir, tool);
   } catch {
-    if (tempPath !== null) removeQuietly(tempPath);
+    return false;
+  }
+}
+function healAgyMcpSchemasForDirectory(options) {
+  try {
+    if (!ALLOWED_ROLES.has(options.seat)) return 0;
+    const raw = typeof options.targetPath === "string" ? options.targetPath.trim() : "";
+    if (raw === "" || !(0, import_node_path.isAbsolute)(raw) || hasUnsafeRelativeSegment(raw)) return 0;
+    const resolvedHome = resolveEffectiveHome();
+    if (!resolvedHome) return 0;
+    const resolvedTarget = (0, import_node_path.resolve)(raw);
+    for (const appName of AGY_APP_DATA_NAMES) {
+      const mcpRoot = (0, import_node_path.resolve)(resolvedHome, ".gemini", appName, "mcp");
+      for (const serverDirName of AGY_SERVER_DIR_NAMES) {
+        const serverDir = (0, import_node_path.resolve)(mcpRoot, serverDirName);
+        if (resolvedTarget === serverDir) {
+          return healMissingSchemasInDir(serverDir, options.seat);
+        }
+      }
+      if (resolvedTarget === mcpRoot) {
+        let healed = 0;
+        for (const serverDirName of AGY_SERVER_DIR_NAMES) {
+          const serverDir = (0, import_node_path.resolve)(mcpRoot, serverDirName);
+          if (!isMissingPath(serverDir)) {
+            healed += healMissingSchemasInDir(serverDir, options.seat);
+          }
+        }
+        return healed;
+      }
+    }
+    return 0;
+  } catch {
+    return 0;
+  }
+}
+function healAgyMcpSchemasForCommand(options) {
+  try {
+    if (!ALLOWED_ROLES.has(options.seat)) return 0;
+    const command = typeof options.command === "string" ? options.command : "";
+    const matchedServers = AGY_SERVER_DIR_NAMES.filter((name) => command.includes(name));
+    if (matchedServers.length === 0) return 0;
+    const resolvedHome = resolveEffectiveHome();
+    if (!resolvedHome) return 0;
+    let healed = 0;
+    for (const appName of AGY_APP_DATA_NAMES) {
+      const mcpRoot = (0, import_node_path.resolve)(resolvedHome, ".gemini", appName, "mcp");
+      if (isMissingPath(mcpRoot)) continue;
+      for (const serverDirName of matchedServers) {
+        const serverDir = (0, import_node_path.resolve)(mcpRoot, serverDirName);
+        if (!isMissingPath(serverDir) || command.includes((0, import_node_path.join)(".gemini", appName, "mcp", serverDirName))) {
+          healed += healMissingSchemasInDir(serverDir, options.seat);
+        }
+      }
+    }
+    return healed;
+  } catch {
+    return 0;
+  }
+}
+function healAgyMcpSchemaForCall(options) {
+  try {
+    const serverName = typeof options.serverName === "string" ? options.serverName.trim() : "";
+    if (!AGY_SERVER_DIR_NAMES.includes(serverName)) return false;
+    const tool = resolveAllowedToolForSeat(options.seat, options.toolName);
+    if (tool === null) return false;
+    const resolvedHome = resolveEffectiveHome();
+    if (!resolvedHome) return false;
+    let healed = false;
+    for (const appName of AGY_APP_DATA_NAMES) {
+      const mcpRoot = (0, import_node_path.resolve)(resolvedHome, ".gemini", appName, "mcp");
+      if (isMissingPath(mcpRoot)) continue;
+      const serverDir = (0, import_node_path.resolve)(mcpRoot, serverName);
+      if (writeMissingSchemaFile(serverDir, tool)) healed = true;
+    }
+    return healed;
+  } catch {
     return false;
   }
 }
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
-  healAgyMcpSchemaFile
+  healAgyMcpSchemaFile,
+  healAgyMcpSchemaForCall,
+  healAgyMcpSchemasForCommand,
+  healAgyMcpSchemasForDirectory
 });
 
 return module.exports;
@@ -2003,6 +2135,31 @@ process.stdin.on("end", () => {
     allow();
   }
 
+  if (DIR_READ_TOOL_NAMES.has(toolName)) {
+    try {
+      agyMcpSchemaHeal.healAgyMcpSchemasForDirectory({
+        seat: ctx.seat,
+        targetPath: extractDirectoryPath(toolInput),
+      });
+    } catch {
+      // Fail open: schema directory healing must never block directory inspection.
+    }
+    allow();
+  }
+
+  if (toolName === "call_mcp_tool") {
+    try {
+      agyMcpSchemaHeal.healAgyMcpSchemaForCall({
+        seat: ctx.seat,
+        serverName: String(toolInput.ServerName ?? toolInput.serverName ?? "").trim(),
+        toolName: mcpCalledToolName,
+      });
+    } catch {
+      // Fail open: schema warming must never block call_mcp_tool.
+    }
+    allow();
+  }
+
   if (ctx.seat === "supervisor" || ctx.seat === "lead") {
     if (WRITE_TOOL_NAMES.has(toolName)) {
       const targetPath = extractTargetPath(toolInput);
@@ -2047,6 +2204,11 @@ process.stdin.on("end", () => {
             "Seat write fence: Supervisor and Lead may only write project memory/docs (AGENTS.md, CONTEXT.md, docs/**, .scratch/**); dispatch implementation work to Lead / Task Agents",
           );
         }
+      }
+      try {
+        agyMcpSchemaHeal.healAgyMcpSchemasForCommand({ seat: ctx.seat, command: cmd });
+      } catch {
+        // Fail open: schema healing on shell inspection must never block allowed commands.
       }
       allow();
     }
@@ -2106,6 +2268,11 @@ process.stdin.on("end", () => {
       for (const target of extractShellWriteTargets(cmd)) {
         const err = checkAgentPath(target);
         if (err) deny(err);
+      }
+      try {
+        agyMcpSchemaHeal.healAgyMcpSchemasForCommand({ seat: ctx.seat, command: cmd });
+      } catch {
+        // Fail open: schema healing on shell inspection must never block allowed commands.
       }
       allow();
     }

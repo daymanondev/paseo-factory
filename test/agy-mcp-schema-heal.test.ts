@@ -370,3 +370,79 @@ test("agy-pre-tool-hook self-heals per-session mcp/paseo_factory schemas across 
   }
   assert.equal(existsSync(join(negHome, ".gemini")), false, "rejected paseo_factory requests create nothing");
 });
+
+test("agy-pre-tool-hook heals all missing role schemas on list_dir / find_by_name / shell ls after peer overwrite without pruning siblings", (t) => {
+  const dir = makeTempDir("agy-schema-dir-cmd-");
+  disposeDir(t, dir);
+  const homeDir = join(dir, "home");
+  const workspaceDir = join(dir, "workspace");
+  const stateDir = join(dir, "state");
+  const serverDir = join(homeDir, ".gemini", "antigravity-cli", "mcp", "paseo-factory_paseo_factory");
+  mkdirSync(serverDir, { recursive: true });
+
+  // Simulate a Peer having just connected and wiped the dir down to Peer tools only.
+  const peerClaim = join(serverDir, "agent_claim.json");
+  const peerSentinel = '{"sentinel":"keep-peer-claim"}';
+  writeFileSync(peerClaim, peerSentinel);
+
+  // 1. Supervisor inspects the directory with list_dir -> heals all Supervisor schemas, keeps Peer file untouched.
+  const listRes = runHook(
+    { toolCall: { name: "list_dir", args: { DirectoryPath: serverDir } }, workspacePaths: [workspaceDir] },
+    { HOME: homeDir, PASEO_FACTORY_SEAT: "supervisor", PASEO_FACTORY_STATE_DIR: stateDir, PASEO_FACTORY_PROJECT_ROOT: workspaceDir },
+  );
+  assert.equal(listRes.status, 0, listRes.stderr);
+  assert.equal(listRes.output.decision, "allow");
+  for (const toolName of catalog.roles.supervisor) {
+    assertHealedSchemaMatchesCatalog(join(serverDir, `${toolName}.json`), toolName);
+  }
+  assert.equal(readFileSync(peerClaim, "utf8"), peerSentinel, "list_dir heal must not overwrite sibling Peer schema");
+  assert.equal(existsSync(join(serverDir, "lead_set_contract.json")), false, "supervisor list_dir must never create lead schemas");
+
+  // 2. Lead inspects the directory with shell `ls -la` -> heals all Lead schemas, keeps existing Supervisor & Peer files untouched.
+  const lsRes = runHook(
+    { toolCall: { name: "run_command", args: { CommandLine: `ls -la ${serverDir}` } }, workspacePaths: [workspaceDir] },
+    { HOME: homeDir, PASEO_FACTORY_SEAT: "lead", PASEO_FACTORY_STATE_DIR: stateDir, PASEO_FACTORY_PROJECT_ROOT: workspaceDir },
+  );
+  assert.equal(lsRes.status, 0, lsRes.stderr);
+  assert.equal(lsRes.output.decision, "allow");
+  for (const toolName of catalog.roles.lead) {
+    assertHealedSchemaMatchesCatalog(join(serverDir, `${toolName}.json`), toolName);
+  }
+  assert.equal(readFileSync(peerClaim, "utf8"), peerSentinel, "shell ls heal must not overwrite sibling Peer schema");
+});
+
+test("agy-pre-tool-hook warms missing allowed schema on call_mcp_tool and skips healing on denied commands", (t) => {
+  const dir = makeTempDir("agy-schema-call-deny-");
+  disposeDir(t, dir);
+  const homeDir = join(dir, "home");
+  const workspaceDir = join(dir, "workspace");
+  const stateDir = join(dir, "state");
+  const mcpRoot = join(homeDir, ".gemini", "antigravity-cli", "mcp");
+  const serverDir = join(mcpRoot, "paseo-factory_paseo_factory");
+  mkdirSync(serverDir, { recursive: true });
+
+  // Denied shell command referencing the server dir must be denied and write nothing.
+  const denyRes = runHook(
+    { toolCall: { name: "run_command", args: { CommandLine: `git push origin main && ls ${serverDir}` } }, workspacePaths: [workspaceDir] },
+    { HOME: homeDir, PASEO_FACTORY_SEAT: "supervisor", PASEO_FACTORY_STATE_DIR: stateDir, PASEO_FACTORY_PROJECT_ROOT: workspaceDir },
+  );
+  assert.equal(denyRes.status, 0, denyRes.stderr);
+  assert.equal(denyRes.output.decision, "deny");
+  assert.deepEqual(readdirSync(serverDir), [], "denied command must not heal schemas");
+
+  // call_mcp_tool warms the called role-allowed tool schema on disk.
+  const callRes = runHook(
+    {
+      toolCall: {
+        name: "call_mcp_tool",
+        args: { ServerName: "paseo-factory_paseo_factory", ToolName: "supervisor_dispatch_lead", Arguments: { message: "go" } },
+      },
+      workspacePaths: [workspaceDir],
+    },
+    { HOME: homeDir, PASEO_FACTORY_SEAT: "supervisor", PASEO_FACTORY_STATE_DIR: stateDir, PASEO_FACTORY_PROJECT_ROOT: workspaceDir },
+  );
+  assert.equal(callRes.status, 0, callRes.stderr);
+  assert.equal(callRes.output.decision, "allow");
+  assertHealedSchemaMatchesCatalog(join(serverDir, "supervisor_dispatch_lead.json"), "supervisor_dispatch_lead");
+  assert.equal(existsSync(join(serverDir, "lead_set_contract.json")), false);
+});
