@@ -36,6 +36,14 @@ function makeProjectRepo(dir: string, name: string): { root: string; slug: strin
   return { root, slug: "", sha };
 }
 
+function readValidPid(file: string): number {
+  if (!existsSync(file)) return 0;
+  const raw = readFileSync(file, "utf8").trim();
+  if (!/^\d+$/.test(raw)) return 0;
+  const pid = Number(raw);
+  return Number.isInteger(pid) && pid > 0 ? pid : 0;
+}
+
 function makeFakeDaemon(initialAgents: Array<{ id: string; status?: string; labels?: Record<string, string>; cwd?: string; requiresAttention?: boolean; attentionReason?: string | null; archivedAt?: string | null; sendShouldFail?: boolean }> = []) {
   const buildAgent = (a: { id: string; status?: string; labels?: Record<string, string>; cwd?: string; requiresAttention?: boolean; attentionReason?: string | null; archivedAt?: string | null; sendShouldFail?: boolean }) => ({
     id: a.id,
@@ -585,9 +593,9 @@ test("lead_close_task immediately dequeues queued Gate (terminal cancelled state
   assert.equal(qRun.ok && qRun.status, "queued");
   await until(() => {
     assert.equal(h.gateQueue.snapshot().running.length, 1);
-    assert.ok(existsSync(childPidFile), "running Gate spawned descendant process");
+    assert.ok(readValidPid(childPidFile) > 0, "running Gate spawned descendant process");
   });
-  const childPid = Number(readFileSync(childPidFile, "utf8").trim());
+  const childPid = readValidPid(childPidFile);
   assert.ok(Number.isInteger(childPid) && childPid > 0);
 
   const qB = await handleSpoolRequest(
@@ -809,9 +817,9 @@ test("Project reset and Project delete dequeue matching queued Gates and kill -p
   await handleSpoolRequest(rootFactory, { id: "ca-1", kind: "claim", task: "TA-RUN", sha: shaA, handoff, agent: "peer-a-run", projectSlug: regA.slug }, { gateQueue }, registry);
   await until(() => {
     assert.equal(gateQueue.snapshot().running[0]?.task, "TA-RUN");
-    assert.ok(existsSync(pidA));
+    assert.ok(readValidPid(pidA) > 0, "TA-RUN spawned descendant process");
   });
-  const childPidA = Number(readFileSync(pidA, "utf8").trim());
+  const childPidA = readValidPid(pidA);
   await handleSpoolRequest(rootFactory, { id: "ca-2", kind: "claim", task: "TA-Q", sha: shaA, handoff, agent: "peer-a-q", projectSlug: regA.slug }, { gateQueue }, registry);
   await handleSpoolRequest(rootFactory, { id: "cb-1", kind: "claim", task: "TB-NEXT", sha: shaB, handoff, agent: "peer-b", projectSlug: regB.slug }, { gateQueue }, registry);
 
@@ -867,9 +875,9 @@ test("Project reset and Project delete dequeue matching queued Gates and kill -p
   await handleSpoolRequest(rootFactory, { id: "cc-1", kind: "claim", task: "TC-RUN", sha: shaC, handoff, agent: "peer-c-run", projectSlug: regC.slug }, { gateQueue }, registry);
   await until(() => {
     assert.equal(gateQueue.snapshot().running[0]?.task, "TC-RUN");
-    assert.ok(existsSync(pidC));
+    assert.ok(readValidPid(pidC) > 0, "TC-RUN spawned descendant process");
   });
-  const childPidC = Number(readFileSync(pidC, "utf8").trim());
+  const childPidC = readValidPid(pidC);
   await handleSpoolRequest(rootFactory, { id: "cc-2", kind: "claim", task: "TC-Q", sha: shaC, handoff, agent: "peer-c-q", projectSlug: regC.slug }, { gateQueue }, registry);
   await handleSpoolRequest(rootFactory, { id: "cb-2", kind: "claim", task: "TB-AFTER-DEL", sha: shaB, handoff, agent: "peer-b", projectSlug: regB.slug }, { gateQueue }, registry);
 
@@ -1464,9 +1472,9 @@ test("Seam 1 (Ticket 05): Pause/Resume & concurrency persist across restart, emp
   assert.ok(cRun.ok && cRun.queueId && cAfter.ok);
   await until(() => {
     assert.equal(q2.snapshot().running[0]?.task, "TB-RUN-CANCEL");
-    assert.ok(existsSync(childPidFile));
+    assert.ok(readValidPid(childPidFile) > 0, "TB-RUN-CANCEL spawned descendant process");
   });
-  const childPid = Number(readFileSync(childPidFile, "utf8").trim());
+  const childPid = readValidPid(childPidFile);
   assert.equal(await q2.cancelItem(cRun.queueId!), true);
 
   let childAlive = true;
