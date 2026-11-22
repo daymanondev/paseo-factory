@@ -2351,3 +2351,347 @@ test("injectRoleOnCreate threads perSessionAgyMcp into both seat and Task-worktr
   assert.equal("mcpServers" in legacyRes.config, false);
   assert.equal(existsSync(join(agyPluginDir, "mcp_config.json")), true);
 });
+
+test("injectRoleOnCreate with liveRoleContract stamps PASEO_FACTORY_CONTRACT_MODE=live and omits baked contract and Peer skill scope from config.systemPrompt across non-Pi harnesses while preserving caller prompt and OpenCode skill permissions (ADR 0067)", (t) => {
+  const dir = makeTempDir("roles-live-create-");
+  disposeDir(t, dir);
+  const stateDir = join(dir, "state");
+  const userHome = join(dir, "home");
+  const repoDir = makeGitRepo(dir);
+  const resolved = resolveProject(repoDir);
+  assert.ok(resolved.ok);
+  const slug = resolved.ok ? resolved.slug : "";
+
+  const nonPiHarnesses = [
+    "antigravity/gemini-4-argon",
+    "claude-code/claude-sonnet-4-6",
+    "codex/gpt-5.4",
+    "opencode/glm-5.1",
+    "copilot/gpt-4.1",
+    "omp/claude-3.7-sonnet",
+  ] as const;
+
+  for (const [idx, provider] of nonPiHarnesses.entries()) {
+    // Supervisor seat with caller systemPrompt
+    const sup = injectRoleOnCreate<AgentCreateRequest>(
+      {
+        config: {
+          provider,
+          cwd: repoDir,
+          title: "Supervisor — repo",
+          systemPrompt: "caller baseline prompt",
+        },
+      },
+      stateDir,
+      userHome,
+      { perSessionAgyMcp: true, liveRoleContract: true },
+    );
+    assert.ok(sup !== undefined, `Supervisor created on ${provider}`);
+    assert.equal(sup.env?.PASEO_FACTORY_CONTRACT_MODE, "live", `${provider}: Supervisor stamped live`);
+    assert.equal(sup.config.systemPrompt, "caller baseline prompt", `${provider}: caller prompt preserved without baked contract`);
+
+    // Lead seat with omitted systemPrompt
+    const lead = injectRoleOnCreate<AgentCreateRequest>(
+      { config: { provider, cwd: repoDir, title: "Lead — repo" } },
+      stateDir,
+      userHome,
+      { perSessionAgyMcp: true, liveRoleContract: true },
+    );
+    assert.ok(lead !== undefined, `Lead created on ${provider}`);
+    assert.equal(lead.env?.PASEO_FACTORY_CONTRACT_MODE, "live", `${provider}: Lead stamped live`);
+    assert.equal(lead.config.systemPrompt, undefined, `${provider}: Lead omits baked contract`);
+
+    // Task-worktree Peer with caller systemPrompt
+    const task = `T-LIVE-${idx}`;
+    const worktreeDir = join(stateDir, "projects", slug, "worktrees", task);
+    mkdirSync(worktreeDir, { recursive: true });
+    const peer = injectRoleOnCreate<AgentCreateRequest>(
+      { config: { provider, cwd: worktreeDir, title: task, systemPrompt: "peer caller rules" } },
+      stateDir,
+      userHome,
+      { perSessionAgyMcp: true, liveRoleContract: true },
+    );
+    assert.ok(peer !== undefined, `Peer created on ${provider}`);
+    assert.equal(peer.env?.PASEO_FACTORY_CONTRACT_MODE, "live", `${provider}: Peer stamped live`);
+    assert.equal(peer.config.systemPrompt, "peer caller rules", `${provider}: Peer omits baked contract and renderPeerSkillScope`);
+    if (provider.startsWith("opencode/")) {
+      const skillPerm = (peer.config.providerOptions as { permission?: { skill?: Record<string, string> } })?.permission?.skill;
+      assert.equal(skillPerm?.["*"], "deny", "OpenCode Peer preserves providerOptions.permission.skill deny default");
+      assert.equal(skillPerm?.tdd, "allow", "OpenCode Peer preserves allowed skill permissions");
+    }
+  }
+
+  // Pi keeps legacy behavior and never stamps live contract mode (even when liveRoleContract: true)
+  const piSup = injectRoleOnCreate<AgentCreateRequest>(
+    { config: { provider: "pi/zai/glm-5.3", cwd: repoDir, title: "Supervisor — repo" } },
+    stateDir,
+    userHome,
+    { perSessionAgyMcp: true, liveRoleContract: true },
+  );
+  assert.ok(piSup !== undefined);
+  assert.equal(piSup.env?.PASEO_FACTORY_CONTRACT_MODE, undefined, "Pi never receives live contract mode");
+  assert.match(piSup.config.systemPrompt ?? "", /paseo-factory role skills:/);
+
+  // factory-supervisor under a pi worker/supervisor lane also keeps legacy behavior
+  mkdirSync(stateDir, { recursive: true });
+  writeFileSync(join(stateDir, "lanes.json"), JSON.stringify({ supervisor: "pi/zcode/glm-5.3" }));
+  const piRoleProvider = injectRoleOnCreate<AgentCreateRequest>(
+    { config: { provider: "factory-supervisor", cwd: repoDir, title: "Start" } },
+    stateDir,
+    userHome,
+    { perSessionAgyMcp: true, liveRoleContract: true },
+  );
+  assert.ok(piRoleProvider !== undefined);
+  assert.equal(piRoleProvider.env?.PASEO_FACTORY_CONTRACT_MODE, undefined);
+
+  // <0.17.1 fail-closed (liveRoleContract omitted/false) continues baking config.systemPrompt
+  const legacyPeerDir = join(stateDir, "projects", slug, "worktrees", "T-LEG");
+  mkdirSync(legacyPeerDir, { recursive: true });
+  const legacyPeer = injectRoleOnCreate<AgentCreateRequest>(
+    { config: { provider: "codex/gpt-5.4", cwd: legacyPeerDir, title: "T-LEG" } },
+    stateDir,
+    userHome,
+    { perSessionAgyMcp: false, liveRoleContract: false },
+  );
+  assert.ok(legacyPeer !== undefined);
+  assert.equal(legacyPeer.env?.PASEO_FACTORY_CONTRACT_MODE, undefined);
+  assert.match(legacyPeer.config.systemPrompt ?? "", /paseo-factory role skills:/);
+  assert.match(legacyPeer.config.systemPrompt ?? "", /Project Peer skills allowed:/);
+});
+
+test("injectRoleOnCreate stays idempotent on repeated live-mode invocations without issuing duplicate Correlation tokens (ADR 0067)", (t) => {
+  const dir = makeTempDir("roles-live-idempotent-");
+  disposeDir(t, dir);
+  const stateDir = join(dir, "state");
+  const userHome = join(dir, "home");
+  const repoDir = makeGitRepo(dir);
+  const resolved = resolveProject(repoDir);
+  assert.ok(resolved.ok);
+  const slug = resolved.ok ? resolved.slug : "";
+
+  // Supervisor with caller prompt (no FOOTER_MARK)
+  const supFirst = injectRoleOnCreate<AgentCreateRequest>(
+    { config: { provider: "codex/gpt-5.4", cwd: repoDir, title: "Supervisor — repo", systemPrompt: "caller rules" } },
+    stateDir,
+    userHome,
+    { perSessionAgyMcp: true, liveRoleContract: true },
+  );
+  assert.ok(supFirst !== undefined);
+  assert.equal(
+    injectRoleOnCreate(supFirst, stateDir, userHome, { perSessionAgyMcp: true, liveRoleContract: true }),
+    undefined,
+    "repeated live-mode Supervisor create is idempotent",
+  );
+
+  // Task-worktree Peer with no systemPrompt
+  const worktreeDir = join(stateDir, "projects", slug, "worktrees", "T-IDEM");
+  mkdirSync(worktreeDir, { recursive: true });
+  const peerFirst = injectRoleOnCreate<AgentCreateRequest>(
+    { config: { provider: "antigravity/gemini-4-argon", cwd: worktreeDir, title: "T-IDEM" } },
+    stateDir,
+    userHome,
+    { perSessionAgyMcp: true, liveRoleContract: true },
+  );
+  assert.ok(peerFirst !== undefined);
+  assert.equal(
+    injectRoleOnCreate(peerFirst, stateDir, userHome, { perSessionAgyMcp: true, liveRoleContract: true }),
+    undefined,
+    "repeated live-mode Peer create is idempotent",
+  );
+
+  assert.equal(new CorrelationRegistry(stateDir).list().length, 2, "no duplicate Correlation tokens issued");
+});
+
+test("injectSessionEnv delivers fresh live role contracts and Peer skill scope via appendSystemPrompt on interactive opens while blocking history, legacy, pi, and <0.17.1 opens (ADR 0067)", (t) => {
+  const dir = makeTempDir("roles-live-open-");
+  disposeDir(t, dir);
+  const stateDir = join(dir, "state");
+  const userHome = join(dir, "home");
+  const repoDir = makeGitRepo(dir);
+  const resolved = resolveProject(repoDir);
+  assert.ok(resolved.ok);
+  const slug = resolved.ok ? resolved.slug : "";
+
+  mkdirSync(join(userHome, ".pi", "agent"), { recursive: true });
+  writeFileSync(
+    join(userHome, ".pi", "agent", "mcp.json"),
+    JSON.stringify({ mcpServers: { docs: { command: process.execPath, args: ["--version"] } } }),
+  );
+  mkdirSync(join(stateDir, "projects", slug), { recursive: true });
+  writeFileSync(
+    join(stateDir, "projects", slug, "ledger.jsonl"),
+    JSON.stringify({
+      event: "contract_set",
+      seq: 1,
+      ts: new Date().toISOString(),
+      task: "T-OPEN",
+      workspace: repoDir,
+      gate: "true",
+      skills: ["initial-skill"],
+    }) + "\n",
+  );
+
+  // 1. Supervisor live create -> interactive open with pre-existing appendSystemPrompt from another plugin
+  const supCreate = injectRoleOnCreate<AgentCreateRequest>(
+    { config: { provider: "codex/gpt-5.4", cwd: repoDir, title: "Supervisor — repo" } },
+    stateDir,
+    userHome,
+    { perSessionAgyMcp: true, liveRoleContract: true },
+  );
+  assert.ok(supCreate !== undefined);
+
+  const supOpen = injectSessionEnv(
+    {
+      agentId: "sup-live-1",
+      cwd: repoDir,
+      provider: "codex/gpt-5.4",
+      reason: "create",
+      purpose: "interactive",
+      appendSystemPrompt: ["[other-plugin] keep me"],
+      env: { ...(supCreate.env ?? {}) },
+    },
+    stateDir,
+    userHome,
+    { liveRoleContract: true },
+  );
+  assert.ok(supOpen !== undefined);
+  assert.equal(supOpen.appendSystemPrompt?.length, 2, "appends live contract without clobbering existing entries");
+  assert.equal(supOpen.appendSystemPrompt?.[0], "[other-plugin] keep me");
+  assert.match(supOpen.appendSystemPrompt?.[1] ?? "", /Supervisor seat of the paseo-factory/);
+  assert.match(supOpen.appendSystemPrompt?.[1] ?? "", new RegExp(slug));
+  assert.equal(supOpen.env.PASEO_FACTORY_CONTRACT_MODE, "live");
+
+  // 2. Peer live create -> interactive open + resume with refreshed Helper MCPs & Contract skills
+  const worktreeDir = join(stateDir, "projects", slug, "worktrees", "T-OPEN");
+  mkdirSync(worktreeDir, { recursive: true });
+  const peerCreate = injectRoleOnCreate<AgentCreateRequest>(
+    { config: { provider: "antigravity/gemini-4-argon", cwd: worktreeDir, title: "T-OPEN" } },
+    stateDir,
+    userHome,
+    { perSessionAgyMcp: true, liveRoleContract: true },
+  );
+  assert.ok(peerCreate !== undefined);
+
+  const peerOpen = injectSessionEnv(
+    {
+      agentId: "peer-live-1",
+      cwd: worktreeDir,
+      provider: "antigravity/gemini-4-argon",
+      reason: "create",
+      purpose: "interactive",
+      env: { ...(peerCreate.env ?? {}) },
+    },
+    stateDir,
+    userHome,
+    { liveRoleContract: true },
+  );
+  assert.ok(peerOpen !== undefined);
+  assert.equal(peerOpen.appendSystemPrompt?.length, 1);
+  assert.match(peerOpen.appendSystemPrompt?.[0] ?? "", /Peer of the paseo-factory verification loop \(task T-OPEN, project /);
+  assert.match(peerOpen.appendSystemPrompt?.[0] ?? "", /Project Peer skills allowed:.*initial-skill/);
+  assert.match(peerOpen.appendSystemPrompt?.[0] ?? "", /docs/);
+
+  // Update Helper MCPs and Contract skills, then resume — fresh appendSystemPrompt reflects updates
+  writeFileSync(
+    join(userHome, ".pi", "agent", "mcp.json"),
+    JSON.stringify({ mcpServers: { docs: { command: process.execPath, args: ["--version"] }, figma: { command: process.execPath, args: ["--version"] } } }),
+  );
+  appendFileSync(
+    join(stateDir, "projects", slug, "ledger.jsonl"),
+    JSON.stringify({
+      event: "contract_set",
+      seq: 2,
+      ts: new Date().toISOString(),
+      task: "T-OPEN",
+      workspace: repoDir,
+      gate: "true",
+      skills: ["updated-skill"],
+    }) + "\n",
+  );
+  const peerResumed = injectSessionEnv(
+    {
+      agentId: "peer-live-1",
+      cwd: worktreeDir,
+      provider: "antigravity/gemini-4-argon",
+      reason: "resume",
+      purpose: "interactive",
+      env: { ...(peerOpen.env ?? {}) },
+    },
+    stateDir,
+    userHome,
+    { liveRoleContract: true },
+  );
+  assert.ok(peerResumed !== undefined);
+  assert.match(peerResumed.appendSystemPrompt?.[0] ?? "", /figma/);
+  assert.match(peerResumed.appendSystemPrompt?.[0] ?? "", /updated-skill/);
+
+  // 3. Negative gates: history open never appends or returns appendSystemPrompt
+  const historyOpen = injectSessionEnv(
+    {
+      agentId: "sup-live-1",
+      cwd: repoDir,
+      provider: "codex/gpt-5.4",
+      reason: "resume",
+      purpose: "history",
+      env: { ...(supCreate.env ?? {}) },
+    },
+    stateDir,
+    userHome,
+    { liveRoleContract: true },
+  );
+  assert.ok(historyOpen !== undefined);
+  assert.equal("appendSystemPrompt" in historyOpen, false, "history open never sets appendSystemPrompt");
+
+  // 4. Negative gate: legacy agent without PASEO_FACTORY_CONTRACT_MODE=live receives no appendSystemPrompt
+  const legacyEnv = { ...supCreate.env };
+  delete legacyEnv.PASEO_FACTORY_CONTRACT_MODE;
+  const legacyOpen = injectSessionEnv(
+    {
+      agentId: "sup-legacy-1",
+      cwd: repoDir,
+      provider: "codex/gpt-5.4",
+      reason: "resume",
+      purpose: "interactive",
+      env: legacyEnv,
+    },
+    stateDir,
+    userHome,
+    { liveRoleContract: true },
+  );
+  assert.ok(legacyOpen !== undefined);
+  assert.equal("appendSystemPrompt" in legacyOpen, false, "legacy session without live mode receives no appendSystemPrompt");
+
+  // 5. Negative gate: Pi never receives appendSystemPrompt (even if PASEO_FACTORY_CONTRACT_MODE=live were present)
+  const piOpen = injectSessionEnv(
+    {
+      agentId: "sup-pi-1",
+      cwd: repoDir,
+      provider: "pi/zai/glm-5.3",
+      reason: "create",
+      purpose: "interactive",
+      env: { ...(supCreate.env ?? {}), PASEO_FACTORY_CONTRACT_MODE: "live" },
+    },
+    stateDir,
+    userHome,
+    { liveRoleContract: true },
+  );
+  assert.ok(piOpen !== undefined);
+  assert.equal("appendSystemPrompt" in piOpen, false, "Pi session never receives appendSystemPrompt");
+
+  // 6. Negative gate: <0.17.1 host (liveRoleContract false/omitted) never sets appendSystemPrompt
+  const pre017Open = injectSessionEnv(
+    {
+      agentId: "sup-live-1",
+      cwd: repoDir,
+      provider: "codex/gpt-5.4",
+      reason: "create",
+      purpose: "interactive",
+      env: { ...(supCreate.env ?? {}) },
+    },
+    stateDir,
+    userHome,
+    { liveRoleContract: false },
+  );
+  assert.ok(pre017Open !== undefined);
+  assert.equal("appendSystemPrompt" in pre017Open, false, "<0.17.1 host never sets appendSystemPrompt");
+});
