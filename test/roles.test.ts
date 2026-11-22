@@ -1399,7 +1399,8 @@ test("role surfaces enforce rolling waves, modular isolated tests, bounded check
     assert.match(surface, /per.slice test files/);
     assert.match(surface, /isolated fixture/);
     assert.match(surface, /explicit timeout/);
-    assert.match(surface, /full cumulative Gate.*before.*factory-claim/);
+    assert.doesNotMatch(surface, /Run the full cumulative Gate before (?:factory-claim|agent_claim)/i);
+    assert.match(surface, /agent_claim.*queued|queued.*end your turn/i);
     assert.doesNotMatch(surface, /Godot|Unity|Phaser/);
   }
 });
@@ -1910,9 +1911,10 @@ test("role surfaces teach bounded serial waves, closure, and structured challeng
   for (const surface of [renderRoleContract("lead"), renderRoleAppendSystem("lead"), bootstrap("lead"),
     buildSeatKickoffPacket({ role: "lead", projectSlug: "repo", projectRoot: root, ledgerEvents: [] })]) {
     assert.doesNotMatch(surface, /Fresh-eyes|wait for CLEAR|CONCERN-free/);
+    assert.doesNotMatch(surface, /Parallel dispatch \(up to 3 Tasks\)/);
     for (const law of [/Serial Waves by Default/, /~120K/, /single-task.*focused bugfix/i,
       /Never pass.*multi-subsystem.*single monolithic Task/, /single.file.*index.html/,
-      /current wave only/, /up to 3.*genuinely disjoint/, /shared foundation/,
+      /current wave only/, /at most one active writable.*engineer.*Peer per Project/i,
       /Bounded Outcome/, /Contract Boundary & Regression Invariants/,
       /Excluded \/ Deferred to Later Waves/, /Verification.*exact.*Gate/,
       /git show --stat/, /git diff/, /lead_merge/, /final wave.*before.*lead_report_to_supervisor/,
@@ -2729,4 +2731,54 @@ test("injectSessionEnv delivers fresh live role contracts and Peer skill scope v
   );
   assert.ok(pre017Open !== undefined);
   assert.equal("appendSystemPrompt" in pre017Open, false, "<0.17.1 host never returns appendSystemPrompt even when pre-populated");
+});
+
+test("ADR 0068 role contracts enforce single writable Peer per Project, serial test defaults, no nested builds in unit tests, 2-tier Gates, and async no-double-gate Claim discipline", () => {
+  const project = { root: "/workspace/repo", slug: "repo" };
+  const leadInput = {
+    seat: "lead" as const,
+    home: "/trial",
+    stateDir: "/trial/state",
+    nodePath: process.execPath,
+    path: "/usr/bin",
+    lane: "codex",
+    project,
+  };
+
+  for (const surface of [
+    LEAD_WAVE_LAWS.join("\n"),
+    renderRoleContract("lead"),
+    renderSeatContract("lead", project),
+    ROLE_PROMPTS.lead,
+    renderSeatBootstrapPrompt(leadInput),
+    renderSeatBootstrap(leadInput),
+    buildSeatKickoffPacket({ role: "lead", projectSlug: project.slug, projectRoot: project.root, ledgerEvents: [] }),
+  ]) {
+    assert.doesNotMatch(surface, /Parallel dispatch \(up to 3 Tasks\)/);
+    assert.doesNotMatch(surface, /the full cumulative Gate runs before Claim/i);
+    assert.match(surface, /at most one active writable `engineer` Peer per Project/i);
+    assert.match(surface, /read-only `scout`, `architect`, or `reviewer` Peers may run concurrently/i);
+    assert.match(surface, /sequential/i);
+    assert.match(surface, /--runInBand.*--no-file-parallelism.*--test-concurrency=1/);
+    assert.match(surface, /never invoke real multi-worker bundlers or native compilers.*expo export.*next build.*gradlew.*xcodebuild.*inside unit-test suites/i);
+    assert.match(surface, /Wave Gate.*lint \+ serial tests \+ typecheck.*Checkpoint\/Build Gate/i);
+    assert.match(surface, /timeoutSeconds.*60.*3,600s.*900s/);
+    assert.match(surface, /never pre-run the full cumulative Gate before Claim/i);
+    assert.match(surface, /Gate queue.*sleeps live at zero tokens/i);
+  }
+
+  for (const surface of [
+    renderRoleContract("agent"),
+    renderRoleAppendSystem("agent"),
+    renderAgentContract("T-04", "repo"),
+    ROLE_PROMPTS.agent,
+  ]) {
+    assert.doesNotMatch(surface, /Run the full cumulative Gate before (?:factory-claim|agent_claim)/i);
+    assert.doesNotMatch(surface, /, run the Gate check, and hand off/i);
+    assert.match(surface, /sequential/i);
+    assert.match(surface, /--runInBand.*--no-file-parallelism.*--test-concurrency=1/);
+    assert.match(surface, /never invoke real multi-worker bundlers or native compilers.*expo export.*next build.*gradlew.*xcodebuild.*inside unit-test suites/i);
+    assert.match(surface, /never pre-run the full cumulative Gate before/i);
+    assert.match(surface, /agent_claim.*queued.*end your turn immediately.*sleep live at zero tokens/i);
+  }
 });

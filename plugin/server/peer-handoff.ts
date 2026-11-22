@@ -225,7 +225,7 @@ export function createPeerHandoffRuntime(deps: PeerHandoffDeps) {
           "## Machine-Verified Worktree Digest", digest,
           `## Outgoing Peer Handoff (${path})`, readFileSync(path, "utf8"),
           readOnlyEvidence === undefined
-            ? "Run targeted modular slice tests with isolated fixtures and explicit timeouts while iterating. Run the full cumulative Gate before calling factory-claim for the committed HEAD, then end your turn."
+            ? "Run fast targeted modular slice tests sequentially with isolated fixtures and explicit timeouts while iterating (never invoke multi-worker bundlers or native compilers inside unit tests, and do not pre-run the full cumulative Gate before claiming). Commit, call `agent_claim` or `factory-claim` for the committed HEAD so the daemon Gate queue runs the Gate once, and end your turn immediately when queued."
             : `This succession is Read-Only (disposition ${disposition}): ${READ_ONLY_DISPOSITION_FENCE} — the worktree must stay clean at HEAD; never commit, never edit files. Call factory-claim with no commit and no sha, supplying \`--outcome --scope --verification --unknowns\` carrying your ${disposition} evidence: ${readOnlyEvidence}, then end your turn.`,
         ].join("\n\n");
       if (!eligible(slug, contract)) return;

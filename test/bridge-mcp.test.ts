@@ -3308,3 +3308,102 @@ test("bridge.mjs agent_claim and lead_verify return structured queued guidance i
     rmSync(repoDir, { recursive: true, force: true });
   }
 });
+
+test("ADR 0068: bridge lead_dispatch_agent refuses concurrent writable Peers per Project while allowing read-only Peers", async (t) => {
+  const homeDir = mkdtempSync(join(tmpdir(), "factory-bridge-single-writable-"));
+  const stateDir = join(homeDir, "plugin-state", "paseo-factory");
+  const repoDir = makeGitRepo();
+  const sha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repoDir, encoding: "utf8" }).trim();
+  t.after(() => {
+    rmSync(homeDir, { recursive: true, force: true });
+    rmSync(repoDir, { recursive: true, force: true });
+  });
+
+  const factory = createFactory({ stateDir, eyeCliProbe: () => false });
+  const reg = ensureProjectRegistered(stateDir, repoDir);
+  assert.equal(reg.ok, true);
+  const registry = createFactoryRegistry({ stateDir, root: factory });
+  t.after(() => registry.stop());
+
+  const liveAgents = new Map<string, { id: string; status: string; archivedAt: string | null; cwd: string; labels: Record<string, string> }>();
+  let created = 0;
+  const fakeDaemon = {
+    agents: {
+      list: async () => ({
+        entries: [...liveAgents.values()].filter((a) => a.archivedAt === null).map((agent) => ({ agent })),
+      }),
+      create: async (options: { cwd?: string; labels?: Record<string, string> }) => {
+        const id = `peer-sw-${++created}`;
+        liveAgents.set(id, { id, status: "running", archivedAt: null, cwd: options.cwd ?? repoDir, labels: options.labels ?? {} });
+        return { id };
+      },
+      ref: (id: string) => ({
+        send: async () => ({ messageId: `msg-${id}` }),
+        archive: async () => {
+          const existing = liveAgents.get(id);
+          if (existing) liveAgents.set(id, { ...existing, archivedAt: new Date().toISOString() });
+          return { archivedAt: new Date().toISOString() };
+        },
+      }),
+    },
+  };
+  const spool = startSpool(stateDir, factory, { registry, pollMs: 15, daemon: fakeDaemon as never, home: homeDir });
+  t.after(() => spool.stop());
+
+  const leadCorr = new CorrelationRegistry(stateDir).issue({ role: "lead", projectSlug: reg.slug, projectRoot: repoDir, agentId: "lead-1" });
+  const brief = (summary: string) =>
+    `1. Bounded Outcome\n${summary}\n\n2. Contract Boundary & Regression Invariants\nExisting HEAD stays green.\n\n3. Excluded / Deferred\nNone.\n\n4. Verification\ntrue`;
+
+  const round1 = await runMcpSession({
+    args: ["--correlation", leadCorr.correlationId, "--state-dir", stateDir],
+    cwd: repoDir,
+    requests: [
+      { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "ENG-A", gate: "true", description: brief("Writable A") } } },
+      { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "lead_dispatch_agent", arguments: { tasks: ["ENG-A"] } } },
+      { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "ENG-B", gate: "true", disposition: "engineer", description: brief("Writable B") } } },
+      { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "lead_dispatch_agent", arguments: { tasks: ["ENG-B"] } } },
+      { jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "SCOUT-1", disposition: "scout", description: brief("Read-only scout") } } },
+      { jsonrpc: "2.0", id: 6, method: "tools/call", params: { name: "lead_dispatch_agent", arguments: { tasks: ["SCOUT-1"] } } },
+    ],
+  });
+  const byId1 = new Map(round1.map((r) => [r.id, r]));
+  const resText = (map: Map<unknown, Record<string, unknown>>, id: number) =>
+    map.get(id)!.result as { isError?: boolean; content: Array<{ text: string }> };
+
+  assert.notEqual(resText(byId1, 2).isError, true, "ENG-A dispatches");
+  const refusedB = resText(byId1, 4);
+  assert.equal(refusedB.isError, true, "ENG-B is refused while ENG-A is live and unsettled");
+  assert.match(refusedB.content[0].text, /writable-peer-in-flight/);
+  assert.match(refusedB.content[0].text, /ENG-A/);
+  assert.notEqual(resText(byId1, 6).isError, true, "SCOUT-1 dispatches concurrently alongside live ENG-A");
+  assert.equal(created, 2, "only ENG-A and SCOUT-1 created Peers");
+
+  const projFactory = registry.factoryForProject(reg.slug);
+  const refusedEvt = projFactory.ledger.eventsFor("ENG-B").findLast((e) => e.event === "spawn_refused");
+  assert.ok(refusedEvt && refusedEvt.event === "spawn_refused");
+  assert.equal(refusedEvt.rule, "spawn:single-writable-peer");
+
+  // Settle ENG-A GREEN, then dispatch [ENG-B, ENG-C] in one lead_dispatch_agent call:
+  // ENG-B dispatches, ENG-C is refused, and the error surfaces both facts.
+  const engAAgent = liveAgents.get("peer-sw-1")!;
+  engAAgent.status = "idle";
+  projFactory.ledger.append({ event: "claim_reported", task: "ENG-A", attempt: 1, sha, agent: "peer-sw-1" });
+  projFactory.ledger.append({ event: "gate_started", task: "ENG-A", attempt: 1, cmd: "true" });
+  projFactory.ledger.append({ event: "gate_finished", task: "ENG-A", attempt: 1, exit: 0, verdict: "green", note: "ok", sha });
+  projFactory.ledger.append({ event: "report_written", task: "ENG-A", attempt: 1, path: "report-ENG-A-1.md" });
+
+  const round2 = await runMcpSession({
+    args: ["--correlation", leadCorr.correlationId, "--state-dir", stateDir],
+    cwd: repoDir,
+    requests: [
+      { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "ENG-C", gate: "true", description: brief("Writable C") } } },
+      { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "lead_dispatch_agent", arguments: { tasks: ["ENG-B", "ENG-C"] } } },
+    ],
+  });
+  const byId2 = new Map(round2.map((r) => [r.id, r]));
+  const multiRes = resText(byId2, 2);
+  assert.equal(multiRes.isError, true);
+  assert.match(multiRes.content[0].text, /spawn dispatched for ENG-B/);
+  assert.match(multiRes.content[0].text, /writable-peer-in-flight/);
+  assert.match(multiRes.content[0].text, /ENG-B/);
+});
