@@ -24,10 +24,11 @@ import { Icon, Loading, Modal, ScrollView, copyText, useToast } from "@getpaseo/
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { Pressable, Text, View } from "react-native";
-import { overview, stateUpdates } from "../../shared/rpc.ts";
+import { gateQueueCancel, gateQueuePause, gateQueueResume, overview, stateUpdates } from "../../shared/rpc.ts";
 import type {
   FactoryOverviewView,
   GateQueueEntryView,
+  GateQueueView,
   OverviewLatestGate,
   OverviewProjectEntry,
 } from "../../shared/view.ts";
@@ -102,12 +103,16 @@ function GateQueueRow({
   entry,
   tickDeltaMs,
   onInspectLog,
+  onCancel,
+  cancelling = false,
   renderItemControls,
 }: {
   theme: PluginTheme;
   entry: GateQueueEntryView;
   tickDeltaMs: number;
   onInspectLog?: (entry: GateQueueEntryView) => void;
+  onCancel?: (id: string) => void;
+  cancelling?: boolean;
   renderItemControls?: (entry: GateQueueEntryView) => ReactNode;
 }) {
   const palette = factoryPalette(theme);
@@ -189,6 +194,20 @@ function GateQueueRow({
             testID={`factory-overview-gate-log-${entry.id}`}
             label="Open log"
             onPress={() => onInspectLog(entry)}
+          />
+        ) : null}
+        {onCancel !== undefined ? (
+          <Btn
+            theme={theme}
+            small
+            variant="danger"
+            icon="X"
+            testID={`factory-queue-cancel-${entry.id}`}
+            label={cancelling ? "Cancelling..." : "Cancel"}
+            disabled={cancelling}
+            onPress={() => {
+              if (!cancelling) onCancel(entry.id);
+            }}
           />
         ) : null}
         {renderItemControls?.(entry)}
@@ -359,6 +378,11 @@ export function FactoryOverviewView({
   onInspectLog,
   onOpenAgent,
   onOpenWorkspace,
+  onTogglePause,
+  pausePending = false,
+  onCancelQueueItem,
+  cancellingQueueIds = [],
+  queueActionError = null,
   queueHeaderControls,
   renderQueueItemControls,
 }: {
@@ -374,6 +398,11 @@ export function FactoryOverviewView({
   onInspectLog?: (entry: GateQueueEntryView) => void;
   onOpenAgent?: (agentId: string) => void;
   onOpenWorkspace?: (workspaceId: string) => void;
+  onTogglePause?: () => void;
+  pausePending?: boolean;
+  onCancelQueueItem?: (id: string) => void;
+  cancellingQueueIds?: readonly string[];
+  queueActionError?: string | null;
   queueHeaderControls?: ReactNode;
   renderQueueItemControls?: (entry: GateQueueEntryView) => ReactNode;
 }) {
@@ -498,12 +527,49 @@ export function FactoryOverviewView({
                     <Pill theme={theme} label={`Concurrency · ${gateQueue.concurrency}`} mono />
                   ) : null}
                 </View>
-                {queueHeaderControls ? (
+                {onTogglePause !== undefined || queueHeaderControls ? (
                   <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[1.5] }}>
+                    {onTogglePause !== undefined ? (
+                      <Btn
+                        theme={theme}
+                        small
+                        variant={gateQueue.paused ? "primary" : "secondary"}
+                        icon={gateQueue.paused ? "Play" : "Pause"}
+                        testID="factory-queue-pause-toggle"
+                        label={
+                          pausePending
+                            ? gateQueue.paused
+                              ? "Resuming..."
+                              : "Pausing..."
+                            : gateQueue.paused
+                              ? "Resume queue"
+                              : "Pause queue"
+                        }
+                        disabled={pausePending}
+                        onPress={() => {
+                          if (!pausePending) onTogglePause();
+                        }}
+                      />
+                    ) : null}
                     {queueHeaderControls}
                   </View>
                 ) : null}
               </View>
+
+              {queueActionError !== null && queueActionError !== undefined ? (
+                <View
+                  testID="factory-overview-gate-queue-error"
+                  style={{
+                    padding: SPACING[2],
+                    borderRadius: RADIUS.md,
+                    borderWidth: 1,
+                    borderColor: tint(palette.bad, "66"),
+                    backgroundColor: tint(palette.bad, "12"),
+                  }}
+                >
+                  <Text style={{ ...text(theme, "label"), color: palette.bad }}>{queueActionError}</Text>
+                </View>
+              ) : null}
 
               {runningCount === 0 && queuedCount === 0 ? (
                 <Text style={text(theme, "meta")}>
@@ -520,6 +586,7 @@ export function FactoryOverviewView({
                       entry={entry}
                       tickDeltaMs={tickDeltaMs}
                       onInspectLog={handleInspectLog}
+                      {...(onCancelQueueItem === undefined ? {} : { onCancel: onCancelQueueItem, cancelling: cancellingQueueIds.includes(entry.id) })}
                       {...(renderQueueItemControls === undefined ? {} : { renderItemControls: renderQueueItemControls })}
                     />
                   ))}
@@ -530,6 +597,7 @@ export function FactoryOverviewView({
                       entry={entry}
                       tickDeltaMs={tickDeltaMs}
                       {...(entry.logPath !== null && entry.logExists ? { onInspectLog: handleInspectLog } : {})}
+                      {...(onCancelQueueItem === undefined ? {} : { onCancel: onCancelQueueItem, cancelling: cancellingQueueIds.includes(entry.id) })}
                       {...(renderQueueItemControls === undefined ? {} : { renderItemControls: renderQueueItemControls })}
                     />
                   ))}
@@ -671,8 +739,29 @@ export function OverviewScreen({
 }: OverviewScreenProps) {
   const mobile = layout.platform === "ios" || layout.platform === "android";
   const overviewCall = useRpc(overview);
+  const pauseQueueCall = useRpc(gateQueuePause);
+  const resumeQueueCall = useRpc(gateQueueResume);
+  const cancelQueueCall = useRpc(gateQueueCancel);
   const refreshRef = useRef<() => void>(() => {});
   const lastViewRef = useRef<FactoryOverviewView | null>(null);
+  const pollValueRef = useRef<FactoryOverviewView | null>(null);
+  const pauseInFlightRef = useRef(false);
+  const cancellingIdsRef = useRef<Set<string>>(new Set());
+  const mountedRef = useRef(true);
+  const [pausePending, setPausePending] = useState(false);
+  const [cancellingIds, setCancellingIds] = useState<string[]>([]);
+  const [queueActionError, setQueueActionError] = useState<string | null>(null);
+  const [gateQueueOverride, setGateQueueOverride] = useState<{
+    gateQueue: GateQueueView;
+    basePollValue: FactoryOverviewView | null;
+  } | null>(null);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   const subscriptionInput = useMemo(() => ({}), []);
   const subscription = useClientSubscription(stateUpdates, subscriptionInput, () => {
@@ -709,6 +798,13 @@ export function OverviewScreen({
     { cadenceKey: `${subscriptionLive}:${mobile}` },
   );
   refreshRef.current = poll.refresh;
+  pollValueRef.current = poll.value;
+
+  useEffect(() => {
+    if (gateQueueOverride !== null && poll.value !== gateQueueOverride.basePollValue) {
+      setGateQueueOverride(null);
+    }
+  }, [gateQueueOverride, poll.value]);
 
   const prevSubscriptionStatusRef = useRef(subscription.status);
   useEffect(() => {
@@ -719,9 +815,16 @@ export function OverviewScreen({
     }
   }, [subscription.status, poll.refresh]);
 
+  if (poll.value !== null) lastViewRef.current = poll.value;
+  const baseView = poll.value ?? lastViewRef.current;
+  const view =
+    baseView !== null && gateQueueOverride !== null && gateQueueOverride.basePollValue === poll.value
+      ? { ...baseView, gateQueue: gateQueueOverride.gateQueue }
+      : baseView;
+
   useEffect(() => {
-    if (mobile || poll.value === null) return;
-    const current = poll.value;
+    if (mobile || view === null) return;
+    const current = view;
     sidebarOverviewBadgeStore.setSummary(
       current.projects.map((project) => ({
         slug: project.slug,
@@ -740,16 +843,65 @@ export function OverviewScreen({
         queuedCount: current.gateQueue.queued.length,
       },
     );
-  }, [mobile, poll.value]);
+  }, [mobile, view]);
 
   const now = useNow(1000);
 
   if (mobile) return null;
 
-  if (poll.value !== null) lastViewRef.current = poll.value;
-  const view = poll.value ?? lastViewRef.current;
   const tickDeltaMs = poll.at !== null ? Math.max(0, now - poll.at) : 0;
   const focusHostOption = navigation?.supportsFocusHost === true ? { focusHost: true } : {};
+
+  const handleTogglePause = async (): Promise<void> => {
+    if (pauseInFlightRef.current || view === null) return;
+    const nextPause = !view.gateQueue.paused;
+    pauseInFlightRef.current = true;
+    setPausePending(true);
+    setQueueActionError(null);
+    try {
+      const reply = nextPause ? await pauseQueueCall({}) : await resumeQueueCall({});
+      if (!mountedRef.current) return;
+      if (!reply.ok) {
+        setQueueActionError(
+          reply.error || (nextPause ? "Could not pause Gate queue." : "Could not resume Gate queue."),
+        );
+        return;
+      }
+      setGateQueueOverride({ gateQueue: reply.gateQueue, basePollValue: pollValueRef.current });
+      poll.refresh();
+    } catch (err) {
+      if (!mountedRef.current) return;
+      setQueueActionError(err instanceof Error ? err.message : String(err));
+    } finally {
+      pauseInFlightRef.current = false;
+      if (mountedRef.current) setPausePending(false);
+    }
+  };
+
+  const handleCancelQueueItem = async (id: string): Promise<void> => {
+    if (cancellingIdsRef.current.has(id)) return;
+    cancellingIdsRef.current.add(id);
+    setCancellingIds((prev) => (prev.includes(id) ? prev : [...prev, id]));
+    setQueueActionError(null);
+    try {
+      const reply = await cancelQueueCall({ queueId: id });
+      if (!mountedRef.current) return;
+      if (!reply.ok) {
+        setQueueActionError(reply.error || "Could not cancel Gate queue item.");
+        return;
+      }
+      setGateQueueOverride({ gateQueue: reply.gateQueue, basePollValue: pollValueRef.current });
+      poll.refresh();
+    } catch (err) {
+      if (!mountedRef.current) return;
+      setQueueActionError(err instanceof Error ? err.message : String(err));
+    } finally {
+      cancellingIdsRef.current.delete(id);
+      if (mountedRef.current) {
+        setCancellingIds((prev) => prev.filter((item) => item !== id));
+      }
+    }
+  };
 
   const openWorkspacePanel = (workspaceId: string): void => {
     navigation?.openWorkspace({
@@ -770,6 +922,15 @@ export function OverviewScreen({
         tickDeltaMs={tickDeltaMs}
         now={now}
         onRefresh={poll.refresh}
+        onTogglePause={() => {
+          void handleTogglePause();
+        }}
+        pausePending={pausePending}
+        onCancelQueueItem={(id) => {
+          void handleCancelQueueItem(id);
+        }}
+        cancellingQueueIds={cancellingIds}
+        queueActionError={queueActionError}
         onOnboardProject={() => openScreen?.({ screenId: FACTORY_ONBOARD_SCREEN_ID })}
         onOpenProject={(project) => {
           if (project.workspaceId !== null) openWorkspacePanel(project.workspaceId);
