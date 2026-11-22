@@ -2799,3 +2799,214 @@ test("ADR 0068 role contracts enforce single writable Peer per Project, serial t
   assert.match(footer, /never pre-run the full cumulative Gate/i);
   assert.match(footer, /queued/i);
 });
+
+test("Supervisor contract cites both ServerName 'paseo_factory' and 'paseo-factory_paseo_factory' in call_mcp_tool examples", () => {
+  const contract = renderRoleContract("supervisor");
+  assert.match(contract, /call_mcp_tool.*ServerName: "paseo_factory".*"paseo-factory_paseo_factory"/);
+});
+
+test("injectSessionEnv strips paseo from mcpServers across Factory seats and backfills paseo_factory (+ Peer Helper MCPs) for legacy Antigravity opens when perSessionAgyMcp is true", (t) => {
+  const dir = makeTempDir("roles-agy-mcp-backfill-");
+  disposeDir(t, dir);
+  const stateDir = join(dir, "state");
+  const userHome = join(dir, "home");
+  const repoDir = makeGitRepo(dir);
+  const resolved = resolveProject(repoDir);
+  assert.ok(resolved.ok);
+  const slug = resolved.ok ? resolved.slug : "";
+
+  mkdirSync(join(userHome, ".pi", "agent"), { recursive: true });
+  writeFileSync(
+    join(userHome, ".pi", "agent", "mcp.json"),
+    JSON.stringify({ mcpServers: { docs: { command: process.execPath, args: ["--version"] } } }),
+  );
+  mkdirSync(stateDir, { recursive: true });
+  writeFileSync(
+    join(stateDir, "lanes.json"),
+    JSON.stringify({ supervisor: "agy/gemini-4-argon", lead: "antigravity/gemini-4-argon", worker: "antigravity/gemini-4-argon" }),
+  );
+
+  // Legacy pre-0.17.1 Supervisor & Lead: no config.mcpServers, no PASEO_FACTORY_CONTRACT_MODE
+  const legacySupCreate = injectRoleOnCreate<AgentCreateRequest>(
+    { config: { provider: "antigravity/gemini-2.5-pro", cwd: repoDir, title: "Supervisor — repo" } },
+    stateDir,
+    userHome,
+    { perSessionAgyMcp: false, liveRoleContract: false },
+  );
+  assert.ok(legacySupCreate !== undefined);
+  assert.equal("mcpServers" in legacySupCreate.config, false);
+
+  const legacySupOpen = injectSessionEnv(
+    {
+      agentId: "agy-legacy-sup",
+      cwd: repoDir,
+      provider: "antigravity/gemini-2.5-pro",
+      reason: "resume",
+      purpose: "interactive",
+      env: { ...(legacySupCreate.env ?? {}) },
+      mcpServers: { paseo: { type: "http", url: "http://127.0.0.1:4200/mcp" } },
+    },
+    stateDir,
+    userHome,
+    { perSessionAgyMcp: true, liveRoleContract: true },
+  ) as { mcpServers?: Record<string, { type?: string; command?: string; args?: string[]; env?: Record<string, string> }>; appendSystemPrompt?: string[] } | undefined;
+
+  assert.ok(legacySupOpen !== undefined);
+  assert.equal(legacySupOpen.mcpServers?.paseo, undefined, "paseo MCP stripped from Antigravity Supervisor");
+  assert.ok(legacySupOpen.mcpServers?.paseo_factory !== undefined, "paseo_factory backfilled for legacy Antigravity Supervisor");
+  assert.equal(legacySupOpen.mcpServers?.docs, undefined, "Supervisor never receives Helper MCPs");
+  assert.equal(legacySupOpen.mcpServers?.paseo_factory?.type, "stdio");
+  assert.equal(legacySupOpen.mcpServers?.paseo_factory?.env?.ELECTRON_RUN_AS_NODE, "1");
+  assert.ok(legacySupOpen.mcpServers?.paseo_factory?.args?.includes("--correlation"));
+  assert.ok(legacySupOpen.mcpServers?.paseo_factory?.args?.includes(legacySupCreate.env!.PASEO_FACTORY_CORRELATION!));
+  assert.ok(legacySupOpen.mcpServers?.paseo_factory?.args?.includes("--role") && legacySupOpen.mcpServers?.paseo_factory?.args?.includes("supervisor"));
+  assert.ok(legacySupOpen.mcpServers?.paseo_factory?.args?.includes("--state-dir") && legacySupOpen.mcpServers?.paseo_factory?.args?.includes(stateDir));
+  assert.ok(legacySupOpen.mcpServers?.paseo_factory?.args?.includes("--project") && legacySupOpen.mcpServers?.paseo_factory?.args?.includes(slug));
+  assert.ok(legacySupOpen.mcpServers?.paseo_factory?.args?.includes("--workspace") && legacySupOpen.mcpServers?.paseo_factory?.args?.includes(repoDir));
+  assert.equal(legacySupOpen.mcpServers?.paseo_factory?.args?.includes("--task"), false);
+  assert.equal("appendSystemPrompt" in legacySupOpen, false, "legacy baked Supervisor gets no duplicate appendSystemPrompt");
+
+  // Legacy Lead recognized via project.json binding with empty env (cold daemon restart) and agy provider alias
+  writeProjectRegistration(stateDir, slug, { root: repoDir, lead: "agy-legacy-lead" });
+  const legacyLeadOpen = injectSessionEnv(
+    {
+      agentId: "agy-legacy-lead",
+      cwd: repoDir,
+      provider: "agy",
+      reason: "resume",
+      purpose: "interactive",
+      env: {},
+      mcpServers: { paseo: { type: "http", url: "http://127.0.0.1:4200/mcp" } },
+    },
+    stateDir,
+    userHome,
+    { perSessionAgyMcp: true, liveRoleContract: true },
+  ) as { env: Record<string, string>; mcpServers?: Record<string, { args?: string[]; env?: Record<string, string> }> } | undefined;
+  assert.ok(legacyLeadOpen !== undefined);
+  assert.equal(legacyLeadOpen.mcpServers?.paseo, undefined, "paseo MCP stripped from Antigravity Lead");
+  assert.ok(legacyLeadOpen.mcpServers?.paseo_factory !== undefined, "paseo_factory backfilled for legacy Antigravity Lead");
+  assert.equal(legacyLeadOpen.mcpServers?.docs, undefined, "Lead never receives Helper MCPs");
+  assert.ok(legacyLeadOpen.mcpServers?.paseo_factory?.args?.includes(legacyLeadOpen.env.PASEO_FACTORY_CORRELATION!));
+  assert.ok(legacyLeadOpen.mcpServers?.paseo_factory?.args?.includes("lead"));
+
+  // Legacy Peer in Task worktree receives paseo_factory (--task) AND missing Helper MCPs, with paseo stripped
+  const worktreeDir = join(stateDir, "projects", slug, "worktrees", "T-LEGACY-AGY");
+  mkdirSync(worktreeDir, { recursive: true });
+  const legacyPeerOpen = injectSessionEnv(
+    {
+      agentId: "agy-legacy-peer",
+      cwd: worktreeDir,
+      provider: "antigravity/gemini-4-argon",
+      reason: "resume",
+      purpose: "interactive",
+      env: {},
+      mcpServers: { paseo: { type: "http", url: "http://127.0.0.1:4200/mcp" } },
+    },
+    stateDir,
+    userHome,
+    { perSessionAgyMcp: true, liveRoleContract: true },
+  ) as { env: Record<string, string>; mcpServers?: Record<string, { args?: string[]; env?: Record<string, string> }> } | undefined;
+  assert.ok(legacyPeerOpen !== undefined);
+  assert.equal(legacyPeerOpen.mcpServers?.paseo, undefined, "paseo MCP stripped from Antigravity Peer");
+  assert.ok(legacyPeerOpen.mcpServers?.paseo_factory !== undefined, "paseo_factory backfilled for legacy Antigravity Peer");
+  assert.equal(legacyPeerOpen.mcpServers?.paseo_factory?.env?.ELECTRON_RUN_AS_NODE, "1");
+  assert.ok(legacyPeerOpen.mcpServers?.paseo_factory?.args?.includes("--task") && legacyPeerOpen.mcpServers?.paseo_factory?.args?.includes("T-LEGACY-AGY"));
+  assert.ok(legacyPeerOpen.mcpServers?.paseo_factory?.args?.includes(worktreeDir));
+  assert.ok(legacyPeerOpen.mcpServers?.docs !== undefined, "Antigravity Peer backfills enabled Helper MCPs");
+
+  // Existing paseo_factory is preserved while paseo is stripped and missing Helper MCPs are added
+  const customBridge = { type: "stdio", command: "/custom/node", args: ["bridge.mjs", "--custom"] };
+  const existingBridgePeer = injectSessionEnv(
+    {
+      agentId: "agy-existing-peer",
+      cwd: worktreeDir,
+      provider: "antigravity/gemini-4-argon",
+      reason: "resume",
+      purpose: "interactive",
+      env: {},
+      mcpServers: { paseo: { type: "http", url: "http://127.0.0.1:4200/mcp" }, paseo_factory: customBridge },
+    },
+    stateDir,
+    userHome,
+    { perSessionAgyMcp: true, liveRoleContract: true },
+  ) as { mcpServers?: Record<string, unknown> } | undefined;
+  assert.ok(existingBridgePeer !== undefined);
+  assert.equal(existingBridgePeer.mcpServers?.paseo, undefined);
+  assert.deepEqual(existingBridgePeer.mcpServers?.paseo_factory, customBridge, "existing paseo_factory is not overwritten");
+  assert.ok(existingBridgePeer.mcpServers?.docs !== undefined, "missing Helper MCPs still backfilled for Peer");
+
+  // Non-Antigravity seats also strip paseo without adding Antigravity backfill
+  const codexSupOpen = injectSessionEnv(
+    {
+      agentId: "codex-sup",
+      cwd: repoDir,
+      provider: "codex/gpt-5.4",
+      reason: "create",
+      purpose: "interactive",
+      env: { PASEO_FACTORY_SEAT: "supervisor" },
+      mcpServers: { paseo: { type: "http", url: "http://127.0.0.1:4200/mcp" }, keep: { type: "stdio", command: "echo" } },
+    },
+    stateDir,
+    userHome,
+    { perSessionAgyMcp: true, liveRoleContract: true },
+  ) as { mcpServers?: Record<string, unknown> } | undefined;
+  assert.ok(codexSupOpen !== undefined);
+  assert.equal(codexSupOpen.mcpServers?.paseo, undefined, "paseo stripped from non-Antigravity Factory seat");
+  assert.ok(codexSupOpen.mcpServers?.keep !== undefined, "other mcpServers preserved");
+  assert.equal(codexSupOpen.mcpServers?.paseo_factory, undefined, "non-Antigravity seat does not backfill Antigravity bridge");
+
+  // Negative gates: history open and <0.17.1 (perSessionAgyMcp: false) never backfill paseo_factory
+  const historyOpen = injectSessionEnv(
+    {
+      agentId: "agy-legacy-sup",
+      cwd: repoDir,
+      provider: "antigravity/gemini-2.5-pro",
+      reason: "resume",
+      purpose: "history",
+      env: { ...(legacySupCreate.env ?? {}) },
+      mcpServers: { paseo: { type: "http", url: "http://127.0.0.1:4200/mcp" } },
+    },
+    stateDir,
+    userHome,
+    { perSessionAgyMcp: true, liveRoleContract: true },
+  ) as { mcpServers?: Record<string, unknown> } | undefined;
+  assert.ok(historyOpen !== undefined);
+  assert.equal(historyOpen.mcpServers?.paseo, undefined);
+  assert.equal(historyOpen.mcpServers?.paseo_factory, undefined, "history open never backfills paseo_factory");
+
+  const pre017Open = injectSessionEnv(
+    {
+      agentId: "agy-legacy-sup",
+      cwd: repoDir,
+      provider: "antigravity/gemini-2.5-pro",
+      reason: "resume",
+      purpose: "interactive",
+      env: { ...(legacySupCreate.env ?? {}) },
+      mcpServers: {},
+    },
+    stateDir,
+    userHome,
+    { perSessionAgyMcp: false, liveRoleContract: false },
+  ) as { mcpServers?: Record<string, unknown> } | undefined;
+  assert.ok(pre017Open !== undefined);
+  assert.equal(pre017Open.mcpServers?.paseo_factory, undefined, "<0.17.1 host never backfills config.mcpServers on Antigravity");
+
+  // Unbound non-Factory session passes through untouched
+  const strangerDir = makeTempDir("roles-stranger-agy-");
+  disposeDir(t, strangerDir);
+  const strangerOpen = injectSessionEnv(
+    {
+      agentId: "personal-agy-chat",
+      cwd: strangerDir,
+      provider: "antigravity/gemini-4-argon",
+      reason: "create",
+      purpose: "interactive",
+      env: {},
+      mcpServers: { paseo: { type: "http", url: "http://127.0.0.1:4200/mcp" } },
+    },
+    stateDir,
+    userHome,
+    { perSessionAgyMcp: true, liveRoleContract: true },
+  );
+  assert.equal(strangerOpen, undefined, "unbound personal Antigravity chat is never modified");
+});

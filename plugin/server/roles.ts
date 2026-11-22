@@ -346,6 +346,45 @@ export function resolveEffectiveProviderFamily(
   return parsed === undefined ? providerFamilyOf(rawProvider) : providerFamilyOf(parsed.provider);
 }
 
+function buildPaseoFactoryBridgeServer(input: {
+  bridgeBinPath: string;
+  correlationId?: string;
+  role: RoleName;
+  stateDir: string;
+  projectSlug: string;
+  workspace: string;
+  task?: string;
+}) {
+  const correlationId = typeof input.correlationId === "string" && input.correlationId.trim() !== "" ? input.correlationId.trim() : undefined;
+  return {
+    type: "stdio" as const,
+    command: process.execPath,
+    args: [
+      input.bridgeBinPath,
+      ...(correlationId !== undefined ? ["--correlation", correlationId] : []),
+      "--role",
+      input.role,
+      "--state-dir",
+      input.stateDir,
+      "--project",
+      input.projectSlug,
+      "--workspace",
+      input.workspace,
+      ...(input.task !== undefined ? ["--task", input.task] : []),
+    ],
+    env: {
+      // Paseo Desktop's process.execPath is an Electron helper binary —
+      // without Node mode it aborts at startup and the MCP connection
+      // fails on agent.create / agent.open (v0.0.27, ADR 0017 §2, problem 3).
+      ELECTRON_RUN_AS_NODE: "1",
+      ...(correlationId !== undefined ? { PASEO_FACTORY_CORRELATION: correlationId } : {}),
+      PASEO_FACTORY_SEAT: input.role,
+      PASEO_FACTORY_STATE_DIR: input.stateDir,
+      PASEO_FACTORY_PROJECT: input.projectSlug,
+    },
+  };
+}
+
 /**
  * Applies the Layer-1 provider execution fence and `paseo_factory` MCP server
  * config on `agent.create` across all 8 provider families (`opencode`,
@@ -400,34 +439,15 @@ export function applyProviderExecutionFence<T extends AgentCreateRequest["config
       provisionAgyPlugin({ stateDir, userHome, agyPluginsDir, perSessionMcp: true });
     }
     const existingMcp = resolveRoleScopedMcpServers({ stateDir, userHome, role, provider: providerFamily });
-    const bridgeServer = {
-      type: "stdio" as const,
-      command: process.execPath,
-      args: [
-        bridgeBinPath,
-        "--correlation",
-        correlationId,
-        "--role",
-        role,
-        "--state-dir",
-        stateDir,
-        "--project",
-        projectSlug,
-        "--workspace",
-        config.cwd,
-        ...(task !== undefined ? ["--task", task] : []),
-      ],
-      env: {
-        // Paseo Desktop's process.execPath is an Electron helper binary —
-        // without Node mode it aborts at startup and the MCP connection
-        // fails on agent.create (v0.0.27, ADR 0017 §2, problem 3).
-        ELECTRON_RUN_AS_NODE: "1",
-        PASEO_FACTORY_CORRELATION: correlationId,
-        PASEO_FACTORY_SEAT: role,
-        PASEO_FACTORY_STATE_DIR: stateDir,
-        PASEO_FACTORY_PROJECT: projectSlug,
-      },
-    };
+    const bridgeServer = buildPaseoFactoryBridgeServer({
+      bridgeBinPath,
+      correlationId,
+      role,
+      stateDir,
+      projectSlug,
+      workspace: config.cwd,
+      ...(task !== undefined ? { task } : {}),
+    });
     nextConfig.mcpServers = {
       ...existingMcp,
       paseo_factory: bridgeServer,
@@ -817,11 +837,79 @@ function persistSeatWorkspaceId(
 
 export interface InjectSessionEnvOptions {
   /**
+   * Enables Paseo `>=0.17.1` per-session Antigravity MCP delivery and legacy
+   * resume backfill (`paseo_factory` + Peer Helper MCPs) on interactive opens;
+   * defaults to `false` (`<0.17.1` fail-closed mode).
+   */
+  perSessionAgyMcp?: boolean;
+  /**
    * Enables Paseo `>=0.17.1` ephemeral `appendSystemPrompt` live role-contract
    * delivery on interactive opens when `PASEO_FACTORY_CONTRACT_MODE === "live"`;
    * defaults to `false` (`<0.17.1` fail-closed mode).
    */
   liveRoleContract?: boolean;
+}
+
+function resolveSessionMcpServers(input: {
+  requestMcpServers: unknown;
+  role: RoleName;
+  effectiveFamily: string;
+  purpose: string | null | undefined;
+  perSessionAgyMcp: boolean;
+  stateDir: string;
+  userHome?: string;
+  projectSlug: string;
+  workspace: string;
+  task?: string;
+  correlationId?: string;
+}): Record<string, unknown> | undefined {
+  const hasRequestMcp = isRecord(input.requestMcpServers);
+  const nextMcp: Record<string, unknown> = isRecord(input.requestMcpServers) ? { ...input.requestMcpServers } : {};
+  let changed = false;
+
+  // Paseo's daemon.mcp.injectIntoAgents injects its 65-tool `paseo` MCP server
+  // into non-role-provider sessions (e.g. rewritten `antigravity` seats), which
+  // bypasses role-provider `paseoTools: { enabled: false }` and overflows agy's
+  // eager MCP tool budget (~25 KB / ~50 tools), evicting `paseo_factory` tools.
+  if (hasRequestMcp && "paseo" in nextMcp) {
+    delete nextMcp.paseo;
+    changed = true;
+  }
+
+  // Legacy pre-0.17.1 Antigravity seats had `config.mcpServers` stripped at
+  // create time; backfill per-session `paseo_factory` (and Helper MCPs for Peer)
+  // on interactive opens once global `mcp_config.json` is retired.
+  if (input.perSessionAgyMcp && input.purpose === "interactive" && input.effectiveFamily === "antigravity") {
+    if (!isRecord(nextMcp.paseo_factory)) {
+      const { bridgeBinPath } = ensureFactoryBinScripts(input.stateDir);
+      nextMcp.paseo_factory = buildPaseoFactoryBridgeServer({
+        bridgeBinPath,
+        ...(input.correlationId !== undefined ? { correlationId: input.correlationId } : {}),
+        role: input.role,
+        stateDir: input.stateDir,
+        projectSlug: input.projectSlug,
+        workspace: input.workspace,
+        ...(input.task !== undefined ? { task: input.task } : {}),
+      });
+      changed = true;
+    }
+    if (input.role === "agent") {
+      const helperMcps = resolveRoleScopedMcpServers({
+        stateDir: input.stateDir,
+        userHome: input.userHome,
+        role: "agent",
+        provider: "antigravity",
+      });
+      for (const [name, serverConfig] of Object.entries(helperMcps)) {
+        if (name !== "paseo" && nextMcp[name] === undefined) {
+          nextMcp[name] = serverConfig;
+          changed = true;
+        }
+      }
+    }
+  }
+
+  return changed ? nextMcp : undefined;
 }
 
 function renderLiveRoleContract(
@@ -871,6 +959,8 @@ export function injectSessionEnv<
     workspaceId?: string | null;
     /** Ephemeral instructions appended on Paseo `>=0.17.1` opens; omitted on `<0.17.1`. */
     appendSystemPrompt?: string[];
+    /** Per-session MCP servers passed by Paseo before session/new or session/load. */
+    mcpServers?: Record<string, unknown>;
   },
 >(
   request: R,
@@ -927,6 +1017,27 @@ export function injectSessionEnv<
       stateDir,
       resolved.promptProject.slug,
     );
+    const workspaceForMcp =
+      typeof request.cwd === "string" && request.cwd.trim() !== ""
+        ? request.cwd
+        : resolved.promptProject.root || resolved.envProject.root;
+    const nextMcpServers = resolveSessionMcpServers({
+      requestMcpServers: request.mcpServers,
+      role: resolved.role,
+      effectiveFamily,
+      purpose: request.purpose,
+      perSessionAgyMcp: options?.perSessionAgyMcp === true,
+      stateDir,
+      userHome,
+      projectSlug: resolved.promptProject.slug,
+      workspace: workspaceForMcp,
+      ...(resolved.task !== undefined ? { task: resolved.task } : {}),
+      ...(nextEnv.PASEO_FACTORY_CORRELATION !== undefined
+        ? { correlationId: nextEnv.PASEO_FACTORY_CORRELATION }
+        : resolved.correlationId !== undefined
+          ? { correlationId: resolved.correlationId }
+          : {}),
+    });
     if (
       options?.liveRoleContract !== true ||
       request.purpose !== "interactive" ||
@@ -938,12 +1049,14 @@ export function injectSessionEnv<
         return {
           ...rest,
           env: nextEnv,
+          ...(nextMcpServers !== undefined ? { mcpServers: nextMcpServers } : {}),
         } as R & { appendSystemPrompt?: string[] };
       }
       return {
         ...request,
         env: nextEnv,
-      };
+        ...(nextMcpServers !== undefined ? { mcpServers: nextMcpServers } : {}),
+      } as R & { appendSystemPrompt?: string[] };
     }
     const liveContract = renderLiveRoleContract(resolved.role, {
       stateDir,
@@ -958,8 +1071,9 @@ export function injectSessionEnv<
     return {
       ...request,
       env: nextEnv,
+      ...(nextMcpServers !== undefined ? { mcpServers: nextMcpServers } : {}),
       appendSystemPrompt,
-    };
+    } as R & { appendSystemPrompt?: string[] };
   };
 
   if (typeof existingCorrId === "string" && existingCorrId.trim() !== "") {

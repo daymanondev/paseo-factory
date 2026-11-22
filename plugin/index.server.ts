@@ -46,7 +46,7 @@ import { migrateLegacyExecutionState } from "./server/core/project-settings.ts";
 // migrateLegacyRootState(stateDir, { projects: Array<{ slug, gitRoot? }> }).
 import { migrateLegacyRootState } from "./server/core/ledger-migration.ts";
 
-const SHELL_VERSION = "0.20.0";
+const SHELL_VERSION = "0.20.1";
 
 const log = (message: string) => console.log(`[${PLUGIN_ID}] ${message}`);
 
@@ -827,6 +827,7 @@ export default function contribute(server: PluginServerContext) {
       // The role identity re-applies on every provider launch (v0.0.14): a
       // seat's or worker's shell can always ask which seat it is.
       const withEnv = injectSessionEnv(next, stateDir, homedir(), {
+        perSessionAgyMcp: supportsV0171Host,
         liveRoleContract: supportsV0171Host,
       });
       // The Supervisor auto-bind door (v0.6.1, ADR 0057 §5): every non-history

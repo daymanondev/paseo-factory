@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.1] - 2026-11-23
+
+**Fix Antigravity (`agy 1.5.14`) eager MCP tool budget eviction and pre-0.17.1 Antigravity seat resume backfill.**
+
+### Fixed
+
+- **Strip `paseo` MCP on Factory seats during `agent.open.before` (`plugin/server/roles.ts`, `plugin/index.server.ts`):** When Paseo Desktop has `daemon.mcp.injectIntoAgents: true`, non-role-provider sessions (such as `antigravity` seats rewritten off `factory-*`) received Paseo's 65-tool `paseo` MCP server (~35 KB) as eager ACP tools alongside `paseo_factory`, overflowing Antigravity's eager tool context budget and causing `agy` to disable `supervisor_dispatch_lead` (and 9 of 16 Lead tools including `lead_set_contract` and `lead_dispatch_agent`). `injectSessionEnv` now strips `paseo` from `request.mcpServers` for Factory seats while leaving unbound personal chats untouched.
+- **Backfill `paseo_factory` (and Peer Helper MCPs) on legacy Antigravity resumes (`plugin/server/roles.ts`, `plugin/index.server.ts`):** On Paseo `>=0.17.1` (`supportsV0171Host`), interactive opens of pre-`0.17.1` Antigravity seats (created without `config.mcpServers`) now backfill role-scoped `paseo_factory` (and missing Helper MCPs for `agent`) into `request.mcpServers`, preserving `<0.17.1` fail-closed behavior and skipping `history` opens.
+- **Role contract `ServerName` clarity (`src/roles-contract.ts`):** Updated the Supervisor `call_mcp_tool` guidance to list `ServerName: "paseo_factory"` alongside `"paseo-factory_paseo_factory"`.
+
 ## [0.20.0] - 2026-11-22
 
 **Daemon-owned machine-wide `Gate queue`, asynchronous `Claim` & direct Peer wakeup routing, strict serial verification discipline, and single-tab `Factory overview` (ADR 0068).**

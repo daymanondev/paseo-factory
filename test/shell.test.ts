@@ -555,6 +555,92 @@ test("contribute gates Antigravity per-session MCP and stale mcp_config.json cle
     assert.equal(supOut.config.mcpServers.docs, undefined, "Supervisor never receives Helper MCPs");
     assert.equal("modeId" in supOut.config, false, "Antigravity keeps modeId unset");
 
+    // agent.open.before strips daemon-injected `paseo` MCP from Antigravity Factory seats
+    const openHook = hooks.get("agent.open.before")!;
+    const supOpened = await openHook(
+      {
+        request: {
+          agentId: "agy-sup-open",
+          workspaceId: "ws-agy",
+          provider: "antigravity/gemini-2.5-pro",
+          cwd: repoDir,
+          reason: "create",
+          purpose: "interactive",
+          title: "Supervisor",
+          background: false,
+          labels: {},
+          metadata: {},
+          tools: [],
+          env: { ...(supOut.env ?? {}) },
+          mcpServers: {
+            paseo: { type: "http", url: "http://127.0.0.1:4200/mcp" },
+            paseo_factory: supOut.config.mcpServers.paseo_factory,
+          },
+        },
+      },
+      {},
+    ) as { mcpServers?: Record<string, unknown> } | undefined;
+    assert.ok(supOpened !== undefined);
+    assert.equal(supOpened.mcpServers?.paseo, undefined, "agent.open.before strips paseo MCP from Factory Supervisor");
+    assert.ok(supOpened.mcpServers?.paseo_factory !== undefined, "agent.open.before preserves paseo_factory");
+
+    // Pre-0.17.1 Antigravity seat resumed on >=0.17.1 backfills paseo_factory (+ Peer Helper MCPs) and strips paseo
+    const legacyPeerWorktree = join(stateDir, "projects", slug, "worktrees", "T-04-LEGACY");
+    mkdirSync(legacyPeerWorktree, { recursive: true });
+    const legacyPeerOpened = await openHook(
+      {
+        request: {
+          agentId: "agy-peer-legacy",
+          workspaceId: "ws-legacy-peer",
+          provider: "antigravity/gemini-2.5-pro",
+          cwd: legacyPeerWorktree,
+          reason: "resume",
+          purpose: "interactive",
+          title: "Peer · T-04-LEGACY",
+          background: false,
+          labels: {},
+          metadata: {},
+          tools: [],
+          env: {},
+          mcpServers: {
+            paseo: { type: "http", url: "http://127.0.0.1:4200/mcp" },
+          },
+        },
+      },
+      {},
+    ) as { mcpServers?: Record<string, { args?: string[]; env?: Record<string, string> }> } | undefined;
+    assert.ok(legacyPeerOpened !== undefined);
+    assert.equal(legacyPeerOpened.mcpServers?.paseo, undefined, "legacy Antigravity Peer strips paseo");
+    assert.ok(legacyPeerOpened.mcpServers?.paseo_factory !== undefined, "legacy Antigravity Peer backfills paseo_factory");
+    assert.equal(legacyPeerOpened.mcpServers?.paseo_factory?.env?.ELECTRON_RUN_AS_NODE, "1");
+    assert.ok(legacyPeerOpened.mcpServers?.paseo_factory?.args?.includes("T-04-LEGACY"));
+    assert.ok(legacyPeerOpened.mcpServers?.docs !== undefined, "legacy Antigravity Peer backfills Helper MCPs");
+
+    // Unbound personal Antigravity session keeps daemon-injected `paseo` MCP untouched
+    const personalDir = makeTempDir("shell-personal-agy-");
+    disposeDir(t, personalDir);
+    const personalOpened = await openHook(
+      {
+        request: {
+          agentId: "personal-agy",
+          workspaceId: "ws-personal",
+          provider: "antigravity/gemini-2.5-pro",
+          cwd: personalDir,
+          reason: "create",
+          purpose: "interactive",
+          title: "Personal chat",
+          background: false,
+          labels: {},
+          metadata: {},
+          tools: [],
+          env: {},
+          mcpServers: { paseo: { type: "http", url: "http://127.0.0.1:4200/mcp" } },
+        },
+      },
+      {},
+    );
+    assert.equal(personalOpened, undefined, "unbound personal Antigravity session preserves paseo MCP untouched");
+
     const worktreeDir = join(stateDir, "projects", slug, "worktrees", "T-03");
     mkdirSync(worktreeDir, { recursive: true });
     const peerOut = await createHook(
