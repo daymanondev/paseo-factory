@@ -854,6 +854,7 @@ function resolveSessionMcpServers(input: {
   requestMcpServers: unknown;
   role: RoleName;
   effectiveFamily: string;
+  effectiveContractMode: string | undefined;
   purpose: string | null | undefined;
   perSessionAgyMcp: boolean;
   stateDir: string;
@@ -867,19 +868,27 @@ function resolveSessionMcpServers(input: {
   const nextMcp: Record<string, unknown> = isRecord(input.requestMcpServers) ? { ...input.requestMcpServers } : {};
   let changed = false;
 
-  // Paseo's daemon.mcp.injectIntoAgents injects its 65-tool `paseo` MCP server
-  // into non-role-provider sessions (e.g. rewritten `antigravity` seats), which
-  // bypasses role-provider `paseoTools: { enabled: false }` and overflows agy's
-  // eager MCP tool budget (~25 KB / ~50 tools), evicting `paseo_factory` tools.
+  // Defensive guard if a host exposes Paseo's built-in `paseo` server on
+  // `agent.open.before`; Factory seats forbid raw Paseo agent tools and
+  // Antigravity's eager MCP tool budget cannot absorb Paseo's 65-tool server.
   if (hasRequestMcp && "paseo" in nextMcp) {
     delete nextMcp.paseo;
     changed = true;
   }
 
-  // Legacy pre-0.17.1 Antigravity seats had `config.mcpServers` stripped at
-  // create time; backfill per-session `paseo_factory` (and Helper MCPs for Peer)
-  // on interactive opens once global `mcp_config.json` is retired.
-  if (input.perSessionAgyMcp && input.purpose === "interactive" && input.effectiveFamily === "antigravity") {
+  // Legacy pre-0.17.1 Antigravity seats (`effectiveContractMode !== "live"`)
+  // had `config.mcpServers` stripped at create time; backfill per-session
+  // `paseo_factory` (and Helper MCPs for Peer) on interactive opens once global
+  // `mcp_config.json` is retired. Seats created on 0.17.1+ (`live`) already
+  // persist `paseo_factory` in saved `config.mcpServers` — returning the same
+  // server name from `agent.open.before` makes Paseo 0.17.1 fail open/reload
+  // with "collides with agent saved configuration".
+  if (
+    input.perSessionAgyMcp &&
+    input.purpose === "interactive" &&
+    input.effectiveFamily === "antigravity" &&
+    input.effectiveContractMode !== "live"
+  ) {
     if (!isRecord(nextMcp.paseo_factory)) {
       const { bridgeBinPath } = ensureFactoryBinScripts(input.stateDir);
       nextMcp.paseo_factory = buildPaseoFactoryBridgeServer({
@@ -1025,6 +1034,7 @@ export function injectSessionEnv<
       requestMcpServers: request.mcpServers,
       role: resolved.role,
       effectiveFamily,
+      effectiveContractMode,
       purpose: request.purpose,
       perSessionAgyMcp: options?.perSessionAgyMcp === true,
       stateDir,

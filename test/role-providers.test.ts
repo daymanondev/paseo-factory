@@ -1001,4 +1001,38 @@ test("ADR 0067: Paseo 0.17.1 ProviderOverridesSchema still rejects extends: 'ant
   const providers = (readConfig(home).agents as { providers: Record<string, unknown> }).providers;
   const parsed = ProviderOverridesSchema.safeParse(providers);
   assert.equal(parsed.success, true, parsed.success ? "" : parsed.error.message);
+  assert.deepEqual(
+    (providers.antigravity as { paseoTools?: { enabled?: boolean } } | undefined)?.paseoTools,
+    { enabled: false },
+    "reconcile defaults base antigravity.paseoTools.enabled to false so Paseo's 65-tool MCP never evicts paseo_factory",
+  );
+
+  // Explicit user override on antigravity.paseoTools.enabled is preserved untouched.
+  const explicitHome = join(dir, "explicit-agy-home");
+  writeConfig(explicitHome, {
+    ...liveLikeConfig(),
+    agents: {
+      ...(liveLikeConfig().agents as Record<string, unknown>),
+      providers: {
+        ...((liveLikeConfig().agents as { providers: Record<string, unknown> }).providers),
+        antigravity: { paseoTools: { enabled: true }, enabled: true },
+      },
+    },
+  });
+  const explicit = reconcilePaseoRoleProviders(explicitHome, {
+    ...LANES,
+    supervisor: "antigravity/gemini-4-argon",
+  });
+  assert.ok(explicit.ok);
+  const explicitProviders = (readConfig(explicitHome).agents as { providers: Record<string, unknown> }).providers;
+  assert.deepEqual(
+    (explicitProviders.antigravity as { paseoTools?: { enabled?: boolean }; enabled?: boolean }).paseoTools,
+    { enabled: true },
+    "explicit user antigravity.paseoTools.enabled survives reconcile",
+  );
+  assert.equal(
+    (explicitProviders.antigravity as { enabled?: boolean }).enabled,
+    true,
+    "unrelated keys on antigravity provider override are preserved",
+  );
 });

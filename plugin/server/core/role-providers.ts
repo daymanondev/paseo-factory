@@ -273,6 +273,35 @@ function ensureBaseOpencodeStateDir(
 }
 
 /**
+ * The base `agents.providers.antigravity` arm (v0.20.2): because Paseo's
+ * `ProviderOverridesSchema` rejects `extends: "antigravity"`, Antigravity
+ * Factory seats run on the base `antigravity` provider rather than
+ * `factory-supervisor`/`factory-lead`/`factory-peer` (where `paseoTools: { enabled: false }`
+ * lives). Under Paseo `>=0.17.1` + `daemon.mcp.injectIntoAgents: true`, Paseo
+ * therefore injects its 65-tool `paseo` MCP server (~35 KB) as eager ACP tools
+ * alongside per-session `paseo_factory`, overflowing `agy`'s eager MCP tool
+ * context budget and disabling `supervisor_dispatch_lead` and 9/16 Lead tools.
+ * Defaulting `agents.providers.antigravity.paseoTools.enabled = false` (while
+ * preserving any explicit user setting on `paseoTools.enabled`) keeps
+ * Antigravity seats inside budget.
+ */
+function ensureBaseAntigravityPaseoToolsOff(
+  providers: Record<string, PaseoProviderEntry>,
+): void {
+  const baseEntry = providers.antigravity;
+  const basePaseoTools = isRecord(baseEntry?.paseoTools) ? baseEntry.paseoTools : undefined;
+  if (basePaseoTools?.enabled === undefined) {
+    providers.antigravity = {
+      ...(isRecord(baseEntry) ? (baseEntry as PaseoProviderEntry) : {}),
+      paseoTools: {
+        ...(basePaseoTools ?? {}),
+        enabled: false,
+      },
+    };
+  }
+}
+
+/**
  * The pure config transform (spec v0.0.27 §Implementation Decisions 1, ADR
  * 0017 §1, ADR 0026 §1): sweeps `sw2-*` and unknown `factory-*` provider keys,
  * writes `factory-supervisor` / `factory-lead` / `factory-peer` mapped from
@@ -361,6 +390,7 @@ export function reconcilePaseoConfigObject(
   // or custom `XDG_STATE_HOME` is left exactly as the owner wrote it.
   if (opencodeStateDir !== undefined) {
     ensureBaseOpencodeStateDir(providers, opencodeStateDir);
+    ensureBaseAntigravityPaseoToolsOff(providers);
   }
   // The picker: every sw2-* / factory-* row goes, and exactly one
   // `Supervisor (Factory)` profile is prepended — model, the harness's
@@ -542,6 +572,7 @@ export function healFactoryRoleProvidersObject(
   // explicit-user-setting precedence as the reconcile path.
   if (opencodeStateDir !== undefined) {
     ensureBaseOpencodeStateDir(providers, opencodeStateDir);
+    ensureBaseAntigravityPaseoToolsOff(providers);
   }
   let nextDaemon = original.daemon;
   if (isRecord(original.daemon) && Array.isArray(original.daemon.agentProfiles)) {

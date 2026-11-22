@@ -2955,6 +2955,30 @@ test("injectSessionEnv strips paseo from mcpServers across Factory seats and bac
   assert.ok(codexSupOpen.mcpServers?.keep !== undefined, "other mcpServers preserved");
   assert.equal(codexSupOpen.mcpServers?.paseo_factory, undefined, "non-Antigravity seat does not backfill Antigravity bridge");
 
+  // Live 0.17.1+ Antigravity seats already persist `paseo_factory` in saved
+  // `config.mcpServers`; returning it again from `agent.open.before` causes
+  // Paseo 0.17.1 to reject refresh/resume with "collides with agent saved configuration".
+  const liveSupOpen = injectSessionEnv(
+    {
+      agentId: "agy-live-sup",
+      cwd: repoDir,
+      provider: "antigravity/gemini-4-hydrogen",
+      reason: "refresh",
+      purpose: "interactive",
+      env: {
+        ...(legacySupCreate.env ?? {}),
+        PASEO_FACTORY_CONTRACT_MODE: "live",
+      },
+      mcpServers: {},
+    },
+    stateDir,
+    userHome,
+    { perSessionAgyMcp: true, liveRoleContract: true },
+  ) as { mcpServers?: Record<string, unknown>; appendSystemPrompt?: string[] } | undefined;
+  assert.ok(liveSupOpen !== undefined);
+  assert.equal(liveSupOpen.mcpServers?.paseo_factory, undefined, "live 0.17.1+ seat never re-emits paseo_factory on open/refresh");
+  assert.ok(Array.isArray(liveSupOpen.appendSystemPrompt) && liveSupOpen.appendSystemPrompt.length > 0, "live 0.17.1+ seat still gets live role contract");
+
   // Negative gates: history open and <0.17.1 (perSessionAgyMcp: false) never backfill paseo_factory
   const historyOpen = injectSessionEnv(
     {

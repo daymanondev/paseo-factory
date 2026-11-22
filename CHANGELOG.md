@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.2] - 2026-11-23
+
+**Prevent `agent.open.before` `paseo_factory` collision on Paseo `0.17.1+` reloads and default `agents.providers.antigravity.paseoTools.enabled = false`.**
+
+### Fixed
+
+- **Avoid `paseo_factory` MCP collision on `0.17.1+` `refresh` / `resume` (`plugin/server/roles.ts`):** Paseo `0.17.1` passes an empty plugin-contribution map (`{}`) as `request.mcpServers` in `agent.open.before` and rejects any returned server name that collides with the agent's saved `config.mcpServers`. `resolveSessionMcpServers` now backfills `paseo_factory` (and Peer Helper MCPs) strictly for legacy pre-`0.17.1` Antigravity seats (`PASEO_FACTORY_CONTRACT_MODE !== "live"`), leaving `0.17.1+` `live` seats free of collision errors.
+- **Default `agents.providers.antigravity.paseoTools.enabled = false` during config reconcile (`src/role-providers.ts`):** Because Paseo injects its 65-tool `paseo` MCP server outside `agent.open.before` whenever `daemon.mcp.injectIntoAgents: true` and `antigravity` seats cannot extend `factory-*` role providers, `reconcilePaseoConfigObject` and `healFactoryRoleProvidersInConfig` now default `agents.providers.antigravity.paseoTools.enabled = false` (preserving any explicit user `paseoTools.enabled` override), preventing `agy 1.5.14` from evicting `supervisor_dispatch_lead` and 9/16 Lead tools under eager tool budget limits.
+
 ## [0.20.1] - 2026-11-23
 
 **Fix Antigravity (`agy 1.5.14`) eager MCP tool budget eviction and pre-0.17.1 Antigravity seat resume backfill.**
