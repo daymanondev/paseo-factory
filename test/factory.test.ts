@@ -156,11 +156,11 @@ test("setContract records the workspace with the criteria, allows re-contracting
   assert.equal(evt2.seq, 2);
   assert.equal(factory.contractFor("T1")?.gate, "true");
 
-  // While an attempt is open in the current epoch, setContract refuses with gate-running.
+  // While an attempt is started/open in the current epoch, setContract refuses with gate-in-flight.
   factory.ledger.append({ event: "claim_reported", task: "T1", attempt: 1, sha });
   assert.throws(
     () => factory.setContract({ task: "T1", workspace, gate: "true", artifact }),
-    factoryErrorCode("gate-running"),
+    factoryErrorCode("gate-in-flight"),
   );
   factory.ledger.append({ event: "gate_finished", task: "T1", attempt: 1, exit: 1, verdict: "red", note: "failed" });
   factory.ledger.append({ event: "report_written", task: "T1", attempt: 1, path: "report-T1-1.md" });
@@ -2127,7 +2127,7 @@ test("accept refuses while another attempt is in flight", async (t) => {
   await factory.claim({ task: "busy", sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   factory.ledger.append({ event: "claim_reported", task: "busy", attempt: 2, sha });
   factory.ledger.append({ event: "gate_started", task: "busy", attempt: 2, cmd: "true" });
-  await assert.rejects(factory.accept({ task: "busy", attempt: 1 }), factoryErrorCode("gate-running"));
+  await assert.rejects(factory.accept({ task: "busy", attempt: 1 }), factoryErrorCode("gate-in-flight"));
 });
 
 test("accepted task projection retains accepted GREEN evidence after a ghost RED attempt", async (t) => {
@@ -2276,4 +2276,83 @@ test("a pre-0054 ledger without task_closed projects unchanged — accepted stay
   const view = foldTasks(factory.ledger.events)[0]!;
   assert.equal(view.status, "accepted");
   assert.equal(view.closed, undefined);
+});
+
+test("gate_queued projects as open/running, blocks double-claim, skips recoverInterruptedAttempts when unstarted, and admits + executes cleanly", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, artifact, sha } = makeWorkspace(dir);
+  const stateDir = join(dir, "state");
+  const factory = createFactory({ stateDir });
+  factory.setContract({ task: "GQ-1", workspace, gate: "true", artifact });
+
+  const handoff = { outcome: "complete" as const, scope: "s", verification: "v", unknowns: "n" };
+
+  // Dirty tree refuses synchronously at admitClaim without opening an Attempt.
+  writeFileSync(join(workspace, artifact), "export function dirty() {}\n");
+  await assert.rejects(
+    factory.admitClaim({ task: "GQ-1", sha, handoff }),
+    factoryErrorCode("invalid-claim"),
+  );
+  assert.equal(factory.ledger.eventsFor("GQ-1").length, 1, "dirty admitClaim opens no Attempt");
+
+  // Unknown SHA refuses synchronously at admitClaim without opening an Attempt.
+  execFileSync("git", ["checkout", "--", artifact], { cwd: workspace });
+  await assert.rejects(
+    factory.admitClaim({ task: "GQ-1", sha: "deadbeef".repeat(5), handoff }),
+    factoryErrorCode("invalid-claim"),
+  );
+  assert.equal(factory.ledger.eventsFor("GQ-1").length, 1, "unknown-sha admitClaim opens no Attempt");
+
+  // Valid admitClaim records gate_queued without running Gate yet.
+  const admission = await factory.admitClaim({ task: "GQ-1", sha, handoff, agent: "peer-1", queueId: "gq-1" });
+  assert.equal(admission.status, "queued");
+  if (admission.status !== "queued") return;
+  assert.equal(admission.attempt, 1);
+  assert.equal(admission.sha, sha);
+
+  const projected = projectTask(factory.ledger.events, "GQ-1");
+  assert.equal(projected.status, "running");
+  assert.equal(projected.inFlightAttempt, 1);
+  assert.equal(projected.attempts[0]?.open, true);
+  assert.equal(projected.attempts[0]?.gateOpen, true);
+
+  // Double-claim while queued refuses with gate-running.
+  await assert.rejects(
+    factory.admitClaim({ task: "GQ-1", sha, handoff }),
+    factoryErrorCode("gate-running"),
+  );
+
+  // Reboot before dequeue leaves unstarted gate_queued intact (not clobbered red!).
+  factory.history.stop();
+  const restarted = createFactory({ stateDir });
+  assert.equal(restarted.recoveredAttempts.length, 0, "unstarted gate_queued is NOT clobbered on reboot");
+  assert.deepEqual(
+    restarted.ledger.eventsFor("GQ-1").map((e) => e.event),
+    ["contract_set", "gate_queued"],
+  );
+
+  // Dequeued execution runs Gate and finishes GREEN.
+  const outcome = await restarted.executeQueuedClaim({
+    task: "GQ-1",
+    attempt: 1,
+    sha,
+    handoff,
+    agent: "peer-1",
+  });
+  assert.ok(outcome !== undefined);
+  assert.equal(outcome.verdict, "green");
+  assert.equal(outcome.attempt, 1);
+  assert.deepEqual(
+    restarted.ledger.eventsFor("GQ-1").map((e) => e.event),
+    ["contract_set", "gate_queued", "claim_reported", "gate_started", "gate_finished", "report_written"],
+  );
+
+  // Re-claiming same green SHA replays idempotently without re-queueing.
+  const replay = await restarted.admitClaim({ task: "GQ-1", sha, handoff, agent: "peer-1" });
+  assert.equal(replay.status, "replayed");
+  if (replay.status === "replayed") {
+    assert.equal(replay.outcome.attempt, 1);
+    assert.equal(replay.outcome.verdict, "green");
+  }
 });

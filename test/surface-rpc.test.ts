@@ -14,7 +14,7 @@ import type { VaultRunner, VaultRunnerCall } from "../src/index.ts";
 import { createFactory } from "../plugin/server/core/factory.ts";
 import { resolveProject } from "../plugin/server/core/project.ts";
 import { createSurfaceHandlers, sanitizeLaneWithProviders } from "../plugin/server/surface-rpc.ts";
-import type { ProviderEntry, SurfaceDaemonApi, SurfaceDeps } from "../plugin/server/surface-rpc.ts";
+import type { ProviderEntry, SurfaceAgentSnapshot, SurfaceDaemonApi, SurfaceDeps } from "../plugin/server/surface-rpc.ts";
 import { handleSpoolRequest } from "../plugin/server/spool.ts";
 import { createLeadMailRuntime } from "../plugin/server/lead-mailbox.ts";
 import { LEAD_ROTATE_TOKENS, PEER_CONTEXT_MARK_TOKENS } from "../plugin/server/handoff-limits.ts";
@@ -9441,4 +9441,231 @@ test("ADR 0066 (C3): storeReleaseRead resolves factory-release-lab via config.js
   assert.equal(disabledRead.settings.runner.installed, true);
   assert.equal(disabledRead.settings.runner.enabled, false);
   assert.equal(disabledRead.settings.runner.status, "disabled");
+});
+
+test("ADR 0068 (Ticket 05): overview snapshot, PanelView queue projection, and Gate queue write RPCs (pause, resume, concurrency, cancel)", async (t) => {
+  const { createGateQueue } = await import("../plugin/server/gate-queue.ts");
+  const { overview, gateQueuePause, gateQueueResume, gateQueueConcurrency, gateQueueCancel } = await import("../plugin/shared/rpc.ts");
+  const dir = makeTempDir("surface-overview-");
+  disposeDir(t, dir);
+  const home = join(dir, "paseo-home");
+  const stateDir = join(home, "plugin-state", "paseo-factory");
+  const rootA = join(dir, "alpha-app");
+  const rootB = join(dir, "beta-app");
+  mkdirSync(rootA, { recursive: true });
+  mkdirSync(rootB, { recursive: true });
+  writeFileSync(join(rootA, "README.md"), "# alpha\n");
+  writeFileSync(join(rootB, "README.md"), "# beta\n");
+  const shaA = gitCommitAll(rootA, "init-a");
+  const shaB = gitCommitAll(rootB, "init-b");
+  const resA = resolveProject(rootA);
+  const resB = resolveProject(rootB);
+  assert.ok(resA.ok && resB.ok);
+
+  writeLanes(stateDir, {
+    supervisor: "pi/zai/glm-5.3",
+    lead: "pi/zai/glm-5.3",
+    worker: "pi/zai/glm-5.3",
+    watch: "pi/zai/glm-5.3",
+    freshEyes: "pi/zai/glm-5.3",
+  });
+  writeProjectRegistration(stateDir, resA.slug, { root: resA.root, name: "Alpha", workspaceId: "ws-alpha", lead: "lead-a", supervisor: "sup-a" });
+  writeProjectRegistration(stateDir, resB.slug, { root: resB.root, name: "Beta", workspaceId: "ws-beta", lead: "lead-b" });
+
+  const rootFactory = createFactory({ stateDir, eyeCliProbe: () => false });
+  const registry = createFactoryRegistry({ stateDir, root: rootFactory });
+  const fA = registry.factoryForProject(resA.slug);
+  const fB = registry.factoryForProject(resB.slug);
+
+  const sent: Array<{ agentId: string; text: string }> = [];
+  const agents: SurfaceAgentSnapshot[] = [
+    { id: "sup-a", provider: "pi/zai/glm-5.3", title: "Sup A", status: "idle", model: "zai/glm-5.3", labels: { seat: "supervisor", project: resA.slug }, archivedAt: null, requiresAttention: false, attentionReason: null, updatedAt: "2026-11-22T10:00:00.000Z", cwd: resA.root, workspaceId: "ws-alpha" },
+    { id: "lead-a", provider: "pi/zai/glm-5.3", title: "Lead A", status: "running", model: "zai/glm-5.3", labels: { seat: "lead", project: resA.slug }, archivedAt: null, requiresAttention: false, attentionReason: null, updatedAt: "2026-11-22T10:00:00.000Z", cwd: resA.root, workspaceId: "ws-alpha" },
+    { id: "peer-a", provider: "pi/zai/glm-5.3", title: "Peer A", status: "idle", model: "zai/glm-5.3", labels: { seat: "agent", project: resA.slug, task: "TA-1" }, archivedAt: null, requiresAttention: false, attentionReason: null, updatedAt: "2026-11-22T10:00:00.000Z", cwd: resA.root },
+    { id: "lead-b", provider: "pi/zai/glm-5.3", title: "Lead B", status: "idle", model: "zai/glm-5.3", labels: { seat: "lead", project: resB.slug }, archivedAt: null, requiresAttention: false, attentionReason: null, updatedAt: "2026-11-22T10:00:00.000Z", cwd: resB.root, workspaceId: "ws-beta" },
+    { id: "peer-b", provider: "pi/zai/glm-5.3", title: "Peer B", status: "idle", model: "zai/glm-5.3", labels: { seat: "agent", project: resB.slug, task: "TB-1" }, archivedAt: null, requiresAttention: false, attentionReason: null, updatedAt: "2026-11-22T10:00:00.000Z", cwd: resB.root },
+  ];
+  const daemon: SurfaceDaemonApi = {
+    agents: {
+      list: async (opts) => ({
+        entries: agents
+          .filter((a) => opts?.filter?.includeArchived || a.archivedAt === null)
+          .filter((a) => !opts?.filter?.labels || Object.entries(opts.filter.labels).every(([k, v]) => a.labels[k] === v))
+          .map((agent) => ({ agent })),
+      }),
+      create: async () => ({ id: "created-1" }),
+      ref: (id) => ({
+        send: async (text: string) => { sent.push({ agentId: id, text }); },
+        archive: async () => ({ archivedAt: new Date().toISOString() }),
+        timeline: { refetch: async () => ({ entries: [] }) },
+      }),
+    },
+    providers: {
+      listAvailable: async () => ({ providers: [{ provider: "pi", available: true }] }),
+      listModels: async () => ({ models: [{ id: "zai/glm-5.3", label: "GLM 5.3" }] }),
+    },
+  };
+
+  let gateQueue!: ReturnType<typeof createGateQueue>;
+  const changes: string[] = [];
+  const handlers = createSurfaceHandlers({
+    factory: rootFactory,
+    registry,
+    stateDir,
+    home,
+    userHome: dir,
+    daemon,
+    gateQueue: () => gateQueue,
+    onStateChange: (ev) => changes.push(ev.handler),
+    listPlugins: async () => ({ ok: true, plugins: [] }),
+  });
+  const leadMail = createLeadMailRuntime({
+    factory: rootFactory,
+    registry,
+    stateDir,
+    daemon,
+    ensureLead: (i) => handlers.leadEnsure(i),
+    retireLead: (i) => handlers.leadRotate(i),
+  });
+  const { settleClaimOutcome } = await import("../plugin/server/spool.ts");
+  gateQueue = createGateQueue({
+    stateDir,
+    factory: rootFactory,
+    registry,
+    onSettled: async ({ item, outcome }) => {
+      await settleClaimOutcome({
+        factory: registry.factoryForProject(item.projectSlug),
+        task: item.task,
+        agent: item.agent,
+        outcome,
+        sha: item.sha,
+        workspace: item.cwd,
+        peerMail: leadMail.notifyPeer,
+        daemon,
+        projectSlug: item.projectSlug,
+      });
+    },
+  });
+  t.after(() => {
+    gateQueue.stop();
+    leadMail.stop();
+    registry.stop();
+  });
+
+  const holdFlag = join(dir, "release-hold");
+  const holdScript = join(dir, "hold-gate.mjs");
+  writeFileSync(
+    holdScript,
+    `import { existsSync } from "node:fs";\nconst iv = setInterval(() => { if (existsSync(${JSON.stringify(holdFlag)})) { clearInterval(iv); process.exit(0); } }, 20);\n`,
+  );
+  fA.setContract({
+    task: "TA-1",
+    workspace: resA.root,
+    gate: `${JSON.stringify(process.execPath)} ${JSON.stringify(holdScript)}`,
+    artifact: "README.md",
+  });
+  fB.setContract({ task: "TB-1", workspace: resB.root, gate: "echo beta-ok", artifact: "README.md" });
+  fB.setContract({ task: "TB-2", workspace: resB.root, gate: "echo beta-two", artifact: "README.md", scope: ["docs"] });
+  // Seed a historical finished gate on TB-2 to verify latestGate projection.
+  fB.ledger.append({ event: "gate_finished", task: "TB-2", attempt: 1, exit: 0, verdict: "green", note: "ok", sha: shaB });
+
+  const handoff = { outcome: "complete" as const, scope: "README.md", verification: "ok", unknowns: "none" };
+  const cA = await handleSpoolRequest(rootFactory, { id: "c-a", kind: "claim", task: "TA-1", sha: shaA, handoff, agent: "peer-a", projectSlug: resA.slug }, { gateQueue }, registry);
+  assert.ok(cA.ok && cA.queueId);
+  const deadline = Date.now() + 5_000;
+  while (gateQueue.snapshot().running.length === 0 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 15));
+  assert.equal(gateQueue.snapshot().running[0]?.task, "TA-1");
+
+  const cB = await handleSpoolRequest(rootFactory, { id: "c-b", kind: "claim", task: "TB-1", sha: shaB, handoff, agent: "peer-b", projectSlug: resB.slug }, { gateQueue }, registry);
+  assert.ok(cB.ok && cB.queueId);
+
+  // 1. Read overview snapshot — must NOT emit onStateChange, and matches Zod schema.
+  const countBeforeOverview = changes.length;
+  const ovRaw = await handlers.overview({});
+  assert.equal(changes.length, countBeforeOverview, "overview is a pure read");
+  const ov = overview.output.parse(ovRaw);
+  assert.ok(ov.ok);
+  assert.equal(ov.gateQueue.paused, false);
+  assert.equal(ov.gateQueue.concurrency, 1);
+  assert.equal(ov.gateQueue.running.length, 1);
+  assert.equal(ov.gateQueue.queued.length, 1);
+  assert.equal(ov.gateQueue.running[0]!.id, cA.queueId);
+  assert.equal(ov.gateQueue.running[0]!.projectSlug, resA.slug);
+  assert.equal(ov.gateQueue.running[0]!.projectName, "Alpha");
+  assert.equal(ov.gateQueue.running[0]!.workspaceId, "ws-alpha");
+  assert.equal(ov.gateQueue.running[0]!.position, 1);
+  assert.match(ov.gateQueue.running[0]!.logPath ?? "", /gate-TA-1-1\.log$/);
+  assert.equal(ov.gateQueue.queued[0]!.id, cB.queueId);
+  assert.equal(ov.gateQueue.queued[0]!.position, 2);
+  assert.equal(ov.gateQueue.queued[0]!.aheadCount, 1);
+  assert.equal(ov.gateQueue.queued[0]!.ahead[0]!.task, "TA-1");
+
+  const projA = ov.projects.find((p) => p.slug === resA.slug)!;
+  const projB = ov.projects.find((p) => p.slug === resB.slug)!;
+  assert.equal(projA.supervisor.statusLabel, "idle");
+  assert.equal(projA.lead.statusLabel, "working");
+  assert.equal(projA.peers[0]?.task, "TA-1");
+  assert.equal(projA.peers[0]?.disposition, "engineer");
+  assert.equal(projA.latestGate?.state, "running");
+  assert.equal(projB.supervisor.statusLabel, "vacant");
+  assert.equal(projB.latestGate?.state, "queued");
+  assert.equal(projB.latestGate?.task, "TB-1");
+
+  // 2. snapshot() projects Gate queue context onto PanelView and PanelPeerRow.
+  const snapB = await handlers.snapshot({ projectRoot: resB.root });
+  assert.ok(snapB.ok);
+  assert.equal(snapB.view.panel.gateQueue?.length, 1);
+  assert.equal(snapB.view.panel.gateQueue?.[0]?.status, "queued");
+  assert.equal(snapB.view.panel.gateQueue?.[0]?.position, 2);
+  assert.equal(snapB.view.panel.gateQueue?.[0]?.aheadLabel, "Alpha · TA-1");
+  assert.equal(snapB.view.panel.seats?.peers[0]?.gateQueue?.status, "queued");
+  assert.equal(snapB.view.panel.seats?.peers[0]?.gateQueue?.position, 2);
+
+  // 3. Owner write RPCs: pause, resume, concurrency validation + update, cancel (by projectSlug + task and by queueId).
+  const pauseRes = gateQueuePause.output.parse(await handlers.gateQueuePause({}));
+  assert.ok(pauseRes.ok);
+  assert.equal(pauseRes.gateQueue.paused, true);
+
+  const concBad = await handlers.gateQueueConcurrency({ concurrency: 0 });
+  assert.equal(concBad.ok, false);
+  const concGood = gateQueueConcurrency.output.parse(await handlers.gateQueueConcurrency({ concurrency: 2 }));
+  assert.ok(concGood.ok);
+  assert.equal(concGood.gateQueue.concurrency, 2);
+
+  // Cancel queued TB-1 by projectSlug + task while paused.
+  const cancelQueued = gateQueueCancel.output.parse(await handlers.gateQueueCancel({ projectSlug: resB.slug, task: "TB-1" }));
+  assert.ok(cancelQueued.ok);
+  assert.deepEqual(cancelQueued.cancelledIds, [cB.queueId!]);
+  assert.equal(cancelQueued.gateQueue.queued.length, 0);
+  const tb1Gate = fB.ledger.eventsFor("TB-1").findLast((e) => e.event === "gate_finished");
+  assert.equal(tb1Gate?.event === "gate_finished" && tb1Gate.verdict, "red");
+  assert.equal(tb1Gate?.event === "gate_finished" && tb1Gate.note, "cancelled-by-owner");
+
+  // Cancel running TA-1 by queueId.
+  const cancelRun = gateQueueCancel.output.parse(await handlers.gateQueueCancel({ queueId: cA.queueId! }));
+  assert.ok(cancelRun.ok);
+  assert.deepEqual(cancelRun.cancelledIds, [cA.queueId!]);
+  assert.equal(cancelRun.gateQueue.running.length, 0);
+
+  // Cancel missing id returns queue-item-not-found failure.
+  const cancelMissing = await handlers.gateQueueCancel({ queueId: "gq-does-not-exist" });
+  assert.equal(cancelMissing.ok, false);
+  if (!cancelMissing.ok) assert.equal(cancelMissing.code, "queue-item-not-found");
+
+  // Resume returns paused=false and overview reflects idle empty queue + historical latestGate on Beta.
+  const resumeRes = gateQueueResume.output.parse(await handlers.gateQueueResume({}));
+  assert.ok(resumeRes.ok);
+  assert.equal(resumeRes.gateQueue.paused, false);
+  const snapAfter = await handlers.snapshot({});
+  assert.ok(snapAfter.ok);
+  assert.equal(snapAfter.view.gateQueueConcurrency, 2, "snapshot view includes updated gateQueueConcurrency for Settings");
+  const ovAfter = overview.output.parse(await handlers.overview({}));
+  assert.ok(ovAfter.ok);
+  assert.equal(ovAfter.gateQueue.paused, false);
+  assert.equal(ovAfter.gateQueue.concurrency, 2);
+  assert.equal(ovAfter.projects.find((p) => p.slug === resB.slug)?.latestGate?.state, "red");
+  assert.ok(changes.includes("gateQueuePause"));
+  assert.ok(changes.includes("gateQueueResume"));
+  assert.ok(changes.includes("gateQueueConcurrency"));
+  assert.ok(changes.includes("gateQueueCancel"));
 });

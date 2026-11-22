@@ -440,7 +440,14 @@ test("bridge.mjs executes Supervisor, Lead, and Agent tools end-to-end over the 
     });
     const claimText = (agentCall[0].result as { isError?: boolean; content: Array<{ text: string }> });
     assert.notEqual(claimText.isError, true, claimText.content[0].text);
-    assert.match(claimText.content[0].text, /GREEN/i);
+    assert.match(claimText.content[0].text, /Status: QUEUED/);
+    {
+      const deadline = Date.now() + 8_000;
+      while (Date.now() < deadline && !projectFactory.ledger.eventsFor("feat-x").some((e) => e.event === "report_written")) {
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      assert.equal(projectFactory.ledger.eventsFor("feat-x").findLast((e) => e.event === "gate_finished")?.verdict, "green");
+    }
 
     const blockerRes = (agentCall[1].result as { isError?: boolean; content: Array<{ text: string }> });
     assert.notEqual(blockerRes.isError, true, blockerRes.content[0].text);
@@ -1330,9 +1337,15 @@ test("the MCP fallback spawn prompt branches on the disposition (ticket 03, ADR 
   assert.ok(readOnlyPrompt.includes("outcome"), "the handoff fields still ride the instruction");
   assert.match(readOnlyPrompt, /blocking defects/, "the reviewer disposition's evidence expectation rides the prompt");
 
-  // 2. The engineer fallback prompt keeps today's gate + commit + claim clause.
+  // 2. The engineer fallback prompt instructs fast slice checks + commit + claim + end turn when queued.
   const engineerPrompt = createdPrompts[1]!;
-  assert.ok(engineerPrompt.includes("pass gate `npm test`, commit on branch factory/ENGD-1, and call agent_claim."), "the engineer clause stays verbatim");
+  assert.ok(
+    engineerPrompt.includes(
+      "run fast slice checks during TDD (never pre-run the full cumulative Gate), commit on branch factory/ENGD-1, call agent_claim (the daemon GateQueue runs the Gate asynchronously), and end your turn immediately once `queued`.",
+    ),
+    "the engineer clause avoids pre-running the full cumulative Gate and instructs end-of-turn on queued",
+  );
+  assert.ok(!engineerPrompt.includes("pass gate `npm test`"), "engineer is never told to pass the full Gate before agent_claim");
   assert.ok(!engineerPrompt.includes("read-only-disposition-fence"), "no read-only fence leaks into the engineer prompt");
 });
 
@@ -1454,7 +1467,15 @@ test("agent_claim carries the mandatory six-field handoff end-to-end (ADR 0053 Â
 
   const claimed = (agentCall[2].result as { isError?: boolean; content: Array<{ text: string }> });
   assert.notEqual(claimed.isError, true, claimed.content[0].text);
-  assert.match(claimed.content[0].text, /GREEN/i, "the scout claim with no commit ends GREEN");
+  assert.match(claimed.content[0].text, /Status: QUEUED/);
+  {
+    const projFactory = registry.factoryForProject(reg.slug);
+    const deadline = Date.now() + 8_000;
+    while (Date.now() < deadline && !projFactory.ledger.eventsFor("RECON-6F").some((e) => e.event === "report_written")) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    assert.equal(projFactory.ledger.eventsFor("RECON-6F").findLast((e) => e.event === "gate_finished")?.verdict, "green", "the scout claim with no commit ends GREEN");
+  }
 
   // 3. Exactly one Attempt opened â€” the refused call appended nothing.
   const ledgerLines = readFileSync(join(stateDir, "projects", reg.slug, "ledger.jsonl"), "utf8")
@@ -1471,9 +1492,9 @@ test("agent_claim carries the mandatory six-field handoff end-to-end (ADR 0053 Â
 
   // 4. The report renders the six fields with the Snapshot synthesized from the
   //    attempt's own facts â€” the attested commit, branch, and Task worktree.
-  const reportMatch = /Report: (.+)/.exec(claimed.content[0].text);
-  assert.ok(reportMatch, "the reply names the report path");
-  const report = readFileSync(reportMatch[1].trim(), "utf8");
+  const reportEvt = reconEvents.find((e) => e.event === "report_written");
+  assert.ok(reportEvt?.path, "the report event records the report path");
+  const report = readFileSync(String(reportEvt.path), "utf8");
   const canonical = [
     "- Outcome: partial",
     "- Snapshot:",
@@ -1488,6 +1509,12 @@ test("agent_claim carries the mandatory six-field handoff end-to-end (ADR 0053 Â
   assert.ok(report.includes(worktreePath), "the Snapshot names the Task worktree");
 
   // 5. The Verdict mail queued to the Lead mailbox carries the handoff verbatim.
+  const deadlineMail = Date.now() + 5_000;
+  while (Date.now() < deadlineMail) {
+    const mailboxNow = readLeadMailbox(join(stateDir, "projects", reg.slug, "mailbox.jsonl"));
+    if ([...mailboxNow.queued, ...(mailboxNow.inFlight?.items ?? [])].some((m) => m.kind === "verdict")) break;
+    await new Promise((r) => setTimeout(r, 20));
+  }
   const mailboxState = readLeadMailbox(join(stateDir, "projects", reg.slug, "mailbox.jsonl"));
   const verdict = [...mailboxState.queued, ...(mailboxState.inFlight?.items ?? [])].find((m) => m.kind === "verdict");
   assert.ok(verdict, "the verdict mail is queued");
@@ -1578,7 +1605,15 @@ test("agent_claim on an engineer Task over MCP never forges the mandatory commit
   });
   const claimRes = claimed[0].result as { isError?: boolean; content: Array<{ text: string }> };
   assert.notEqual(claimRes.isError, true, claimRes.content[0].text);
-  assert.match(claimRes.content[0].text, /Verdict: GREEN/);
+  assert.match(claimRes.content[0].text, /Status: QUEUED/);
+  {
+    const projFactory = registry.factoryForProject(reg.slug);
+    const deadline = Date.now() + 8_000;
+    while (Date.now() < deadline && !projFactory.ledger.eventsFor("ENG-1").some((e) => e.event === "report_written")) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    assert.equal(projFactory.ledger.eventsFor("ENG-1").findLast((e) => e.event === "gate_finished")?.verdict, "green");
+  }
 
   // 3. The refused call opened exactly no Attempt; the attested claim opened one.
   const ledgerLines = readFileSync(join(stateDir, "projects", reg.slug, "ledger.jsonl"), "utf8")
@@ -1656,9 +1691,17 @@ test("lead_verify claims through the bridge with the mechanical marker and no fo
   });
   const verifyRes = verifyCall[0].result as { isError?: boolean; content: Array<{ text: string }> };
   assert.notEqual(verifyRes.isError, true, verifyRes.content[0].text);
-  const reply = JSON.parse(verifyRes.content[0].text) as { ok: boolean; verdict?: string; reportPath?: string };
+  const reply = JSON.parse(verifyRes.content[0].text) as { ok: boolean; status?: string; verdict?: string; reportPath?: string };
   assert.equal(reply.ok, true);
-  assert.equal(reply.verdict, "green");
+  assert.equal(reply.status, "queued");
+  {
+    const projFactory = registry.factoryForProject(reg.slug);
+    const deadline = Date.now() + 8_000;
+    while (Date.now() < deadline && !projFactory.ledger.eventsFor("ENG-LV").some((e) => e.event === "report_written")) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    assert.equal(projFactory.ledger.eventsFor("ENG-LV").findLast((e) => e.event === "gate_finished")?.verdict, "green");
+  }
 
   const ledgerLines = readFileSync(join(stateDir, "projects", reg.slug, "ledger.jsonl"), "utf8")
     .trim()
@@ -1669,7 +1712,8 @@ test("lead_verify claims through the bridge with the mechanical marker and no fo
   assert.equal(claimLine.mechanical, "lead_verify", "the claim line carries the mechanical marker");
   assert.equal(claimLine.handoff, undefined, "no synthetic handoff is forged onto the Lead's re-run");
 
-  const report = readFileSync(String(reply.reportPath), "utf8");
+  const reportEvt = ledgerLines.find((e) => e.event === "report_written" && e.task === "ENG-LV");
+  const report = readFileSync(String(reportEvt.path), "utf8");
   assert.match(report, /- Lead verification \(`lead_verify`\): mechanical re-run of the Contract Gate by the Lead â€” no Peer handoff on this claim/);
   assert.doesNotMatch(report, /- Outcome:/, "the report renders no Peer outcome for the mechanical re-run");
   assert.match(report, /- Verdict: GREEN/);
@@ -1771,7 +1815,15 @@ test("lead_accept_task on a GREEN read-only Task closes merge-free (ADR 0053 Â§3
       },
     ],
   });
-  assert.match(okText(agentCall[0], "the read-only claim"), /GREEN/i, "the read-only claim ends GREEN at the worktree HEAD");
+  assert.match(okText(agentCall[0], "the read-only claim"), /Status: QUEUED/);
+  {
+    const projFactory = registry.factoryForProject(slug);
+    const deadline = Date.now() + 8_000;
+    while (Date.now() < deadline && !projFactory.ledger.eventsFor("RO-ACC").some((e) => e.event === "report_written")) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    assert.equal(projFactory.ledger.eventsFor("RO-ACC").findLast((e) => e.event === "gate_finished")?.verdict, "green", "the read-only claim ends GREEN at the worktree HEAD");
+  }
 
   // 3. Lead acceptance: merge-free. No landing fields, HEAD untouched, the
   //    Peer archived, the Task worktree removed.
@@ -2274,7 +2326,6 @@ test("v0.0.93 quiet-point regression: Lead dispatches a Peer then crosses 160k â
       requests: [
         { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} },
         { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "agent_claim", arguments: { task: "T-KICK", commit: kickSha, outcome: "complete", scope: "s", verification: "v", unknowns: "n" } } },
-        { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "agent_claim", arguments: { task: "T-KICK", commit: kickSha, outcome: "complete", scope: "s", verification: "v", unknowns: "n" } } },
       ],
     });
     const peerTools = (peerMcpCall[0].result as { tools: Array<{ name: string; _meta?: { timeoutMs?: number } }> }).tools;
@@ -2282,8 +2333,21 @@ test("v0.0.93 quiet-point regression: Lead dispatches a Peer then crosses 160k â
     assert.deepEqual(claimTool?._meta, { timeoutMs: 600_000 }, "agent_claim must advertise _meta.timeoutMs = 600000 for ZCode");
     const firstClaim = peerMcpCall[1].result as { isError?: boolean; content: Array<{ text: string }> };
     assert.notEqual(firstClaim.isError, true, firstClaim.content[0].text);
-    assert.match(firstClaim.content[0].text, /Verdict: GREEN/);
-    const replayClaim = peerMcpCall[2].result as { isError?: boolean; content: Array<{ text: string }> };
+    assert.match(firstClaim.content[0].text, /Status: QUEUED/);
+    {
+      const deadline = Date.now() + 8_000;
+      while (Date.now() < deadline && readProjectRegistration(stateDir, reg.slug)?.rotationState !== "handing_over") {
+        await new Promise((r) => setTimeout(r, 20));
+      }
+    }
+    const replayMcpCall = await runMcpSession({
+      args: ["--correlation", peerCorr.correlationId, "--state-dir", stateDir, "--home", homeDir],
+      cwd: worktree,
+      requests: [
+        { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "agent_claim", arguments: { task: "T-KICK", commit: kickSha, outcome: "complete", scope: "s", verification: "v", unknowns: "n" } } },
+      ],
+    });
+    const replayClaim = replayMcpCall[0].result as { isError?: boolean; content: Array<{ text: string }> };
     assert.notEqual(replayClaim.isError, true, replayClaim.content[0].text);
     assert.match(replayClaim.content[0].text, /Verdict: GREEN/);
 
@@ -3172,4 +3236,180 @@ test("bridge.mjs: lead_store_release, supervisor_dispatch_lead({ storeRelease })
     rmSync(repoDir, { recursive: true, force: true });
     rmSync(bareVault, { recursive: true, force: true });
   }
+});
+
+test("bridge.mjs agent_claim and lead_verify return structured queued guidance immediately and run FIFO", async () => {
+  const homeDir = mkdtempSync(join(tmpdir(), "factory-bridge-async-queue-"));
+  const stateDir = join(homeDir, "plugin-state", "paseo-factory");
+  const repoDir = makeGitRepo();
+  const sha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repoDir, encoding: "utf8" }).trim();
+  const factory = createFactory({ stateDir, eyeCliProbe: () => false });
+  const reg = ensureProjectRegistered(stateDir, repoDir);
+  assert.equal(reg.ok, true);
+  const registry = createFactoryRegistry({ stateDir, root: factory });
+  const spool = startSpool(stateDir, factory, { registry, pollMs: 15 });
+  try {
+    const correlations = new CorrelationRegistry(stateDir);
+    const leadCorr = correlations.issue({ role: "lead", projectSlug: reg.slug, projectRoot: repoDir });
+    const agentCorr = correlations.issue({ role: "agent", projectSlug: reg.slug, projectRoot: repoDir, task: "AQ-1" });
+    const slowGate = `${JSON.stringify(process.execPath)} -e "setTimeout(() => process.exit(0), 200)"`;
+
+    await runMcpSession({
+      args: ["--correlation", leadCorr.correlationId, "--state-dir", stateDir],
+      cwd: repoDir,
+      requests: [
+        { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "AQ-1", gate: slowGate, artifact: "README.md", description: "1. Bounded Outcome\nQueue test 1\n\n2. Contract Boundary & Regression Invariants\nNone\n\n3. Excluded / Deferred\nNone\n\n4. Verification\nGate" } } },
+        { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "AQ-2", gate: "/usr/bin/true", artifact: "README.md", description: "1. Bounded Outcome\nQueue test 2\n\n2. Contract Boundary & Regression Invariants\nNone\n\n3. Excluded / Deferred\nNone\n\n4. Verification\nGate" } } },
+      ],
+    });
+
+    const claimRes = await runMcpSession({
+      args: ["--correlation", agentCorr.correlationId, "--state-dir", stateDir],
+      cwd: repoDir,
+      requests: [{
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: {
+          name: "agent_claim",
+          arguments: { task: "AQ-1", sha, outcome: "complete", scope: "README.md", verification: "ok", unknowns: "none" },
+        },
+      }],
+    });
+    const claimOut = claimRes[0].result as { isError?: boolean; content: Array<{ text: string }> };
+    assert.notEqual(claimOut.isError, true);
+    assert.match(claimOut.content[0].text, /Status: QUEUED/);
+    assert.match(claimOut.content[0].text, /Position: 1 \(0 ahead\)/);
+    assert.match(claimOut.content[0].text, /End your turn now/i);
+
+    const verifyRes = await runMcpSession({
+      args: ["--correlation", leadCorr.correlationId, "--state-dir", stateDir],
+      cwd: repoDir,
+      requests: [{
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "lead_verify", arguments: { task: "AQ-2", commit: sha } },
+      }],
+    });
+    const verifyOut = verifyRes[0].result as { isError?: boolean; content: Array<{ text: string }> };
+    assert.notEqual(verifyOut.isError, true);
+    const parsedVerify = JSON.parse(verifyOut.content[0].text) as Record<string, unknown>;
+    assert.equal(parsedVerify.status, "queued");
+    assert.equal(parsedVerify.position, 2);
+    assert.equal(Array.isArray(parsedVerify.ahead) && parsedVerify.ahead.length, 1);
+
+    const projFactory = registry.factoryForProject(reg.slug);
+    const deadline = Date.now() + 8_000;
+    while (Date.now() < deadline) {
+      if (projFactory.ledger.eventsFor("AQ-2").some((e) => e.event === "report_written")) break;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    assert.equal(projFactory.ledger.eventsFor("AQ-1").findLast((e) => e.event === "gate_finished")?.verdict, "green");
+    assert.equal(projFactory.ledger.eventsFor("AQ-2").findLast((e) => e.event === "gate_finished")?.verdict, "green");
+  } finally {
+    spool.stop();
+    registry.stop();
+    rmSync(homeDir, { recursive: true, force: true });
+    rmSync(repoDir, { recursive: true, force: true });
+  }
+});
+
+test("ADR 0068: bridge lead_dispatch_agent refuses concurrent writable Peers per Project while allowing read-only Peers", async (t) => {
+  const homeDir = mkdtempSync(join(tmpdir(), "factory-bridge-single-writable-"));
+  const stateDir = join(homeDir, "plugin-state", "paseo-factory");
+  const repoDir = makeGitRepo();
+  const sha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repoDir, encoding: "utf8" }).trim();
+  t.after(() => {
+    rmSync(homeDir, { recursive: true, force: true });
+    rmSync(repoDir, { recursive: true, force: true });
+  });
+
+  const factory = createFactory({ stateDir, eyeCliProbe: () => false });
+  const reg = ensureProjectRegistered(stateDir, repoDir);
+  assert.equal(reg.ok, true);
+  const registry = createFactoryRegistry({ stateDir, root: factory });
+  t.after(() => registry.stop());
+
+  const liveAgents = new Map<string, { id: string; status: string; archivedAt: string | null; cwd: string; labels: Record<string, string> }>();
+  let created = 0;
+  const fakeDaemon = {
+    agents: {
+      list: async () => ({
+        entries: [...liveAgents.values()].filter((a) => a.archivedAt === null).map((agent) => ({ agent })),
+      }),
+      create: async (options: { cwd?: string; labels?: Record<string, string> }) => {
+        const id = `peer-sw-${++created}`;
+        liveAgents.set(id, { id, status: "running", archivedAt: null, cwd: options.cwd ?? repoDir, labels: options.labels ?? {} });
+        return { id };
+      },
+      ref: (id: string) => ({
+        send: async () => ({ messageId: `msg-${id}` }),
+        archive: async () => {
+          const existing = liveAgents.get(id);
+          if (existing) liveAgents.set(id, { ...existing, archivedAt: new Date().toISOString() });
+          return { archivedAt: new Date().toISOString() };
+        },
+      }),
+    },
+  };
+  const spool = startSpool(stateDir, factory, { registry, pollMs: 15, daemon: fakeDaemon as never, home: homeDir });
+  t.after(() => spool.stop());
+
+  const leadCorr = new CorrelationRegistry(stateDir).issue({ role: "lead", projectSlug: reg.slug, projectRoot: repoDir, agentId: "lead-1" });
+  const brief = (summary: string) =>
+    `1. Bounded Outcome\n${summary}\n\n2. Contract Boundary & Regression Invariants\nExisting HEAD stays green.\n\n3. Excluded / Deferred\nNone.\n\n4. Verification\ntrue`;
+
+  const round1 = await runMcpSession({
+    args: ["--correlation", leadCorr.correlationId, "--state-dir", stateDir],
+    cwd: repoDir,
+    requests: [
+      { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "ENG-A", gate: "true", description: brief("Writable A") } } },
+      { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "lead_dispatch_agent", arguments: { tasks: ["ENG-A"] } } },
+      { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "ENG-B", gate: "true", disposition: "engineer", description: brief("Writable B") } } },
+      { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "lead_dispatch_agent", arguments: { tasks: ["ENG-B"] } } },
+      { jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "SCOUT-1", disposition: "scout", description: brief("Read-only scout") } } },
+      { jsonrpc: "2.0", id: 6, method: "tools/call", params: { name: "lead_dispatch_agent", arguments: { tasks: ["SCOUT-1"] } } },
+    ],
+  });
+  const byId1 = new Map(round1.map((r) => [r.id, r]));
+  const resText = (map: Map<unknown, Record<string, unknown>>, id: number) =>
+    map.get(id)!.result as { isError?: boolean; content: Array<{ text: string }> };
+
+  assert.notEqual(resText(byId1, 2).isError, true, "ENG-A dispatches");
+  const refusedB = resText(byId1, 4);
+  assert.equal(refusedB.isError, true, "ENG-B is refused while ENG-A is live and unsettled");
+  assert.match(refusedB.content[0].text, /writable-peer-in-flight/);
+  assert.match(refusedB.content[0].text, /ENG-A/);
+  assert.notEqual(resText(byId1, 6).isError, true, "SCOUT-1 dispatches concurrently alongside live ENG-A");
+  assert.equal(created, 2, "only ENG-A and SCOUT-1 created Peers");
+
+  const projFactory = registry.factoryForProject(reg.slug);
+  const refusedEvt = projFactory.ledger.eventsFor("ENG-B").findLast((e) => e.event === "spawn_refused");
+  assert.ok(refusedEvt && refusedEvt.event === "spawn_refused");
+  assert.equal(refusedEvt.rule, "spawn:single-writable-peer");
+
+  // Settle ENG-A GREEN, then dispatch [ENG-B, ENG-C] in one lead_dispatch_agent call:
+  // ENG-B dispatches, ENG-C is refused, and the error surfaces both facts.
+  const engAAgent = liveAgents.get("peer-sw-1")!;
+  engAAgent.status = "idle";
+  projFactory.ledger.append({ event: "claim_reported", task: "ENG-A", attempt: 1, sha, agent: "peer-sw-1" });
+  projFactory.ledger.append({ event: "gate_started", task: "ENG-A", attempt: 1, cmd: "true" });
+  projFactory.ledger.append({ event: "gate_finished", task: "ENG-A", attempt: 1, exit: 0, verdict: "green", note: "ok", sha });
+  projFactory.ledger.append({ event: "report_written", task: "ENG-A", attempt: 1, path: "report-ENG-A-1.md" });
+
+  const round2 = await runMcpSession({
+    args: ["--correlation", leadCorr.correlationId, "--state-dir", stateDir],
+    cwd: repoDir,
+    requests: [
+      { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "ENG-C", gate: "true", description: brief("Writable C") } } },
+      { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "lead_dispatch_agent", arguments: { tasks: ["ENG-B", "ENG-C"] } } },
+    ],
+  });
+  const byId2 = new Map(round2.map((r) => [r.id, r]));
+  const multiRes = resText(byId2, 2);
+  assert.equal(multiRes.isError, true);
+  assert.match(multiRes.content[0].text, /spawn dispatched for ENG-B/);
+  assert.match(multiRes.content[0].text, /writable-peer-in-flight/);
+  assert.match(multiRes.content[0].text, /ENG-B/);
 });

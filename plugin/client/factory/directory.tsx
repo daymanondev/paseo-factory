@@ -10,7 +10,7 @@ import * as pluginUi from "@getpaseo/plugin/client/ui";
 import { Platform, Pressable, Text, View } from "react-native";
 import { handoffStart, lanesSet, seatsDirectory, stateUpdates } from "../../shared/rpc.ts";
 import type { ProjectDirectoryEntry, SeatDirectoryEntry } from "../../shared/view.ts";
-import { headerPlans, pillPlans, reconcileDirectory, workspaceRowBadgePlan } from "../kit/directory.ts";
+import { headerPlans, pillPlans, reconcileDirectory, sidebarOverviewBadgeStore, workspaceRowBadgePlan } from "../kit/directory.ts";
 import type { RegistrationLike } from "../kit/directory.ts";
 import { isSubscriptionLive, subscribeClientUpdates } from "../kit/subscription.ts";
 import { CONTROL_SM, RADIUS, SPACING, hoveredOf, text } from "../kit/theme.ts";
@@ -250,6 +250,7 @@ export function startSeatDirectory(client: PluginClientContext, editorRequests?:
       if (!reply.ok) { warn("directory poll", reply.error); return; }
       if (reply.daemonError) { warn("directory poll", reply.daemonError); return; }
       try { projectStore.setProjects(reply.projects); } catch (error) { warn("workspace badge", error); }
+      try { sidebarOverviewBadgeStore.setSummary(reply.projects, reply.gateQueue ?? null); } catch (error) { warn("sidebar overview badge", error); }
       try {
         reconcileDirectory(
           headers,
@@ -340,6 +341,7 @@ export function startSeatDirectory(client: PluginClientContext, editorRequests?:
       removeBadgeItem = undefined;
     }
     projectStore.clear();
+    sidebarOverviewBadgeStore.clear();
     for (const entry of headers.values()) { try { entry.registration.remove(); } catch (error) { warn("header", error); } }
     for (const entry of pills.values()) { try { entry.registration.remove(); } catch (error) { warn("pill", error); } }
     headers.clear();

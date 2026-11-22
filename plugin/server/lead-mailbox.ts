@@ -94,7 +94,7 @@ import {
 } from "./core/mailbox.ts";
 import type { LeadMailFrom, LeadMailItem, LeadMailKind, MailRecipient } from "./core/mailbox.ts";
 import { boundTaskPeers, peerIsRunning } from "./task-peers.ts";
-import { driverWavesInFlight, projectEventsOf as sharedProjectEventsOf, projectFactoryOf, projectPeersInFlight, projectStreamOf as sharedProjectStreamOf, taskFactoryOf as sharedTaskFactoryOf, taskHasSettledPeerOutcome } from "./peer-in-flight.ts";
+import { driverWavesInFlight, projectEventsOf as sharedProjectEventsOf, projectFactoryOf, projectPeersInFlight, projectStreamOf as sharedProjectStreamOf, taskFactoryOf as sharedTaskFactoryOf, taskHasSettledPeerOutcome, tasksWithOpenGate } from "./peer-in-flight.ts";
 import { foldTasks, renderLedgerLine } from "./view.ts";
 import type { TaskView } from "../shared/view.ts";
 import { normalizeLanesWithDaemon } from "./spool.ts";
@@ -1601,8 +1601,8 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     // A Peer context handoff owns this turn boundary (its extraction prompt or successor).
     const peerHandoffState = readHandoffProgress(deps.stateDir, slug, `peer:${task}`)?.state;
     if (peerHandoffState !== undefined && peerHandoffState !== "done" && peerHandoffState !== "failed") return false;
-    const last =events.findLast((evt) => "task" in evt && evt.task === task);
-    if (last === undefined || last.event === "permit_denied" || last.event === "gate_started" || last.event === "claim_reported") return false;
+    const last = events.findLast((evt) => "task" in evt && evt.task === task);
+    if (last === undefined || last.event === "permit_denied" || tasksWithOpenGate(events).has(task)) return false;
     let escalated = false;
     try {
       escalated = readMailboxEvents(mailboxPath(slug)).some(
@@ -1903,13 +1903,24 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
    * last terminal outcome clears the predicate and its own hook pumps the
    * whole held batch as one consolidated delivery. Never rejects.
    */
-  const notifyPeer = async (input: { task: string; kind: "verdict" | "needs_human"; text: string }): Promise<void> => {
+  const notifyPeer = async (input: { task: string; kind: "verdict" | "needs_human"; text: string; projectSlug?: string }): Promise<void> => {
     try {
-      // The task-owning stream (v0.0.89): the Contract lives in the OWNING
-      // Project's Factory — the wired Factory first (it may still own the task
-      // itself, the legacy root bridge), then the registry's Projects. The
-      // first owner wins (a colliding Task id notifies one Project, never both).
-      let owning = deps.factory.contractFor(input.task) !== undefined ? deps.factory.ledger.events : undefined;
+      // The task-owning stream (v0.0.89): when an explicit projectSlug is supplied
+      // and owns this task, check it first so identically named Task IDs across
+      // Projects never wake the wrong Project's Lead. Otherwise check the wired
+      // Factory (legacy root bridge) then scan registered Projects.
+      let owning: readonly LedgerEvent[] | undefined;
+      if (input.projectSlug !== undefined) {
+        try {
+          const factory = registry.factoryForProject(input.projectSlug);
+          if (factory.contractFor(input.task) !== undefined) owning = factory.ledger.events;
+        } catch {
+          // fall through to wired Factory / registry scan
+        }
+      }
+      if (owning === undefined && deps.factory.contractFor(input.task) !== undefined) {
+        owning = deps.factory.ledger.events;
+      }
       if (owning === undefined) {
         for (const slug of registry.slugs()) {
           try {
@@ -2200,14 +2211,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
   const hasActiveWork = async (): Promise<boolean> => {
     // Gate work remains active even after its Peer has finished its turn —
     // across EVERY Project's Ledger (v0.0.89), never the root stream alone.
-    const gates = new Set<string>();
-    for (const events of eventStreamsOf()) {
-      for (const event of events) {
-        if (event.event === "gate_started") gates.add(`${event.task}:${event.attempt}`);
-        else if (event.event === "gate_finished") gates.delete(`${event.task}:${event.attempt}`);
-      }
-    }
-    if (gates.size > 0 || handingOverBySlug.size > 0) return true;
+    if (eventStreamsOf().some((events) => tasksWithOpenGate(events).size > 0) || handingOverBySlug.size > 0) return true;
     const projects = listProjectRegistrations(deps.stateDir);
     if (projects.some(project => supervisorHandoff.active(project.slug))) return true;
     if (projects.some(project => { const mailbox = readLeadMailbox(mailboxPath(project.slug)); return mailbox.inFlight !== null || mailbox.supervisorInFlight !== null; })) return true;
@@ -2497,7 +2501,7 @@ function agentOfTask(
       contractSetCountByTask.set(evt.task, (contractSetCountByTask.get(evt.task) ?? 0) + 1);
       continue;
     }
-    if (evt.event !== "claim_reported" && evt.event !== "meter_written" && evt.event !== "repoke_dispatched") continue;
+    if (evt.event !== "gate_queued" && evt.event !== "claim_reported" && evt.event !== "meter_written" && evt.event !== "repoke_dispatched") continue;
     if (typeof evt.agent === "string" && evt.agent !== "") ledgerAgents.set(evt.task, evt.agent);
   }
   if (context === undefined) return ledgerAgents;

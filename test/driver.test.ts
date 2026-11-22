@@ -45,8 +45,10 @@ import { awaitReply, submit } from "../plugin/bin/spool-client.mjs";
 test("renderBrief bakes the task and the driver's PATH into the runbook template, verbatim otherwise", () => {
   const brief = renderBrief("live05-driver", "/custom/bin:/usr/bin");
 
-  assert.ok(brief.includes("Do the assigned work on branch `live05-driver`."));
+  assert.ok(brief.includes("Do the assigned work on branch `live05-driver`."), "keeps canonical branch header");
+  assert.ok(brief.includes("fast slice checks during TDD (never pre-run the full cumulative Gate)"), "instructs slice checks rather than pre-running the full Gate");
   assert.ok(brief.includes("`factory-claim --task live05-driver --sha <sha>`"));
+  assert.ok(brief.includes("end your turn immediately once `queued`"));
   assert.ok(brief.includes("If the result is RED: read the note line, fix, make a NEW commit, claim"));
   assert.ok(brief.includes("Never edit tests just to make them green."));
   assert.ok(brief.includes('export\nPATH="/custom/bin:/usr/bin" first.'), "the PATH-export line carries the baked value, not the runbook's hardcoded nvm path");
@@ -128,7 +130,7 @@ test("renderBrief branches on the read-only dispositions (ticket 03, ADR 0054 §
 test("renderBrief keeps the engineer law byte-identical on the engineer and omitted dispositions (ticket 03)", () => {
   const explicit = renderBrief("live03-eng", "/custom/bin", undefined, undefined, "factory/live03-eng", "engineer");
   const omitted = renderBrief("live03-eng", "/custom/bin", undefined, undefined, "factory/live03-eng");
-  assert.ok(explicit.includes("When done: commit, run\n`git rev-parse HEAD`, then `factory-claim --task live03-eng --sha <sha>`."));
+  assert.ok(explicit.includes("when done: commit, run\n`git rev-parse HEAD`, then `factory-claim --task live03-eng --sha <sha>`, and end your turn immediately once `queued`"));
   assert.equal(explicit, omitted, "an explicit engineer disposition renders byte-identically to the omitted default");
   assert.ok(!explicit.includes("Read-Only") && !explicit.includes("read-only-disposition-fence"), "no read-only fence leaks into the engineer brief");
 });
@@ -1698,4 +1700,64 @@ test("effectiveCreateLane prefers the spool's thinking-resolved lane when a tier
     "pi/zai/glm-5.3",
     "without a tier the configured lane the driver resolved locally stands",
   );
+});
+
+test("ADR 0068 idleIsFinish and observeTasks hold an idle Peer peacefully while gate_queued is open until settlement", async (t) => {
+  const mk = (seq: number, event: string, extra: Record<string, unknown> = {}) =>
+    ({ seq, event, task: "LEAD1", ts: "2026-11-22T00:00:00.000Z", ...extra }) as never;
+  assert.equal(
+    idleIsFinish([mk(1, "contract_set"), mk(2, "spawn_dispatched"), mk(3, "gate_queued", { attempt: 1, sha: "abc" })], "LEAD1"),
+    false,
+    "open gate_queued is NOT a Peer-terminal outcome — idle Peer stays held",
+  );
+
+  const harness = await leadHarness(
+    t,
+    () => ({ status: "idle", attentionReason: "finished", pendingPermissions: [] }),
+    () => ({ entries: [] }),
+  );
+  let settled = false;
+  let run: Promise<unknown> | undefined;
+  try {
+    harness.factory.ledger.append({ event: "gate_queued", task: "LEAD1", attempt: 1, sha: "deadbeef", id: "gq-drv-1", agent: "ag-lead1" });
+    const logs: string[] = [];
+    const terminals: { fate?: string; reason?: string }[] = [];
+    run = observeTasks(harness.rpc, [{ task: "LEAD1", agentId: "ag-lead1" }], {
+      pollMs: 15,
+      stateDir: harness.stateDir,
+      spoolRoot: harness.spoolRoot,
+      graceMs: 10,
+      missingDeadMs: 80,
+      log: (message) => logs.push(message),
+      onTerminal: (entry) => {
+        terminals.push({ ...(entry.terminal as { fate?: string; reason?: string }) });
+      },
+    });
+    await new Promise((r) => setTimeout(r, 150));
+    const holdsCount = terminals.length;
+    const processed = harness.processedKinds();
+    harness.claimGreen();
+    settled = true;
+    let guardTimer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        run,
+        new Promise<never>((_, reject) => {
+          guardTimer = setTimeout(() => reject(new Error("observeTasks did not settle after claimGreen")), 3_000);
+        }),
+      ]);
+    } finally {
+      clearTimeout(guardTimer);
+    }
+    assert.equal(holdsCount, 0, "idle Peer held past missingDeadMs while gate_queued is open");
+    assert.deepEqual(processed, [], "driver submits no repoke/needs_human while gate_queued is open");
+    assert.ok(logs.some((m) => /Gate is queued\/running/i.test(m)), `expected Gate queued hold log, got: ${logs.join(" | ")}`);
+    assert.deepEqual(terminals.map((x) => x.fate), ["finished"]);
+  } finally {
+    if (!settled) {
+      harness.claimGreen();
+      await run?.catch(() => {});
+    }
+    harness.stop();
+  }
 });

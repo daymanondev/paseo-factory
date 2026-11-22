@@ -30,6 +30,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { Factory } from "./core/factory.ts";
 import type { MeterUsage } from "./core/events.ts";
+import { CorrelationRegistry } from "./core/correlations.ts";
 import { readProjectRegistration } from "./core/project.ts";
 import { projectTask } from "./core/task-state.ts";
 import { atomicJson } from "./core/json-store.ts";
@@ -123,7 +124,7 @@ export interface UsageRuntime {
   /** A terminal seat boundary: extract and flush one session's final usage NOW. */
   flushAgent: (agent: UsageAgentSnapshotLike, meta?: { slug?: string; task?: string; attempt?: number }) => Promise<SessionUsageRecord | undefined>;
   /** A Task/Attempt terminal boundary: flush the Peer and land the Tier-1 `meter_written` line when tokens grew. */
-  meterTaskBoundary: (input: { task: string; agentId?: string; attempt?: number }) => Promise<void>;
+  meterTaskBoundary: (input: { task: string; agentId?: string; attempt?: number; slug?: string }) => Promise<void>;
   /**
    * The same boundary act for a caller that already holds the retiring
    * agent's snapshot (Peer handoff, re-contracting retirement): flush AND
@@ -327,13 +328,18 @@ export function createUsageRuntime(deps: UsageRuntimeDeps): UsageRuntime {
 
     async meterTaskBoundary(input) {
       try {
-        const owner = taskFactory(input.task);
+        const owner = taskFactory(input.task, input.slug);
         if (owner.contractFor(input.task) === undefined) return;
-        const agentId = input.agentId ?? lastTaskAgent(owner, input.task);
+        const rawAgentId = input.agentId ?? lastTaskAgent(owner, input.task);
+        if (rawAgentId === undefined) return;
+        const agentId = rawAgentId.startsWith("cor_")
+          ? new CorrelationRegistry(deps.stateDir).resolve(rawAgentId)?.agentId ??
+            lastTaskAgent(owner, input.task)
+          : rawAgentId;
         if (agentId === undefined) return;
         const agent = await censusAgent(agentId);
         if (agent === undefined) return;
-        await meterBoundary(input.task, agent, input.attempt);
+        await meterBoundary(input.task, agent, input.attempt, input.slug);
       } catch (error) {
         log(`usage: task meter of ${input.task} deferred — ${String(error)}`);
       }
@@ -406,7 +412,7 @@ function projectsWithSeat(stateDir: string, agentId: string): string[] {
 function lastTaskAgent(factory: Factory, task: string): string | undefined {
   let agentId: string | undefined;
   for (const evt of factory.ledger.eventsFor(task)) {
-    if (evt.event !== "claim_reported" && evt.event !== "meter_written") continue;
+    if (evt.event !== "gate_queued" && evt.event !== "claim_reported" && evt.event !== "meter_written") continue;
     if (typeof evt.agent === "string" && evt.agent.trim() !== "") agentId = evt.agent;
   }
   return agentId;

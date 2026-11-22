@@ -152,9 +152,41 @@ test("parseSpoolRequest accepts exactly the three request shapes and nothing els
     { kind: "claim", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" }, task: "T1", sha: "abc" },
     { id: "r1", kind: "contract", task: "T1", workspace: "/w", gate: "true", artifact: "a", submitter: "owner", freshEyes: "yes" },
     { id: "r1", kind: "contract", task: "T1", workspace: "/w", gate: "true", artifact: "a", submitter: "owner", freshEyes: 1 },
+    { id: "r1", kind: "contract", task: "T1", workspace: "/w", gate: "true", artifact: "a", submitter: "owner", timeoutSeconds: 59 },
+    { id: "r1", kind: "contract", task: "T1", workspace: "/w", gate: "true", artifact: "a", submitter: "owner", timeoutSeconds: 3601 },
+    { id: "r1", kind: "contract", task: "T1", workspace: "/w", gate: "true", artifact: "a", submitter: "owner", timeoutSeconds: 60.5 },
+    { id: "r1", kind: "contract", task: "T1", workspace: "/w", gate: "true", artifact: "a", submitter: "owner", timeoutSeconds: "900" },
+    { id: "r1", kind: "contract", task: "T1", workspace: "/w", gate: "true", artifact: "a", submitter: "owner", timeoutSeconds: null },
   ]) {
     assert.equal(parseSpoolRequest(bad), undefined, `${JSON.stringify(bad)} must be rejected`);
   }
+});
+
+test("parseSpoolRequest and handleSpoolRequest accept and forward contract timeoutSeconds (60..3600)", async (t) => {
+  const valid = { id: "r-to", kind: "contract", task: "T-TO", workspace: "/w", gate: "true", artifact: "a", timeoutSeconds: 1800, submitter: "owner" };
+  assert.deepEqual(parseSpoolRequest(valid), valid);
+
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const workspace = join(dir, "ws");
+  mkdirSync(workspace, { recursive: true });
+  writeFileSync(join(workspace, "README.md"), "# repo\n");
+  gitCommitAll(workspace);
+
+  const factory = createFactory({ stateDir: join(dir, "state") });
+  const reply = await handleSpoolRequest(factory, {
+    id: "r-spool-to",
+    kind: "contract",
+    task: "T-SP-TO",
+    workspace,
+    gate: "true",
+    artifact: "README.md",
+    timeoutSeconds: 1200,
+    submitter: "owner",
+  });
+  assert.equal(reply.ok, true, JSON.stringify(reply));
+  assert.match(reply.summary ?? "", /timeout 1200s/);
+  assert.equal(factory.contractFor("T-SP-TO")?.timeoutSeconds, 1200);
 });
 
 test("lead_rotate rides the injected rotation handler and is refused loudly without one (v0.0.14)", async (t) => {
@@ -1765,4 +1797,285 @@ test("spawn prepends the Skill discipline hint on a skills-less Contract (expo p
     "explicit contract.skills preserves the Required-skills line unchanged",
   );
   assert.ok(!prompts[2]!.includes("Skill discipline"), "no hint alongside explicit skills");
+});
+
+test("ADR 0068: spool refuses dispatching a second concurrent writable (engineer/omitted) Peer in the same Project while another writable Peer is live and unsettled", async (t) => {
+  const dir = makeTempDir("spool-single-writable-");
+  disposeDir(t, dir);
+  const stateDir = join(dir, "state");
+  const repo = join(dir, "repo");
+  mkdirSync(repo, { recursive: true });
+  writeFileSync(join(repo, "README.md"), "base\n");
+  const baseSha = gitCommitAll(repo, "init");
+  const resolved = resolveProject(repo);
+  assert.ok(resolved.ok);
+  const slug = resolved.slug;
+  writeProjectRegistration(stateDir, slug, { root: resolved.root });
+
+  const registry = createFactoryRegistry({ stateDir });
+  t.after(() => registry.stop());
+  const factory = registry.factoryForProject(slug);
+
+  const liveAgents: Array<import("../plugin/server/surface-rpc.ts").SurfaceAgentSnapshot & { labels: Record<string, string> }> = [];
+  let createdCount = 0;
+  const fakeDaemon = {
+    agents: {
+      list: async (opts?: { filter?: { labels?: Record<string, string>; includeArchived?: boolean } }) => {
+        const wanted = opts?.filter?.labels ?? {};
+        const includeArchived = opts?.filter?.includeArchived === true;
+        const entries = liveAgents
+          .filter((agent) => (includeArchived || agent.archivedAt === null))
+          .filter((agent) => Object.entries(wanted).every(([k, v]) => agent.labels[k] === v))
+          .map((agent) => ({ agent }));
+        return { entries };
+      },
+      create: async (opts: { cwd?: string; labels?: Record<string, string>; config?: { provider?: string } }) => {
+        const id = `peer-${++createdCount}`;
+        liveAgents.push({
+          id,
+          status: "running",
+          archivedAt: null,
+          cwd: opts.cwd ?? resolved.root,
+          provider: opts.config?.provider ?? "pi",
+          model: null,
+          title: null,
+          requiresAttention: false,
+          attentionReason: null,
+          updatedAt: new Date().toISOString(),
+          labels: opts.labels ?? {},
+        });
+        return { id };
+      },
+      ref: (id: string) => ({
+        send: async () => ({ messageId: `msg-${id}` }),
+        archive: async () => {
+          const found = liveAgents.find((a) => a.id === id);
+          if (found) found.archivedAt = new Date().toISOString();
+          return { archivedAt: new Date().toISOString() };
+        },
+      }),
+    },
+  } as unknown as import("../plugin/server/surface-rpc.ts").SurfaceDaemonApi;
+  const deps = { daemon: fakeDaemon };
+
+  // 1. Contract T-01 (omitted disposition -> writable engineer) and T-02 (explicit engineer).
+  factory.setContract({ task: "T-01", workspace: resolved.root, gate: "true", artifact: "README.md" });
+  factory.setContract({ task: "T-02", workspace: resolved.root, gate: "true", artifact: "README.md", disposition: "engineer" });
+
+  // Spawn T-01 -> succeeds and leaves live running Peer peer-1.
+  const first = await handleSpoolRequest(
+    registry.root,
+    { id: "sp-1", kind: "spawn", task: "T-01", provider: "pi/zai/glm-5.3", arity: 1, prompt: "Execute task T-01", submitter: "lead-1", seat: "lead" },
+    deps,
+    registry,
+  );
+  assert.equal(first.ok, true, JSON.stringify(first));
+  assert.equal(createdCount, 1);
+
+  // 2. While T-01 Peer is running, spawning T-02 must be refused and record spawn_refused.
+  const whileRunning = await handleSpoolRequest(
+    registry.root,
+    { id: "sp-2-run", kind: "spawn", task: "T-02", provider: "pi/zai/glm-5.3", arity: 1, prompt: "Execute task T-02", submitter: "lead-1", seat: "lead" },
+    deps,
+    registry,
+  );
+  assert.equal(whileRunning.ok, false);
+  if (!whileRunning.ok) {
+    assert.equal(whileRunning.code, "writable-peer-in-flight");
+    assert.match(whileRunning.message, /T-01/);
+  }
+  assert.equal(createdCount, 1, "refused spawn must not create a second Peer");
+  const refusedRunning = factory.ledger.events.findLast((e) => e.event === "spawn_refused");
+  assert.ok(refusedRunning && refusedRunning.event === "spawn_refused");
+  assert.equal(refusedRunning.task, "T-02");
+  assert.equal(refusedRunning.rule, "spawn:single-writable-peer");
+
+  // 3. While T-01 Peer ended its turn (idle) after queuing in Gate queue (gate_queued), T-02 is STILL refused.
+  liveAgents[0]!.status = "idle";
+  factory.ledger.append({ event: "gate_queued", task: "T-01", attempt: 1, sha: baseSha, agent: "peer-1" });
+  const whileQueued = await handleSpoolRequest(
+    registry.root,
+    { id: "sp-2-queue", kind: "spawn", task: "T-02", provider: "pi/zai/glm-5.3", arity: 1, prompt: "Execute task T-02", submitter: "lead-1", seat: "lead" },
+    deps,
+    registry,
+  );
+  assert.equal(whileQueued.ok, false);
+  if (!whileQueued.ok) assert.equal(whileQueued.code, "writable-peer-in-flight");
+  assert.equal(createdCount, 1);
+
+  // 4. While T-01 is RED on Attempt 1 (< MAX_ATTEMPTS) with idle live Peer retrying, T-02 is STILL refused.
+  factory.ledger.append({ event: "gate_started", task: "T-01", attempt: 1, cmd: "true" });
+  factory.ledger.append({ event: "gate_finished", task: "T-01", attempt: 1, exit: 1, verdict: "red", note: "lint fail", sha: baseSha });
+  factory.ledger.append({ event: "report_written", task: "T-01", attempt: 1, path: "report-T-01-1.md" });
+  const whileRedRetry = await handleSpoolRequest(
+    registry.root,
+    { id: "sp-2-red1", kind: "spawn", task: "T-02", provider: "pi/zai/glm-5.3", arity: 1, prompt: "Execute task T-02", submitter: "lead-1", seat: "lead" },
+    deps,
+    registry,
+  );
+  assert.equal(whileRedRetry.ok, false);
+  if (!whileRedRetry.ok) assert.equal(whileRedRetry.code, "writable-peer-in-flight");
+  assert.equal(createdCount, 1);
+
+  // 5. Concurrent Promise.all spawn of two fresh writable Tasks in the same Project allows only one.
+  liveAgents[0]!.archivedAt = new Date().toISOString();
+  factory.setContract({ task: "T-03", workspace: resolved.root, gate: "true", artifact: "README.md" });
+  factory.setContract({ task: "T-04", workspace: resolved.root, gate: "true", artifact: "README.md" });
+  const concurrent = await Promise.all([
+    handleSpoolRequest(registry.root, { id: "sp-conc-3", kind: "spawn", task: "T-03", provider: "pi/zai/glm-5.3", arity: 1, prompt: "Execute task T-03", submitter: "lead-1", seat: "lead" }, deps, registry),
+    handleSpoolRequest(registry.root, { id: "sp-conc-4", kind: "spawn", task: "T-04", provider: "pi/zai/glm-5.3", arity: 1, prompt: "Execute task T-04", submitter: "lead-1", seat: "lead" }, deps, registry),
+  ]);
+  assert.deepEqual(concurrent.map((r) => r.ok).sort(), [false, true], "concurrent writable spawns serialize and refuse the second");
+  assert.equal(createdCount, 2);
+});
+
+test("ADR 0068: read-only dispositions (scout, architect, reviewer) and separate Projects dispatch freely without false single-writable-Peer refusals, and settled/dead writable Peers unblock the Project", async (t) => {
+  const dir = makeTempDir("spool-ro-cross-proj-");
+  disposeDir(t, dir);
+  const stateDir = join(dir, "state");
+  const repoA = join(dir, "repo-a");
+  const repoB = join(dir, "repo-b");
+  for (const r of [repoA, repoB]) {
+    mkdirSync(r, { recursive: true });
+    writeFileSync(join(r, "README.md"), "base\n");
+  }
+  const shaA = gitCommitAll(repoA, "init a");
+  gitCommitAll(repoB, "init b");
+  const resA = resolveProject(repoA);
+  const resB = resolveProject(repoB);
+  assert.ok(resA.ok && resB.ok);
+  writeProjectRegistration(stateDir, resA.slug, { root: resA.root });
+  writeProjectRegistration(stateDir, resB.slug, { root: resB.root });
+
+  const registry = createFactoryRegistry({ stateDir });
+  t.after(() => registry.stop());
+  const factoryA = registry.factoryForProject(resA.slug);
+  const factoryB = registry.factoryForProject(resB.slug);
+
+  const liveAgents: Array<import("../plugin/server/surface-rpc.ts").SurfaceAgentSnapshot & { labels: Record<string, string> }> = [];
+  let createdCount = 0;
+  const fakeDaemon = {
+    agents: {
+      list: async (opts?: { filter?: { labels?: Record<string, string>; includeArchived?: boolean } }) => {
+        const wanted = opts?.filter?.labels ?? {};
+        const includeArchived = opts?.filter?.includeArchived === true;
+        const entries = liveAgents
+          .filter((agent) => includeArchived || agent.archivedAt === null)
+          .filter((agent) => Object.entries(wanted).every(([k, v]) => agent.labels[k] === v))
+          .map((agent) => ({ agent }));
+        return { entries };
+      },
+      create: async (opts: { cwd?: string; labels?: Record<string, string>; config?: { provider?: string } }) => {
+        const id = `peer-${++createdCount}`;
+        liveAgents.push({
+          id,
+          status: "running",
+          archivedAt: null,
+          cwd: opts.cwd ?? resA.root,
+          provider: opts.config?.provider ?? "pi",
+          model: null,
+          title: null,
+          requiresAttention: false,
+          attentionReason: null,
+          updatedAt: new Date().toISOString(),
+          labels: opts.labels ?? {},
+        });
+        return { id };
+      },
+      ref: (id: string) => ({
+        archive: async () => {
+          const found = liveAgents.find((a) => a.id === id);
+          if (found) found.archivedAt = new Date().toISOString();
+          return { archivedAt: new Date().toISOString() };
+        },
+      }),
+    },
+  } as unknown as import("../plugin/server/surface-rpc.ts").SurfaceDaemonApi;
+  const deps = { daemon: fakeDaemon, stopAgent: async () => ({ ok: true as const }) };
+
+  // 1. Live writable Peer ENG-1 in Project A.
+  factoryA.setContract({ task: "ENG-1", workspace: resA.root, gate: "true", artifact: "README.md", disposition: "engineer" });
+  const eng1 = await handleSpoolRequest(
+    registry.root,
+    { id: "sp-eng1", kind: "spawn", task: "ENG-1", provider: "pi/zai/glm-5.3", arity: 1, prompt: "Execute task ENG-1", submitter: "lead-1", seat: "lead" },
+    deps,
+    registry,
+  );
+  assert.equal(eng1.ok, true);
+
+  // 2. Read-only Peers (scout, architect, reviewer) in Project A all dispatch concurrently while ENG-1 is running!
+  for (const disp of ["scout", "architect", "reviewer"] as const) {
+    const taskId = `RO-${disp.toUpperCase()}`;
+    factoryA.setContract({ task: taskId, workspace: resA.root, gate: "", disposition: disp });
+    const roReply = await handleSpoolRequest(
+      registry.root,
+      { id: `sp-${disp}`, kind: "spawn", task: taskId, provider: "pi/zai/glm-5.3", arity: 1, prompt: `Execute task ${taskId}`, submitter: "lead-1", seat: "lead" },
+      deps,
+      registry,
+    );
+    assert.equal(roReply.ok, true, `${disp} must not be blocked by live writable Peer`);
+  }
+
+  // 3. Writable Peer in Project B dispatches freely even while Project A's ENG-1 is running!
+  factoryB.setContract({ task: "ENG-1", workspace: resB.root, gate: "true", artifact: "README.md" });
+  const engB = await handleSpoolRequest(
+    registry.root,
+    { id: "sp-engb", kind: "spawn", task: "ENG-1", projectSlug: resB.slug, provider: "pi/zai/glm-5.3", arity: 1, prompt: "Execute task ENG-1 in B", submitter: "lead-b", seat: "lead" },
+    deps,
+    registry,
+  );
+  assert.equal(engB.ok, true, `separate Project writable Peer must not be blocked: ${JSON.stringify(engB)}`);
+
+  // 4. Settling ENG-1 in Project A (GREEN / ready-to-accept) unblocks ENG-2 in Project A EVEN WHILE read-only Peers stay running!
+  liveAgents[0]!.status = "idle";
+  factoryA.ledger.append({ event: "claim_reported", task: "ENG-1", attempt: 1, sha: shaA, agent: "peer-1" });
+  factoryA.ledger.append({ event: "gate_started", task: "ENG-1", attempt: 1, cmd: "true" });
+  factoryA.ledger.append({ event: "gate_finished", task: "ENG-1", attempt: 1, exit: 0, verdict: "green", note: "ok", sha: shaA });
+  factoryA.ledger.append({ event: "report_written", task: "ENG-1", attempt: 1, path: "report-ENG-1-1.md" });
+
+  factoryA.setContract({ task: "ENG-2", workspace: resA.root, gate: "true", artifact: "README.md" });
+  const eng2 = await handleSpoolRequest(
+    registry.root,
+    { id: "sp-eng2", kind: "spawn", task: "ENG-2", provider: "pi/zai/glm-5.3", arity: 1, prompt: "Execute task ENG-2", submitter: "lead-1", seat: "lead" },
+    deps,
+    registry,
+  );
+  assert.equal(eng2.ok, true, "settled GREEN ENG-1 and active read-only Peers must not block ENG-2");
+
+  // 5. While ENG-2's Peer is running, ENG-3 is refused; once ENG-2's Peer dies (status: error), ENG-3 unblocks.
+  factoryA.setContract({ task: "ENG-3", workspace: resA.root, gate: "true", artifact: "README.md" });
+  const eng3Blocked = await handleSpoolRequest(
+    registry.root,
+    { id: "sp-eng3-blocked", kind: "spawn", task: "ENG-3", provider: "pi/zai/glm-5.3", arity: 1, prompt: "Execute task ENG-3", submitter: "lead-1", seat: "lead" },
+    deps,
+    registry,
+  );
+  assert.equal(eng3Blocked.ok, false);
+  const eng2Agent = liveAgents.find((a) => a.labels.task === "ENG-2" && a.labels.project === resA.slug)!;
+  eng2Agent.status = "error";
+  const eng3AfterError = await handleSpoolRequest(
+    registry.root,
+    { id: "sp-eng3-ok", kind: "spawn", task: "ENG-3", provider: "pi/zai/glm-5.3", arity: 1, prompt: "Execute task ENG-3", submitter: "lead-1", seat: "lead" },
+    deps,
+    registry,
+  );
+  assert.equal(eng3AfterError.ok, true, "dead (error) writable Peer must not block subsequent writable Peer");
+
+  // 6. RED at attempt ceiling (3/3) settles ENG-3 and unblocks ENG-4 even if ENG-3's Peer stays unarchived idle.
+  const eng3Agent = liveAgents.find((a) => a.labels.task === "ENG-3" && a.labels.project === resA.slug)!;
+  eng3Agent.status = "idle";
+  for (const attempt of [1, 2, 3]) {
+    factoryA.ledger.append({ event: "claim_reported", task: "ENG-3", attempt, sha: shaA, agent: eng3Agent.id });
+    factoryA.ledger.append({ event: "gate_started", task: "ENG-3", attempt, cmd: "true" });
+    factoryA.ledger.append({ event: "gate_finished", task: "ENG-3", attempt, exit: 1, verdict: "red", note: "fail", sha: shaA });
+    factoryA.ledger.append({ event: "report_written", task: "ENG-3", attempt, path: `report-ENG-3-${attempt}.md` });
+  }
+  factoryA.setContract({ task: "ENG-4", workspace: resA.root, gate: "true", artifact: "README.md" });
+  const eng4 = await handleSpoolRequest(
+    registry.root,
+    { id: "sp-eng4", kind: "spawn", task: "ENG-4", provider: "pi/zai/glm-5.3", arity: 1, prompt: "Execute task ENG-4", submitter: "lead-1", seat: "lead" },
+    deps,
+    registry,
+  );
+  assert.equal(eng4.ok, true, "attempt-ceiling (RED 3/3) settled writable Peer unblocks next writable Peer");
 });

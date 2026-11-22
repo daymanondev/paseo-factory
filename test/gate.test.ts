@@ -4,7 +4,13 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { runGate } from "../src/gate.ts";
-import { REPORT_NOTE_MAX_CHARS } from "../src/constants.ts";
+import {
+  DEFAULT_CONTRACT_TIMEOUT_SECONDS,
+  DEFAULT_GATE_TIMEOUT_MS,
+  MAX_CONTRACT_TIMEOUT_SECONDS,
+  MIN_CONTRACT_TIMEOUT_SECONDS,
+  REPORT_NOTE_MAX_CHARS,
+} from "../src/constants.ts";
 import { disposeDir, makeTempDir } from "./helpers.ts";
 
 test("exit 0 with the artifact present is green", async (t) => {
@@ -199,4 +205,106 @@ test("a signal-terminated Gate remains red with no exit code", { skip: process.p
   assert.equal(result.exit, null);
   assert.equal(result.timedOut, false);
   assert.equal(result.note, "killed by signal");
+});
+
+test("default Gate timeout is 900s (900_000ms) rather than 300s, and bounds are 60..3600s", { skip: process.platform === "win32" }, async (t) => {
+  assert.equal(MIN_CONTRACT_TIMEOUT_SECONDS, 60);
+  assert.equal(MAX_CONTRACT_TIMEOUT_SECONDS, 3600);
+  assert.equal(DEFAULT_CONTRACT_TIMEOUT_SECONDS, 900);
+  assert.equal(DEFAULT_GATE_TIMEOUT_MS, 900_000);
+
+  const dir = makeTempDir();
+  const pidPath = join(dir, "child.pid");
+  t.after(() => {
+    if (!existsSync(pidPath)) return;
+    try { process.kill(Number(readFileSync(pidPath, "utf8")), "SIGKILL"); } catch { /* already dead */ }
+  });
+  disposeDir(t, dir);
+
+  writeFileSync(join(dir, "waiter.mjs"), `
+    import { writeFileSync } from "node:fs";
+    writeFileSync(${JSON.stringify(pidPath)}, String(process.pid));
+    setInterval(() => {}, 1000);
+  `);
+
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let settled = false;
+  const gatePromise = runGate({ cmd: `exec '${process.execPath}' waiter.mjs`, cwd: dir }).then((res) => {
+    settled = true;
+    return res;
+  });
+
+  // Wait for the real subprocess to spawn and write its pidfile (setImmediate is unmocked).
+  const deadline = Date.now() + 5_000;
+  while (!existsSync(pidPath)) {
+    if (Date.now() >= deadline) throw new Error("waiter.mjs did not start within 5s");
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+
+  // Must survive past the old 300s (300_000ms) ceiling and up to 899_999ms.
+  t.mock.timers.tick(300_000);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(settled, false, "omitted Gate timeout must not kill at the old 300s ceiling");
+
+  t.mock.timers.tick(599_999);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(settled, false, "omitted Gate timeout must not kill before 900_000ms");
+
+  // Crossing 900_000ms kills the detached process group and resolves red timeout.
+  t.mock.timers.tick(1);
+  const result = await gatePromise;
+  const pid = Number(readFileSync(pidPath, "utf8"));
+  const status = spawnSync("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" }).stdout.trim();
+
+  assert.equal(result.timedOut, true);
+  assert.equal(result.exit, null);
+  assert.equal(result.verdict, "red");
+  assert.match(result.note, /900000ms.*timeout/);
+  assert.ok(status === "" || status.startsWith("Z"), `process ${pid} must be reaped on timeout: ${status}`);
+});
+
+test("runGate aborts promptly via AbortSignal, reaping detached -pgid and recording red cancelNote", { skip: process.platform === "win32" }, async (t) => {
+  const dir = makeTempDir();
+  const pidPath = join(dir, "child.pid");
+  t.after(() => {
+    if (!existsSync(pidPath)) return;
+    try { process.kill(Number(readFileSync(pidPath, "utf8")), "SIGKILL"); } catch { /* already dead */ }
+  });
+  disposeDir(t, dir);
+
+  writeFileSync(join(dir, "sleeper.mjs"), `
+    import { writeFileSync } from "node:fs";
+    writeFileSync(${JSON.stringify(pidPath)}, String(process.pid));
+    setInterval(() => {}, 1000);
+  `);
+
+  const controller = new AbortController();
+  const gatePromise = runGate({
+    cmd: `exec '${process.execPath}' sleeper.mjs`,
+    cwd: dir,
+    timeoutMs: 30_000,
+    signal: controller.signal,
+    cancelNote: "cancelled-by-owner",
+  });
+
+  const deadline = Date.now() + 5_000;
+  while (!existsSync(pidPath)) {
+    if (Date.now() >= deadline) throw new Error("sleeper.mjs did not start within 5s");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+
+  const startedAt = Date.now();
+  controller.abort();
+  const result = await gatePromise;
+  const elapsed = Date.now() - startedAt;
+  const pid = Number(readFileSync(pidPath, "utf8"));
+  const status = spawnSync("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" }).stdout.trim();
+
+  assert.equal(result.verdict, "red");
+  assert.equal(result.exit, null);
+  assert.equal(result.timedOut, false);
+  assert.equal(result.cancelled, true);
+  assert.equal(result.note, "cancelled-by-owner");
+  assert.ok(elapsed < 2_000, `abort took ${elapsed}ms`);
+  assert.ok(status === "" || status.startsWith("Z"), `aborted process ${pid} must be reaped: ${status}`);
 });

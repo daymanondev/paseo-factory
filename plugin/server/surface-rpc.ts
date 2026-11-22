@@ -3,7 +3,7 @@ import { recentSeatModels } from "./seat-model-history.ts";
 import { readPeerHandover } from "./peer-handoff.ts";
 import { parseHandoffFile } from "./handoff-text.ts";
 import { readHandoffProgress, laneRef } from "./handoff-progress.ts";
-import type { LastReleaseView, PanelView, ReleaseOriginView, ReleaseSettingsView, ScopedLaneRef, StoreReleaseRunnerStatus, StoreReleaseView, TaskView } from "../shared/view.ts";
+import type { GateQueueAheadEntryView, GateQueueEntryView, GateQueueView, LastReleaseView, OverviewLatestGate, OverviewProjectEntry, PanelGateQueueEntry, PanelView, ReleaseOriginView, ReleaseSettingsView, ScopedLaneRef, StoreReleaseRunnerStatus, StoreReleaseView, TaskView } from "../shared/view.ts";
 import type { HandoffProgress, HandoffAction, HandoffRequest, HandoffReply } from "../shared/handoff.ts";
 import { clearReleaseRequest, clearStoreReleaseRequest, readProjectSettings, readReleaseRequest, readReleaseSettings, readStoreReleaseRequest, readStoreReleaseSettings, setProjectReleaseSettings, setProjectSkillPacks, setProjectStoreReleaseSettings, resetProjectSkillPacks } from "./core/project-settings.ts";
 import type { ProjectReleaseMode, ProjectStoreReleaseMode } from "./core/project-settings.ts";
@@ -18,6 +18,11 @@ import { provisionPiAgentHome } from "./core/pi-home.ts";
 import { expandHome, pluginDirFor } from "./paths.ts";
 import { liveSeatCandidates, seatCandidates } from "./seats.ts";
 import { checkProjectResetRepository, removeProjectStateDirectory, resetProjectRepository } from "./project-reset.ts";
+import { cancelProjectGates, gateItemBelongsToProject, resolveGateProjectTarget } from "./gate-queue.ts";
+import type { GateQueue } from "./gate-queue.ts";
+import { GATE_QUEUE_FILENAME, readPersistedGateQueue, snapshotFromGateQueueFile } from "./core/gate-queue-status.ts";
+import type { GateQueueItem, GateQueueSnapshot } from "./core/gate-queue-status.ts";
+import { attemptEvidenceName } from "./core/factory.ts";
 import { boundTaskPeers } from "./task-peers.ts";
 import { peerHandoffsInProgress, projectPeersInFlight } from "./peer-in-flight.ts";
 import { withProjectIngressLock } from "./core/project-ingress-lock.ts";
@@ -54,7 +59,7 @@ import { buildSeatKickoffPacket } from "./core/preflight.ts";
 import { LANE_NAMES, findCatalogModel, findCatalogProviderEntry, laneError, loadLanes, migrateLegacyZcodeLane, normalizeLaneWithProviders, normalizeLanesWithProviders, parseLane, saveLanes, projectLanesPath, listLaneProfiles, getLaneProfile, readLaneProfilesFile, saveLaneProfile, deleteLaneProfile, applyLaneProfile, saveLanesBatch, resetProjectLanes, validatedProfileLanes } from "./core/lanes.ts";
 import type { LaneProfile } from "./core/lanes.ts";
 import { listProjectRegistrations, projectNotebookPath, projectStateDir, readProjectRegistration, resolveOrBootstrapProject, resolveProject } from "./core/project.ts";
-import type { ProjectResolution } from "./core/project.ts";
+import type { ProjectRegistration, ProjectResolution } from "./core/project.ts";
 import { builtinVaultRunner, hydrateVaultDirect, importVaultSecrets, isLocalCompanionGitSource, loadVaultConfig, probeCompanionGitAccess, probeGhAuth, pullVault, pushVault, readVaultStatus, readVaultStoreReadiness, saveVaultConfig, syncVault } from "./core/vault.ts";
 import type { ImportVaultSecretsInput, SyncVaultOptions, VaultConfig, VaultRunner } from "./core/vault.ts";
 import { materializeVaultSkillsFromRuntime, resolveVaultUserHome } from "./core/vault-materialization.ts";
@@ -115,6 +120,11 @@ import {
   onboardingInspect,
   onboardingStart,
   onboardingStatus,
+  overview,
+  gateQueueCancel,
+  gateQueueConcurrency,
+  gateQueuePause,
+  gateQueueResume,
   projectDelete,
   projectReset,
   projectRotate,
@@ -441,6 +451,8 @@ export interface SurfaceDeps {
    * is refused `project-rotate-unavailable`.
    */
   rotateProjectMailbox?: (slug: string) => void;
+  /** Daemon-wide Gate queue whose Project Gates are cancelled before reset/delete enters exclusive maintenance. */
+  gateQueue?: GateQueue | (() => GateQueue | undefined);
   /** Optional hook notified after a non-read surface handler completes. */
   onStateChange?: (event: { handler: string; projectSlug?: string; projectRoot?: string }) => void;
   /** Optional override for the `start-supervisor` watchdog timeout during async onboarding runs (defaults to 120s). */
@@ -617,6 +629,265 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       workspace: input.projectRoot !== undefined && input.projectRoot.trim() !== "" ? input.projectRoot : input.workspace,
     });
     return target.ok ? deps.registry.factoryForProject(target.slug) : deps.factory;
+  };
+
+  const resolveDeleteTarget = (
+    input: { projectRoot?: string; projectSlug?: string; project?: string } = {},
+  ): { ok: true; project: { slug: string; root: string; name: string } } | ReturnType<typeof failure> => {
+    const rawRoot = (input.projectRoot ?? "").trim();
+    const rawSlug = (input.projectSlug ?? input.project ?? "").trim();
+    if (rawRoot !== "") {
+      const resolved = resolveProject(rawRoot);
+      if (resolved.ok) {
+        return { ok: true, project: { slug: resolved.slug, root: resolved.root, name: basename(resolved.root) || resolved.slug } };
+      }
+      const registrations = listProjectRegistrations(deps.stateDir);
+      const byMatch = registrations.find(
+        (reg) => reg.root === rawRoot || realpathSafe(reg.root) === realpathSafe(rawRoot) || reg.slug === rawRoot,
+      );
+      if (byMatch !== undefined) {
+        return { ok: true, project: { slug: byMatch.slug, root: byMatch.root, name: basename(byMatch.root) || byMatch.slug } };
+      }
+      if (rawSlug !== "") {
+        const bySlug = readProjectRegistration(deps.stateDir, rawSlug);
+        if (bySlug !== undefined) {
+          return { ok: true, project: { slug: bySlug.slug, root: bySlug.root, name: basename(bySlug.root) || bySlug.slug } };
+        }
+        return { ok: true, project: { slug: rawSlug, root: rawRoot, name: basename(rawRoot) || rawSlug } };
+      }
+      return failure("unknown-project", `project root ${rawRoot} does not resolve to a registered project or git repository — ${resolved.reason}`);
+    }
+    if (rawSlug !== "") {
+      const reg = readProjectRegistration(deps.stateDir, rawSlug);
+      if (reg !== undefined) {
+        return { ok: true, project: { slug: reg.slug, root: reg.root, name: basename(reg.root) || reg.slug } };
+      }
+      return failure("unknown-project", `project "${rawSlug}" is not registered — pass projectRoot or a known projectSlug`);
+    }
+    const registrations = listProjectRegistrations(deps.stateDir);
+    if (registrations.length === 1) {
+      const only = registrations[0]!;
+      return { ok: true, project: { slug: only.slug, root: only.root, name: basename(only.root) || only.slug } };
+    }
+    if (registrations.length === 0) {
+      return failure("unknown-project", "no project specified and no project is registered");
+    }
+    return failure(
+      "ambiguous-project",
+      `more than one project is registered (${registrations.map((r) => r.slug).join(", ")}) — pass projectRoot or projectSlug to name the one to delete`,
+    );
+  };
+
+  const resolveGateQueue = (): GateQueue | undefined =>
+    typeof deps.gateQueue === "function" ? deps.gateQueue() : deps.gateQueue;
+
+  const currentGateQueueSnapshot = (): GateQueueSnapshot => {
+    const live = resolveGateQueue();
+    if (live !== undefined) return live.snapshot();
+    const persisted = readPersistedGateQueue(join(deps.stateDir, GATE_QUEUE_FILENAME), 1);
+    return persisted !== undefined
+      ? snapshotFromGateQueueFile(persisted)
+      : { paused: false, concurrency: 1, running: [], queued: [] };
+  };
+
+  const projectDisplayName = (slug: string, reg?: ProjectRegistration): string =>
+    reg?.name ?? (reg !== undefined ? basename(reg.root) || slug : slug);
+
+  const resolveQueueLogPath = (item: GateQueueItem): string | null => {
+    if (typeof item.logPath === "string" && item.logPath.trim() !== "") return item.logPath;
+    const baseDir = item.useRootFactory === true ? deps.stateDir : projectStateDir(deps.stateDir, item.projectSlug);
+    const contract = contractInProject(item.task, item.projectSlug);
+    return join(baseDir, `gate-${attemptEvidenceName(item.task, item.attempt, contract)}.log`);
+  };
+
+  const buildGateQueueView = (
+    snap: GateQueueSnapshot,
+    regBySlug: ReadonlyMap<string, ProjectRegistration>,
+    workspaceBySlug?: ReadonlyMap<string, string | null>,
+    now = Date.now(),
+  ): GateQueueView => {
+    const ordered = [...snap.running, ...snap.queued];
+    const aheadMeta: GateQueueAheadEntryView[] = [];
+    const running: GateQueueEntryView[] = [];
+    const queued: GateQueueEntryView[] = [];
+
+    for (let idx = 0; idx < ordered.length; idx += 1) {
+      const item = ordered[idx]!;
+      const reg = regBySlug.get(item.projectSlug);
+      const projectName = projectDisplayName(item.projectSlug, reg);
+      const projectRoot = reg?.root ?? null;
+      const workspaceId = workspaceBySlug?.get(item.projectSlug) ?? reg?.workspaceId ?? null;
+      const logPath = resolveQueueLogPath(item);
+      const logExists = logPath !== null && existsSync(logPath);
+      const enqueuedMs = Date.parse(item.enqueuedAt);
+      const startedMs = item.startedAt !== undefined ? Date.parse(item.startedAt) : Number.NaN;
+      const waitMs = item.status === "running"
+        ? (Number.isFinite(startedMs) && Number.isFinite(enqueuedMs) ? Math.max(0, startedMs - enqueuedMs) : 0)
+        : (Number.isFinite(enqueuedMs) ? Math.max(0, now - enqueuedMs) : 0);
+      const elapsedMs = item.status === "running"
+        ? (Number.isFinite(startedMs) ? Math.max(0, now - startedMs) : 0)
+        : null;
+      const ahead = aheadMeta.map((a) => ({ ...a }));
+      const entry: GateQueueEntryView = {
+        id: item.id,
+        projectSlug: item.projectSlug,
+        projectName,
+        projectRoot,
+        workspaceId,
+        task: item.task,
+        attempt: item.attempt,
+        status: item.status,
+        queuedAt: item.enqueuedAt,
+        startedAt: item.startedAt ?? null,
+        waitMs,
+        elapsedMs,
+        timeoutMs: item.timeoutMs,
+        position: idx + 1,
+        aheadCount: ahead.length,
+        ahead,
+        logPath,
+        logExists,
+        ...(item.mechanical === undefined ? {} : { mechanical: item.mechanical }),
+        ...(item.agent === undefined ? {} : { agentId: item.agent }),
+      };
+      if (item.status === "running") running.push(entry);
+      else queued.push(entry);
+      aheadMeta.push({
+        id: item.id,
+        projectSlug: item.projectSlug,
+        projectName,
+        task: item.task,
+        attempt: item.attempt,
+        status: item.status,
+      });
+    }
+
+    return {
+      paused: snap.paused,
+      pausedAt: snap.pausedAt ?? null,
+      concurrency: snap.concurrency,
+      running,
+      queued,
+    };
+  };
+
+  const panelGateQueueEntries = (
+    snap: GateQueueSnapshot,
+    slug: string,
+    root: string,
+    regBySlug: ReadonlyMap<string, ProjectRegistration>,
+    now = Date.now(),
+  ): PanelGateQueueEntry[] => {
+    const view = buildGateQueueView(snap, regBySlug, undefined, now);
+    const ordered = [...view.running, ...view.queued];
+    const originalById = new Map([...snap.running, ...snap.queued].map((item) => [item.id, item]));
+    const entries: PanelGateQueueEntry[] = [];
+    for (const entry of ordered) {
+      const raw = originalById.get(entry.id);
+      if (raw === undefined || !gateItemBelongsToProject(deps.stateDir, slug, root, raw)) continue;
+      const headAhead = entry.ahead[0];
+      entries.push({
+        id: entry.id,
+        task: entry.task,
+        attempt: entry.attempt,
+        status: entry.status,
+        position: entry.position,
+        aheadCount: entry.aheadCount,
+        aheadLabel: headAhead === undefined ? null : `${headAhead.projectName} · ${headAhead.task}`,
+        ...(entry.ahead.length === 0 ? {} : { ahead: entry.ahead }),
+        paused: snap.paused,
+        queuedAt: entry.queuedAt,
+        startedAt: entry.startedAt,
+        ...(entry.mechanical === undefined ? {} : { mechanical: entry.mechanical }),
+      });
+    }
+    return entries;
+  };
+
+  const latestGateOf = (
+    events: readonly LedgerEvent[],
+    projectQueueEntries: readonly GateQueueEntryView[],
+  ): OverviewLatestGate | null => {
+    const active = projectQueueEntries.find((entry) => entry.status === "running") ?? projectQueueEntries[0];
+    if (active !== undefined) {
+      return {
+        state: active.status,
+        verdict: null,
+        task: active.task,
+        attempt: active.attempt,
+        ts: active.startedAt ?? active.queuedAt,
+        note: null,
+      };
+    }
+    const latestFinished = events.findLast(
+      (evt): evt is Extract<LedgerEvent, { event: "gate_finished" }> => evt.event === "gate_finished",
+    );
+    if (latestFinished !== undefined) {
+      return {
+        state: latestFinished.verdict,
+        verdict: latestFinished.verdict,
+        task: latestFinished.task,
+        attempt: latestFinished.attempt,
+        ts: latestFinished.ts,
+        note: latestFinished.note.trim() === "" ? null : latestFinished.note,
+      };
+    }
+    return null;
+  };
+
+  const cancelGatesBeforeProjectMaintenance = async (
+    kind: "projectReset" | "projectDelete",
+    rawInput: unknown,
+    rawContext: unknown,
+  ): Promise<void> => {
+    const queue = resolveGateQueue();
+    if (queue === undefined) return;
+    const input = (rawInput !== null && typeof rawInput === "object" ? rawInput : {}) as {
+      projectRoot?: string;
+      projectSlug?: string;
+      project?: string;
+      keepSeats?: boolean;
+      seat?: string;
+    };
+    const context = (rawContext !== null && typeof rawContext === "object" ? rawContext : undefined) as
+      | (SurfaceCallContext & { seat?: string })
+      | undefined;
+    if (kind === "projectDelete") {
+      const callerSeat =
+        typeof input.seat === "string" && input.seat.trim() !== ""
+          ? input.seat.trim()
+          : typeof context?.seat === "string" && context.seat.trim() !== ""
+            ? context.seat.trim()
+            : "";
+      if (isProjectSeat(callerSeat)) return;
+      const target = resolveDeleteTarget(input);
+      if (!target.ok) return;
+      await cancelProjectGates({
+        gateQueue: queue,
+        stateDir: deps.stateDir,
+        slug: target.project.slug,
+        root: target.project.root,
+        note: "cancelled-by-project-delete",
+      });
+      return;
+    }
+    const target = resolveActTarget(input, "reset");
+    if (!target.ok) return;
+    const protectedPluginDir = deps.pluginDir ?? pluginDirFor(deps.home);
+    if (input.keepSeats !== true) {
+      try {
+        checkProjectResetRepository(target.project.root, protectedPluginDir);
+      } catch {
+        return;
+      }
+    }
+    await cancelProjectGates({
+      gateQueue: queue,
+      stateDir: deps.stateDir,
+      slug: target.project.slug,
+      root: target.project.root,
+      note: "cancelled-by-project-reset",
+    });
   };
   let localUpdateSnapshot: { statuses: ReadonlyMap<string, DaemonPluginSourceStatus>; checkedAt: string } | null = null;
   let localToolUpdateSnapshot: Record<"factory-skills-pack", CompanionToolUpdateStatus> | null = null;
@@ -1029,7 +1300,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
   const agentTaskIndex = (events: readonly LedgerEvent[] = deps.factory.ledger.events): Map<string, string> => {
     const index = new Map<string, string>();
     for (const evt of events) {
-      const agent = evt.event === "claim_reported" || evt.event === "meter_written" ? evt.agent : evt.event === "repoke_dispatched" ? evt.agent : undefined;
+      const agent = evt.event === "gate_queued" || evt.event === "claim_reported" || evt.event === "meter_written" ? evt.agent : evt.event === "repoke_dispatched" ? evt.agent : undefined;
       if ("task" in evt && typeof evt.task === "string" && typeof agent === "string" && agent !== "") index.set(agent, evt.task);
     }
     return index;
@@ -2900,6 +3171,195 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     };
   };
 
+  /**
+   * Shared machine-wide directory gatherer backing both `seatsDirectory` and
+   * `overview` (ADR 0057 §8/§11, ADR 0068): one daemon listing, one per-Project
+   * panel fold, and one Gate-queue projection.
+   */
+  const gatherDirectoryAndOverview = async (context?: SurfaceCallContext) => {
+    const now = Date.now();
+    const daemon = resolveDaemon(context);
+    let rawAgents: SurfaceAgentSnapshot[] = [];
+    let providers: ProviderEntry[] = cachedProviderList ?? [];
+    let daemonError: string | null = null;
+    try {
+      const page = await daemon.agents.list({ filter: { includeArchived: false, includeBackground: true } });
+      rawAgents = page.entries.map((entry) => entry.agent).filter((agent) => agent.archivedAt === null);
+      providers = await bestEffortProviders(daemon);
+    } catch (err) {
+      daemonError = `daemon unavailable: ${messageOf(err)}`;
+    }
+    const missingPrerequisites = buildCompanionToolsView()
+      .filter((tool) => tool.status !== "running" || tool.error !== null)
+      .map((tool) => tool.title);
+    const registrations = listProjectRegistrations(deps.stateDir);
+    const regBySlug = new Map(registrations.map((reg) => [reg.slug, reg]));
+    const queueSnap = currentGateQueueSnapshot();
+    const preQueueView = buildGateQueueView(queueSnap, regBySlug, undefined, now);
+    const orderedQueueEntries = [...preQueueView.running, ...preQueueView.queued];
+    const rawQueueById = new Map([...queueSnap.running, ...queueSnap.queued].map((item) => [item.id, item]));
+
+    const directoryRows: Parameters<typeof directorySeatOf>[] = [];
+    const projects: ProjectDirectoryEntry[] = [];
+    const overviewProjects: OverviewProjectEntry[] = [];
+    const workspaceBySlug = new Map<string, string | null>();
+
+    for (const registration of registrations) {
+      const supervisorRaw = seatCandidates(rawAgents, deps.stateDir, "supervisor", registration.slug)[0];
+      const leadRaw = seatCandidates(rawAgents, deps.stateDir, "lead", registration.slug)[0];
+      let events: readonly LedgerEvent[] = [];
+      let ledgerError: string | null = null;
+      try {
+        events = factoryForSlug(registration.slug).ledger.events;
+      } catch (err) {
+        ledgerError = messageOf(err);
+        log(`seatsDirectory: project ${registration.slug} ledger unreadable — ${ledgerError}`);
+      }
+      const tasks = foldTasks(events);
+      const bound = agentTaskIndex(events);
+      const peers: SurfaceAgentSnapshot[] = [];
+      for (const agent of rawAgents) {
+        if (agent.id === supervisorRaw?.id || agent.id === leadRaw?.id) continue;
+        if (agent.labels.seat === "agent" && agent.labels.project === registration.slug) {
+          peers.push(agent);
+          continue;
+        }
+        if (agent.labels.seat !== undefined) continue;
+        const task = bound.get(agent.id);
+        if (task === undefined || !taskInProject(task, registration.root, registration.slug)) continue;
+        const view = tasks.find((entry) => entry.task === task);
+        if (view !== undefined && (view.status === "accepted" || view.status === "closed")) continue;
+        peers.push(agent);
+      }
+      const supervisor = supervisorRaw === undefined ? null : agentViewOf(supervisorRaw, null, "supervisor", registration.slug, providers);
+      const lead = leadRaw === undefined ? null : agentViewOf(leadRaw, null, "lead", registration.slug, providers);
+      const agents = [
+        ...(supervisor === null ? [] : [supervisor]),
+        ...(lead === null ? [] : [lead]),
+        ...peers.map((agent) => agentViewOf(agent, bound.get(agent.id) ?? agent.labels.task ?? null, undefined, registration.slug, providers)),
+      ];
+      let heldSupervisorMailCount = 0;
+      try {
+        heldSupervisorMailCount = readLeadMailbox(join(projectStateDir(deps.stateDir, registration.slug), "mailbox.jsonl")).supervisorQueued.length;
+      } catch {
+        heldSupervisorMailCount = 0;
+      }
+      const effective = loadLanes(deps.stateDir, registration.slug);
+      const effectiveLanes = effective.ok ? normalizeLanesWithProviders(effective.lanes, providers) : undefined;
+      const profiles = effectiveLanes !== undefined ? laneProfilesGather(registration.slug, effectiveLanes, providers) : { profiles: [], activeProfileId: null, activeProfileModified: false, hasProjectLaneOverride: false };
+      const panel = foldPanel({
+        ...(effectiveLanes !== undefined ? handoffPanelFacts(registration.slug, tasks, effectiveLanes) : {}),
+        ...(effectiveLanes !== undefined ? { seatLanes: seatLanesOf(registration.slug, effectiveLanes) } : {}),
+        profile: { active: profiles.profiles.find(p => p.id === profiles.activeProfileId) ?? null, list: profiles.profiles, modified: profiles.activeProfileModified },
+        project: { slug: registration.slug, root: registration.root, ...(registration.name !== undefined ? { name: registration.name } : {}) },
+        registered: true,
+        folder: null,
+        git: { gitRepo: true, hasCommits: true },
+        tasks,
+        agents,
+        supervisor,
+        lead,
+        missingPrerequisites,
+        openDesign: existsSync(registration.root) ? probeOpenDesign(deps.stateDir, registration.slug, registration.root) : null,
+        rotationState: registration.rotationState ?? null,
+        handoffRequestedAt: registration.handoffRequestedAt ?? null,
+        heldSupervisorMailCount,
+        supervisorCandidates: [],
+        now,
+      });
+      const workspaceId = registration.workspaceId ?? supervisorRaw?.workspaceId ?? leadRaw?.workspaceId ?? null;
+      workspaceBySlug.set(registration.slug, workspaceId);
+
+      const projectQueueItems = orderedQueueEntries.filter((entry) => {
+        const raw = rawQueueById.get(entry.id);
+        return raw !== undefined && gateItemBelongsToProject(deps.stateDir, registration.slug, registration.root, raw);
+      });
+      const headQueueItem = projectQueueItems.find((entry) => entry.status === "running") ?? projectQueueItems[0];
+      const gateQueueStatus = headQueueItem?.status ?? null;
+      const gateQueuePosition = headQueueItem?.position ?? null;
+
+      const seatRows = [panel.seats!.supervisor, panel.seats!.lead, ...panel.seats!.peers];
+      const handoffActive = panel.handoffs.some(
+        (handoff) => handoff.state !== "done" && handoff.state !== "failed",
+      );
+      const activeWorkCount = seatRows.filter(
+        (row) => !("vacant" in row && row.vacant) && (row.statusLabel === "working" || row.statusLabel === "starting"),
+      ).length;
+      const backgroundWorkCount = seatRows.reduce(
+        (sum, row) => sum + (row.backgroundWorkCount ?? 0),
+        0,
+      );
+      projects.push({
+        slug: registration.slug,
+        root: registration.root,
+        workspaceId,
+        needsYouCount: panel.needsYou.length,
+        handoffActive,
+        activeWorkCount,
+        backgroundWorkCount,
+        gateQueueStatus,
+        gateQueuePosition,
+        gateQueuePaused: queueSnap.paused,
+      });
+
+      const overviewPeers = panel.seats!.peers.map((peer) => ({
+        agentId: peer.agentId,
+        task: peer.task,
+        disposition: peer.disposition,
+        statusLabel: peer.statusLabel,
+        tone: peer.tone,
+      }));
+      overviewProjects.push({
+        slug: registration.slug,
+        name: projectDisplayName(registration.slug, registration),
+        root: registration.root,
+        workspaceId,
+        needsYouCount: panel.needsYou.length,
+        handoffActive,
+        supervisor: {
+          statusLabel: panel.seats!.supervisor.statusLabel,
+          tone: panel.seats!.supervisor.tone,
+          vacant: panel.seats!.supervisor.vacant,
+          agentId: panel.seats!.supervisor.agentId,
+        },
+        lead: {
+          statusLabel: panel.seats!.lead.statusLabel,
+          tone: panel.seats!.lead.tone,
+          vacant: panel.seats!.lead.vacant,
+          agentId: panel.seats!.lead.agentId,
+        },
+        peers: overviewPeers,
+        latestGate: latestGateOf(events, projectQueueItems),
+        gateQueueStatus,
+        gateQueuePosition,
+        ...(ledgerError === null ? {} : { ledgerError }),
+      });
+
+      if (supervisorRaw !== undefined) directoryRows.push([registration, supervisorRaw, panel.seats!.supervisor, profiles]);
+      if (leadRaw !== undefined) directoryRows.push([registration, leadRaw, panel.seats!.lead, profiles]);
+      for (const row of panel.seats!.peers) { const peer = peers.find(p => p.id === row.agentId); if (peer) directoryRows.push([registration, peer, row, profiles]); }
+    }
+
+    const gateQueueView = buildGateQueueView(queueSnap, regBySlug, workspaceBySlug, now);
+    return {
+      daemonError,
+      seats: directoryRows.map(args => directorySeatOf(...args)),
+      projects,
+      gateQueueSummary: {
+        paused: queueSnap.paused,
+        concurrency: queueSnap.concurrency,
+        runningCount: queueSnap.running.length,
+        queuedCount: queueSnap.queued.length,
+      },
+      overview: {
+        generatedAt: new Date(now).toISOString(),
+        daemonError,
+        gateQueue: gateQueueView,
+        projects: overviewProjects,
+      },
+    };
+  };
+
   const handlers = {
     async openDesignCatalog(_input: {}) {
       try { return { ok: true as const, projects: discoverOpenDesignProjects(resolveSurfaceUserHome()) }; }
@@ -3191,6 +3651,11 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       const effectiveLanes = normalizeLanesWithProviders(lanes.lanes, providers);
       const effectiveMachineLanes = normalizeLanesWithProviders(machineLanes.lanes, providers);
       const profileInfo = laneProfilesGather(enrichedProject?.slug, effectiveLanes, providers);
+      const panelRegistrations = new Map(listProjectRegistrations(deps.stateDir).map((reg) => [reg.slug, reg]));
+      const panelGateQueue =
+        enrichedProject !== null && panelRegistration !== undefined
+          ? panelGateQueueEntries(currentGateQueueSnapshot(), enrichedProject.slug, enrichedProject.root, panelRegistrations)
+          : undefined;
       const view = foldView({
         stateDir: deps.stateDir,
         generatedAt: new Date().toISOString(),
@@ -3225,6 +3690,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           handoffRequestedAt: panelRegistration?.handoffRequestedAt ?? null,
           heldSupervisorMailCount,
           supervisorCandidates,
+          ...(panelGateQueue === undefined ? {} : { gateQueue: panelGateQueue }),
           now: Date.now(),
         },
       });
@@ -3243,6 +3709,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           skillHub: inspectSkillHub({ stateDir: deps.stateDir, paseoHome: deps.home, slpLanes: effectiveLanes, userHome: resolveSurfaceUserHome(), projectRoot: enrichedProject?.root, configuredPacks }),
           companionTools: buildCompanionToolsView(),
           helperMcps: helperMcpRoster(discoverHelperMcps({ stateDir: deps.stateDir, userHome: resolveSurfaceUserHome() }).servers),
+          gateQueueConcurrency: currentGateQueueSnapshot().concurrency,
           ...profileInfo,
         },
       };
@@ -3250,123 +3717,107 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
 
     /**
      * The all-Projects seat directory (v0.6.1 W4 spike, ADR 0057 §8/§11): one
-     * read the client's header-button/composer-pill starter polls. Per
-     * registered Project — the standing seats through the same
-     * `seatCandidates` resolution the snapshot uses, Peers through BOTH
-     * identification paths (the spool's spawn labels and the ledger's own
-     * agent→task binding), the root workspace id, and the Needs-you count
-     * folded by the same `foldPanel` the workspace panel renders. The
-     * daemon-half law holds: an unreachable daemon degrades to an empty seat
-     * list with `daemonError` named, never a failed read.
+     * read the client's header-button/composer-pill starter polls.
      */
     async seatsDirectory(_input: {}, context?: SurfaceCallContext) {
-      const daemon = resolveDaemon(context);
-      let rawAgents: SurfaceAgentSnapshot[] = [];
-      let providers: ProviderEntry[] = cachedProviderList ?? [];
-      let daemonError: string | null = null;
+      const gathered = await gatherDirectoryAndOverview(context);
+      return {
+        ok: true as const,
+        seats: gathered.seats,
+        projects: gathered.projects,
+        gateQueue: gathered.gateQueueSummary,
+        daemonError: gathered.daemonError,
+      };
+    },
+
+    /**
+     * Machine-wide Factory overview snapshot (ADR 0068): returns the live
+     * Gate queue + compact summary rows for all registered Projects.
+     */
+    async overview(_input: {}, context?: SurfaceCallContext) {
+      const gathered = await gatherDirectoryAndOverview(context);
+      return {
+        ok: true as const,
+        ...gathered.overview,
+      };
+    },
+
+    async gateQueuePause(_input: {}, _context?: SurfaceCallContext) {
+      const queue = resolveGateQueue();
+      if (queue === undefined) return failure("gate-queue-unavailable", "Gate queue is not active on this server");
+      const snap = queue.pause();
+      const regBySlug = new Map(listProjectRegistrations(deps.stateDir).map((reg) => [reg.slug, reg]));
+      return { ok: true as const, gateQueue: buildGateQueueView(snap, regBySlug) };
+    },
+
+    async gateQueueResume(_input: {}, _context?: SurfaceCallContext) {
+      const queue = resolveGateQueue();
+      if (queue === undefined) return failure("gate-queue-unavailable", "Gate queue is not active on this server");
+      const snap = queue.resume();
+      const regBySlug = new Map(listProjectRegistrations(deps.stateDir).map((reg) => [reg.slug, reg]));
+      return { ok: true as const, gateQueue: buildGateQueueView(snap, regBySlug) };
+    },
+
+    async gateQueueConcurrency(input: { concurrency: number }, _context?: SurfaceCallContext) {
+      const queue = resolveGateQueue();
+      if (queue === undefined) return failure("gate-queue-unavailable", "Gate queue is not active on this server");
       try {
-        const page = await daemon.agents.list({ filter: { includeArchived: false, includeBackground: true } });
-        rawAgents = page.entries.map((entry) => entry.agent).filter((agent) => agent.archivedAt === null);
-        providers = await bestEffortProviders(daemon);
+        const snap = queue.setConcurrency(input.concurrency);
+        const regBySlug = new Map(listProjectRegistrations(deps.stateDir).map((reg) => [reg.slug, reg]));
+        return { ok: true as const, gateQueue: buildGateQueueView(snap, regBySlug) };
       } catch (err) {
-        daemonError = `daemon unavailable: ${messageOf(err)}`;
+        return failure("invalid-concurrency", messageOf(err));
       }
-      const missingPrerequisites = buildCompanionToolsView()
-        .filter((tool) => tool.status !== "running" || tool.error !== null)
-        .map((tool) => tool.title);
-      const directoryRows: Parameters<typeof directorySeatOf>[] = [];
-      const projects: ProjectDirectoryEntry[] = [];
-      for (const registration of listProjectRegistrations(deps.stateDir)) {
-        const supervisorRaw = seatCandidates(rawAgents, deps.stateDir, "supervisor", registration.slug)[0];
-        const leadRaw = seatCandidates(rawAgents, deps.stateDir, "lead", registration.slug)[0];
-        // Peers: the spool's labeled spawn shape first, then the ledger-bound
-        // path on still-open tasks (the panel's peerRows law).
-        let events: readonly LedgerEvent[] = [];
-        try {
-          events = factoryForSlug(registration.slug).ledger.events;
-        } catch (err) {
-          log(`seatsDirectory: project ${registration.slug} ledger unreadable — ${messageOf(err)}`);
-        }
-        const tasks = foldTasks(events);
-        const bound = agentTaskIndex(events);
-        const peers: SurfaceAgentSnapshot[] = [];
-        for (const agent of rawAgents) {
-          if (agent.id === supervisorRaw?.id || agent.id === leadRaw?.id) continue;
-          if (agent.labels.seat === "agent" && agent.labels.project === registration.slug) {
-            peers.push(agent);
-            continue;
+    },
+
+    async gateQueueCancel(
+      input: { queueId?: string; id?: string; projectSlug?: string; projectRoot?: string; task?: string },
+      _context?: SurfaceCallContext,
+    ) {
+      const queue = resolveGateQueue();
+      if (queue === undefined) return failure("gate-queue-unavailable", "Gate queue is not active on this server");
+      const targetId = input.queueId?.trim() || input.id?.trim() || undefined;
+      const targetTask = input.task?.trim() || undefined;
+      const resolvedTarget = resolveGateProjectTarget({
+        stateDir: deps.stateDir,
+        project: input.projectSlug,
+        workspace: input.projectRoot,
+      });
+      const targetSlug = resolvedTarget?.slug;
+      const targetRoot = resolvedTarget?.root;
+
+      if (targetId === undefined && (targetTask === undefined || (targetSlug === undefined && targetRoot === undefined))) {
+        return failure("invalid-cancel-target", "provide queueId (or id), or task with projectSlug/projectRoot");
+      }
+
+      const cancelled = await queue.cancelMatching(
+        (item) => {
+          if (targetId !== undefined) return item.id === targetId;
+          if (item.task !== targetTask) return false;
+          if (targetSlug !== undefined && targetRoot !== undefined) {
+            return gateItemBelongsToProject(deps.stateDir, targetSlug, targetRoot, item);
           }
-          if (agent.labels.seat !== undefined) continue;
-          const task = bound.get(agent.id);
-          if (task === undefined || !taskInProject(task, registration.root, registration.slug)) continue;
-          const view = tasks.find((entry) => entry.task === task);
-          if (view !== undefined && (view.status === "accepted" || view.status === "closed")) continue;
-          peers.push(agent);
-        }
-        // The Needs-you count: the same panel projection the workspace panel
-        // renders for this Project (the snapshot's own gather, reused).
-        const supervisor = supervisorRaw === undefined ? null : agentViewOf(supervisorRaw, null, "supervisor", registration.slug, providers);
-        const lead = leadRaw === undefined ? null : agentViewOf(leadRaw, null, "lead", registration.slug, providers);
-        const agents = [
-          ...(supervisor === null ? [] : [supervisor]),
-          ...(lead === null ? [] : [lead]),
-          ...peers.map((agent) => agentViewOf(agent, bound.get(agent.id) ?? agent.labels.task ?? null, undefined, registration.slug, providers)),
-        ];
-        let heldSupervisorMailCount = 0;
-        try {
-          heldSupervisorMailCount = readLeadMailbox(join(projectStateDir(deps.stateDir, registration.slug), "mailbox.jsonl")).supervisorQueued.length;
-        } catch {
-          heldSupervisorMailCount = 0; // an unreadable mailbox is not a failed directory read
-        }
-        const effective = loadLanes(deps.stateDir, registration.slug);
-        const effectiveLanes = effective.ok ? normalizeLanesWithProviders(effective.lanes, providers) : undefined;
-        const profiles = effectiveLanes !== undefined ? laneProfilesGather(registration.slug, effectiveLanes, providers) : { profiles: [], activeProfileId: null, activeProfileModified: false, hasProjectLaneOverride: false };
-        const panel = foldPanel({
-          ...(effectiveLanes !== undefined ? handoffPanelFacts(registration.slug, tasks, effectiveLanes) : {}),
-          ...(effectiveLanes !== undefined ? { seatLanes: seatLanesOf(registration.slug, effectiveLanes) } : {}),
-          profile: { active: profiles.profiles.find(p => p.id === profiles.activeProfileId) ?? null, list: profiles.profiles, modified: profiles.activeProfileModified },
-          project: { slug: registration.slug, root: registration.root, ...(registration.name !== undefined ? { name: registration.name } : {}) },
-          registered: true,
-          folder: null,
-          git: { gitRepo: true, hasCommits: true },
-          tasks,
-          agents,
-          supervisor,
-          lead,
-          missingPrerequisites,
-          openDesign: existsSync(registration.root) ? probeOpenDesign(deps.stateDir, registration.slug, registration.root) : null,
-          rotationState: registration.rotationState ?? null,
-          handoffRequestedAt: registration.handoffRequestedAt ?? null,
-          heldSupervisorMailCount,
-          supervisorCandidates: [], // the adopt rows are a live-Supervisor panel concern, never a Needs-you item
-          now: Date.now(),
-        });
-        const workspaceId = registration.workspaceId ?? supervisorRaw?.workspaceId ?? leadRaw?.workspaceId ?? null;
-        const seatRows = [panel.seats!.supervisor, panel.seats!.lead, ...panel.seats!.peers];
-        const handoffActive = panel.handoffs.some(
-          (handoff) => handoff.state !== "done" && handoff.state !== "failed",
+          if (targetSlug !== undefined) return item.projectSlug === targetSlug;
+          return targetRoot !== undefined && gateItemBelongsToProject(deps.stateDir, "", targetRoot, item);
+        },
+        { note: "cancelled-by-owner", suppressSettled: false },
+      );
+
+      if (cancelled.length === 0) {
+        return failure(
+          "queue-item-not-found",
+          targetId !== undefined
+            ? `no queued or running Gate found for queue id "${targetId}"`
+            : `no queued or running Gate found for ${targetSlug ?? targetRoot}/${targetTask}`,
         );
-        const activeWorkCount = seatRows.filter(
-          (row) => !("vacant" in row && row.vacant) && (row.statusLabel === "working" || row.statusLabel === "starting"),
-        ).length;
-        const backgroundWorkCount = seatRows.reduce(
-          (sum, row) => sum + (row.backgroundWorkCount ?? 0),
-          0,
-        );
-        projects.push({
-          slug: registration.slug,
-          root: registration.root,
-          workspaceId,
-          needsYouCount: panel.needsYou.length,
-          handoffActive,
-          activeWorkCount,
-          backgroundWorkCount,
-        });
-        if (supervisorRaw !== undefined) directoryRows.push([registration, supervisorRaw, panel.seats!.supervisor, profiles]);
-        if (leadRaw !== undefined) directoryRows.push([registration, leadRaw, panel.seats!.lead, profiles]);
-        for (const row of panel.seats!.peers) { const peer = peers.find(p => p.id === row.agentId); if (peer) directoryRows.push([registration, peer, row, profiles]); }
       }
-      return { ok: true as const, seats: directoryRows.map(args => directorySeatOf(...args)), projects, daemonError };
+      const regBySlug = new Map(listProjectRegistrations(deps.stateDir).map((reg) => [reg.slug, reg]));
+      return {
+        ok: true as const,
+        cancelledCount: cancelled.length,
+        cancelledIds: cancelled.map((item) => item.id),
+        gateQueue: buildGateQueueView(queue.snapshot(), regBySlug),
+      };
     },
 
     async lanesSet(input: { lane: LaneName; value: string; projectRoot?: string }, context?: SurfaceCallContext) {
@@ -4079,54 +4530,9 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         );
       }
 
-      const rawRoot = (input.projectRoot ?? "").trim();
-      const rawSlug = (input.projectSlug ?? input.project ?? "").trim();
-      let project: { slug: string; root: string; name: string } | undefined;
-
-      if (rawRoot !== "") {
-        const resolved = resolveProject(rawRoot);
-        if (resolved.ok) {
-          project = { slug: resolved.slug, root: resolved.root, name: basename(resolved.root) || resolved.slug };
-        } else {
-          const registrations = listProjectRegistrations(deps.stateDir);
-          const byMatch = registrations.find(
-            (reg) => reg.root === rawRoot || realpathSafe(reg.root) === realpathSafe(rawRoot) || reg.slug === rawRoot,
-          );
-          if (byMatch !== undefined) {
-            project = { slug: byMatch.slug, root: byMatch.root, name: basename(byMatch.root) || byMatch.slug };
-          } else if (rawSlug !== "") {
-            const bySlug = readProjectRegistration(deps.stateDir, rawSlug);
-            if (bySlug !== undefined) {
-              project = { slug: bySlug.slug, root: bySlug.root, name: basename(bySlug.root) || bySlug.slug };
-            } else {
-              project = { slug: rawSlug, root: rawRoot, name: basename(rawRoot) || rawSlug };
-            }
-          }
-          if (project === undefined) {
-            return failure("unknown-project", `project root ${rawRoot} does not resolve to a registered project or git repository — ${resolved.reason}`);
-          }
-        }
-      } else if (rawSlug !== "") {
-        const reg = readProjectRegistration(deps.stateDir, rawSlug);
-        if (reg !== undefined) {
-          project = { slug: reg.slug, root: reg.root, name: basename(reg.root) || reg.slug };
-        } else {
-          return failure("unknown-project", `project "${rawSlug}" is not registered — pass projectRoot or a known projectSlug`);
-        }
-      } else {
-        const registrations = listProjectRegistrations(deps.stateDir);
-        if (registrations.length === 1) {
-          const only = registrations[0]!;
-          project = { slug: only.slug, root: only.root, name: basename(only.root) || only.slug };
-        } else if (registrations.length === 0) {
-          return failure("unknown-project", "no project specified and no project is registered");
-        } else {
-          return failure(
-            "ambiguous-project",
-            `more than one project is registered (${registrations.map((r) => r.slug).join(", ")}) — pass projectRoot or projectSlug to name the one to delete`,
-          );
-        }
-      }
+      const target = resolveDeleteTarget(input);
+      if (!target.ok) return target;
+      const project = target.project;
 
       const daemon = resolveDaemon(context);
       const { projectDir, worktreesDir, projectTaskSet, archivedSeats, archivedAgents } =
@@ -5218,7 +5624,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
   const PROJECT_ACT_HANDLERS: ReadonlySet<string> = new Set(["projectReset", "projectDelete", "projectRotate"]);
   /** The handlers that take their lane's exclusive maintenance — the Project acts plus register. The one place the set is named. */
   const EXCLUSIVE_MAINTENANCE_HANDLERS: ReadonlySet<string> = new Set([...PROJECT_ACT_HANDLERS, "projectRegister"]);
-  const reads = new Set(["cachedProviders", "sanitizeLane", "snapshot", "seatsDirectory", "onboardingBrowse", "onboardingStatus", "pluginsCheckUpdates", "selfUpdateStatus", "selfUpdateApply", "historyImport", "historyImports", "historyUpgrade", "vaultHydrate", "vaultPull", "vaultPush", "vaultSync", "vaultImport", "releaseSettingsRead", "storeReleaseRead", "githubPublishPreflight"]);
+  const reads = new Set(["cachedProviders", "sanitizeLane", "snapshot", "seatsDirectory", "overview", "onboardingBrowse", "onboardingStatus", "pluginsCheckUpdates", "selfUpdateStatus", "selfUpdateApply", "historyImport", "historyImports", "historyUpgrade", "vaultHydrate", "vaultPull", "vaultPush", "vaultSync", "vaultImport", "releaseSettingsRead", "storeReleaseRead", "githubPublishPreflight"]);
   const nonEmptyString = (value: unknown): string | undefined =>
     typeof value === "string" && value.trim() !== "" ? value.trim() : undefined;
   const surfaceChangeTarget = (
@@ -5267,9 +5673,14 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           : registerSlug !== undefined && deps.registry !== undefined
             ? deps.registry.factoryForProject(registerSlug)
             : deps.factory;
-        const pending = !lane.history.maintenanceActive && EXCLUSIVE_MAINTENANCE_HANDLERS.has(key)
-          ? lane.history.withExclusiveMaintenance(() => value.apply(receiver, args))
-          : lane.history.runOperation(() => value.apply(receiver, args), { newWork: true });
+        const execute = () =>
+          !lane.history.maintenanceActive && EXCLUSIVE_MAINTENANCE_HANDLERS.has(key)
+            ? lane.history.withExclusiveMaintenance(() => value.apply(receiver, args))
+            : lane.history.runOperation(() => value.apply(receiver, args), { newWork: true });
+        const pending =
+          !lane.history.maintenanceActive && (key === "projectReset" || key === "projectDelete")
+            ? cancelGatesBeforeProjectMaintenance(key, args[0], args[1]).then(execute)
+            : execute();
         if (deps.onStateChange === undefined) return pending;
         return pending.then((result) => {
           deps.onStateChange?.({ handler: key, ...surfaceChangeTarget(args[0], result, registerSlug) });
@@ -5307,6 +5718,11 @@ export function registerSurfaceRpc(
   server.handle(historyUpgrade, (input, context) => { pass(context); return handlers.historyUpgrade(input); });
       server.handle(snapshot, (input, context) => handlers.snapshot(input, pass(context)));
   server.handle(seatsDirectory, (input, context) => handlers.seatsDirectory(input, pass(context)));
+  server.handle(overview, (input, context) => handlers.overview(input, pass(context)));
+  server.handle(gateQueuePause, (input, context) => handlers.gateQueuePause(input, pass(context)));
+  server.handle(gateQueueResume, (input, context) => handlers.gateQueueResume(input, pass(context)));
+  server.handle(gateQueueConcurrency, (input, context) => handlers.gateQueueConcurrency(input, pass(context)));
+  server.handle(gateQueueCancel, (input, context) => handlers.gateQueueCancel(input, pass(context)));
   server.handle(openDesignCatalog, input => handlers.openDesignCatalog(input));
   server.handle(openDesignExport, input => handlers.openDesignExport(input));
   server.handle(openDesignStatus, input => handlers.openDesignStatus(input));

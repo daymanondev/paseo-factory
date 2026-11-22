@@ -108,6 +108,8 @@ commands:
                                      open first (v0.0.14) — the Lead mandates
                                      a method, not just an outcome; the
                                      driver's brief renders them at the top
+             [--timeout-seconds <n>] Gate timeout in seconds (integer 60..3600;
+                                     defaults to 900 seconds when omitted)
 
   accept     Accept one green attempt of a task (the Owner's act)
              accept <task> --attempt <n> [--by owner|supervisor|lead] [--project <slug>]
@@ -322,6 +324,13 @@ commands:
              both run T-01); with no registered Project the legacy root
              ledger reads as before.
              status [--project <slug>]
+
+  gate-queue Inspect or configure the daemon-wide Gate queue (ADR 0068):
+             gate-queue status [--json]
+             gate-queue pause [--json]
+             gate-queue resume [--json]
+             gate-queue concurrency <n> [--json]  (integer >= 1)
+             gate-queue cancel <queueId> [--note <text>] [--json]
 
   cost       Print the Cost read over the whole ledger (v0.0.8): one row per
              task — lane, attempts, wall (first spawn → last verdict,
@@ -642,6 +651,7 @@ if (command === "contract") {
     verification: { type: "string" },
     disposition: { type: "string" },
     "reset-peer": { type: "boolean", default: false },
+    "timeout-seconds": { type: "string" },
     project: { type: "string" },
     "wait-secs": { type: "string" },
   });
@@ -654,6 +664,18 @@ if (command === "contract") {
   }
   if (v.disposition !== undefined && !["engineer", "architect", "reviewer", "scout"].includes(v.disposition)) {
     fail("contract: --disposition must be one of engineer|architect|reviewer|scout — omit it for the engineer default");
+  }
+  let timeoutSeconds;
+  if (v["timeout-seconds"] !== undefined) {
+    const rawTimeout = v["timeout-seconds"].trim();
+    if (!/^\d+$/.test(rawTimeout)) {
+      fail("contract: --timeout-seconds must be an integer between 60 and 3600");
+    }
+    const parsedTimeout = Number(rawTimeout);
+    if (!Number.isSafeInteger(parsedTimeout) || parsedTimeout < 60 || parsedTimeout > 3600) {
+      fail("contract: --timeout-seconds must be an integer between 60 and 3600");
+    }
+    timeoutSeconds = parsedTimeout;
   }
   // ADR 0054 §2: --gate is the engineer disposition's requirement; the
   // read-only three (scout|architect|reviewer) may omit it (default "").
@@ -688,6 +710,7 @@ if (command === "contract") {
     // ADR 0053 §1/§3: the Peer's disposition and the explicit reset — a
     // re-contract preserves the live Peer unless --reset-peer is passed.
     ...(v.disposition === undefined ? {} : { disposition: v.disposition }),
+    ...(timeoutSeconds === undefined ? {} : { timeoutSeconds }),
     ...(v["reset-peer"] ? { resetPeer: true } : {}),
     // v0.0.89 (ADR 0045 §1): the explicit target Project — the router's
     // top-priority context. Usually redundant (the workspace resolves it);
@@ -1625,9 +1648,9 @@ if (command === "status") {
     const events = readOne(join(stateDir, "projects", slug, "ledger.jsonl"));
     if (events.length === 0) {
       console.log(`factory: no tasks yet (ledger: ${join(stateDir, "projects", slug, "ledger.jsonl")})`);
-      process.exit(0);
+    } else {
+      for (const line of taskStatusLines(events)) console.log(line);
     }
-    for (const line of taskStatusLines(events)) console.log(line);
   } else {
     const streams = registered
       .map((slug) => ({ slug, events: readOne(join(stateDir, "projects", slug, "ledger.jsonl")) }))
@@ -1637,9 +1660,9 @@ if (command === "status") {
       const events = readOne(ledgerPath);
       if (events.length === 0) {
         console.log(`factory: no tasks yet (ledger: ${ledgerPath})`);
-        process.exit(0);
+      } else {
+        for (const line of taskStatusLines(events)) console.log(line);
       }
-      for (const line of taskStatusLines(events)) console.log(line);
     } else {
       // The "All projects" aggregate: each row attributed with its Project's
       // slug — two Projects may share a Task id (`T-01` in each).
@@ -1659,6 +1682,60 @@ if (command === "status") {
     console.log("Token Usage");
     for (const line of usageLines) console.log(line);
   }
+  // Machine-wide Gate queue summary (ADR 0068): read directly from
+  // `<stateDir>/gate-queue.json` without a spool round trip.
+  const { statusGateQueueLines } = await import("./gate-queue-status.mjs");
+  const gateQueueLines = statusGateQueueLines(stateDir);
+  if (gateQueueLines.length > 0) {
+    console.log("");
+    for (const line of gateQueueLines) console.log(line);
+  }
+  process.exit(0);
+}
+
+if (command === "gate-queue") {
+  const parsed = parseCommandOptions({
+    json: { type: "boolean", default: false },
+    note: { type: "string" },
+    "wait-secs": { type: "string" },
+  });
+  const sub = parsed.positionals[0];
+  if (sub === "status") {
+    if (parsed.positionals.length > 1) fail(`gate-queue status: unexpected positional "${parsed.positionals[1]}"`);
+    const { GATE_QUEUE_FILENAME, readPersistedGateQueue, snapshotFromGateQueueFile, statusGateQueueLines } = await import("./gate-queue-status.mjs");
+    const file = readPersistedGateQueue(join(stateDir, GATE_QUEUE_FILENAME)) ?? { version: 1, paused: false, concurrency: 1, items: [] };
+    const snap = snapshotFromGateQueueFile(file);
+    if (parsed.values.json === true) await writeJsonAndExit(snap);
+    console.log(`Gate queue (concurrency=${snap.concurrency}, paused=${snap.paused}, running=${snap.running.length}, queued=${snap.queued.length})`);
+    for (const line of statusGateQueueLines(stateDir)) console.log(line);
+    process.exit(0);
+  }
+  if (stampedSeat !== undefined) {
+    console.error(
+      `factory: seat-cannot-gate-queue: Seat ${stampedSeat} cannot mutate the daemon Gate queue; Gate queue controls are Owner-only actions.`,
+    );
+    process.exit(2);
+  }
+  let request;
+  if (sub === "pause" || sub === "resume") {
+    if (parsed.positionals.length > 1) fail(`gate-queue ${sub}: unexpected positional "${parsed.positionals[1]}"`);
+    request = { id: randomId(), kind: "gate_queue", action: sub };
+  } else if (sub === "concurrency") {
+    const raw = parsed.positionals[1];
+    if (raw === undefined || parsed.positionals.length > 2) fail(`gate-queue concurrency: expected integer >= 1 ("gate-queue concurrency <n>")`);
+    if (!/^[1-9]\d*$/.test(raw)) fail(`gate-queue concurrency: invalid concurrency "${raw}" (must be an integer >= 1)`);
+    request = { id: randomId(), kind: "gate_queue", action: "concurrency", concurrency: Number(raw) };
+  } else if (sub === "cancel") {
+    const queueId = parsed.positionals[1];
+    if (queueId === undefined || queueId.trim() === "" || parsed.positionals.length > 2) fail(`gate-queue cancel: expected <queueId>`);
+    const note = typeof parsed.values.note === "string" && parsed.values.note.trim() !== "" ? parsed.values.note.trim() : undefined;
+    request = { id: randomId(), kind: "gate_queue", action: "cancel", queueId: queueId.trim(), ...(note === undefined ? {} : { note }) };
+  } else {
+    fail(`gate-queue: unknown subcommand "${sub ?? "(none)"}" — use "gate-queue status | pause | resume | concurrency <n> | cancel <queueId>"`);
+  }
+  const reply = await roundTrip(request, waitSeconds(parsed));
+  if (parsed.values.json === true) await writeJsonAndExit({ ok: true, summary: reply.summary, gateQueue: reply.gateQueue });
+  console.log(`factory: ${reply.summary}`);
   process.exit(0);
 }
 

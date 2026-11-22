@@ -5,6 +5,7 @@ import type {
   ContractSet,
   FreshEyesWritten,
   GateFinished,
+  GateQueued,
   GitBlocked,
   LedgerEvent,
   PermitDenied,
@@ -54,14 +55,16 @@ export function renderReport(task: string, attempt: number, events: readonly Led
   const mine = epochEvents.filter((e): boolean => e.event === "contract_set" || ("attempt" in e && e.attempt === attempt));
   const contract = mine.findLast((e): e is ContractSet => e.event === "contract_set");
   const claim = mine.findLast((e): e is ClaimReported => e.event === "claim_reported");
+  const queued = mine.findLast((e): e is GateQueued => e.event === "gate_queued");
+  const claimLike = claim ?? queued;
   const gate = mine.findLast((e): e is GateFinished => e.event === "gate_finished");
   const eye = mine.findLast((e): e is FreshEyesWritten => e.event === "fresh_eyes_written");
   const watch = mine.findLast((e): e is WatchWritten => e.event === "watch_written");
 
-  if (!contract || !claim || !gate) {
+  if (!contract || !claimLike || !gate) {
     const missing = [
       contract ? null : "contract_set",
-      claim ? null : "claim_reported",
+      claimLike ? null : "claim_reported",
       gate ? null : "gate_finished",
     ]
       .filter((name): name is string => name !== null)
@@ -83,20 +86,20 @@ export function renderReport(task: string, attempt: number, events: readonly Led
     }`,
     `- Workspace: ${contract.workspace}`,
     ...(chokeLines(epochEvents.filter(isChokeEventFor(task)))),
-    `- Claimed @ ${formatTimestamp(claim.ts)}: ${claim.sha}`,
-    ...(claim.agent === undefined ? [] : [`- Claimed by agent \`${claim.agent}\``]),
+    `- Claimed @ ${formatTimestamp(claimLike.ts)}: ${claimLike.sha}`,
+    ...(claimLike.agent === undefined ? [] : [`- Claimed by agent \`${claimLike.agent}\``]),
     ...(gate.sha === undefined ? [] : [`- Attested commit: \`${gate.sha}\``]),
     // The six-field handoff (ADR 0053 §4) between the claim line and the
     // Verdict evidence; pre-0053 claims carry no handoff and render unchanged.
     // A `lead_verify` mechanical re-run carries the marker instead — the Lead's
     // re-verification claims no Peer outcome, and the report says so in place
     // of the handoff block rather than forging one.
-    ...(claim.handoff === undefined
-      ? claim.mechanical === "lead_verify"
+    ...(claimLike.handoff === undefined
+      ? claimLike.mechanical === "lead_verify"
         ? ["- Lead verification (`lead_verify`): mechanical re-run of the Contract Gate by the Lead — no Peer handoff on this claim"]
         : []
-      : handoffLines(claim.handoff, {
-          sha: gate.sha ?? claim.sha,
+      : handoffLines(claimLike.handoff, {
+          sha: gate.sha ?? claimLike.sha,
           branch: `factory/${task}`,
           dir:
             epochEvents.findLast((e): e is SpawnDispatched => e.event === "spawn_dispatched" && e.task === task && typeof e.worktree === "string")

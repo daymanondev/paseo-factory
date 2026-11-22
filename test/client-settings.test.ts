@@ -107,15 +107,16 @@ test("the mobile Settings body is a read-only summary — values, no write contr
   for (const section of SECTION_IDS) assert.doesNotMatch(lines(section), /<button|<input/, `${section} mounts no write control on mobile`);
 });
 
-test("the surface registers the Workspace panel, the Settings screen, the desktop Onboarding screen/footer item, and Command Center actions", () => {
+test("the surface registers the Workspace panel, the Settings screen, the desktop sidebar header item, Overview + Onboarding screens, and Command Center actions", () => {
   const index = read("plugin/index.client.tsx");
   const registrations = [...index.matchAll(/client\.(add[A-Za-z]+)\(/g)].map((m) => m[1]);
   assert.deepEqual([...registrations].sort(), [
     "addCommandCenterItem",
     "addCommandCenterItem",
     "addScreen",
+    "addScreen",
     "addSettingsScreen",
-    "addSidebarFooterItem",
+    "addSidebarHeaderItem",
     "addWorkspacePanel",
   ]);
   assert.match(index, /title: "Open Factory Panel"/);
@@ -255,5 +256,66 @@ test("Settings keeps an unsaved pack open after failure and fences writes while 
         assert.equal((container.querySelector(`[data-testid="${id}"]`) as HTMLButtonElement).disabled, true, id);
       }
     } finally { await act(() => root.unmount()); }
+  });
+});
+
+test("Settings Diagnostics hosts validated Gate queue concurrency knob (no live queue monitor) and mobile stays read-only", async () => {
+  const { DiagnosticsBody, SettingsReadOnly } = await loadClientModule("plugin/client/factory/settings.tsx");
+  const roHtml = renderToStaticMarkup(createElement(SettingsReadOnly, { theme, view: healthyView({ gateQueueConcurrency: 3 }), section: "diagnostics" }));
+  assert.match(roHtml, /Gate queue concurrency/);
+  assert.match(roHtml, />3</);
+  assert.doesNotMatch(roHtml, /<button|<input/, "mobile Diagnostics stays read-only");
+
+  await mountUnderNativeWindow(async (createRoot, container, act) => {
+    const saved: number[] = [];
+    const root = createRoot(container);
+    const fill = async (id: string, value: string) => {
+      const input = container.querySelector(`[data-testid="${id}"]`) as HTMLInputElement;
+      assert.ok(input, id);
+      await act(() => {
+        input.value = value;
+        input.dispatchEvent(new (input.ownerDocument.defaultView!.Event)("input", { bubbles: true }));
+      });
+    };
+    const click = async (id: string) => {
+      const btn = container.querySelector(`[data-testid="${id}"]`) as HTMLButtonElement;
+      assert.ok(btn, id);
+      await act(() => btn.click());
+    };
+    try {
+      await act(() =>
+        root.render(
+          createElement(DiagnosticsBody, {
+            theme,
+            view: healthyView({ gateQueueConcurrency: 2 }),
+            busy: false,
+            onSetGateQueueConcurrency: async (n: number) => {
+              saved.push(n);
+              return true;
+            },
+          }),
+        ),
+      );
+      const html = container.innerHTML;
+      assert.doesNotMatch(html, /Pause|Resume|Cancel item|running Gates/i, "Settings must NEVER mount live queue monitor controls");
+
+      const input = container.querySelector('[data-testid="gate-queue-concurrency-input"]') as HTMLInputElement;
+      assert.equal(input.value, "2");
+      assert.equal((container.querySelector('[data-testid="gate-queue-concurrency-save"]') as HTMLButtonElement).disabled, true, "unchanged value disables Save");
+
+      for (const bad of ["0", "-1", "abc", "1.5"]) {
+        await fill("gate-queue-concurrency-input", bad);
+        assert.match(container.textContent ?? "", /whole number ≥ 1/i, `invalid ${bad} shows inline validation message`);
+        assert.equal((container.querySelector('[data-testid="gate-queue-concurrency-save"]') as HTMLButtonElement).disabled, true, `invalid ${bad} disables Save`);
+      }
+      assert.deepEqual(saved, []);
+
+      await fill("gate-queue-concurrency-input", "4");
+      assert.equal((container.querySelector('[data-testid="gate-queue-concurrency-save"]') as HTMLButtonElement).disabled, false);
+      await click("gate-queue-concurrency-save");
+      assert.deepEqual(saved, [4]);
+    } finally {
+      await act(() => root.unmount());
+    }
   });
 });

@@ -71,6 +71,7 @@ export const MAX_ATTEMPTS = 3;
 export const EVENT_NAMES = [
   "ledger_schema",
   "contract_set",
+  "gate_queued",
   "claim_reported",
   "gate_started",
   "gate_finished",
@@ -235,6 +236,26 @@ export interface ContractSet extends EventIdentityMetadata {
    * default — pre-0053 Contracts predate the field and are never migrated.
    */
   disposition?: PeerDisposition;
+  /**
+   * Optional per-Contract Gate timeout in seconds (`60..3600`, ADR 0068).
+   * Omitted = `900` seconds (`DEFAULT_CONTRACT_TIMEOUT_SECONDS`); historical
+   * `contract_set` lines predate this field and replay using the default.
+   */
+  timeoutSeconds?: number;
+}
+
+export interface GateQueued extends EventIdentityMetadata {
+  seq: number;
+  ts: Timestamp;
+  event: "gate_queued";
+  task: string;
+  attempt: number;
+  sha: string;
+  /** Optional queue entry id assigned by the daemon's Gate queue. */
+  id?: string;
+  agent?: string;
+  handoff?: PeerHandoffFields;
+  mechanical?: "lead_verify";
 }
 
 export interface ClaimReported extends EventIdentityMetadata {
@@ -823,6 +844,7 @@ export interface StoreReleaseFailed extends EventIdentityMetadata {
 export type LedgerEvent =
   | LedgerSchema
   | ContractSet
+  | GateQueued
   | ClaimReported
   | GateStarted
   | GateFinished

@@ -28,7 +28,8 @@ import { claimCliBinDir, ensureClaimCli, ensureGitShim, injectClaimCliPath } fro
 import { createChoke, normalizeAgentCreateRequest, startGitBlockIngestion } from "./server/choke.ts";
 import { createTimelineFetcher } from "./server/timeline.ts";
 import type { TimelineSourceApi } from "./server/timeline.ts";
-import { spoolRootFor, startSpool } from "./server/spool.ts";
+import { createGateQueueSettler, spoolRootFor, startSpool } from "./server/spool.ts";
+import { createGateQueue } from "./server/gate-queue.ts";
 import { createUsageRuntime } from "./server/usage-rollup.ts";
 import { createSurfaceHandlers, registerSurfaceRpc } from "./server/surface-rpc.ts";
 import { createStateHub } from "./server/state-hub.ts";
@@ -112,10 +113,44 @@ export default function contribute(server: PluginServerContext) {
   });
   let paseoApi: TimelineSourceApi | undefined;
   let onPaseoCaptured: (() => void) | undefined;
+  let stopped = false;
+  let rpcRegistered = false;
+  const paseoWaiters = new Set<() => void>();
+  const notifyPaseoWaiters = (): void => {
+    for (const resolveWaiter of [...paseoWaiters]) {
+      paseoWaiters.delete(resolveWaiter);
+      resolveWaiter();
+    }
+  };
+  const waitForPaseoOrDelay = (delayMs: number): Promise<void> => {
+    if (paseoApi !== undefined || stopped) return Promise.resolve();
+    return new Promise<void>((resolveWaiter) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const done = (): void => {
+        if (timer !== undefined) clearTimeout(timer);
+        paseoWaiters.delete(done);
+        resolveWaiter();
+      };
+      paseoWaiters.add(done);
+      timer = setTimeout(done, delayMs);
+      timer.unref?.();
+    });
+  };
+  const waitForPaseoCapture = (): Promise<void> => {
+    if (paseoApi !== undefined || stopped) return Promise.resolve();
+    return new Promise<void>((resolveWaiter) => {
+      const done = (): void => {
+        paseoWaiters.delete(done);
+        resolveWaiter();
+      };
+      paseoWaiters.add(done);
+    });
+  };
   const capturePaseo = (context: { paseo?: unknown }): void => {
     if (paseoApi === undefined && context.paseo !== undefined) {
       paseoApi = context.paseo as unknown as TimelineSourceApi;
       log("watch: captured the daemon API — timeline feeds are live");
+      notifyPaseoWaiters();
       onPaseoCaptured?.();
     }
     if (context.paseo !== undefined) {
@@ -123,6 +158,27 @@ export default function contribute(server: PluginServerContext) {
     }
   };
   const fetchTimeline = createTimelineFetcher(() => paseoApi);
+  let paseoWarmupPromise: Promise<void> | undefined;
+  const ensurePaseoApi = (): Promise<void> => {
+    if (paseoApi !== undefined || stopped) return Promise.resolve();
+    if (paseoWarmupPromise !== undefined) return paseoWarmupPromise;
+    paseoWarmupPromise = (async () => {
+      await waitForPaseoOrDelay(50);
+      for (let attempt = 0; attempt < 3 && paseoApi === undefined && !stopped; attempt += 1) {
+        if (attempt > 0) await waitForPaseoOrDelay(75);
+        if (paseoApi !== undefined || stopped) break;
+        const warmed = await Promise.race([
+          waitForPaseoCapture().then(() => true),
+          warmPluginDaemonApiViaWs(home),
+        ]);
+        if (paseoApi !== undefined || stopped) break;
+        if (!warmed && !existsSync(join(home, "paseo.pid"))) break;
+      }
+    })().finally(() => {
+      paseoWarmupPromise = undefined;
+    });
+    return paseoWarmupPromise;
+  };
 
   // The one-time legacy root split (v0.0.89, ADR 0045 §2), BEFORE any Factory
   // opens, the Spool watcher starts, or an RPC is served: a legacy root
@@ -376,6 +432,7 @@ export default function contribute(server: PluginServerContext) {
     clearPluginArchive: (input) => leadMail.clearPluginArchive(input.agentId),
     resetProjectMailbox: (slug) => leadMail.resetProjectMailbox(slug),
     rotateProjectMailbox: (slug) => leadMail.rotateProjectMailbox(slug),
+    gateQueue: () => gateQueue,
     leadDispatch: (request, options) => leadMail.dispatchLead(request, options),
     supervisorReport: (request) => leadMail.reportSupervisor(request),
     // v0.6.1 (ADR 0057 §5): a newly bound Supervisor receives its Seat kickoff
@@ -416,6 +473,24 @@ export default function contribute(server: PluginServerContext) {
     },
     onLog: log,
   });
+  const gateQueue = createGateQueue({
+    stateDir,
+    factory,
+    registry,
+    log,
+    onStateChange: () => {
+      stateHub.emit("gate.queue");
+      void refreshSleepInhibition();
+    },
+    onSettled: createGateQueueSettler({
+      rootFactory: factory,
+      registry,
+      usageMeter: (meterInput) => usage.meterTaskBoundary(meterInput),
+      peerMail: leadMail.notifyPeer,
+      daemon: () => paseoApi as never,
+      onLog: log,
+    }),
+  });
   const sleepInhibitor = new SleepInhibitor({ onError: error => log(`sleep inhibition unavailable: ${String(error)}`) });
   let sleepCheckInFlight = false;
   let sleepCheckPending = false;
@@ -424,7 +499,7 @@ export default function contribute(server: PluginServerContext) {
     if (process.platform !== "darwin" || sleepStopped) return;
     if (sleepCheckInFlight) { sleepCheckPending = true; return; }
     sleepCheckInFlight = true;
-    try { sleepInhibitor.poke(await leadMail.hasActiveWork()); }
+    try { sleepInhibitor.poke((await leadMail.hasActiveWork()) || gateQueue.hasRunning() || gateQueue.hasQueued()); }
     catch (error) { log(`sleep activity check deferred: ${String(error)}`); }
     finally {
       sleepCheckInFlight = false;
@@ -437,7 +512,7 @@ export default function contribute(server: PluginServerContext) {
   if (process.platform === "darwin") {
     try {
       activityWatcher = watch(stateDir, { recursive: true, persistent: false }, (_event, file) => {
-        if (file && /(?:ledger\.jsonl|mailbox\.jsonl|project\.json|spool[/\\])/.test(String(file))) void refreshSleepInhibition();
+        if (file && /(?:ledger\.jsonl|mailbox\.jsonl|gate-queue\.json|project\.json|spool[/\\])/.test(String(file))) void refreshSleepInhibition();
       });
       activityWatcher.on("error", error => log(`sleep activity watch unavailable: ${String(error)}`));
     } catch (error) { log(`sleep activity watch unavailable: ${String(error)}`); }
@@ -470,14 +545,44 @@ export default function contribute(server: PluginServerContext) {
   sleepSweepTimer.unref?.();
   void refreshSleepInhibition();
   let mailRecovered = false;
+  let gateQueueRecovered = false;
+  let gateQueueRecoveryPromise: Promise<void> | undefined;
+  const ensureGateQueueRecovered = (): void => {
+    if (
+      !rpcRegistered ||
+      gateQueueRecovered ||
+      gateQueueRecoveryPromise !== undefined ||
+      stopped ||
+      pendingUpgradeFor(stateDir) !== undefined
+    ) {
+      return;
+    }
+    gateQueueRecoveryPromise = (async () => {
+      if (gateQueue.hasRunning() || gateQueue.hasQueued()) {
+        await ensurePaseoApi();
+      } else {
+        void ensurePaseoApi();
+      }
+      if (stopped || pendingUpgradeFor(stateDir) !== undefined) return;
+      await gateQueue.startupRecovery();
+      gateQueueRecovered = true;
+    })()
+      .catch((error) => {
+        log(`gate-queue: recovery deferred — ${String(error)}`);
+      })
+      .finally(() => {
+        gateQueueRecoveryPromise = undefined;
+      });
+  };
   const resumeOrdinaryRuntime = (): void => {
-    if (pendingUpgradeFor(stateDir) !== undefined) return;
+    if (stopped || pendingUpgradeFor(stateDir) !== undefined) return;
     initializeOrdinaryRuntime();
     refreshPluginInstallation();
     if (!mailRecovered) {
       leadMail.startupRecovery();
       mailRecovered = true;
     }
+    ensureGateQueueRecovered();
     if (paseoApi !== undefined) void leadMail.pumpAll().catch((error) => log(`lead-mailbox: pump deferred — ${String(error)}`));
   };
   resumeOrdinaryRuntime();
@@ -538,7 +643,7 @@ export default function contribute(server: PluginServerContext) {
     },
   );
   const spool = startSpool(stateDir, factory, {
-    ordinaryReady: () => booted && mailRecovered,
+    ordinaryReady: () => booted && mailRecovered && gateQueueRecovered,
     onLog: log,
     ask: choke.spoolAskHandler,
     // Legacy CLI spelling now enters the same handoff engine as the Owner surface.
@@ -673,9 +778,11 @@ export default function contribute(server: PluginServerContext) {
     // The accept path's worktree-record sweep targets the real daemon home —
     // never the PASEO_HOME-env fallback (v0.0.27, ADR 0017 §4).
     home,
+    ...(pluginDir === undefined ? {} : { pluginDir }),
     // The Per-Project Factory registry (v0.0.89, ADR 0045 §1): every
     // Project-scoped command routes onto the target Project's own Factory.
     registry,
+    gateQueue,
     storeReleaseNotify: async ({ slug, text }) => {
       await leadMail.enqueueLeadMail(slug, { from: "system", kind: "report", text });
       await leadMail.pumpProjectLead(slug);
@@ -696,12 +803,8 @@ export default function contribute(server: PluginServerContext) {
       stateHub.subscribe(input, context);
     });
   }
-  const warmupTimer = setTimeout(() => {
-    if (paseoApi === undefined) {
-      warmPluginDaemonApiViaWs(home);
-    }
-  }, 50);
-  warmupTimer.unref?.();
+  rpcRegistered = true;
+  ensureGateQueueRecovered();
 
   const gitBlocks = startGitBlockIngestion(factory, { onLog: log });
 
@@ -786,6 +889,8 @@ export default function contribute(server: PluginServerContext) {
   );
 
   return () => {
+    stopped = true;
+    notifyPaseoWaiters();
     sleepStopped = true;
     offHandoffProgress();
     stateWatcher?.close();
@@ -793,7 +898,6 @@ export default function contribute(server: PluginServerContext) {
     activityWatcher?.close();
     clearInterval(sleepSweepTimer);
     sleepInhibitor.stop();
-    clearTimeout(warmupTimer);
     clearTimeout(postReadySyncTimer);
     clearInterval(recoveryTimer);
     clearInterval(peerSweepTimer);
@@ -803,6 +907,7 @@ export default function contribute(server: PluginServerContext) {
     offTurnEnded();
     offAgentArchived();
     gitBlocks.stop();
+    gateQueue.stop();
     spool.stop();
     leadMail.stop();
     usage.stop();

@@ -78,8 +78,12 @@ test("status tracks a whole loop: contract → red claim → green claim → acc
   assert.equal(fresh.status, 0, fresh.stderr);
   assert.match(fresh.stdout, /no tasks yet/);
 
+  const passFlag = join(dir, "gate-pass");
+  const gateScript = join(dir, "gate-check.mjs");
+  writeFileSync(gateScript, `import { existsSync } from "node:fs";\nprocess.exit(existsSync(${JSON.stringify(passFlag)}) ? 0 : 1);\n`);
+  const gateCmd = `${JSON.stringify(process.execPath)} ${JSON.stringify(gateScript)}`;
   const contract = await run(ownerCli, [
-    "contract", "--task", "LOOP9", "--workspace", workspace, "--gate", "true", "--artifact", "src/format.ts",
+    "contract", "--task", "LOOP9", "--workspace", workspace, "--gate", gateCmd, "--artifact", "src/format.ts",
   ], ownerEnv);
   assert.equal(contract.status, 0, contract.stderr);
 
@@ -88,17 +92,32 @@ test("status tracks a whole loop: contract → red claim → green claim → acc
   assert.equal(idle.status, 0, idle.stderr);
   assert.equal(establishedFields(idle.stdout), "LOOP9 attempts=0 verdict=- sha=- accepted=no eye=- choke=0/0/0\n");
 
-  // Attempt 1: a claim whose sha resolves to nothing is red before the gate
-  // even runs — so this attempt has no attested sha to show.
-  const red = await run(claimCli, ["--task", "LOOP9", "--sha", "deadbeef", "--outcome", "complete", "--scope", "s", "--verification", "v", "--unknowns", "none", "--wait-secs", "60"], agentEnv);
-  assert.equal(red.status, 1, `expected red\nstdout: ${red.stdout}\nstderr: ${red.stderr}`);
+  const waitForReport = async (attempt: number) => {
+    const deadline = Date.now() + 8_000;
+    while (Date.now() < deadline) {
+      if (factory.ledger.eventsFor("LOOP9").some((e) => e.event === "report_written" && e.attempt === attempt)) return;
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    assert.fail(`timed out waiting for LOOP9#${attempt}`);
+  };
+
+  // Unresolvable SHA is rejected at async admission without opening Attempt 1.
+  const badSha = await run(claimCli, ["--task", "LOOP9", "--sha", "deadbeef", "--outcome", "complete", "--scope", "s", "--verification", "v", "--unknowns", "none", "--wait-secs", "60"], agentEnv);
+  assert.equal(badSha.status, 2);
+
+  // Attempt 1: queued -> red when passFlag does not exist yet.
+  const red = await run(claimCli, ["--task", "LOOP9", "--sha", baseSha, "--outcome", "complete", "--scope", "s", "--verification", "v", "--unknowns", "none", "--wait-secs", "60"], agentEnv);
+  assert.equal(red.status, 0, `expected queued claim\nstdout: ${red.stdout}\nstderr: ${red.stderr}`);
+  await waitForReport(1);
   const afterRed = await run(ownerCli, ["status"], ownerEnv);
   assert.equal(afterRed.status, 0, afterRed.stderr);
-  assert.equal(establishedFields(afterRed.stdout), "LOOP9 attempts=1 verdict=red sha=- accepted=no eye=- choke=0/0/0\n");
+  assert.equal(establishedFields(afterRed.stdout), `LOOP9 attempts=1 verdict=red sha=${baseSha.slice(0, 7)} accepted=no eye=- choke=0/0/0\n`);
 
-  // Attempt 2: the real commit — green, and the verdict attests it (short sha).
+  // Attempt 2: the real commit — green once gate passes, and the verdict attests it (short sha).
+  writeFileSync(passFlag, "ok\n");
   const green = await run(claimCli, ["--task", "LOOP9", "--sha", baseSha, "--outcome", "complete", "--scope", "s", "--verification", "v", "--unknowns", "none", "--wait-secs", "60"], agentEnv);
   assert.equal(green.status, 0, `expected green\nstdout: ${green.stdout}\nstderr: ${green.stderr}`);
+  await waitForReport(2);
   const afterGreen = await run(ownerCli, ["status"], ownerEnv);
   assert.equal(afterGreen.status, 0, afterGreen.stderr);
   assert.equal(establishedFields(afterGreen.stdout), `LOOP9 attempts=2 verdict=green sha=${baseSha.slice(0, 7)} accepted=no eye=- choke=0/0/0\n`);
@@ -637,4 +656,96 @@ test("taskStatusLines lean mode collapses settled (accepted and closed) tasks in
 
   const full = taskStatusLines(events);
   assert.equal(full.length, 3, "default/full mode returns every historical row verbatim");
+});
+
+test("Seam 3 (Ticket 05): factory status renders Gate queue summary (paused, concurrency, running, FIFO queued) directly from gate-queue.json and omits when empty/unpaused", async (t) => {
+  const dir = makeTempDir("status-gate-queue-");
+  disposeDir(t, dir);
+  const home = join(dir, "paseo-home");
+  const stateDir = join(home, "plugin-state", "paseo-factory");
+  const env = { PASEO_HOME: home };
+
+  const rootA = join(dir, "proj-a");
+  const rootB = join(dir, "proj-b");
+  mkdirSync(rootA, { recursive: true });
+  mkdirSync(rootB, { recursive: true });
+  writeFileSync(join(rootA, "README.md"), "a\n");
+  writeFileSync(join(rootB, "README.md"), "b\n");
+  gitCommitAll(rootA);
+  gitCommitAll(rootB);
+  const resA = resolveProject(rootA);
+  const resB = resolveProject(rootB);
+  assert.ok(resA.ok && resB.ok);
+  writeProjectRegistration(stateDir, resA.slug, { root: resA.root });
+  writeProjectRegistration(stateDir, resB.slug, { root: resB.root });
+
+  mkdirSync(join(stateDir, "projects", resA.slug), { recursive: true });
+  writeFileSync(
+    join(stateDir, "projects", resA.slug, "ledger.jsonl"),
+    JSON.stringify({ seq: 1, ts, event: "contract_set", task: "T-01", workspace: resA.root, gate: "npm test", artifact: "README.md" }) + "\n",
+  );
+
+  // 1. Empty & unpaused gate-queue.json omits Gate queue section completely.
+  writeFileSync(
+    join(stateDir, "gate-queue.json"),
+    JSON.stringify({ schemaVersion: 1, paused: false, concurrency: 1, items: [] }),
+  );
+  const emptyQueue = await run(ownerCli, ["status"], env);
+  assert.equal(emptyQueue.status, 0, emptyQueue.stderr);
+  assert.equal(emptyQueue.stdout.includes("Gate queue"), false, "idle unpaused queue omits Gate queue section");
+
+  // 2. Paused queue with running + FIFO queued items renders full Gate queue section.
+  const twoMinsAgo = new Date(Date.now() - 125_000).toISOString();
+  const thirtySecsAgo = new Date(Date.now() - 30_000).toISOString();
+  writeFileSync(
+    join(stateDir, "gate-queue.json"),
+    JSON.stringify({
+      schemaVersion: 1,
+      paused: true,
+      pausedAt: twoMinsAgo,
+      concurrency: 2,
+      items: [
+        {
+          id: "gq-run",
+          projectSlug: resA.slug,
+          task: "T-01",
+          attempt: 1,
+          sha: "1111111",
+          cmd: "npm test",
+          cwd: resA.root,
+          timeoutMs: 900_000,
+          enqueuedAt: twoMinsAgo,
+          startedAt: twoMinsAgo,
+          status: "running",
+        },
+        {
+          id: "gq-q2",
+          projectSlug: resB.slug,
+          task: "T-02",
+          attempt: 2,
+          sha: "2222222",
+          cmd: "npm test",
+          cwd: resB.root,
+          timeoutMs: 900_000,
+          enqueuedAt: thirtySecsAgo,
+          status: "queued",
+          mechanical: "lead_verify",
+        },
+      ],
+    }),
+  );
+
+  const populated = await run(ownerCli, ["status"], env);
+  assert.equal(populated.status, 0, populated.stderr);
+  assert.match(populated.stdout, /Gate queue/);
+  assert.match(populated.stdout, /state: paused.*concurrency=2 · running=1 · queued=1/);
+  assert.match(populated.stdout, new RegExp(`#1 \\[running\\] ${resA.slug} · T-01 attempt #1 · elapsed \\d+[ms]`));
+  assert.match(populated.stdout, new RegExp(`#2 \\[queued\\] ${resB.slug} · T-02 attempt #2 · waiting \\d+[ms] \\(lead_verify\\)`));
+
+  // 3. --project with empty ledger still renders Gate queue when queue is paused/non-empty.
+  const scopedEmpty = await run(ownerCli, ["status", "--project", resB.slug], env);
+  assert.equal(scopedEmpty.status, 0, scopedEmpty.stderr);
+  assert.match(scopedEmpty.stdout, /no tasks yet/);
+  assert.match(scopedEmpty.stdout, /Gate queue/);
+  assert.match(scopedEmpty.stdout, /state: paused/);
 });

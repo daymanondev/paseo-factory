@@ -528,3 +528,85 @@ test("plugin/index.server.ts registers guarded stateUpdates, emits on 5 hooks an
   stop();
   await waitUntil(() => daemonUnsubCount >= 3);
 });
+
+test("ADR 0068 (Ticket 05): gate.queue and surface queue control RPCs emit live stateUpdates to global subscribers", async (t) => {
+  const homeDir = makeTempDir();
+  disposeDir(t, homeDir);
+  const prevHome = process.env.HOME;
+  const prevPaseoHome = process.env.PASEO_HOME;
+  process.env.HOME = homeDir;
+  process.env.PASEO_HOME = join(homeDir, ".paseo");
+  t.after(() => {
+    if (prevHome === undefined) delete process.env.HOME;
+    else process.env.HOME = prevHome;
+    if (prevPaseoHome === undefined) delete process.env.PASEO_HOME;
+    else process.env.PASEO_HOME = prevPaseoHome;
+  });
+
+  const handlers = new Map<string, (input: unknown, context: unknown) => Promise<unknown> | unknown>();
+  const server = {
+    addHook: () => () => {},
+    handle: (contract: { name: string }, handler: (input: unknown, context: unknown) => unknown) => {
+      handlers.set(contract.name, handler);
+    },
+  } as unknown as Parameters<typeof contribute>[0];
+
+  const stop = contribute(server);
+  t.after(() => stop());
+
+  const fakeDaemon = {
+    agents: {
+      list: async () => ({ entries: [] }),
+      subscribe: () => () => {},
+    },
+    providers: {
+      listAvailable: async () => ({ providers: [{ provider: "pi", available: true }] }),
+      listModels: async () => ({ models: [] }),
+      subscribe: () => () => {},
+    },
+  };
+
+  const received: StateUpdateEvent[] = [];
+  const ac = new AbortController();
+  handlers.get("factory.state.updates")!(
+    {},
+    {
+      paseo: fakeDaemon,
+      signal: ac.signal,
+      push: async (event: StateUpdateEvent) => {
+        received.push(event);
+      },
+    },
+  );
+
+  // Read-only overview must NOT emit stateUpdates.
+  const overviewRes = (await handlers.get("factory.overview")!({}, { paseo: fakeDaemon })) as { ok: boolean };
+  assert.equal(overviewRes.ok, true);
+  await wait(80);
+  assert.equal(received.some((e) => e.reasons.some((r) => r.includes("overview"))), false, "overview read must not emit");
+
+  // Mutating queue RPCs emit gate.queue and surface.gateQueue* reasons immediately.
+  const beforePause = received.length;
+  const pauseRes = (await handlers.get("factory.gate.queue.pause")!({}, { paseo: fakeDaemon })) as { ok: boolean };
+  assert.equal(pauseRes.ok, true);
+  await waitUntil(() => {
+    const reasons = new Set(received.slice(beforePause).flatMap((e) => e.reasons));
+    return reasons.has("gate.queue") && reasons.has("surface.gateQueuePause");
+  });
+
+  const beforeConc = received.length;
+  const concRes = (await handlers.get("factory.gate.queue.concurrency")!({ concurrency: 2 }, { paseo: fakeDaemon })) as { ok: boolean };
+  assert.equal(concRes.ok, true);
+  await waitUntil(() => {
+    const reasons = new Set(received.slice(beforeConc).flatMap((e) => e.reasons));
+    return reasons.has("gate.queue") && reasons.has("surface.gateQueueConcurrency");
+  });
+
+  const beforeResume = received.length;
+  const resumeRes = (await handlers.get("factory.gate.queue.resume")!({}, { paseo: fakeDaemon })) as { ok: boolean };
+  assert.equal(resumeRes.ok, true);
+  await waitUntil(() => {
+    const reasons = new Set(received.slice(beforeResume).flatMap((e) => e.reasons));
+    return reasons.has("gate.queue") && reasons.has("surface.gateQueueResume");
+  });
+});

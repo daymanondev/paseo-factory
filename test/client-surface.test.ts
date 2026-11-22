@@ -118,24 +118,26 @@ test("installed cards show the state-correct action bar — Disable/Enable by en
   assert.match(plugins, /actions\.manage\(id, "(enable|disable|reload|update|remove)"\)/);
 });
 
-test("the one FactoryShell hosts only the workspace panel and the settings screen; the global Onboarding screen mounts OnboardingScreen (ADR 0056 / ADR 0063)", () => {
+test("the one FactoryShell hosts only the workspace panel and the settings screen; the global Overview and Onboarding screens mount OverviewScreen and OnboardingScreen (ADR 0056 / ADR 0063 / ADR 0068)", () => {
   const entries = read("plugin/client/factory/entries.tsx");
   assert.equal((entries.match(/<FactoryShell/g) ?? []).length, 2, "settings screen and workspace panel render the one shell");
+  assert.match(entries, /FactoryOverviewScreen/, "desktop-only global Factory overview screen is exported");
+  assert.match(entries, /FactoryOverviewSidebarItem/, "desktop-only single Factory sidebar header item is exported");
   assert.match(entries, /FactoryOnboardScreen/, "desktop-only global Onboarding screen is exported");
-  assert.match(entries, /FactoryOnboardSidebarItem/, "desktop-only sidebar footer item is exported");
-  assert.doesNotMatch(entries, /FactoryScreen|addSidebarHeaderItem/, "the old All-projects dashboard and sidebar header item stay deleted");
+  assert.doesNotMatch(entries, /FactoryOnboardSidebarItem|FactoryScreen|addSidebarFooterItem/, "standalone Onboard sidebar footer item and old dashboard stay removed");
 });
 
-test("v0.6.0 W4 + ADR 0063: the surface registers the Workspace panel, Settings screen, desktop-only Onboarding screen/footer item, and two Command Center actions", () => {
+test("v0.6.0 W4 + ADR 0063 + ADR 0068: the surface registers the Workspace panel, Settings screen, single desktop Factory sidebar header item + Overview/Onboarding screens, and two Command Center actions", () => {
   const index = read("plugin/index.client.tsx");
   assert.equal((index.match(/client\.addWorkspacePanel\(/g) ?? []).length, 1);
   assert.equal((index.match(/client\.addSettingsScreen\(/g) ?? []).length, 1);
-  assert.equal((index.match(/client\.addSidebarFooterItem\(/g) ?? []).length, 1);
-  assert.equal((index.match(/client\.addScreen\(/g) ?? []).length, 1);
+  assert.equal((index.match(/client\.addSidebarHeaderItem\(/g) ?? []).length, 1);
+  assert.equal((index.match(/client\.addSidebarFooterItem\(/g) ?? []).length, 0);
+  assert.equal((index.match(/client\.addScreen\(/g) ?? []).length, 2);
   assert.equal((index.match(/client\.addCommandCenterItem\(/g) ?? []).length, 2, "workspace panel and global onboard Command Center actions");
   assert.match(index, /title: "Open Factory Panel"/);
   assert.match(index, /title: "Factory: Onboard Project"/);
-  assert.doesNotMatch(index, /addSidebarHeaderItem|retro|Retro|vaultSync/, "no sidebar header row, Retro or Vault palette entry");
+  assert.doesNotMatch(index, /addSidebarFooterItem|retro|Retro|vaultSync/, "no sidebar footer item, Retro or Vault palette entry");
 });
 
 // ---- native seat starts & live seat states (v0.0.27, ADR 0017 §3) ---------------------------
@@ -1126,4 +1128,39 @@ test("W13: pill labels track every active handoff phase, including substitute ha
   const states = ["scheduled", "handing-over", "substitute", "creating-successor", "done", "failed", null];
   const plans = pillPlans(states.map((state, i) => ({ role: "lead", workspaceId: "root", agentId: `agent-${i}`, handoffState: state } as SeatDirectoryEntry)));
   assert.deepEqual(plans.map(plan => plan.label), ["lead · handing off", "lead · handing off", "lead · handing off", "lead · handing off", "lead", "lead", "lead"]);
+});
+
+test("ADR 0068 (Tickets 06–07): all 8 Factory overview & Gate queue E2E hooks are present and RPC hooks stay out of pure presentation components", () => {
+  const entries = read("plugin/client/factory/entries.tsx");
+  const overviewScreen = read("plugin/client/factory/overview-screen.tsx");
+  const projectPanel = read("plugin/client/factory/project-panel.tsx");
+  const shell = read("plugin/client/factory/shell.tsx");
+
+  const combined = `${entries}\n${overviewScreen}\n${projectPanel}`;
+  for (const hook of [
+    "factory-sidebar-overview-entry",
+    "factory-overview-screen",
+    "factory-overview-gate-queue",
+    "factory-overview-projects-list",
+    "factory-overview-onboard-button",
+    "factory-team-gate-queue-pill",
+    "factory-queue-pause-toggle",
+    "factory-queue-cancel-",
+  ]) {
+    assert.ok(combined.includes(hook), `client exposes E2E hook ${hook}`);
+  }
+
+  // Presentational boundary: FactoryOverviewView (before OverviewScreen) and project-panel.tsx never call useRpc
+  const viewOnlySlice = overviewScreen.slice(
+    overviewScreen.indexOf("export function FactoryOverviewView("),
+    overviewScreen.indexOf("/** Live desktop-only"),
+  );
+  assert.ok(!viewOnlySlice.includes("useRpc"), "FactoryOverviewView remains purely presentational");
+  assert.ok(!projectPanel.includes("useRpc"), "project-panel.tsx remains purely presentational");
+
+  // OverviewScreen owns overview + queue write RPCs; FactoryShell owns gateQueueCancel
+  for (const rpc of ["overview", "gateQueuePause", "gateQueueResume", "gateQueueCancel"]) {
+    assert.match(overviewScreen, new RegExp(`useRpc\\(${rpc}\\)`), `OverviewScreen binds useRpc(${rpc})`);
+  }
+  assert.match(shell, /useRpc\(gateQueueCancel\)/, "FactoryShell binds useRpc(gateQueueCancel)");
 });

@@ -192,10 +192,17 @@ export function validateHistoryCausality(events: readonly LedgerEvent[]): string
         if (state.inFlightAttempt !== undefined) reject("Contract replaces an open Claim pipeline");
         if (state.acceptance !== undefined) reject("Contract follows Task acceptance");
       }
+      if (event.event === "gate_queued") {
+        if (!text(event.sha)) reject("Queued Gate SHA is missing");
+        if (state.inFlightAttempt !== undefined) reject("Queued Gate arrived before the previous Report");
+        if (event.attempt !== state.maxAttempt + 1 || event.attempt > MAX_ATTEMPTS) reject("Queued Gate does not advance the Contract epoch's Attempt counter");
+        if (state.acceptance !== undefined) reject("Queued Gate follows Task acceptance");
+      }
       if (event.event === "claim_reported") {
+        const queuedAttempt = attempt?.events.some((item) => item.event === "gate_queued") && claim === undefined;
         if (!text(event.sha)) reject("Claim SHA is missing");
-        if (state.inFlightAttempt !== undefined) reject("Claim arrived before the previous Report");
-        if (event.attempt !== state.maxAttempt + 1 || event.attempt > MAX_ATTEMPTS) reject("Claim does not advance the Contract epoch's Attempt counter");
+        if (!queuedAttempt && state.inFlightAttempt !== undefined) reject("Claim arrived before the previous Report");
+        if ((queuedAttempt ? event.attempt !== state.maxAttempt : event.attempt !== state.maxAttempt + 1) || event.attempt > MAX_ATTEMPTS) reject("Claim does not advance the Contract epoch's Attempt counter");
         if (state.acceptance !== undefined) reject("Claim follows Task acceptance");
       }
       if (event.event === "gate_started") {

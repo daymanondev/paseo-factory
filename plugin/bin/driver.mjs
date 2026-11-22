@@ -112,8 +112,8 @@ const TASK_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 // (or `.agents/skills/<skill>/SKILL.md` in the Workspace) — on demand.
 // No description and no skills, no headers — the brief is byte-identical to
 // v0.0.5's.
-const BRIEF_TEMPLATE = `Do the assigned work on branch \`<branch>\`. When done: commit, run
-\`git rev-parse HEAD\`, then \`factory-claim --task <task-id> --sha <sha>\`.
+const BRIEF_TEMPLATE = `Do the assigned work on branch \`<branch>\`. Use fast slice checks during TDD (never pre-run the full cumulative Gate); when done: commit, run
+\`git rev-parse HEAD\`, then \`factory-claim --task <task-id> --sha <sha>\`, and end your turn immediately once \`queued\` (the daemon GateQueue runs the Gate asynchronously).
 If the result is RED: read the note line, fix, make a NEW commit, claim
 again with the new sha. Never edit tests just to make them green.
 
@@ -800,6 +800,16 @@ export function verdictOfThisRun(events, task) {
  * Claim, and the Owner resumes a paused one. A task the ledger never spawned
  * (a bare observe) keeps the old snapshot-only finish.
  */
+function hasOpenGate(events, task) {
+  let open = false;
+  for (const evt of events) {
+    if (evt.task !== task) continue;
+    if (evt.event === "gate_queued" || evt.event === "gate_started") open = true;
+    else if (evt.event === "gate_finished" || evt.event === "contract_set" || evt.event === "task_closed") open = false;
+  }
+  return open;
+}
+
 export function idleIsFinish(events, task) {
   let anchored = false;
   let settled = false;
@@ -1266,7 +1276,11 @@ export async function observeTasks(
             // Peer's: no meter, no archive; keep watching.
             if (entry.holdingIdle !== true) {
               entry.holdingIdle = true;
-              log(`factory: ${entry.task} agent idle with no Claim or verdict on the ledger — the task stays open (paused, or waiting for a nudge); not metering or archiving`);
+              log(
+                hasOpenGate(events, entry.task)
+                  ? `factory: ${entry.task} agent idle while Gate is queued/running — holding open at zero tokens; not metering or archiving`
+                  : `factory: ${entry.task} agent idle with no Claim or verdict on the ledger — the task stays open (paused, or waiting for a nudge); not metering or archiving`,
+              );
             }
             continue;
           }

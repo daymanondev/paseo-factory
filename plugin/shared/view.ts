@@ -507,6 +507,66 @@ export const PanelSupervisorCandidateRowSchema = z.object({
 });
 export type PanelSupervisorCandidateRow = z.infer<typeof PanelSupervisorCandidateRowSchema>;
 
+export const GateQueueAheadEntrySchema = z.object({
+  id: z.string(),
+  projectSlug: z.string(),
+  projectName: z.string(),
+  task: z.string(),
+  attempt: z.number().int().min(1),
+  status: z.enum(["queued", "running"]),
+});
+export type GateQueueAheadEntryView = z.infer<typeof GateQueueAheadEntrySchema>;
+
+export const GateQueueEntryViewSchema = z.object({
+  id: z.string(),
+  projectSlug: z.string(),
+  projectName: z.string(),
+  projectRoot: z.string().nullable(),
+  workspaceId: z.string().nullable(),
+  task: z.string(),
+  attempt: z.number().int().min(1),
+  status: z.enum(["queued", "running"]),
+  queuedAt: z.string(),
+  startedAt: z.string().nullable(),
+  waitMs: z.number().int().nonnegative(),
+  elapsedMs: z.number().int().nonnegative().nullable(),
+  timeoutMs: z.number().int().nonnegative(),
+  position: z.number().int().min(1),
+  aheadCount: z.number().int().nonnegative(),
+  ahead: z.array(GateQueueAheadEntrySchema),
+  logPath: z.string().nullable(),
+  logExists: z.boolean(),
+  mechanical: z.literal("lead_verify").optional(),
+  agentId: z.string().nullable().optional(),
+});
+export type GateQueueEntryView = z.infer<typeof GateQueueEntryViewSchema>;
+
+export const GateQueueViewSchema = z.object({
+  paused: z.boolean(),
+  pausedAt: z.string().nullable(),
+  concurrency: z.number().int().min(1),
+  running: z.array(GateQueueEntryViewSchema),
+  queued: z.array(GateQueueEntryViewSchema),
+});
+export type GateQueueView = z.infer<typeof GateQueueViewSchema>;
+
+/** Per-Project Gate queue status pill projected onto `PanelView` and `PanelPeerRow` (ADR 0068). */
+export const PanelGateQueueEntrySchema = z.object({
+  id: z.string(),
+  task: z.string(),
+  attempt: z.number().int().min(1),
+  status: z.enum(["queued", "running"]),
+  position: z.number().int().min(1),
+  aheadCount: z.number().int().nonnegative(),
+  aheadLabel: z.string().nullable(),
+  ahead: z.array(GateQueueAheadEntrySchema).optional(),
+  paused: z.boolean(),
+  queuedAt: z.string(),
+  startedAt: z.string().nullable(),
+  mechanical: z.literal("lead_verify").optional(),
+});
+export type PanelGateQueueEntry = z.infer<typeof PanelGateQueueEntrySchema>;
+
 export const PanelPeerRowSchema = z.object({
   ...SeatFields,
   role: z.literal("peer"),
@@ -521,6 +581,8 @@ export const PanelPeerRowSchema = z.object({
   model: z.string().nullable(),
   /** Running background shells/monitors reported by the daemon (>=0.16.0); absent when unreported. */
   backgroundWorkCount: z.number().int().nonnegative().optional(),
+  /** Live or queued Gate queue entry for this Peer's Task, when present. */
+  gateQueue: PanelGateQueueEntrySchema.nullable().optional(),
 });
 export type PanelPeerRow = z.infer<typeof PanelPeerRowSchema>;
 
@@ -581,6 +643,8 @@ export const PanelViewSchema = z.object({
   }).nullable(),
   openDesign: PanelOpenDesignSchema.nullable(),
   onboarding: PanelOnboardingSchema.nullable(),
+  /** Active or queued Gate queue entries belonging to this Project (ADR 0068). */
+  gateQueue: z.array(PanelGateQueueEntrySchema).optional(),
 });
 export type PanelView = z.infer<typeof PanelViewSchema>;
 
@@ -637,8 +701,66 @@ export const ProjectDirectoryEntrySchema = z.object({
   activeWorkCount: z.number().int().nonnegative().optional(),
   /** Total leftover background shells/monitors reported across live Project seats and open Peers. */
   backgroundWorkCount: z.number().int().nonnegative().optional(),
+  /** Highest-priority Gate queue status for this Project (`running` > `queued`). */
+  gateQueueStatus: z.enum(["running", "queued"]).nullable().optional(),
+  /** 1-based queue position of the Project's head Gate queue item when active or queued. */
+  gateQueuePosition: z.number().int().min(1).nullable().optional(),
+  /** True while the machine-wide Gate queue is paused. */
+  gateQueuePaused: z.boolean().optional(),
 });
 export type ProjectDirectoryEntry = z.infer<typeof ProjectDirectoryEntrySchema>;
+
+export const OverviewProjectSeatSummarySchema = z.object({
+  statusLabel: z.string(),
+  tone: PanelToneSchema,
+  vacant: z.boolean(),
+  agentId: z.string().nullable(),
+});
+export type OverviewProjectSeatSummary = z.infer<typeof OverviewProjectSeatSummarySchema>;
+
+export const OverviewProjectPeerSummarySchema = z.object({
+  agentId: z.string(),
+  task: z.string(),
+  disposition: z.enum(["engineer", "architect", "reviewer", "scout"]),
+  statusLabel: z.string(),
+  tone: PanelToneSchema,
+});
+export type OverviewProjectPeerSummary = z.infer<typeof OverviewProjectPeerSummarySchema>;
+
+export const OverviewLatestGateSchema = z.object({
+  state: z.enum(["running", "queued", "green", "red"]),
+  verdict: z.enum(["green", "red"]).nullable(),
+  task: z.string(),
+  attempt: z.number().int().min(1),
+  ts: z.string(),
+  note: z.string().nullable(),
+});
+export type OverviewLatestGate = z.infer<typeof OverviewLatestGateSchema>;
+
+export const OverviewProjectEntrySchema = z.object({
+  slug: z.string(),
+  name: z.string(),
+  root: z.string(),
+  workspaceId: z.string().nullable(),
+  needsYouCount: z.number().int().nonnegative(),
+  handoffActive: z.boolean(),
+  supervisor: OverviewProjectSeatSummarySchema,
+  lead: OverviewProjectSeatSummarySchema,
+  peers: z.array(OverviewProjectPeerSummarySchema),
+  latestGate: OverviewLatestGateSchema.nullable(),
+  gateQueueStatus: z.enum(["running", "queued"]).nullable(),
+  gateQueuePosition: z.number().int().min(1).nullable(),
+  ledgerError: z.string().nullable().optional(),
+});
+export type OverviewProjectEntry = z.infer<typeof OverviewProjectEntrySchema>;
+
+export const FactoryOverviewViewSchema = z.object({
+  generatedAt: z.string(),
+  daemonError: z.string().nullable(),
+  gateQueue: GateQueueViewSchema,
+  projects: z.array(OverviewProjectEntrySchema),
+});
+export type FactoryOverviewView = z.infer<typeof FactoryOverviewViewSchema>;
 
 export const FactoryViewSchema = z.object({
   /** The Project panel's view-model, projected server-side — the client only renders it (v0.6.0, ADR 0056). */
@@ -710,6 +832,8 @@ export const FactoryViewSchema = z.object({
    * field's own precedent).
    */
   projectUsage: ProjectUsageViewSchema.nullable().optional(),
+  /** Daemon-wide GateQueue max concurrent Gate executions (ADR 0068, default 1). */
+  gateQueueConcurrency: z.number().int().min(1).optional(),
 });
 export type FactoryView = z.infer<typeof FactoryViewSchema>;
 

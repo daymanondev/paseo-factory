@@ -9,7 +9,7 @@ import { openExternalUrl, useRpc } from "@getpaseo/plugin/client";
 import { Modal, ScrollView, useToast } from "@getpaseo/plugin/client/ui";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Text, View } from "react-native";
-import { skillsImport, skillsPackSave, skillsPackDelete, skillsPackReset, skillsTogglePack, lanesSet, lanesReset, lanesSetBatch, handoffStart, handoffReplaceNow, handoffCancel, handoffRetry, handoffHandover, onboardingInspect, onboardingStart, onboardingStatus, openDesignCatalog, openDesignSync, helperMcpsSyncAndProbe, helperMcpsSetEnabled, pluginsInstall, pluginsManage, pluginsCheckUpdates, releaseSettingsRead, releaseSettingsWrite, storeReleaseRead, storeReleaseWrite, githubPublishPreflight, githubPublish, selfUpdateApply, selfUpdateStatus, profilesApply, profilesDelete, profilesSave, projectDelete, projectReset, projectRotate, snapshot, stateUpdates, supervisorAdopt, supervisorStart, vaultConfigure, vaultHydrate, vaultImport, vaultSync } from "../../shared/rpc.ts";
+import { skillsImport, skillsPackSave, skillsPackDelete, skillsPackReset, skillsTogglePack, lanesSet, lanesReset, lanesSetBatch, handoffStart, handoffReplaceNow, handoffCancel, handoffRetry, handoffHandover, onboardingInspect, onboardingStart, onboardingStatus, openDesignCatalog, openDesignSync, helperMcpsSyncAndProbe, helperMcpsSetEnabled, pluginsInstall, pluginsManage, pluginsCheckUpdates, releaseSettingsRead, releaseSettingsWrite, storeReleaseRead, storeReleaseWrite, githubPublishPreflight, githubPublish, selfUpdateApply, selfUpdateStatus, profilesApply, profilesDelete, profilesSave, projectDelete, projectReset, projectRotate, snapshot, stateUpdates, supervisorAdopt, supervisorStart, vaultConfigure, vaultHydrate, vaultImport, vaultSync, gateQueueCancel, gateQueueConcurrency } from "../../shared/rpc.ts";
 import { GH_LOGIN_CMD } from "./github-release-card.tsx";
 import type { GitHubPublishSubmitInput, ReleaseCardFeedback } from "./github-release-card.tsx";
 import type { StoreReleaseCardFeedback } from "./store-release-card.tsx";
@@ -21,6 +21,7 @@ import { isSubscriptionLive, useClientSubscription } from "../kit/subscription.t
 import { OpenDesignControl } from "./open-design.tsx";
 import type { SeatEditorRequest } from "./editor-request.ts";
 import { ProjectPanel } from "./project-panel.tsx";
+import type { GateQueueCancelError } from "./project-panel.tsx";
 import { useSelfUpdate } from "./self-update.tsx";
 import { ProjectMenu } from "./project-menu.tsx";
 import { useOnboardingRunTracker } from "./onboarding-run-tracker.tsx";
@@ -36,6 +37,7 @@ import { DiagnosticsBody, PrerequisiteSetupCard, SettingsReadOnly, SettingsScree
 import { settingsWarnings } from "./settings-state.ts";
 import { isCoreSelfRestartError, resolveCoreRestartWatch } from "./plugin-feedback.ts";
 import type { ActivePluginAct, PluginsNote } from "./plugin-feedback.ts";
+import { useGateQueueCancel } from "./gate-queue-cancel.ts";
 
 /** The navigation slice the shell uses — `openAgent` jumps to a session. */
 export interface Navigation {
@@ -123,6 +125,8 @@ export function FactoryShell({
   const vaultHydrateCall = useRpc(vaultHydrate);
   const vaultSyncCall = useRpc(vaultSync);
   const vaultImportCall = useRpc(vaultImport);
+  const gateQueueCancelCall = useRpc(gateQueueCancel);
+  const gateQueueConcurrencyCall = useRpc(gateQueueConcurrency);
 
   const [busy, setBusy] = useState(false);
   const [handover, setHandover] = useState<{ seat: string; text: string; source: "extracted" | "substitute" } | null>(null);
@@ -145,10 +149,35 @@ export function FactoryShell({
   const [releaseFeedback, setReleaseFeedback] = useState<ReleaseCardFeedback | null>(null);
   const [releaseCopiedLogin, setReleaseCopiedLogin] = useState(false);
   const [containerWidth, setContainerWidth] = useState<number>(0);
+  const [gateQueueCancelError, setGateQueueCancelError] = useState<GateQueueCancelError | null>(null);
+  const mountedRef = useRef(true);
+  const scopeRootRef = useRef(dir);
+  scopeRootRef.current = dir;
   const lastViewRef = useRef<FactoryView | null>(null);
   const refreshRef = useRef<() => void>(() => {});
   const onboardingProgressRef = useRef<(projectRoot?: string) => void>(() => {});
   const [onboardingHoldFolder, setOnboardingHoldFolder] = useState<string | null>(null);
+  const { cancellingIds: cancellingGateQueueIds, cancelItem: cancelGateQueueItemAsync } = useGateQueueCancel({
+    call: (input) => gateQueueCancelCall(input),
+    mountedRef,
+    scopeKey: dir,
+    onStart: () => setGateQueueCancelError(null),
+    onSuccess: () => {
+      toast.show("Gate cancelled", { variant: "success" });
+      refreshRef.current();
+    },
+    onFailure: (id, message) => {
+      setGateQueueCancelError({ queueId: id, message });
+      toast.error(`Cancel Gate: ${message}`);
+    },
+  });
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   // The active Project scope: the workspace panel's directory (auto-bound).
   const scopeRoot = dir;
@@ -253,6 +282,7 @@ export function FactoryShell({
 
   useEffect(() => {
     setOnboardingHoldFolder(null);
+    setGateQueueCancelError(null);
   }, [scopeRoot]);
 
   const probedScopeRef = useRef<string | null>(null);
@@ -621,6 +651,9 @@ export function FactoryShell({
     if (target === null) return;
     void act("Delete Project", () => projectDeleteCall({ projectRoot: target.root, projectSlug: target.slug, project: target.slug }));
   };
+  const cancelGateQueueItem = (id: string): void => {
+    void cancelGateQueueItemAsync(id);
+  };
   const incompleteTools = (view.companionTools ?? []).filter((t) => t.status !== "running" || t.error !== null);
   const isInstallingPrereqs = activePluginAct !== null && activePluginAct.kind === "install" && activePluginAct.target === "all";
   /** Installs every required skill & tool — the Needs-you item's action and the Settings banner's button. */
@@ -941,7 +974,22 @@ export function FactoryShell({
                 />
               ),
               vault: vaultPane,
-              diagnostics: <DiagnosticsBody theme={theme} view={view} serverId={serverId} />,
+              diagnostics: (
+                <DiagnosticsBody
+                  theme={theme}
+                  view={view}
+                  serverId={serverId}
+                  busy={busy}
+                  onSetGateQueueConcurrency={(concurrency) =>
+                    act("gate-queue-concurrency", async () => {
+                      const reply = await gateQueueConcurrencyCall({ concurrency });
+                      return reply.ok
+                        ? { ok: true as const, summary: `Gate queue concurrency set to ${reply.gateQueue.concurrency}` }
+                        : reply;
+                    })
+                  }
+                />
+              ),
             }
       }
     />
@@ -999,6 +1047,8 @@ export function FactoryShell({
             storeReleaseBusy={storeReleaseBusy}
             storeReleaseFeedback={storeReleaseFeedback}
             {...(mobile ? {} : { storeReleaseActions: { setMode: updateStoreReleaseMode } })}
+            cancellingGateQueueIds={cancellingGateQueueIds}
+            gateQueueCancelError={gateQueueCancelError}
             {...(mobile || openReleaseLab === undefined ? {} : { onOpenReleaseLab: openReleaseLab })}
             {...(mobile || openSettings === undefined ? {} : { onOpenSettings: openSettings })}
             onTabChange={setPanelTab}
@@ -1009,7 +1059,7 @@ export function FactoryShell({
             mobile={mobile}
             now={now}
             daemonError={view.daemonError}
-            actions={{ openAgent, installPrerequisites, handoffStart: startHandoff, handoffReplaceNow: replaceHandoff, handoffCancel: cancelHandoff, handoffRetry: retryHandoff, viewHandover, startSupervisor, syncOpenDesign, adoptSupervisor, saveSeatModel, setMachineDefault, applyProfile: applyProjectProfile, toggleSkillPack: toggleProjectSkillPack, resetSkillPacks: resetProjectSkillPacks, saveProfile: saveProjectProfile, resetProjectLanes, manageSkillPacks: () => { if (!mobile) openSettings?.(); }, busy: busy || activePluginAct !== null }}
+            actions={{ openAgent, installPrerequisites, handoffStart: startHandoff, handoffReplaceNow: replaceHandoff, handoffCancel: cancelHandoff, handoffRetry: retryHandoff, viewHandover, startSupervisor, syncOpenDesign, adoptSupervisor, saveSeatModel, setMachineDefault, applyProfile: applyProjectProfile, toggleSkillPack: toggleProjectSkillPack, resetSkillPacks: resetProjectSkillPacks, saveProfile: saveProjectProfile, resetProjectLanes, cancelGateQueueItem, manageSkillPacks: () => { if (!mobile) openSettings?.(); }, busy: busy || activePluginAct !== null }}
             openDesignActions={
               !mobile && view.project !== null && view.project.missingRoot !== true ? (
                 <>

@@ -8,13 +8,13 @@
  * instead, so no settings write is ever mounted there. Pure render — no useRpc.
  */
 import type { PluginTheme } from "@getpaseo/plugin";
-import { Icon } from "@getpaseo/plugin/client/ui";
-import { useState } from "react";
+import { Icon, TextInput } from "@getpaseo/plugin/client/ui";
+import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { Pressable, Text, View } from "react-native";
 import type { CompanionPluginView, FactoryView } from "../../shared/view.ts";
 import { Btn, Card, Pill } from "../kit/pill.tsx";
-import { RADIUS, SPACING, text, tint } from "../kit/theme.ts";
+import { CONTROL_SM, MONO_FONT, RADIUS, SPACING, text, tint } from "../kit/theme.ts";
 import { SkillPackInventory } from "./skill-hub.tsx";
 import { SETTINGS_SECTION_ORDER } from "./settings-state.ts";
 import type { SettingsSectionId, SettingsWarnings } from "./settings-state.ts";
@@ -101,6 +101,7 @@ export function SettingsReadOnly({ theme, view, section }: { theme: PluginTheme;
       rows = [
         <Row key="daemon" theme={theme} label="Daemon" value={view.daemonError ?? "healthy"} />,
         <Row key="state" theme={theme} label="State directory" value={view.stateDir} />,
+        <Row key="gate-queue-concurrency" theme={theme} label="Gate queue concurrency" value={String(view.gateQueueConcurrency ?? 1)} />,
       ];
       break;
   }
@@ -112,13 +113,75 @@ export function SettingsReadOnly({ theme, view, section }: { theme: PluginTheme;
   );
 }
 
-/** The Diagnostics body — machine state the Owner reads when something is off. */
-export function DiagnosticsBody({ theme, view, serverId }: { theme: PluginTheme; view: FactoryView; serverId?: string }) {
+/** The Diagnostics body — machine state the Owner reads when something is off, plus rare GateQueue concurrency setting. */
+export function DiagnosticsBody({
+  theme,
+  view,
+  serverId,
+  busy = false,
+  onSetGateQueueConcurrency,
+}: {
+  theme: PluginTheme;
+  view: FactoryView;
+  serverId?: string;
+  busy?: boolean;
+  onSetGateQueueConcurrency?: (concurrency: number) => Promise<boolean> | boolean;
+}) {
+  const currentConcurrency = view.gateQueueConcurrency ?? 1;
+  const [draft, setDraft] = useState(String(currentConcurrency));
+  useEffect(() => {
+    setDraft(String(currentConcurrency));
+  }, [currentConcurrency]);
+  const trimmed = draft.trim();
+  const parsedConcurrency = /^[1-9]\d*$/.test(trimmed) ? Number(trimmed) : undefined;
+  const validConcurrency = parsedConcurrency !== undefined && Number.isSafeInteger(parsedConcurrency) && parsedConcurrency >= 1;
+  const dirty = validConcurrency && parsedConcurrency !== currentConcurrency;
+
   return (
-    <View style={{ gap: SPACING[1] }}>
-      <Text style={text(theme, "code")}>stateDir: {view.stateDir}</Text>
-      <Text style={text(theme, "code")}>serverId: {serverId ?? "local"}</Text>
-      <Text style={text(theme, "code")}>daemon: {view.daemonError ?? "healthy"}</Text>
+    <View style={{ gap: SPACING[2] }}>
+      <View style={{ gap: SPACING[1] }}>
+        <Text style={text(theme, "code")}>stateDir: {view.stateDir}</Text>
+        <Text style={text(theme, "code")}>serverId: {serverId ?? "local"}</Text>
+        <Text style={text(theme, "code")}>daemon: {view.daemonError ?? "healthy"}</Text>
+      </View>
+      <View style={{ gap: SPACING[1] }}>
+        <Text style={text(theme, "label")}>Gate queue max concurrency</Text>
+        <Text style={text(theme, "meta")}>Max concurrent background Gate runs across all Projects (default 1).</Text>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: SPACING[1.5], flexWrap: "wrap" }}>
+          <View
+            style={{
+              minHeight: CONTROL_SM,
+              minWidth: 72,
+              justifyContent: "center",
+              borderWidth: 1,
+              borderColor: validConcurrency ? theme.colors.border : theme.colors.statusDanger,
+              borderRadius: RADIUS.md,
+              backgroundColor: theme.colors.surface0,
+            }}
+          >
+            <TextInput
+              testID="gate-queue-concurrency-input"
+              value={draft}
+              onChangeText={setDraft}
+              keyboardType="numeric"
+              style={{ paddingHorizontal: SPACING[2], paddingVertical: 4, color: theme.colors.foreground, fontSize: 12, fontFamily: MONO_FONT }}
+            />
+          </View>
+          <Btn
+            testID="gate-queue-concurrency-save"
+            theme={theme}
+            small
+            solid
+            label="Save"
+            disabled={busy || onSetGateQueueConcurrency === undefined || !dirty}
+            onPress={() => {
+              if (!validConcurrency || parsedConcurrency === undefined || onSetGateQueueConcurrency === undefined) return;
+              void onSetGateQueueConcurrency(parsedConcurrency);
+            }}
+          />
+        </View>
+        {!validConcurrency ? <Text style={text(theme, "meta", "statusDanger")}>Enter a whole number ≥ 1.</Text> : null}
+      </View>
     </View>
   );
 }

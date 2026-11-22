@@ -1089,15 +1089,15 @@ export function reloadDaemonConfigViaWs(home: string): void {
  * right after plugin boot/reload so `registerSurfaceRpc` immediately captures
  * `context.paseo` before any Spool request arrives.
  */
-export function warmPluginDaemonApiViaWs(home: string): void {
+export function warmPluginDaemonApiViaWs(home: string): Promise<boolean> {
   const call = daemonWsRequestPayload(
     home,
     { type: "plugin.rpc.invoke.request", pluginId: "paseo-factory", method: "factory.snapshot", input: {} },
     "plugin.rpc.invoke.response",
     5_000,
   );
-  if (call === null) return;
-  void call.catch(() => {});
+  if (call === null) return Promise.resolve(false);
+  return call.then((reply) => reply.ok, () => false);
 }
 
 /** True for a plain object — the narrowing helper the cleanup slices use. */
