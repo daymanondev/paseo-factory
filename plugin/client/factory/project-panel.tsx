@@ -10,7 +10,7 @@ import { Modal, TextInput } from "@getpaseo/plugin/client/ui";
 import { createContext, useContext, useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { Pressable, Text, View } from "react-native";
-import type { GitHubPublishPreflightView, PanelNeedsYouItem, PanelOpenDesign, PanelPeerRow, PanelSeatRow, PanelSupervisorCandidateRow, PanelTone, PanelView, Lanes, ReleaseSettingsView, StoreReleaseView } from "../../shared/view.ts";
+import type { GitHubPublishPreflightView, PanelGateQueueEntry, PanelNeedsYouItem, PanelOpenDesign, PanelPeerRow, PanelSeatRow, PanelSupervisorCandidateRow, PanelTone, PanelView, Lanes, ReleaseSettingsView, StoreReleaseView } from "../../shared/view.ts";
 import { GitHubReleaseCard } from "./github-release-card.tsx";
 import type { GitHubReleaseActions, ReleaseCardFeedback } from "./github-release-card.tsx";
 import { StoreReleaseCard } from "./store-release-card.tsx";
@@ -346,6 +346,36 @@ function SeatRow({
   );
 }
 
+function teamGateQueueLabel(entry: PanelGateQueueEntry): string {
+  if (entry.status === "running") return "Gate · running";
+  if (entry.aheadLabel !== null) return `Gate · queued (#${entry.position} behind ${entry.aheadLabel})`;
+  if (entry.paused) return `Gate · queued (#${entry.position} · paused)`;
+  return `Gate · queued (#${entry.position})`;
+}
+
+/** Contextual Gate queue badge on a Team tab Peer row or unmatched Project queue item. */
+function TeamGateQueuePill({ theme, entry }: { theme: PluginTheme; entry: PanelGateQueueEntry }) {
+  const palette = factoryPalette(theme);
+  const colour = entry.status === "running" ? palette.ok : palette.wait;
+  return (
+    <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[1.5] }}>
+      <ToneBadge
+        theme={theme}
+        testID="factory-team-gate-queue-pill"
+        label={teamGateQueueLabel(entry)}
+        colour={colour}
+        dot
+      />
+      {entry.status === "queued" && entry.paused && entry.aheadLabel !== null ? (
+        <ToneBadge theme={theme} label="Paused" colour={palette.wait} dot={false} />
+      ) : null}
+      {entry.mechanical === "lead_verify" ? (
+        <ToneBadge theme={theme} label="lead_verify" colour={palette.lead} dot={false} pill={false} />
+      ) : null}
+    </View>
+  );
+}
+
 function PeerRowView({ theme, row, wide, actions }: { theme: PluginTheme; row: PanelPeerRow; wide: boolean; actions: ProjectPanelActions }) {
   const handOff = useHandOff(`peer:${row.task}`, actions);
   const canHandOff = row.allowedActions.includes("hand-off-now");
@@ -370,6 +400,7 @@ function PeerRowView({ theme, row, wide, actions }: { theme: PluginTheme; row: P
           {row.allowedActions.includes("view-handover") ? <Btn theme={theme} small variant="ghost" testID={`factory-seat-view-handover-peer-${row.task}`} label="View handover" disabled={actions.busy} onPress={() => actions.viewHandover(`peer:${row.task}`)} /> : null}
         </>}
       />
+      {row.gateQueue != null ? <TeamGateQueuePill theme={theme} entry={row.gateQueue} /> : null}
       <IdleBackgroundWork theme={theme} seatKey={`peer-${row.task}`} row={row} />
     </View></View>
   );
@@ -418,12 +449,14 @@ function GroupHeading({ theme, label }: { theme: PluginTheme; label: string }) {
 function Seats({
   theme,
   seats,
+  gateQueue = [],
   mobile,
   wide,
   actions,
 }: {
   theme: PluginTheme;
   seats: NonNullable<PanelView["seats"]>;
+  gateQueue?: readonly PanelGateQueueEntry[];
   mobile: boolean;
   wide: boolean;
   actions: ProjectPanelActions;
@@ -431,10 +464,25 @@ function Seats({
   const [closedOpen, setClosedOpen] = useState(false);
   const live = seats.peers.filter((peer) => !isClosedPeer(peer));
   const closed = seats.peers.filter(isClosedPeer);
+  const shownQueueIds = new Set(
+    live.map((peer) => peer.gateQueue?.id).filter((id): id is string => typeof id === "string" && id !== ""),
+  );
+  const unmatchedQueueEntries = gateQueue.filter((entry) => !shownQueueIds.has(entry.id));
   return (
     <View testID="factory-panel-seats">
       <SeatRow theme={theme} name="Supervisor" row={seats.supervisor} mobile={mobile} wide={wide} divider={false} actions={actions} />
       <SeatRow theme={theme} name="Lead" row={seats.lead} mobile={mobile} wide={wide} actions={actions} />
+      {unmatchedQueueEntries.length > 0 ? (
+        <View testID="factory-panel-gate-queue">
+          <GroupHeading theme={theme} label="GATE QUEUE" />
+          {unmatchedQueueEntries.map((entry) => (
+            <View key={entry.id} style={{ ...seatRowStyle(theme, true), flexDirection: "row", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: SPACING[2] }}>
+              <Text style={text(theme, "rowTitle")}>{`${entry.task} · Attempt ${entry.attempt}`}</Text>
+              <TeamGateQueuePill theme={theme} entry={entry} />
+            </View>
+          ))}
+        </View>
+      ) : null}
       {seats.peers.length > 0 ? (
         <View testID="factory-panel-peers">
           <GroupHeading theme={theme} label="PEERS" />
@@ -940,7 +988,7 @@ export function ProjectPanel({
   const needsYouItems = withoutShownHandoffFailures(panel.needsYou, panel.handoffs);
   const needsYou = <NeedsYou theme={theme} items={needsYouItems} mobile={mobile} wide={wide} actions={actions} />;
   const handoff = <HandoffBlock theme={theme} handoffs={panel.handoffs} mobile={mobile} wide={wide} actions={actions} />;
-  const seats = panel.seats === null ? null : <Seats theme={theme} seats={panel.seats} mobile={mobile} wide={wide} actions={actions} />;
+  const seats = panel.seats === null ? null : <Seats theme={theme} seats={panel.seats} {...(panel.gateQueue === undefined ? {} : { gateQueue: panel.gateQueue })} mobile={mobile} wide={wide} actions={actions} />;
   const models = <ModelsTab theme={theme} panel={panel} mobile={mobile} actions={actions} modelView={modelView} machineLanes={machineLanes} hasProjectLaneOverride={hasProjectLaneOverride} />;
   const packs = <SkillPacks theme={theme} divider={panel.usage != null} packs={skillPacks} explicit={skillPacksExplicit} {...(!mobile ? { onReset: actions.resetSkillPacks, onManage: actions.manageSkillPacks } : {})} initiallyExpanded={initialUi?.expandedSkillPacks ?? []} busy={actions.busy} {...(!mobile && actions.toggleSkillPack !== undefined ? { onToggle: actions.toggleSkillPack } : {})} />;
   const design = panel.openDesign === null ? null : <OpenDesign theme={theme} openDesign={panel.openDesign} now={now} desktopActions={mobile ? null : openDesignActions} />;

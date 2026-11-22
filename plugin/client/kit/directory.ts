@@ -19,10 +19,110 @@ export interface WorkspaceRowBadgePlan {
   readonly accessibilityLabel: string;
 }
 
+/** Machine-wide Gate queue summary emitted by `factory.seats.directory`. */
+export interface DirectoryGateQueueSummary {
+  readonly paused: boolean;
+  readonly concurrency: number;
+  readonly runningCount: number;
+  readonly queuedCount: number;
+}
+
+/** Zero-RN descriptor for the global `Factory` sidebar header row's trailing badge. */
+export interface SidebarOverviewBadgePlan {
+  readonly needsYouCount: number;
+  readonly runningCount: number;
+  readonly queuedCount: number;
+  readonly paused: boolean;
+  readonly label: string;
+  readonly tone: "wait" | "ok";
+}
+
+/**
+ * Computes the compact trailing badge descriptor for the desktop `Factory`
+ * sidebar header entry, or `null` when no Project needs attention and no Gate
+ * is running or queued.
+ */
+export function sidebarOverviewBadgePlan(
+  projects: readonly ProjectDirectoryEntry[],
+  gateQueue?: DirectoryGateQueueSummary | null,
+): SidebarOverviewBadgePlan | null {
+  const needsYouCount = projects.reduce((sum, project) => sum + (project.needsYouCount > 0 ? project.needsYouCount : 0), 0);
+  const runningCount = gateQueue?.runningCount ?? projects.filter((project) => project.gateQueueStatus === "running").length;
+  const queuedCount = gateQueue?.queuedCount ?? projects.filter((project) => project.gateQueueStatus === "queued").length;
+  const paused = gateQueue?.paused ?? projects.some((project) => project.gateQueuePaused === true);
+
+  if (needsYouCount === 0 && runningCount === 0 && queuedCount === 0) return null;
+
+  const gateText =
+    runningCount > 0
+      ? queuedCount > 0
+        ? `Gate running · +${queuedCount}`
+        : "Gate running"
+      : queuedCount > 0
+        ? paused
+          ? `Paused · ${queuedCount}`
+          : `${queuedCount} queued`
+        : "";
+
+  const label =
+    needsYouCount > 0 && gateText !== ""
+      ? `Needs you · ${needsYouCount} · ${gateText}`
+      : needsYouCount > 0
+        ? `Needs you · ${needsYouCount}`
+        : gateText;
+
+  return {
+    needsYouCount,
+    runningCount,
+    queuedCount,
+    paused,
+    label,
+    tone: needsYouCount > 0 || runningCount === 0 ? "wait" : "ok",
+  };
+}
+
+function createSidebarOverviewBadgeStore() {
+  let badge: SidebarOverviewBadgePlan | null = null;
+  let fingerprint = "null";
+  const listeners = new Set<() => void>();
+  const notify = (): void => {
+    for (const listener of listeners) listener();
+  };
+  return {
+    subscribe(listener: () => void): () => void {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+    getSnapshot(): SidebarOverviewBadgePlan | null {
+      return badge;
+    },
+    setSummary(projects: readonly ProjectDirectoryEntry[], gateQueue?: DirectoryGateQueueSummary | null): void {
+      const next = sidebarOverviewBadgePlan(projects, gateQueue);
+      const nextFingerprint = JSON.stringify(next);
+      if (nextFingerprint === fingerprint) return;
+      badge = next;
+      fingerprint = nextFingerprint;
+      notify();
+    },
+    clear(): void {
+      if (badge === null) return;
+      badge = null;
+      fingerprint = "null";
+      notify();
+    },
+  };
+}
+
+/** Shared sidebar overview badge store fed by `startSeatDirectory` and `OverviewScreen`. */
+export const sidebarOverviewBadgeStore = createSidebarOverviewBadgeStore();
+
 /**
  * Pure workspace-row badge planner: maps `(workspaceId, projects)` to the
- * highest-priority badge descriptor (`Needs you · N` > `Handing off` > active
- * work / leftover background work), or `null` when idle or not a Factory Project.
+ * highest-priority badge descriptor (`Needs you · N` > `Handing off` >
+ * `Gate running` / `Gate #N` > active work / leftover background work), or
+ * `null` when idle or not a Factory Project.
  */
 export function workspaceRowBadgePlan(
   workspaceId: string,
@@ -49,6 +149,29 @@ export function workspaceRowBadgePlan(
       tone: "info",
       icon: "RefreshCw",
       accessibilityLabel: "Factory: Handing off",
+    };
+  }
+  if (project.gateQueueStatus === "running") {
+    return {
+      label: "Gate running",
+      tone: "success",
+      icon: "Activity",
+      accessibilityLabel: "Factory: Gate running",
+    };
+  }
+  if (project.gateQueueStatus === "queued") {
+    const pos =
+      typeof project.gateQueuePosition === "number" &&
+      Number.isFinite(project.gateQueuePosition) &&
+      project.gateQueuePosition >= 1
+        ? Math.trunc(project.gateQueuePosition)
+        : null;
+    const label = pos !== null ? `Gate #${pos}` : "Gate queued";
+    return {
+      label,
+      tone: "warning",
+      icon: "Clock",
+      accessibilityLabel: project.gateQueuePaused ? `Factory: ${label} (paused)` : `Factory: ${label}`,
     };
   }
   const activeWorkCount = project.activeWorkCount ?? 0;

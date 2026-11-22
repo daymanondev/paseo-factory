@@ -378,6 +378,42 @@ test("registers addWorkspaceRowBadgeItem once with lowercase-hyphen id, updates 
       accessibilityLabel: "Factory: Handing off",
     });
 
+    // Gate running and Gate #N badges surface in priority order below Needs you and Handing off, above active/background
+    currentReply = makeProjectsReply([
+      { slug: "p-needs", root: "/r/needs", workspaceId: "ws-needs", needsYouCount: 0, handoffActive: false, gateQueueStatus: "running", gateQueuePosition: 1, activeWorkCount: 2, backgroundWorkCount: 1 },
+      { slug: "p-handoff", root: "/r/handoff", workspaceId: "ws-handoff", needsYouCount: 0, handoffActive: false, gateQueueStatus: "queued", gateQueuePosition: 2, activeWorkCount: 1 },
+      { slug: "p-active", root: "/r/active", workspaceId: "ws-active", needsYouCount: 0, handoffActive: false, activeWorkCount: 0, backgroundWorkCount: 1 },
+      { slug: "p-bg", root: "/r/bg", workspaceId: "ws-bg", needsYouCount: 0, handoffActive: false, activeWorkCount: 1, backgroundWorkCount: 0 },
+      { slug: "p-idle", root: "/r/idle", workspaceId: "ws-idle", needsYouCount: 0, handoffActive: true, gateQueueStatus: "running", gateQueuePosition: 1 },
+    ]);
+    await act(async () => {
+      onEvent({ seq: 1.5, reasons: ["gate.queue"], at: "2026-11-18T00:00:00.500Z" });
+      await flush();
+    });
+    assert.deepEqual(readRowBadge(container, "ws-needs"), {
+      label: "Gate running",
+      tone: "success",
+      icon: "Activity",
+      accessibilityLabel: "Factory: Gate running",
+    });
+    assert.deepEqual(readRowBadge(container, "ws-handoff"), {
+      label: "Gate #2",
+      tone: "warning",
+      icon: "Clock",
+      accessibilityLabel: "Factory: Gate #2",
+    });
+    assert.equal(readRowBadge(container, "ws-idle")?.label, "Handing off");
+
+    // Restore ws-handoff and ws-bg for subsequent failure-retention assertions
+    currentReply = makeProjectsReply([
+      { slug: "p-handoff", root: "/r/handoff", workspaceId: "ws-handoff", needsYouCount: 1, handoffActive: false, activeWorkCount: 0, backgroundWorkCount: 0 },
+      { slug: "p-bg", root: "/r/bg", workspaceId: "ws-bg", needsYouCount: 0, handoffActive: false, activeWorkCount: 1, backgroundWorkCount: 0 },
+    ]);
+    await act(async () => {
+      onEvent({ seq: 1.75, reasons: ["state.fs"], at: "2026-11-18T00:00:00.750Z" });
+      await flush();
+    });
+
     // Failed poll (daemonError or ok: false) retains last badges.
     currentReply = makeProjectsReply([], { daemonError: "daemon down" });
     await act(async () => {

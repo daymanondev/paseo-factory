@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { loadClientModule, testTheme } from "./client-markup.ts";
-import { workspaceRowBadgePlan } from "../plugin/client/kit/directory.ts";
+import { sidebarOverviewBadgePlan, workspaceRowBadgePlan } from "../plugin/client/kit/directory.ts";
 import type { ProjectDirectoryEntry } from "../plugin/shared/view.ts";
 
 const theme = testTheme as never;
@@ -179,6 +179,150 @@ test("workspaceRowBadgePlan enforces priority: Needs you > handoff > active work
       tone: "warning",
       icon: "Activity",
       accessibilityLabel: "Factory: 3 background processes running",
+    },
+  );
+});
+
+test("workspaceRowBadgePlan prioritizes Gate running and Gate #N below Needs you and Handing off, above active/background work", () => {
+  const base = { slug: "proj", root: "/tmp/proj", workspaceId: "ws-1" };
+
+  // Needs you beats Gate running
+  assert.equal(
+    workspaceRowBadgePlan("ws-1", [
+      { ...base, needsYouCount: 1, handoffActive: false, gateQueueStatus: "running", gateQueuePosition: 1, activeWorkCount: 2 },
+    ])?.label,
+    "Needs you · 1",
+  );
+
+  // Handing off beats Gate running and Gate #N
+  assert.equal(
+    workspaceRowBadgePlan("ws-1", [
+      { ...base, needsYouCount: 0, handoffActive: true, gateQueueStatus: "running", gateQueuePosition: 1, activeWorkCount: 2 },
+    ])?.label,
+    "Handing off",
+  );
+  assert.equal(
+    workspaceRowBadgePlan("ws-1", [
+      { ...base, needsYouCount: 0, handoffActive: true, gateQueueStatus: "queued", gateQueuePosition: 2, activeWorkCount: 2 },
+    ])?.label,
+    "Handing off",
+  );
+
+  // Gate running beats active and background work
+  assert.deepEqual(
+    workspaceRowBadgePlan("ws-1", [
+      { ...base, needsYouCount: 0, handoffActive: false, gateQueueStatus: "running", gateQueuePosition: 1, activeWorkCount: 2, backgroundWorkCount: 1 },
+    ]),
+    {
+      label: "Gate running",
+      tone: "success",
+      icon: "Activity",
+      accessibilityLabel: "Factory: Gate running",
+    },
+  );
+
+  // Gate #N beats active and background work
+  assert.deepEqual(
+    workspaceRowBadgePlan("ws-1", [
+      { ...base, needsYouCount: 0, handoffActive: false, gateQueueStatus: "queued", gateQueuePosition: 3, activeWorkCount: 2, backgroundWorkCount: 1 },
+    ]),
+    {
+      label: "Gate #3",
+      tone: "warning",
+      icon: "Clock",
+      accessibilityLabel: "Factory: Gate #3",
+    },
+  );
+
+  // Gate queued fallback when position is omitted
+  assert.deepEqual(
+    workspaceRowBadgePlan("ws-1", [
+      { ...base, needsYouCount: 0, handoffActive: false, gateQueueStatus: "queued", gateQueuePosition: null, gateQueuePaused: true },
+    ]),
+    {
+      label: "Gate queued",
+      tone: "warning",
+      icon: "Clock",
+      accessibilityLabel: "Factory: Gate queued (paused)",
+    },
+  );
+});
+
+test("sidebarOverviewBadgePlan summarizes Needs you, running Gates, and queued Gates across all Projects", () => {
+  const proj = (over: Partial<ProjectDirectoryEntry>): ProjectDirectoryEntry => ({
+    slug: "p",
+    root: "/tmp/p",
+    workspaceId: "ws-1",
+    needsYouCount: 0,
+    ...over,
+  });
+
+  // Idle machine -> null
+  assert.equal(
+    sidebarOverviewBadgePlan([proj({}), proj({ slug: "p2", workspaceId: "ws-2" })], { paused: false, concurrency: 1, runningCount: 0, queuedCount: 0 }),
+    null,
+  );
+
+  // Needs you only
+  assert.deepEqual(
+    sidebarOverviewBadgePlan([proj({ needsYouCount: 2 }), proj({ slug: "p2", needsYouCount: 1 })], { paused: false, concurrency: 1, runningCount: 0, queuedCount: 0 }),
+    {
+      needsYouCount: 3,
+      runningCount: 0,
+      queuedCount: 0,
+      paused: false,
+      label: "Needs you · 3",
+      tone: "wait",
+    },
+  );
+
+  // Running Gate (+ queued)
+  assert.deepEqual(
+    sidebarOverviewBadgePlan([proj({})], { paused: false, concurrency: 1, runningCount: 1, queuedCount: 2 }),
+    {
+      needsYouCount: 0,
+      runningCount: 1,
+      queuedCount: 2,
+      paused: false,
+      label: "Gate running · +2",
+      tone: "ok",
+    },
+  );
+
+  // Queued only (unpaused vs paused)
+  assert.deepEqual(
+    sidebarOverviewBadgePlan([proj({})], { paused: false, concurrency: 1, runningCount: 0, queuedCount: 2 }),
+    {
+      needsYouCount: 0,
+      runningCount: 0,
+      queuedCount: 2,
+      paused: false,
+      label: "2 queued",
+      tone: "wait",
+    },
+  );
+  assert.deepEqual(
+    sidebarOverviewBadgePlan([proj({})], { paused: true, concurrency: 1, runningCount: 0, queuedCount: 2 }),
+    {
+      needsYouCount: 0,
+      runningCount: 0,
+      queuedCount: 2,
+      paused: true,
+      label: "Paused · 2",
+      tone: "wait",
+    },
+  );
+
+  // Fallback when gateQueue summary is absent (legacy/minimal payload)
+  assert.deepEqual(
+    sidebarOverviewBadgePlan([proj({ gateQueueStatus: "running" })]),
+    {
+      needsYouCount: 0,
+      runningCount: 1,
+      queuedCount: 0,
+      paused: false,
+      label: "Gate running",
+      tone: "ok",
     },
   );
 });

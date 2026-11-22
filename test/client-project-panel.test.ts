@@ -1996,3 +1996,108 @@ test("Store Release card renders Owner-only mode selector chips, busy/disabled s
   assert.equal(hasHook(mobileHtml, "factory-panel-store-release-mode-on-request"), false);
   assert.equal(hasHook(mobileHtml, "factory-panel-store-release-mode-auto-staging"), false);
 });
+
+test("ADR 0068 (Ticket 06): Team tab renders contextual Gate · running and Gate · queued pills with factory-team-gate-queue-pill", async () => {
+  // 1. Running Gate on active Peer row
+  const runningHtml = await render(
+    makePanel({
+      seats: {
+        ...healthySeats,
+        peers: [
+          {
+            ...healthySeats.peers[0]!,
+            gateQueue: {
+              id: "gq-run-1",
+              task: "T-08",
+              attempt: 1,
+              status: "running",
+              position: 1,
+              aheadCount: 0,
+              aheadLabel: null,
+              paused: false,
+              queuedAt: "2026-11-22T10:00:00.000Z",
+              startedAt: "2026-11-22T10:00:01.000Z",
+            },
+          },
+        ],
+      },
+      gateQueue: [
+        {
+          id: "gq-run-1",
+          task: "T-08",
+          attempt: 1,
+          status: "running",
+          position: 1,
+          aheadCount: 0,
+          aheadLabel: null,
+          paused: false,
+          queuedAt: "2026-11-22T10:00:00.000Z",
+          startedAt: "2026-11-22T10:00:01.000Z",
+        },
+      ],
+    }),
+  );
+  const runningPeer = runningHtml.slice(runningHtml.indexOf("factory-panel-seat-peer-T-08"));
+  assert.ok(hasHook(runningPeer, "factory-team-gate-queue-pill"), "Peer row renders factory-team-gate-queue-pill");
+  assert.match(runningPeer, /Gate · running/);
+  assert.equal((runningHtml.match(/data-testid="factory-team-gate-queue-pill"/g) ?? []).length, 1, "does not duplicate Peer queue pill in fallback list");
+
+  // 2. Queued Gate behind another Project's Task on active Peer row
+  const queuedHtml = await render(
+    makePanel({
+      seats: {
+        ...healthySeats,
+        peers: [
+          {
+            ...healthySeats.peers[0]!,
+            gateQueue: {
+              id: "gq-q-2",
+              task: "T-08",
+              attempt: 2,
+              status: "queued",
+              position: 2,
+              aheadCount: 1,
+              aheadLabel: "Alpha · TA-1",
+              paused: false,
+              queuedAt: "2026-11-22T10:00:05.000Z",
+              startedAt: null,
+            },
+          },
+        ],
+      },
+    }),
+  );
+  const queuedPeer = queuedHtml.slice(queuedHtml.indexOf("factory-panel-seat-peer-T-08"));
+  assert.ok(hasHook(queuedPeer, "factory-team-gate-queue-pill"));
+  assert.match(queuedPeer, /Gate · queued \(#2 behind Alpha · TA-1\)/);
+
+  // 3. Project-level gateQueue entry without a matching live Peer row (e.g. lead_verify) still renders on Team tab
+  const verifyHtml = await render(
+    makePanel({
+      seats: { ...healthySeats, peers: [] },
+      gateQueue: [
+        {
+          id: "gq-verify-3",
+          task: "T-09",
+          attempt: 1,
+          status: "queued",
+          position: 3,
+          aheadCount: 2,
+          aheadLabel: "Beta · TB-2",
+          paused: true,
+          queuedAt: "2026-11-22T10:00:10.000Z",
+          startedAt: null,
+          mechanical: "lead_verify",
+        },
+      ],
+    }),
+  );
+  assert.ok(hasHook(verifyHtml, "factory-team-gate-queue-pill"));
+  assert.match(verifyHtml, /Gate · queued \(#3 behind Beta · TB-2\)/);
+  assert.match(verifyHtml, /T-09/);
+  assert.match(verifyHtml, /Paused/);
+
+  // 4. Presentational law: project-panel.tsx never imports or calls useRpc
+  const source = readFileSync(join(repoRoot, "plugin/client/factory/project-panel.tsx"), "utf8");
+  assert.equal(source.includes("useRpc"), false, "project-panel.tsx remains strictly presentational");
+});

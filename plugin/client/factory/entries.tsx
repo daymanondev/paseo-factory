@@ -1,8 +1,9 @@
 /**
- * The surface's hosts (ADR 0009 §1; v0.6.0 W4/W8, ADR 0056; ADR 0063):
+ * The surface's hosts (ADR 0009 §1; v0.6.0 W4/W8, ADR 0056; ADR 0063; ADR 0068):
  * the workspace panel (the Project panel, scoped to the active workspace's
  * directory via useWorkspace), the Settings screen (machine-wide, unscoped),
- * and the desktop-only global Onboarding screen + sidebar footer item.
+ * and the desktop-only global `Factory overview` sidebar header item + screen
+ * alongside the global Onboarding screen route.
  */
 import type {
   PluginClientOpenPanelOptions,
@@ -14,13 +15,21 @@ import type {
 import { useWorkspace } from "@getpaseo/plugin/client";
 import * as pluginUi from "@getpaseo/plugin/client/ui";
 import { useSyncExternalStore } from "react";
+import { View } from "react-native";
+import { sidebarOverviewBadgeStore } from "../kit/directory.ts";
+import type { SidebarOverviewBadgePlan } from "../kit/directory.ts";
+import { ToneBadge } from "../kit/pill.tsx";
+import { SPACING, factoryPalette } from "../kit/theme.ts";
 import type { SeatEditorRequests } from "./editor-request.ts";
 import { OnboardingScreen } from "./onboarding-screen.tsx";
+import { OVERVIEW_SCREEN_ID, OverviewScreen } from "./overview-screen.tsx";
+import type { OverviewScreenProps } from "./overview-screen.tsx";
 import { FactoryShell } from "./shell.tsx";
 import { FactoryTabErrorBoundary } from "./tab-error-boundary.tsx";
 
 export const PANEL_ID = "paseo-factory";
 export const ONBOARD_SCREEN_ID = "paseo-factory-onboard";
+export { OVERVIEW_SCREEN_ID };
 
 function resolveSidebarRow(): typeof pluginUi.SidebarRow | null {
   const candidate = (pluginUi as { SidebarRow?: unknown }).SidebarRow;
@@ -33,17 +42,82 @@ function resolveSidebarRow(): typeof pluginUi.SidebarRow | null {
 
 const HostSidebarRow = resolveSidebarRow();
 
-/** Desktop-only sidebar footer item opening the global Onboarding screen. */
-export function FactoryOnboardSidebarItem({ layout, currentScreen, openScreen }: PluginSidebarItemProps) {
+export type FactoryOverviewSidebarItemProps = PluginSidebarItemProps & {
+  badge?: SidebarOverviewBadgePlan | null;
+};
+
+/** Desktop-only sidebar header item opening the single-tab `Factory overview` screen. */
+export function FactoryOverviewSidebarItem({
+  theme,
+  layout,
+  currentScreen,
+  openScreen,
+  badge,
+}: FactoryOverviewSidebarItemProps) {
+  const liveBadge = useSyncExternalStore(
+    sidebarOverviewBadgeStore.subscribe,
+    sidebarOverviewBadgeStore.getSnapshot,
+    sidebarOverviewBadgeStore.getSnapshot,
+  );
   if (layout.platform === "ios" || layout.platform === "android") return null;
   if (HostSidebarRow === null) return null;
+
+  const summary = badge !== undefined ? badge : liveBadge;
+  const palette = factoryPalette(theme);
+  const trailing =
+    summary === null ? undefined : (
+      <View
+        testID="factory-sidebar-overview-badge"
+        style={{ flexDirection: "row", alignItems: "center", gap: SPACING[1] }}
+      >
+        {summary.needsYouCount > 0 ? (
+          <ToneBadge
+            theme={theme}
+            label={`Needs you · ${summary.needsYouCount}`}
+            colour={palette.wait}
+            dot={false}
+          />
+        ) : null}
+        {summary.runningCount > 0 ? (
+          <ToneBadge
+            theme={theme}
+            label={summary.queuedCount > 0 ? `Gate · ${summary.runningCount}+${summary.queuedCount}` : "Gate running"}
+            colour={palette.ok}
+            dot
+          />
+        ) : summary.queuedCount > 0 ? (
+          <ToneBadge
+            theme={theme}
+            label={summary.paused ? `Paused · ${summary.queuedCount}` : `${summary.queuedCount} queued`}
+            colour={palette.wait}
+            dot={false}
+          />
+        ) : null}
+      </View>
+    );
+
   return (
-    <HostSidebarRow
-      icon="FolderPlus"
-      label="Onboard Project"
-      active={currentScreen?.screenId === ONBOARD_SCREEN_ID}
-      onPress={() => openScreen({ screenId: ONBOARD_SCREEN_ID })}
-    />
+    <View testID="factory-sidebar-overview-entry">
+      <HostSidebarRow
+        icon="Activity"
+        label="Factory"
+        active={currentScreen?.screenId === OVERVIEW_SCREEN_ID}
+        onPress={() => openScreen({ screenId: OVERVIEW_SCREEN_ID })}
+        {...(trailing === undefined ? {} : { trailing })}
+      />
+    </View>
+  );
+}
+
+export type FactoryOverviewScreenProps = OverviewScreenProps;
+
+/** Desktop-only global `Factory overview` screen. */
+export function FactoryOverviewScreen(props: FactoryOverviewScreenProps) {
+  if (props.layout.platform === "ios" || props.layout.platform === "android") return null;
+  return (
+    <FactoryTabErrorBoundary theme={props.theme} section="Factory overview">
+      <OverviewScreen {...props} />
+    </FactoryTabErrorBoundary>
   );
 }
 
