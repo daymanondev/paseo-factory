@@ -1615,3 +1615,45 @@ test("factory status prints live Gate queue running + queued items while active 
   assert.equal(doneStatus.status, 0, doneStatus.stderr);
   assert.equal(doneStatus.stdout.includes("Gate queue"), false);
 });
+
+test("factory gate-queue CLI manages concurrency, pause/resume, status, and enforces Owner authority", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const home = join(dir, "paseo-home");
+  const stateDir = join(home, "plugin-state", "paseo-factory");
+  const factory = createFactory({ stateDir, eyeCliProbe: () => false });
+  const { createGateQueue } = await import("../plugin/server/gate-queue.ts");
+  const gateQueue = createGateQueue({ stateDir, factory, concurrency: 1 });
+  const spool = startSpool(stateDir, factory, { pollMs: 15, gateQueue });
+  t.after(() => {
+    spool.stop();
+    gateQueue.stop();
+  });
+
+  const initialStatus = await run(ownerCli, ["gate-queue", "status", "--json"], { PASEO_HOME: home });
+  assert.equal(initialStatus.status, 0, initialStatus.stderr);
+  const initialJson = JSON.parse(initialStatus.stdout);
+  assert.equal(initialJson.concurrency, 1);
+  assert.equal(initialJson.paused, false);
+
+  const setConc = await run(ownerCli, ["gate-queue", "concurrency", "3", "--json"], { PASEO_HOME: home });
+  assert.equal(setConc.status, 0, setConc.stderr);
+  const concJson = JSON.parse(setConc.stdout);
+  assert.equal(concJson.gateQueue.concurrency, 3);
+  assert.equal(gateQueue.snapshot().concurrency, 3);
+
+  const badConc = await run(ownerCli, ["gate-queue", "concurrency", "0"], { PASEO_HOME: home });
+  assert.equal(badConc.status, 2);
+
+  const paused = await run(ownerCli, ["gate-queue", "pause", "--json"], { PASEO_HOME: home });
+  assert.equal(paused.status, 0, paused.stderr);
+  assert.equal(JSON.parse(paused.stdout).gateQueue.paused, true);
+
+  const resumed = await run(ownerCli, ["gate-queue", "resume", "--json"], { PASEO_HOME: home });
+  assert.equal(resumed.status, 0, resumed.stderr);
+  assert.equal(JSON.parse(resumed.stdout).gateQueue.paused, false);
+
+  const leadRefused = await run(ownerCli, ["gate-queue", "concurrency", "2"], { PASEO_HOME: home, PASEO_FACTORY_SEAT: "lead" });
+  assert.equal(leadRefused.status, 2);
+  assert.match(leadRefused.stderr, /seat-cannot-gate-queue/i);
+});

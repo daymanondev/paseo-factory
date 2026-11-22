@@ -31,7 +31,7 @@ import { FactoryError } from "./errors.ts";
 import type { AttemptAccepted, ClaimReported, ContractSet, GateFinished, GateQueued, GitBlocked, LedgerEvent, MeterWritten, MeterUsage, NeedsHuman, NeedsHumanEvidence, NeedsHumanReason, PeerDisposition, PeerHandoffFields, RepokeDispatched, RepokeRefused, RespawnDispatched, RespawnRefused, SpawnDispatched, SpawnRefused, TaskClosed, Verdict } from "./events.ts";
 import type { GateResult } from "./gate.ts";
 import { LedgerAdmission } from "./history-admission.ts";
-import { readOptionalJson } from "./json-store.ts";
+import { GATE_QUEUE_FILENAME, readPersistedGateQueue } from "./gate-queue-status.ts";
 
 /** Task ids become report filenames, so they stay flat and filename-safe. */
 const TASK_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
@@ -697,6 +697,47 @@ export function createFactory(options: FactoryOptions): Factory {
         agent: string | undefined;
       };
 
+  const findIdempotentGreenReplay = (
+    fullHistory: readonly LedgerEvent[],
+    history: readonly LedgerEvent[],
+    task: string,
+    sha: string,
+    mechanical: "lead_verify" | undefined,
+    admittedHandoff: PeerHandoffFields | undefined,
+    matchClaimReportedSha: boolean,
+  ): ClaimOutcome | undefined => {
+    const completed = projectTask(fullHistory, task).attempts.findLast(
+      (entry) =>
+        !entry.open &&
+        entry.gate?.verdict === "green" &&
+        (entry.gate.sha === sha ||
+          (matchClaimReportedSha && entry.events.some((event) => event.event === "claim_reported" && event.sha === sha))),
+    );
+    if (completed?.gate === undefined) return undefined;
+    const report = completed.events.findLast((event) => event.event === "report_written");
+    const replayedClaim = completed.events.findLast((event): event is ClaimReported => event.event === "claim_reported");
+    const repoked =
+      replayedClaim !== undefined &&
+      history.some((event) => event.event === "repoke_dispatched" && event.seq > replayedClaim.seq);
+    if (
+      report?.event === "report_written" &&
+      replayedClaim !== undefined &&
+      !repoked &&
+      replayedClaim.mechanical === mechanical &&
+      sameHandoff(replayedClaim.handoff, admittedHandoff)
+    ) {
+      return {
+        attempt: completed.attempt,
+        verdict: "green",
+        gate: completed.gate,
+        reportPath: report.path,
+        ...(replayedClaim.handoff === undefined ? {} : { handoff: replayedClaim.handoff }),
+        ...(replayedClaim.mechanical === undefined ? {} : { mechanical: replayedClaim.mechanical }),
+      };
+    }
+    return undefined;
+  };
+
   const prepareClaim = (self: Factory, { task, sha, agent, handoff, mechanical }: ClaimInput): PreparedClaim => {
     assertTaskId(task);
     const contract = self.contractFor(task);
@@ -755,30 +796,9 @@ export function createFactory(options: FactoryOptions): Factory {
       );
     }
 
-    const completed = projectTask(fullHistory, task).attempts.findLast(
-      (entry) => !entry.open && entry.gate?.verdict === "green" &&
-        (entry.gate.sha === claimedSha || entry.events.some(event => event.event === "claim_reported" && event.sha === claimedSha)),
-    );
-    if (completed?.gate !== undefined) {
-      const report = completed.events.findLast((event) => event.event === "report_written");
-      const replayedClaim = completed.events.findLast((event): event is ClaimReported => event.event === "claim_reported");
-      const repoked = replayedClaim !== undefined && history.some(
-        (event) => event.event === "repoke_dispatched" && event.seq > replayedClaim.seq,
-      );
-      if (report?.event === "report_written" && replayedClaim !== undefined && !repoked &&
-        replayedClaim.mechanical === mechanical && sameHandoff(replayedClaim.handoff, admittedHandoff)) {
-        return {
-          kind: "replayed",
-          outcome: {
-            attempt: completed.attempt,
-            verdict: "green",
-            gate: completed.gate,
-            reportPath: report.path,
-            ...(replayedClaim?.handoff === undefined ? {} : { handoff: replayedClaim.handoff }),
-            ...(replayedClaim?.mechanical === undefined ? {} : { mechanical: replayedClaim.mechanical }),
-          },
-        };
-      }
+    const replayed = findIdempotentGreenReplay(fullHistory, history, task, claimedSha, mechanical, admittedHandoff, true);
+    if (replayed !== undefined) {
+      return { kind: "replayed", outcome: replayed };
     }
 
     if (lastAttempt >= MAX_ATTEMPTS) {
@@ -1319,31 +1339,17 @@ export function createFactory(options: FactoryOptions): Factory {
         }
         // Handle cross-form replay (short vs full SHA) when Attempt 1 attested resolved.full.
         if (resolved.full !== claimedSha) {
-          const fullHistory = ledger.eventsFor(input.task);
-          const history = epochEventsFor(ledger, input.task);
-          const completed = projectTask(fullHistory, input.task).attempts.findLast(
-            (entry) => !entry.open && entry.gate?.verdict === "green" && entry.gate.sha === resolved.full,
+          const replayed = findIdempotentGreenReplay(
+            ledger.eventsFor(input.task),
+            epochEventsFor(ledger, input.task),
+            input.task,
+            resolved.full,
+            mechanical,
+            admittedHandoff,
+            false,
           );
-          if (completed?.gate !== undefined) {
-            const report = completed.events.findLast((event) => event.event === "report_written");
-            const replayedClaim = completed.events.findLast((event): event is ClaimReported => event.event === "claim_reported");
-            const repoked = replayedClaim !== undefined && history.some(
-              (event) => event.event === "repoke_dispatched" && event.seq > replayedClaim.seq,
-            );
-            if (report?.event === "report_written" && replayedClaim !== undefined && !repoked &&
-              replayedClaim.mechanical === mechanical && sameHandoff(replayedClaim.handoff, admittedHandoff)) {
-              return {
-                status: "replayed",
-                outcome: {
-                  attempt: completed.attempt,
-                  verdict: "green",
-                  gate: completed.gate,
-                  reportPath: report.path,
-                  ...(replayedClaim?.handoff === undefined ? {} : { handoff: replayedClaim.handoff }),
-                  ...(replayedClaim?.mechanical === undefined ? {} : { mechanical: replayedClaim.mechanical }),
-                },
-              };
-            }
+          if (replayed !== undefined) {
+            return { status: "replayed", outcome: replayed };
           }
         }
         const clean = await checkCleanAt(executionDir, resolved.full);
@@ -2436,19 +2442,9 @@ function attemptIsOpen(history: readonly LedgerEvent[], attempt: number): boolea
  * landed (ticket 03 R1). The interrupted pass itself is never re-run: its line
  * simply never exists, recovery's report says so by omission.
  */
-function readGateQueueItemsSafe(stateDir: string): Array<{ projectSlug?: string; useRootFactory?: boolean; task?: string; attempt?: number; status?: string }> {
-  try {
-    const raw = readOptionalJson(join(stateDir, "gate-queue.json"));
-    if (typeof raw !== "object" || raw === null || !Array.isArray((raw as { items?: unknown }).items)) return [];
-    return (raw as { items: Array<{ projectSlug?: string; useRootFactory?: boolean; task?: string; attempt?: number; status?: string }> }).items;
-  } catch {
-    return [];
-  }
-}
-
 function recoverInterruptedAttempts(ledger: Ledger, dataDir: string, stateDir: string, projectSlug?: string): { task: string; attempt: number }[] {
   const recovered: { task: string; attempt: number }[] = [];
-  const queueItems = readGateQueueItemsSafe(stateDir);
+  const queueItems = readPersistedGateQueue(join(stateDir, GATE_QUEUE_FILENAME))?.items ?? [];
   const isManagedByGateQueue = (task: string, attempt: number): boolean =>
     queueItems.some((item) =>
       item.task === task &&

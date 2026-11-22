@@ -1,4 +1,15 @@
-import { isValidContractTimeoutSeconds } from "./constants.ts";
+import {
+  DEFAULT_CONTRACT_TIMEOUT_SECONDS,
+  isValidContractTimeoutSeconds,
+  MAX_CONTRACT_TIMEOUT_SECONDS,
+  MIN_CONTRACT_TIMEOUT_SECONDS,
+} from "./constants.ts";
+export {
+  DEFAULT_CONTRACT_TIMEOUT_SECONDS,
+  isValidContractTimeoutSeconds,
+  MAX_CONTRACT_TIMEOUT_SECONDS,
+  MIN_CONTRACT_TIMEOUT_SECONDS,
+};
 import { eventAllowsUnboundEpoch, LEDGER_REFERENCE_KINDS, EVENT_NAMES, NEEDS_HUMAN_REASONS, needsHumanEvidenceIsValid, PEER_DISPOSITIONS, PEER_HANDOFF_OUTCOMES, STORE_RELEASE_ACTIONS, STORE_RELEASE_FAILURE_CLASSES, STORE_RELEASE_MODES } from "./events.ts";
 import { PEER_THINKING_LEVELS } from "./peer-thinking.ts";
 import type { LedgerEvent } from "./events.ts";

@@ -43,8 +43,8 @@ import type { StoreReleaseAction } from "./core/events.ts";
 import { activeContractSnapshot, repokeCompletionFooter } from "./core/disposition-prompt.ts";
 import { handoffLines } from "./core/report.ts";
 import type { ClaimOutcome, Factory } from "./core/factory.ts";
-import type { GateQueue, GateQueueAheadEntry, GateQueueItem } from "./gate-queue.ts";
-import { createGateQueue, gateItemBelongsToProject } from "./gate-queue.ts";
+import type { GateQueue, GateQueueAheadEntry, GateQueueItem, GateQueueSnapshot } from "./gate-queue.ts";
+import { cancelProjectGates, createGateQueue, randomQueueId, resolveGateProjectTarget } from "./gate-queue.ts";
 import { checkProjectResetRepository } from "./project-reset.ts";
 import type { LedgerEvent, MeterUsage, NeedsHumanEvidence, NeedsHumanReason, PeerDisposition, PeerHandoffFields, Verdict } from "./core/events.ts";
 import { CorrelationRegistry, readCorrelations } from "./core/correlations.ts";
@@ -595,6 +595,17 @@ export interface SpoolStoreNotebookWriteRequest {
   seat?: SpoolSeat;
 }
 
+export interface SpoolGateQueueRequest {
+  id: string;
+  kind: "gate_queue";
+  action: "pause" | "resume" | "concurrency" | "cancel";
+  concurrency?: number;
+  queueId?: string;
+  note?: string;
+  submitter?: string;
+  seat?: SpoolSeat;
+}
+
 export type SpoolRequest =
   | ({ id: string; kind: "upgrade"; submitter?: string; seat?: SpoolSeat } & Omit<UpgradeInput, "controlId">)
   | { id: string; kind: "history_import" | "history_import_status"; sources?: HistoryImportSource[]; project?: string; submitter?: string; seat?: SpoolSeat }
@@ -619,7 +630,8 @@ export type SpoolRequest =
   | NotebookRequest
   | SpoolReleaseRequest
   | SpoolStoreReleaseRequest
-  | SpoolStoreNotebookWriteRequest;
+  | SpoolStoreNotebookWriteRequest
+  | SpoolGateQueueRequest;
 
 /** Handles a synthetic ask — `createChoke(...).spoolAskHandler` is the implementation. */
 export type AskHandler = (request: AskRequest) => SpoolReply;
@@ -732,6 +744,7 @@ export type SpoolReply =
       path?: string;
       synced?: boolean;
       pushed?: boolean;
+      gateQueue?: GateQueueSnapshot;
     }
   | { id: string; ok: false; code: string; message: string; event?: LedgerEvent; step?: string };
 
@@ -1246,6 +1259,30 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
       ...projectSlugField,
     };
   }
+  if (req.kind === "gate_queue") {
+    if (req.action !== "pause" && req.action !== "resume" && req.action !== "concurrency" && req.action !== "cancel") return undefined;
+    let concurrency: number | undefined;
+    if (req.action === "concurrency") {
+      if (typeof req.concurrency !== "number" || !Number.isInteger(req.concurrency) || req.concurrency < 1) return undefined;
+      concurrency = req.concurrency;
+    }
+    let queueId: string | undefined;
+    if (req.action === "cancel") {
+      if (typeof req.queueId !== "string" || req.queueId.trim() === "") return undefined;
+      queueId = req.queueId.trim();
+    }
+    if (req.note !== undefined && (typeof req.note !== "string" || req.note.trim() === "")) return undefined;
+    return {
+      id: req.id,
+      kind: "gate_queue",
+      action: req.action,
+      ...(concurrency === undefined ? {} : { concurrency }),
+      ...(queueId === undefined ? {} : { queueId }),
+      ...(req.note === undefined ? {} : { note: req.note }),
+      ...submitterField,
+      ...seatField,
+    };
+  }
   return undefined;
 }
 
@@ -1737,6 +1774,18 @@ export async function createTaskPeer(input: {
  * Factory stands exactly as before.
  */
 const peerLifecycleByFactory = new WeakMap<Factory, Map<string, Promise<unknown>>>();
+const projectSpawnLanes = new Map<string, Promise<unknown>>();
+
+async function withProjectSpawnLane<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const previous = projectSpawnLanes.get(key) ?? Promise.resolve();
+  const pending = previous.catch(() => {}).then(fn);
+  projectSpawnLanes.set(key, pending);
+  try {
+    return await pending;
+  } finally {
+    if (projectSpawnLanes.get(key) === pending) projectSpawnLanes.delete(key);
+  }
+}
 
 /**
  * The Owner's Project acts that run on the root Factory's lane: they act on a
@@ -1919,7 +1968,7 @@ function gateFailureTail(outcome: ClaimOutcome): string {
   return outcome.gate.note;
 }
 
-function formatPeerRetryWakeupText(input: {
+function formatPeerRedWakeupText(input: {
   task: string;
   outcome: ClaimOutcome;
   tail: string;
@@ -1932,7 +1981,7 @@ function formatPeerRetryWakeupText(input: {
     ...(outcome.gate.outputPath ? [`Gate log: ${outcome.gate.outputPath}`] : []),
     ...(outcome.reportPath ? [`Report: ${outcome.reportPath}`] : []),
     ...(tail !== "" && tail !== outcome.gate.note ? [`Failure output tail:\n\`\`\`\n${tail}\n\`\`\``] : []),
-    `Fix the failure in your task worktree, commit your changes, and re-run \`agent_claim\` (never notify Lead directly — Lead wakes on GREEN or at attempt ${MAX_ATTEMPTS}).`,
+    `Fix the failure in your task worktree, commit your changes, and re-claim via \`agent_claim\` for your next Attempt (never notify Lead directly — Lead wakes on GREEN or at attempt ${MAX_ATTEMPTS}).`,
   ];
   return lines.join("\n\n");
 }
@@ -2005,7 +2054,7 @@ async function wakeLivePeerOnRed(input: {
   }
 
   const tail = gateFailureTail(outcome);
-  const text = formatPeerRetryWakeupText({ task, outcome, tail });
+  const text = formatPeerRedWakeupText({ task, outcome, tail });
   try {
     await resolvedDaemon.agents.ref(targetPeer.id).send(text);
     return { delivered: true };
@@ -2100,32 +2149,34 @@ export async function settleClaimOutcome(input: {
   });
 }
 
-function resolveResetOrDeleteTargetForPreCancel(
-  stateDir: string,
-  request: SpoolResetRequest | SpoolDeleteRequest,
-): { slug: string; root: string } | undefined {
-  const ctx = contextOfSpoolRequest(request);
-  const rawRoot = ctx.workspace?.trim() ?? "";
-  const rawSlug = ctx.project?.trim() ?? "";
-  if (rawRoot !== "") {
-    const resolved = resolveProject(rawRoot);
-    if (resolved.ok) return { slug: resolved.slug, root: resolved.root };
-    const byMatch = listProjectRegistrations(stateDir).find(
-      (reg) => reg.root === rawRoot || reg.slug === rawRoot,
-    );
-    if (byMatch !== undefined) return { slug: byMatch.slug, root: byMatch.root };
-    if (request.kind === "delete" && rawSlug !== "") {
-      const bySlug = readProjectRegistration(stateDir, rawSlug);
-      return bySlug !== undefined ? { slug: bySlug.slug, root: bySlug.root } : { slug: rawSlug, root: rawRoot };
-    }
-    return undefined;
-  }
-  if (rawSlug !== "") {
-    const reg = readProjectRegistration(stateDir, rawSlug);
-    return reg === undefined ? undefined : { slug: reg.slug, root: reg.root };
-  }
-  const regs = listProjectRegistrations(stateDir);
-  return regs.length === 1 ? { slug: regs[0]!.slug, root: regs[0]!.root } : undefined;
+/** Builds the shared `GateQueue` `onSettled` callback routing outcomes to `settleClaimOutcome`. */
+export function createGateQueueSettler(input: {
+  rootFactory: Factory;
+  registry?: FactoryRegistry;
+  usageMeter?: SpoolOptions["usageMeter"];
+  peerMail?: PeerMailHook;
+  daemon?: SurfaceDaemonApi | (() => SurfaceDaemonApi | undefined);
+  onLog?: (message: string) => void;
+}) {
+  return async ({ item, outcome }: { item: GateQueueItem; outcome: ClaimOutcome }): Promise<void> => {
+    const targetFactory =
+      item.useRootFactory === true || input.registry === undefined
+        ? input.rootFactory
+        : input.registry.factoryForProject(item.projectSlug);
+    await settleClaimOutcome({
+      factory: targetFactory,
+      task: item.task,
+      agent: item.agent,
+      outcome,
+      sha: item.sha,
+      workspace: item.cwd,
+      ...(item.useRootFactory === true || item.projectSlug === "root" ? {} : { projectSlug: item.projectSlug }),
+      ...(input.usageMeter === undefined ? {} : { usageMeter: input.usageMeter }),
+      ...(input.peerMail === undefined ? {} : { peerMail: input.peerMail }),
+      ...(input.daemon === undefined ? {} : { daemon: input.daemon }),
+      ...(input.onLog === undefined ? {} : { onLog: input.onLog }),
+    });
+  };
 }
 
 async function cancelProjectGatesBeforeMaintenance(
@@ -2137,8 +2188,16 @@ async function cancelProjectGatesBeforeMaintenance(
   const resolvedDaemon = resolveDaemonArg(deps.daemon);
   const effectiveSeat = await resolveEffectiveSeat(rootFactory, resolvedDaemon, request);
   if (isProjectSeat(effectiveSeat)) return;
-  const target = resolveResetOrDeleteTargetForPreCancel(rootFactory.stateDir, request);
-  if (target === undefined) return;
+  const ctx = contextOfSpoolRequest(request);
+  const target = resolveGateProjectTarget({
+    stateDir: rootFactory.stateDir,
+    project: ctx.project,
+    workspace: ctx.workspace,
+    requireKnownWorkspace: true,
+    allowUnregisteredDeleteTarget: request.kind === "delete",
+    singleProjectFallback: true,
+  });
+  if (target?.slug === undefined || target.root === undefined) return;
   if (request.kind === "reset" && request.keepSeats !== true) {
     try {
       const protectedPluginDir = deps.pluginDir ?? pluginDirFor(resolveSpoolPaseoHome(rootFactory.stateDir, deps.home));
@@ -2147,11 +2206,13 @@ async function cancelProjectGatesBeforeMaintenance(
       return;
     }
   }
-  const note = request.kind === "delete" ? "cancelled-by-project-delete" : "cancelled-by-project-reset";
-  await deps.gateQueue.cancelMatching(
-    (item) => gateItemBelongsToProject(rootFactory.stateDir, target.slug, target.root, item),
-    { note, suppressSettled: true },
-  );
+  await cancelProjectGates({
+    gateQueue: deps.gateQueue,
+    stateDir: rootFactory.stateDir,
+    slug: target.slug,
+    root: target.root,
+    note: request.kind === "delete" ? "cancelled-by-project-delete" : "cancelled-by-project-reset",
+  });
 }
 
 export async function handleSpoolRequest(
@@ -2180,7 +2241,8 @@ export async function handleSpoolRequest(
           ? effective.contractFor(request.task)?.workspace
           : undefined;
     const project = workspace === undefined ? undefined : resolveProject(workspace);
-    return project?.ok ? withProjectIngressLock(effective.stateDir, project.slug, admitted) : admitted();
+    const lockSlug = routing.slug ?? (project?.ok ? project.slug : undefined);
+    return lockSlug !== undefined ? withProjectIngressLock(effective.stateDir, lockSlug, admitted) : admitted();
   };
   if (request.kind !== "spawn" && request.kind !== "contract") return run();
   // Spool requests run concurrently. Serialize only Peer lifecycle operations
@@ -2245,6 +2307,40 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
         code: "seat-cannot-delete",
         message: `Seat ${effectiveSeat} cannot call factory project delete; project deletion is an Owner-only action.`,
       };
+    }
+    if (
+      request.kind === "gate_queue" &&
+      isProjectSeat(effectiveSeat)
+    ) {
+      return {
+        id: request.id,
+        ok: false,
+        code: "seat-cannot-gate-queue",
+        message: `Seat ${effectiveSeat} cannot mutate the daemon Gate queue; Gate queue controls are Owner-only actions.`,
+      };
+    }
+    if (request.kind === "gate_queue") {
+      if (gateQueue === undefined) {
+        return { id: request.id, ok: false, code: "gate-queue-unavailable", message: "Gate queue is not active on this server." };
+      }
+      if (request.action === "pause") {
+        const snap = gateQueue.pause();
+        return { id: request.id, ok: true, summary: `Gate queue paused (${snap.running.length} running, ${snap.queued.length} queued)`, gateQueue: snap };
+      }
+      if (request.action === "resume") {
+        const snap = gateQueue.resume();
+        return { id: request.id, ok: true, summary: `Gate queue resumed (concurrency=${snap.concurrency})`, gateQueue: snap };
+      }
+      if (request.action === "concurrency") {
+        const snap = gateQueue.setConcurrency(request.concurrency!);
+        return { id: request.id, ok: true, summary: `Gate queue concurrency set to ${snap.concurrency}`, gateQueue: snap };
+      }
+      const removed = await gateQueue.cancelItem(request.queueId!, request.note);
+      if (!removed) {
+        return { id: request.id, ok: false, code: "queue-item-not-found", message: `Gate queue item "${request.queueId}" was not found.` };
+      }
+      const snap = gateQueue.snapshot();
+      return { id: request.id, ok: true, summary: `Cancelled Gate queue item ${request.queueId}`, gateQueue: snap };
     }
     if (
       request.kind === "project_register" &&
@@ -2363,18 +2459,21 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
       return project?.ok ? item.projectSlug === project.slug : true;
     };
     if (request.kind === "contract") {
-      if (
+      const hasRunningTaskGate = (): boolean =>
         gateQueue !== undefined &&
-        gateQueue.snapshot().running.some((item) => matchesTaskQueueItem(item, request.workspace))
-      ) {
-        return {
-          id: request.id,
-          ok: false,
-          code: "gate-in-flight",
-          message: `task ${request.task} has an actively running Gate — wait for its verdict before re-contracting`,
-        };
-      }
+        gateQueue.snapshot().running.some((item) => matchesTaskQueueItem(item, request.workspace));
+      const gateInFlightReply = (): SpoolReply => ({
+        id: request.id,
+        ok: false,
+        code: "gate-in-flight",
+        message: `task ${request.task} has an actively running Gate — wait for its verdict before re-contracting`,
+      });
+      if (hasRunningTaskGate()) return gateInFlightReply();
       const previousPeers = await taskPeers(request.task);
+      // Re-check right after awaiting daemon so a queued Gate promoted during
+      // taskPeers can never be overwritten or killed; zero awaits intervene
+      // between this check, setContract, and queued-only dequeue in cancelMatching.
+      if (hasRunningTaskGate()) return gateInFlightReply();
       const contractEvt = factory.setContract({
         task: request.task,
         workspace: request.workspace,
@@ -2397,7 +2496,7 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
       });
       if (gateQueue !== undefined) {
         await gateQueue.cancelMatching(
-          (item) => matchesTaskQueueItem(item, request.workspace),
+          (item) => item.status === "queued" && matchesTaskQueueItem(item, request.workspace),
           { note: "superseded-by-recontract", suppressSettled: true },
         );
       }
@@ -2439,7 +2538,7 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
       });
 
       if (gateQueue !== undefined) {
-        const queueId = `gq-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
+        const queueId = randomQueueId();
         const admitAsync = async () => {
           const admitted = await factory.admitClaim({
             task: request.task,
@@ -2669,55 +2768,61 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
     if (request.kind === "spawn") {
       const preSpawnContract = factory.contractFor(request.task);
       const spawnProject = preSpawnContract === undefined ? undefined : resolveProject(preSpawnContract.workspace);
-      const liveAgents =
-        resolvedDaemon !== undefined && spawnProject?.ok
-          ? (await resolvedDaemon.agents.list({ filter: { includeArchived: false, includeBackground: true } })).entries
-              .map((entry) => entry.agent)
-              .filter((agent) => agent.archivedAt === null)
-          : undefined;
-      const peers = await taskPeers(request.task, liveAgents);
-      const running = peers.find(peerIsRunning);
-      if (running !== undefined) {
-        const message = `Peer ${running.id} is already running in the Task worktree for ${request.task}; wait for its completion mail or call lead_set_contract first to open a new epoch`;
-        const event = factory.ledger.append({ event: "spawn_refused", task: request.task, provider: request.provider, arity: request.arity, rule: "spawn:peer-already-running", reason: "peer-already-running" });
-        return { id: request.id, ok: false, code: "peer-already-running", message, event };
-      }
-      if (
-        preSpawnContract !== undefined &&
-        spawnProject?.ok &&
-        !isReadOnlyPeerDisposition(preSpawnContract.disposition) &&
-        liveAgents !== undefined &&
-        liveAgents.length > 0
-      ) {
-        const projectRoot = readProjectRegistration(factory.stateDir, spawnProject.slug)?.root ?? spawnProject.root;
-        const source = { factory: registry?.root ?? factory, ...(registry === undefined ? {} : { registry }) };
-        const inFlight = projectPeersInFlight({
-          stateDir: factory.stateDir,
-          slug: spawnProject.slug,
-          root: projectRoot,
-          source,
-          live: liveAgents,
-          law: "quiet-point",
-        });
-        const writableConflict = inFlight.find((round) => {
-          if (round.task === request.task) return false;
-          const otherContract = taskFactoryOf(source, spawnProject.slug, round.task).contractFor(round.task);
-          return !isReadOnlyPeerDisposition(otherContract?.disposition);
-        });
-        if (writableConflict !== undefined) {
-          const holders = writableConflict.agentIds.length > 0 ? ` (${writableConflict.agentIds.join(", ")})` : "";
-          const message = `Project ${spawnProject.slug} already has a live unsettled writable Peer${holders} on task ${writableConflict.task}; at most one active writable engineer Peer is allowed per Project at a time (settle, accept, or close ${writableConflict.task} first, or dispatch a read-only disposition: scout | architect | reviewer).`;
-          const event = factory.ledger.append({
-            event: "spawn_refused",
-            task: request.task,
-            provider: request.provider,
-            arity: request.arity,
-            rule: "spawn:single-writable-peer",
-            reason: message,
-          });
-          return { id: request.id, ok: false, code: "writable-peer-in-flight", message, event };
+      const spawnSlug = routedSlug ?? (spawnProject?.ok ? spawnProject.slug : undefined);
+      const spawnLaneKey = `${factory.stateDir}\0${spawnSlug ?? preSpawnContract?.workspace ?? "__global__"}`;
+      return await withProjectSpawnLane(spawnLaneKey, async (): Promise<SpoolReply> => {
+        const liveAgents =
+          resolvedDaemon !== undefined && spawnSlug !== undefined
+            ? (await resolvedDaemon.agents.list({ filter: { includeArchived: false, includeBackground: true } })).entries
+                .map((entry) => entry.agent)
+                .filter((agent) => agent.archivedAt === null)
+            : undefined;
+        const peers = await taskPeers(request.task, liveAgents);
+        const running = peers.find(peerIsRunning);
+        if (running !== undefined) {
+          const message = `Peer ${running.id} is already running in the Task worktree for ${request.task}; wait for its completion mail or call lead_set_contract first to open a new epoch`;
+          const event = factory.ledger.append({ event: "spawn_refused", task: request.task, provider: request.provider, arity: request.arity, rule: "spawn:peer-already-running", reason: "peer-already-running" });
+          return { id: request.id, ok: false, code: "peer-already-running", message, event };
         }
-      }
+        const projectRoot =
+          spawnSlug !== undefined
+            ? (readProjectRegistration(factory.stateDir, spawnSlug)?.root ?? (spawnProject?.ok ? spawnProject.root : undefined))
+            : undefined;
+        if (
+          preSpawnContract !== undefined &&
+          spawnSlug !== undefined &&
+          projectRoot !== undefined &&
+          !isReadOnlyPeerDisposition(preSpawnContract.disposition) &&
+          liveAgents !== undefined
+        ) {
+          const source = { factory: registry?.root ?? factory, ...(registry === undefined ? {} : { registry }) };
+          const inFlight = projectPeersInFlight({
+            stateDir: factory.stateDir,
+            slug: spawnSlug,
+            root: projectRoot,
+            source,
+            live: liveAgents,
+            law: "quiet-point",
+          });
+          const writableConflict = inFlight.find((round) => {
+            if (round.task === request.task) return false;
+            const otherContract = taskFactoryOf(source, spawnSlug, round.task).contractFor(round.task);
+            return !isReadOnlyPeerDisposition(otherContract?.disposition);
+          });
+          if (writableConflict !== undefined) {
+            const holders = writableConflict.agentIds.length > 0 ? ` (${writableConflict.agentIds.join(", ")})` : "";
+            const message = `Project ${spawnSlug} already has a live unsettled writable Peer${holders} on task ${writableConflict.task}; at most one active writable engineer Peer is allowed per Project at a time (settle, accept, or close ${writableConflict.task} first, or dispatch a read-only disposition: scout | architect | reviewer).`;
+            const event = factory.ledger.append({
+              event: "spawn_refused",
+              task: request.task,
+              provider: request.provider,
+              arity: request.arity,
+              rule: "spawn:single-writable-peer",
+              reason: message,
+            });
+            return { id: request.id, ok: false, code: "writable-peer-in-flight", message, event };
+          }
+        }
       await retirePeers(peers);
       // The driver's arrival (v0.0.5): one ledger line either way, then the
       // reply the driver keys its next move on — create the agent, or report
@@ -2869,6 +2974,7 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
         ...(spawnedAgentId !== undefined ? { agentId: spawnedAgentId } : {}),
         ...(resolvedSpawnProvider !== undefined ? { resolvedProvider: resolvedSpawnProvider } : {}),
       };
+      });
     }
     if (request.kind === "respawn") {
       // The Lead's one automatic Respawn per progress marker (v0.0.12, ADR 0008):
@@ -3462,25 +3568,14 @@ export function startSpool(stateDir: string, factory: Factory, options: SpoolOpt
           factory,
           ...(options.registry === undefined ? {} : { registry: options.registry }),
           log,
-          onSettled: async ({ item, outcome }) => {
-            const targetFactory =
-              item.useRootFactory === true || options.registry === undefined
-                ? factory
-                : options.registry.factoryForProject(item.projectSlug);
-            await settleClaimOutcome({
-              factory: targetFactory,
-              task: item.task,
-              agent: item.agent,
-              outcome,
-              sha: item.sha,
-              workspace: item.cwd,
-              ...(item.useRootFactory === true || item.projectSlug === "root" ? {} : { projectSlug: item.projectSlug }),
-              usageMeter: options.usageMeter,
-              peerMail: options.peerMail,
-              ...(options.daemon === undefined ? {} : { daemon: options.daemon }),
-              onLog: log,
-            });
-          },
+          onSettled: createGateQueueSettler({
+            rootFactory: factory,
+            ...(options.registry === undefined ? {} : { registry: options.registry }),
+            ...(options.usageMeter === undefined ? {} : { usageMeter: options.usageMeter }),
+            ...(options.peerMail === undefined ? {} : { peerMail: options.peerMail }),
+            ...(options.daemon === undefined ? {} : { daemon: options.daemon }),
+            onLog: log,
+          }),
         })
       : undefined;
   const gateQueue = options.gateQueue ?? ownedGateQueue!;

@@ -1,8 +1,12 @@
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
 import { join } from "node:path";
+import type { Duplex } from "node:stream";
+import contribute from "../plugin/index.server.ts";
 import { createFactory } from "../plugin/server/core/factory.ts";
 import { CorrelationRegistry } from "../plugin/server/core/correlations.ts";
 import { MAX_ATTEMPTS } from "../plugin/server/core/events.ts";
@@ -1478,4 +1482,419 @@ test("Seam 1 (Ticket 05): Pause/Resume & concurrency persist across restart, emp
   });
   assert.equal(fake.sent.filter((s) => s.agentId === "peer-b1").length, 0, "Owner cancel of running Gate wakes Lead, not Peer");
   assert.equal(fA2.ledger.eventsFor("TA-AFTER-CANCEL").findLast((e) => e.event === "gate_finished")?.verdict, "green");
+});
+
+const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+
+function decodeWsFrames(buffer: Buffer): { texts: string[]; closed: boolean; rest: Buffer } {
+  const texts: string[] = [];
+  let closed = false;
+  let offset = 0;
+  while (offset + 2 <= buffer.length) {
+    const opcode = buffer[offset]! & 0x0f;
+    const masked = (buffer[offset + 1]! & 0x80) !== 0;
+    let length = buffer[offset + 1]! & 0x7f;
+    let cursor = offset + 2;
+    if (length === 126) {
+      if (cursor + 2 > buffer.length) break;
+      length = buffer.readUInt16BE(cursor);
+      cursor += 2;
+    } else if (length === 127) {
+      if (cursor + 8 > buffer.length) break;
+      length = Number(buffer.readBigUInt64BE(cursor));
+      cursor += 8;
+    }
+    const maskLength = masked ? 4 : 0;
+    if (cursor + maskLength + length > buffer.length) break;
+    const mask = masked ? buffer.subarray(cursor, cursor + 4) : null;
+    cursor += maskLength;
+    const payload = buffer.subarray(cursor, cursor + length);
+    if (mask !== null) for (let i = 0; i < payload.length; i++) payload[i] ^= mask[i & 3]!;
+    if (opcode === 0x1) texts.push(payload.toString("utf8"));
+    if (opcode === 0x8) closed = true;
+    offset = cursor + length;
+  }
+  return { texts, closed, rest: buffer.subarray(offset) };
+}
+
+function encodeWsText(text: string): Buffer {
+  const payload = Buffer.from(text, "utf8");
+  const frame = payload.length < 126 ? Buffer.allocUnsafe(2 + payload.length) : Buffer.allocUnsafe(4 + payload.length);
+  frame[0] = 0x81;
+  if (payload.length < 126) {
+    frame[1] = payload.length;
+    payload.copy(frame, 2);
+  } else {
+    frame[1] = 126;
+    frame.writeUInt16BE(payload.length, 2);
+    payload.copy(frame, 4);
+  }
+  return frame;
+}
+
+async function startBootWarmupWsDaemon(
+  t: TestContext,
+  home: string,
+  onRpc: (message: Record<string, unknown>) => Promise<Record<string, unknown>>,
+) {
+  const sockets = new Set<Duplex>();
+  const server = createServer();
+  server.on("upgrade", (req, socket) => {
+    const key = String(req.headers["sec-websocket-key"] ?? "");
+    const accept = createHash("sha1").update(key + WS_GUID).digest("base64");
+    socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
+    sockets.add(socket);
+    let pending: Buffer<ArrayBufferLike> = Buffer.alloc(0);
+    socket.on("data", (chunk: Buffer) => {
+      const decoded = decodeWsFrames(Buffer.concat([pending, chunk]));
+      pending = decoded.rest;
+      for (const text of decoded.texts) {
+        const envelope = JSON.parse(text) as Record<string, unknown>;
+        if (envelope.type === "hello") {
+          socket.write(encodeWsText(JSON.stringify({
+            type: "session",
+            message: { type: "status", payload: { status: "server_info" } },
+          })));
+          continue;
+        }
+        if (envelope.type === "session" && typeof envelope.message === "object" && envelope.message !== null) {
+          const message = envelope.message as Record<string, unknown>;
+          void onRpc(message).then((answer) => {
+            if (!socket.destroyed) socket.write(encodeWsText(JSON.stringify({ type: "session", message: answer })));
+          });
+        }
+      }
+      if (decoded.closed) {
+        socket.write(Buffer.from([0x88, 0x00]));
+        socket.end();
+      }
+    });
+    socket.on("close", () => sockets.delete(socket));
+    socket.on("error", () => {});
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (address === null || typeof address === "string") throw new Error("ws server failed to bind");
+  mkdirSync(home, { recursive: true });
+  writeFileSync(join(home, "paseo.pid"), `${JSON.stringify({ listen: `127.0.0.1:${address.port}` })}\n`);
+  writeFileSync(join(home, "local-credential"), "boot-test-cred\n");
+  t.after(() => {
+    for (const s of sockets) s.destroy();
+    server.close();
+  });
+}
+
+test("contribute(server) captures paseoApi before gateQueue.startupRecovery settles running Gates so live surviving Peers receive daemon-restarted RED directly while dead Peers fall back to Lead mailbox", async (t) => {
+  const dir = makeTempDir("boot-paseo-capture-");
+  disposeDir(t, dir);
+  const home = join(dir, "paseo-home");
+  const stateDir = join(home, "plugin-state", "paseo-factory");
+  const rootLive = join(dir, "proj-live");
+  const rootDead = join(dir, "proj-dead");
+  for (const r of [rootLive, rootDead]) {
+    mkdirSync(r, { recursive: true });
+    writeFileSync(join(r, "README.md"), `# ${r}\n`);
+  }
+  const shaLive = gitCommitAll(rootLive, "init-live");
+  const shaDead = gitCommitAll(rootDead, "init-dead");
+
+  const prevHome = process.env.HOME;
+  const prevPaseoHome = process.env.PASEO_HOME;
+  process.env.HOME = dir;
+  process.env.PASEO_HOME = home;
+  t.after(() => {
+    if (prevHome === undefined) delete process.env.HOME;
+    else process.env.HOME = prevHome;
+    if (prevPaseoHome === undefined) delete process.env.PASEO_HOME;
+    else process.env.PASEO_HOME = prevPaseoHome;
+  });
+
+  const regLive = ensureProjectRegistered(stateDir, rootLive);
+  const regDead = ensureProjectRegistered(stateDir, rootDead);
+  assert.ok(regLive.ok && regDead.ok);
+
+  const seedRegistry = createFactoryRegistry({ stateDir });
+  const fLive = seedRegistry.factoryForProject(regLive.slug);
+  const fDead = seedRegistry.factoryForProject(regDead.slug);
+  fLive.setContract({ task: "T-BOOT-LIVE", workspace: rootLive, gate: "true", artifact: "README.md" });
+  fDead.setContract({ task: "T-BOOT-DEAD", workspace: rootDead, gate: "true", artifact: "README.md" });
+  await fLive.admitClaim({ task: "T-BOOT-LIVE", sha: shaLive, handoff, agent: "peer-surviving", queueId: "gq-boot-live" });
+  await fDead.admitClaim({ task: "T-BOOT-DEAD", sha: shaDead, handoff, agent: "peer-dead", queueId: "gq-boot-dead" });
+  seedRegistry.stop();
+
+  writeFileSync(join(stateDir, "gate-queue.json"), JSON.stringify({
+    schemaVersion: 1,
+    paused: false,
+    concurrency: 1,
+    items: [
+      {
+        id: "gq-boot-live",
+        projectSlug: regLive.slug,
+        task: "T-BOOT-LIVE",
+        attempt: 1,
+        sha: shaLive,
+        cmd: "true",
+        cwd: rootLive,
+        timeoutMs: 60_000,
+        agent: "peer-surviving",
+        handoff,
+        enqueuedAt: new Date().toISOString(),
+        startedAt: new Date().toISOString(),
+        status: "running",
+        pid: 888_881,
+      },
+      {
+        id: "gq-boot-dead",
+        projectSlug: regDead.slug,
+        task: "T-BOOT-DEAD",
+        attempt: 1,
+        sha: shaDead,
+        cmd: "true",
+        cwd: rootDead,
+        timeoutMs: 60_000,
+        agent: "peer-dead",
+        handoff,
+        enqueuedAt: new Date().toISOString(),
+        startedAt: new Date().toISOString(),
+        status: "running",
+        pid: 888_882,
+      },
+    ],
+  }, null, 2));
+
+  const fake = makeFakeDaemon([
+    { id: "lead-live", status: "idle", labels: { seat: "lead", project: regLive.slug }, cwd: rootLive },
+    { id: "lead-dead", status: "idle", labels: { seat: "lead", project: regDead.slug }, cwd: rootDead },
+    { id: "peer-surviving", status: "idle", labels: { seat: "agent", project: regLive.slug, task: "T-BOOT-LIVE" }, cwd: rootLive },
+    { id: "peer-dead", status: "error", labels: { seat: "agent", project: regDead.slug, task: "T-BOOT-DEAD" }, cwd: rootDead },
+  ]);
+  writeProjectRegistration(stateDir, regLive.slug, { root: rootLive, lead: "lead-live" });
+  writeProjectRegistration(stateDir, regDead.slug, { root: rootDead, lead: "lead-dead" });
+
+  const handlers = new Map<string, (input: unknown, context: unknown) => Promise<unknown> | unknown>();
+  await startBootWarmupWsDaemon(t, home, async (message) => {
+    if (message.type === "plugin.list.request") {
+      return { type: "plugin.list.response", payload: { requestId: message.requestId, plugins: [] } };
+    }
+    if (message.type === "config.reload.request") {
+      return { type: "config.reload.response", payload: { requestId: message.requestId, ok: true } };
+    }
+    const rpcName = typeof message.method === "string" ? message.method : "";
+    const handler = handlers.get(rpcName);
+    const out = handler ? await handler(message.input ?? {}, { paseo: fake.daemon }) : { ok: false, error: "not-found" };
+    return {
+      type: "plugin.rpc.invoke.response",
+      payload: { requestId: message.requestId, result: out },
+    };
+  });
+
+  const server = {
+    addHook: () => () => {},
+    handle: (contract: { name: string }, handler: (input: unknown, context: unknown) => unknown) => {
+      handlers.set(contract.name, handler);
+    },
+  } as unknown as Parameters<typeof contribute>[0];
+
+  const stop = contribute(server);
+  t.after(() => stop());
+
+  await until(() => {
+    const queue = JSON.parse(readFileSync(join(stateDir, "gate-queue.json"), "utf8")) as { items: unknown[] };
+    assert.equal(queue.items.length, 0);
+    assert.ok(fake.sent.some((s) => s.agentId === "peer-surviving" && /daemon-restarted/.test(s.text)), "surviving live Peer receives daemon-restarted RED directly");
+    assert.ok(fake.sent.some((s) => s.agentId === "lead-dead" && /daemon-restarted/.test(s.text) && /peer-unavailable/.test(s.text)), "dead Peer falls back to Lead mailbox with peer-unavailable");
+  }, 5_000);
+
+  assert.equal(fake.sent.filter((s) => s.agentId === "lead-live").length, 0, "Lead for surviving Peer stays asleep (not woken by false peer-unavailable fallback)");
+  assert.equal(
+    readMailboxEvents(join(projectStateDir(stateDir, regLive.slug), "mailbox.jsonl")).some((e) => e.type === "mail_queued" && e.task === "T-BOOT-LIVE"),
+    false,
+    "no Lead mailbox entry queued when surviving Peer was woken directly",
+  );
+});
+
+test("TOCTOU guard: contract refuses gate-in-flight without cancelling queued Gate that became running during taskPeers", async (t) => {
+  const dir = makeTempDir("spool-contract-toctou-");
+  disposeDir(t, dir);
+  const stateDir = join(dir, "state");
+  const { root } = makeProjectRepo(dir, "contract-toctou");
+  const reg = ensureProjectRegistered(stateDir, root);
+  assert.ok(reg.ok);
+  const factory = createFactory({ stateDir });
+
+  const blockerFlag = join(dir, "release-blocker");
+  const targetFlag = join(dir, "release-target");
+  const waitScript = join(dir, "wait-flag.mjs");
+  writeFileSync(
+    waitScript,
+    "import { existsSync } from 'node:fs';\nconst flag = process.argv[2];\nconst deadline = Date.now() + 10000;\nwhile (!existsSync(flag) && Date.now() < deadline) {\n  await new Promise((r) => setTimeout(r, 15));\n}\n",
+  );
+  const holdGate = (flagPath: string) =>
+    `${JSON.stringify(process.execPath)} ${JSON.stringify(waitScript)} ${JSON.stringify(flagPath)}`;
+
+  const targetGate = holdGate(targetFlag);
+  const cBlock = factory.setContract({ task: "T-BLOCK", workspace: root, gate: holdGate(blockerFlag), artifact: "README.md" });
+  const cTarget = factory.setContract({ task: "T-TARGET", workspace: root, gate: targetGate, artifact: "README.md" });
+  const wtBlocker = allocateTaskWorktree(stateDir, cBlock, "T-BLOCK").worktree!;
+  const wtTarget = allocateTaskWorktree(stateDir, cTarget, "T-TARGET").worktree!;
+  factory.ledger.append({ event: "spawn_dispatched", task: "T-BLOCK", provider: "pi/zai/glm-5.3", arity: 1, worktree: wtBlocker });
+  factory.ledger.append({ event: "spawn_dispatched", task: "T-TARGET", provider: "pi/zai/glm-5.3", arity: 1, worktree: wtTarget });
+  writeFileSync(join(wtBlocker, "b.txt"), "blocker\n");
+  writeFileSync(join(wtTarget, "t.txt"), "target\n");
+  const shaBlock = gitCommitChanges(wtBlocker, "blocker commit");
+  const shaTarget = gitCommitChanges(wtTarget, "target commit");
+
+  const gateQueue = createGateQueue({ stateDir, concurrency: 1, factory });
+  t.after(() => {
+    if (existsSync(dir)) {
+      writeFileSync(blockerFlag, "1\n");
+      writeFileSync(targetFlag, "1\n");
+    }
+    gateQueue.stop();
+  });
+
+  const blockPrep = await factory.admitClaim({ task: "T-BLOCK", sha: shaBlock, handoff, queueId: "gq-blk" });
+  assert.equal(blockPrep.status, "queued");
+  await gateQueue.enqueue({
+    id: blockPrep.queuedEvent.id ?? "gq-blk",
+    projectSlug: reg.slug,
+    task: "T-BLOCK",
+    attempt: blockPrep.attempt,
+    sha: shaBlock,
+    cmd: blockPrep.contract.gate,
+    cwd: blockPrep.executionDir,
+    timeoutMs: 10_000,
+    handoff,
+  });
+  await until(() => assert.ok(gateQueue.snapshot().running.some((i) => i.task === "T-BLOCK")));
+
+  const tgtPrep = await factory.admitClaim({ task: "T-TARGET", sha: shaTarget, handoff, queueId: "gq-tgt" });
+  assert.equal(tgtPrep.status, "queued");
+  await gateQueue.enqueue({
+    id: tgtPrep.queuedEvent.id ?? "gq-tgt",
+    projectSlug: reg.slug,
+    task: "T-TARGET",
+    attempt: tgtPrep.attempt,
+    sha: shaTarget,
+    cmd: tgtPrep.contract.gate,
+    cwd: tgtPrep.executionDir,
+    timeoutMs: 10_000,
+    handoff,
+  });
+  assert.equal(gateQueue.snapshot().queued.some((i) => i.task === "T-TARGET"), true);
+
+  const fake = makeFakeDaemon();
+  const raceDaemon: SurfaceDaemonApi = {
+    ...fake.daemon,
+    agents: {
+      ...fake.daemon.agents,
+      async list(opts) {
+        // Release T-BLOCK and wait until T-TARGET transitions queued -> running mid-taskPeers!
+        writeFileSync(blockerFlag, "1\n");
+        await until(() => assert.ok(gateQueue.snapshot().running.some((i) => i.task === "T-TARGET")));
+        return await fake.daemon.agents.list(opts);
+      },
+    },
+  };
+
+  try {
+    const reply = await handleSpoolRequest(
+      factory,
+      {
+        id: "recontract-toctou",
+        kind: "contract",
+        task: "T-TARGET",
+        workspace: root,
+        gate: "echo overwritten",
+        artifact: "README.md",
+        outcome: "Updated target contract",
+        invariants: "Keep target invariant",
+        exclusions: "No unrelated changes",
+        verification: "Slice test passes",
+        submitter: "lead",
+        seat: "lead",
+      },
+      { daemon: raceDaemon, gateQueue },
+    );
+
+    assert.equal(reply.ok, false, "contract must refuse when queued Gate starts running during taskPeers");
+    if (!reply.ok) assert.equal(reply.code, "gate-in-flight");
+    assert.equal(factory.contractFor("T-TARGET")?.gate, targetGate, "original Contract must stay intact");
+    assert.equal(
+      gateQueue.snapshot().running.some((i) => i.task === "T-TARGET"),
+      true,
+      "actively running Gate must NOT be killed by re-contract",
+    );
+  } finally {
+    writeFileSync(blockerFlag, "1\n");
+    writeFileSync(targetFlag, "1\n");
+  }
+  await until(() => {
+    const snap = gateQueue.snapshot();
+    assert.equal(snap.running.length, 0);
+    assert.equal(snap.queued.length, 0);
+  });
+});
+
+test("TOCTOU guard: concurrent writable spawn calls serialize per Project and open gate_queued blocks writable spawn even with zero live agents", async (t) => {
+  const dir = makeTempDir("spool-spawn-toctou-");
+  disposeDir(t, dir);
+  const stateDir = join(dir, "state");
+  const { root } = makeProjectRepo(dir, "spawn-toctou");
+  ensureProjectRegistered(stateDir, root);
+  const factory = createFactory({ stateDir });
+
+  factory.setContract({ task: "T-A", workspace: root, gate: "true", artifact: "README.md", disposition: "engineer" });
+  factory.setContract({ task: "T-B", workspace: root, gate: "true", artifact: "README.md", disposition: "engineer" });
+  factory.setContract({ task: "T-C", workspace: root, gate: "true", artifact: "README.md", disposition: "engineer" });
+
+  const fake = makeFakeDaemon();
+  let createdCount = 0;
+  const slowDaemon: SurfaceDaemonApi = {
+    ...fake.daemon,
+    agents: {
+      ...fake.daemon.agents,
+      async create(opts) {
+        createdCount += 1;
+        await new Promise((r) => setTimeout(r, 35));
+        return await fake.daemon.agents.create(opts);
+      },
+    },
+  };
+
+  const [spawnA, spawnB] = await Promise.all([
+    handleSpoolRequest(
+      factory,
+      { id: "sp-a", kind: "spawn", task: "T-A", provider: "pi/zai/glm-5.3", arity: 1, prompt: "Execute task T-A: implement slice A.", submitter: "lead", seat: "lead" },
+      { daemon: slowDaemon, home: dir },
+    ),
+    handleSpoolRequest(
+      factory,
+      { id: "sp-b", kind: "spawn", task: "T-B", provider: "pi/zai/glm-5.3", arity: 1, prompt: "Execute task T-B: implement slice B.", submitter: "lead", seat: "lead" },
+      { daemon: slowDaemon, home: dir },
+    ),
+  ]);
+
+  const outcomes = [spawnA, spawnB];
+  assert.equal(outcomes.filter((r) => r.ok).length, 1, "at most one concurrent writable spawn succeeds per Project");
+  const refused = outcomes.find((r) => !r.ok);
+  assert.ok(refused && !refused.ok);
+  assert.equal(refused.code, "writable-peer-in-flight");
+  assert.equal(createdCount, 1, "second concurrent spawn must never create a second live writable Peer");
+
+  // Even when liveAgents is empty (T-A's Peer exited after submitting gate_queued),
+  // writable spawn for T-C MUST still be refused with writable-peer-in-flight.
+  fake.agents.length = 0;
+  const wtA = factory.worktreeFor("T-A")!;
+  writeFileSync(join(wtA, "a.txt"), "work\n");
+  const shaA = gitCommitChanges(wtA, "task A commit");
+  await factory.admitClaim({ task: "T-A", sha: shaA, handoff, queueId: "gq-ta-1" });
+
+  const spawnC = await handleSpoolRequest(
+    factory,
+    { id: "sp-c", kind: "spawn", task: "T-C", provider: "pi/zai/glm-5.3", arity: 1, prompt: "Execute task T-C: implement slice C.", submitter: "lead", seat: "lead" },
+    { daemon: slowDaemon, home: dir },
+  );
+  assert.equal(spawnC.ok, false, "open gate_queued on T-A blocks writable spawn for T-C even with zero live agents");
+  if (!spawnC.ok) assert.equal(spawnC.code, "writable-peer-in-flight");
 });

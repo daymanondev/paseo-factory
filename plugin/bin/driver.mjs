@@ -112,8 +112,8 @@ const TASK_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 // (or `.agents/skills/<skill>/SKILL.md` in the Workspace) — on demand.
 // No description and no skills, no headers — the brief is byte-identical to
 // v0.0.5's.
-const BRIEF_TEMPLATE = `Do the assigned work on branch \`<branch>\`. When done: commit, run
-\`git rev-parse HEAD\`, then \`factory-claim --task <task-id> --sha <sha>\`.
+const BRIEF_TEMPLATE = `Do the assigned work on branch \`<branch>\`. Use fast slice checks during TDD (never pre-run the full cumulative Gate); when done: commit, run
+\`git rev-parse HEAD\`, then \`factory-claim --task <task-id> --sha <sha>\`, and end your turn immediately once \`queued\` (the daemon GateQueue runs the Gate asynchronously).
 If the result is RED: read the note line, fix, make a NEW commit, claim
 again with the new sha. Never edit tests just to make them green.
 

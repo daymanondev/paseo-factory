@@ -746,7 +746,6 @@ export const OverviewProjectEntrySchema = z.object({
   handoffActive: z.boolean(),
   supervisor: OverviewProjectSeatSummarySchema,
   lead: OverviewProjectSeatSummarySchema,
-  activePeer: OverviewProjectPeerSummarySchema.nullable(),
   peers: z.array(OverviewProjectPeerSummarySchema),
   latestGate: OverviewLatestGateSchema.nullable(),
   gateQueueStatus: z.enum(["running", "queued"]).nullable(),
@@ -833,6 +832,8 @@ export const FactoryViewSchema = z.object({
    * field's own precedent).
    */
   projectUsage: ProjectUsageViewSchema.nullable().optional(),
+  /** Daemon-wide GateQueue max concurrent Gate executions (ADR 0068, default 1). */
+  gateQueueConcurrency: z.number().int().min(1).optional(),
 });
 export type FactoryView = z.infer<typeof FactoryViewSchema>;
 

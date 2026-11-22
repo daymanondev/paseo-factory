@@ -1295,6 +1295,10 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 // src/ledger-validation.ts
 var ledger_validation_exports = {};
 __export(ledger_validation_exports, {
+  DEFAULT_CONTRACT_TIMEOUT_SECONDS: () => DEFAULT_CONTRACT_TIMEOUT_SECONDS,
+  MAX_CONTRACT_TIMEOUT_SECONDS: () => MAX_CONTRACT_TIMEOUT_SECONDS,
+  MIN_CONTRACT_TIMEOUT_SECONDS: () => MIN_CONTRACT_TIMEOUT_SECONDS,
+  isValidContractTimeoutSeconds: () => isValidContractTimeoutSeconds,
   isValidLedgerEvent: () => isValidLedgerEvent,
   parseLedgerJsonl: () => parseLedgerJsonl,
   usageIsValid: () => usageIsValid
@@ -1607,6 +1611,10 @@ function record(value) {
 }
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
+  DEFAULT_CONTRACT_TIMEOUT_SECONDS,
+  MAX_CONTRACT_TIMEOUT_SECONDS,
+  MIN_CONTRACT_TIMEOUT_SECONDS,
+  isValidContractTimeoutSeconds,
   isValidLedgerEvent,
   parseLedgerJsonl,
   usageIsValid
@@ -2505,14 +2513,9 @@ async function handleToolCall(name, rawArgs) {
     const verification = structured("verification");
     let timeoutSeconds;
     if (args.timeoutSeconds !== undefined) {
-      if (
-        typeof args.timeoutSeconds !== "number" ||
-        !Number.isSafeInteger(args.timeoutSeconds) ||
-        args.timeoutSeconds < 60 ||
-        args.timeoutSeconds > 3600
-      ) {
+      if (!ledgerValidationPolicy.isValidContractTimeoutSeconds(args.timeoutSeconds)) {
         return toolResult(
-          "lead_set_contract: `timeoutSeconds` must be an integer between 60 and 3600 seconds (omit it for the 900s default).",
+          `lead_set_contract: \`timeoutSeconds\` must be an integer between ${ledgerValidationPolicy.MIN_CONTRACT_TIMEOUT_SECONDS} and ${ledgerValidationPolicy.MAX_CONTRACT_TIMEOUT_SECONDS} seconds (omit it for the ${ledgerValidationPolicy.DEFAULT_CONTRACT_TIMEOUT_SECONDS}s default).`,
           true,
         );
       }
@@ -2826,7 +2829,7 @@ async function handleToolCall(name, rawArgs) {
         : undefined;
       promptParts.push(
         readOnlyEvidence === undefined
-          ? `Execute task ${task}: ${artifactClause}pass gate \`${contract?.gate ?? ""}\`, commit on branch factory/${task}, and call agent_claim.`
+          ? `Execute task ${task}: ${artifactClause}run fast slice checks during TDD (never pre-run the full cumulative Gate), commit on branch factory/${task}, call agent_claim (the daemon GateQueue runs the Gate asynchronously), and end your turn immediately once \`queued\`.`
           : `Execute task ${task}: this session is Read-Only (disposition ${contract.disposition}) — the read-only-disposition-fence forbids file edits and \`git commit\`; never commit, never edit files. Call agent_claim with no commit and no sha, supplying \`outcome\`, \`scope\`, \`verification\`, and \`unknowns\` carrying your ${contract.disposition} evidence: ${readOnlyEvidence}.`,
       );
       const taskPrompt =

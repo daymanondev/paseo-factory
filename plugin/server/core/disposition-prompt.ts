@@ -73,7 +73,7 @@ export function repokeCompletionFooter(task: string, contract: ContractSet | und
   const gate = contract?.gate ?? "";
   const evidence = readOnlyDispositionEvidence(disposition);
   if (evidence === undefined) {
-    return `Continue inside your Task worktree on branch factory/${task}, run the gate \`${gate}\`, commit your changes, and call \`paseo-factory_agent_claim\` (or \`agent_claim\`).`;
+    return `Continue inside your Task worktree on branch factory/${task}, run fast slice checks during TDD (never pre-run the full cumulative Gate), commit your changes, call \`paseo-factory_agent_claim\` (or \`agent_claim\`), and end your turn immediately once \`queued\`; the daemon GateQueue runs \`${gate}\` asynchronously.`;
   }
   const gateClause = gate.trim() === "" ? ":" : `, run the gate \`${gate}\` read-only,`;
   return [

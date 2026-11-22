@@ -94,7 +94,7 @@ import {
 } from "./core/mailbox.ts";
 import type { LeadMailFrom, LeadMailItem, LeadMailKind, MailRecipient } from "./core/mailbox.ts";
 import { boundTaskPeers, peerIsRunning } from "./task-peers.ts";
-import { driverWavesInFlight, projectEventsOf as sharedProjectEventsOf, projectFactoryOf, projectPeersInFlight, projectStreamOf as sharedProjectStreamOf, taskFactoryOf as sharedTaskFactoryOf, taskHasSettledPeerOutcome } from "./peer-in-flight.ts";
+import { driverWavesInFlight, projectEventsOf as sharedProjectEventsOf, projectFactoryOf, projectPeersInFlight, projectStreamOf as sharedProjectStreamOf, taskFactoryOf as sharedTaskFactoryOf, taskHasSettledPeerOutcome, tasksWithOpenGate } from "./peer-in-flight.ts";
 import { foldTasks, renderLedgerLine } from "./view.ts";
 import type { TaskView } from "../shared/view.ts";
 import { normalizeLanesWithDaemon } from "./spool.ts";
@@ -1601,8 +1601,8 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     // A Peer context handoff owns this turn boundary (its extraction prompt or successor).
     const peerHandoffState = readHandoffProgress(deps.stateDir, slug, `peer:${task}`)?.state;
     if (peerHandoffState !== undefined && peerHandoffState !== "done" && peerHandoffState !== "failed") return false;
-    const last =events.findLast((evt) => "task" in evt && evt.task === task);
-    if (last === undefined || last.event === "permit_denied" || last.event === "gate_queued" || last.event === "gate_started" || last.event === "claim_reported") return false;
+    const last = events.findLast((evt) => "task" in evt && evt.task === task);
+    if (last === undefined || last.event === "permit_denied" || tasksWithOpenGate(events).has(task)) return false;
     let escalated = false;
     try {
       escalated = readMailboxEvents(mailboxPath(slug)).some(
@@ -2211,20 +2211,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
   const hasActiveWork = async (): Promise<boolean> => {
     // Gate work remains active even after its Peer has finished its turn —
     // across EVERY Project's Ledger (v0.0.89), never the root stream alone.
-    const gates = new Set<string>();
-    for (const events of eventStreamsOf()) {
-      for (const event of events) {
-        if (event.event === "gate_queued" || event.event === "gate_started") gates.add(`${event.task}:${event.attempt}`);
-        else if (event.event === "gate_finished") gates.delete(`${event.task}:${event.attempt}`);
-        else if (event.event === "contract_set" || event.event === "task_closed") {
-          const prefix = `${event.task}:`;
-          for (const key of gates) {
-            if (key.startsWith(prefix)) gates.delete(key);
-          }
-        }
-      }
-    }
-    if (gates.size > 0 || handingOverBySlug.size > 0) return true;
+    if (eventStreamsOf().some((events) => tasksWithOpenGate(events).size > 0) || handingOverBySlug.size > 0) return true;
     const projects = listProjectRegistrations(deps.stateDir);
     if (projects.some(project => supervisorHandoff.active(project.slug))) return true;
     if (projects.some(project => { const mailbox = readLeadMailbox(mailboxPath(project.slug)); return mailbox.inFlight !== null || mailbox.supervisorInFlight !== null; })) return true;

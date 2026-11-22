@@ -185,7 +185,6 @@ function makeProjectEntry(overrides: Partial<OverviewProjectEntry> = {}): Overvi
     handoffActive: false,
     supervisor: { statusLabel: "idle", tone: "normal", vacant: false, agentId: "sup-alpha" },
     lead: { statusLabel: "working", tone: "normal", vacant: false, agentId: "lead-alpha" },
-    activePeer: { agentId: "peer-alpha", task: "TA-1", disposition: "engineer", statusLabel: "working", tone: "normal" },
     peers: [{ agentId: "peer-alpha", task: "TA-1", disposition: "engineer", statusLabel: "working", tone: "normal" }],
     latestGate: { state: "running", verdict: null, task: "TA-1", attempt: 1, ts: "2026-11-22T10:00:01.000Z", note: null },
     gateQueueStatus: "running",
@@ -255,7 +254,6 @@ function makeOverviewFixture(overrides: Partial<FactoryOverviewView> = {}): Fact
         handoffActive: false,
         supervisor: { statusLabel: "waiting for permission", tone: "waiting", vacant: false, agentId: "sup-beta" },
         lead: { statusLabel: "idle", tone: "normal", vacant: false, agentId: "lead-beta" },
-        activePeer: { agentId: "peer-beta", task: "TB-2", disposition: "reviewer", statusLabel: "idle", tone: "normal" },
         peers: [{ agentId: "peer-beta", task: "TB-2", disposition: "reviewer", statusLabel: "idle", tone: "normal" }],
         latestGate: { state: "queued", verdict: null, task: "TB-2", attempt: 2, ts: "2026-11-22T09:58:38.000Z", note: null },
         gateQueueStatus: "queued",
@@ -348,7 +346,6 @@ test("FactoryOverviewView renders empty Gate queue and green/red latestGate stat
         slug: "green-proj",
         name: "GreenProj",
         peers: [],
-        activePeer: null,
         latestGate: { state: "green", verdict: "green", task: "T-1", attempt: 1, ts: "2026-11-22T09:55:43.000Z", note: null },
         gateQueueStatus: null,
         gateQueuePosition: null,
@@ -357,7 +354,6 @@ test("FactoryOverviewView renders empty Gate queue and green/red latestGate stat
         slug: "red-proj",
         name: "RedProj",
         peers: [],
-        activePeer: null,
         latestGate: { state: "red", verdict: "red", task: "T-2", attempt: 3, ts: "2026-11-22T09:50:43.000Z", note: "attempt-ceiling" },
         gateQueueStatus: null,
         gateQueuePosition: null,
@@ -630,8 +626,7 @@ test("desktop contribute registers single Factory sidebar header item with live 
 
       const trailing = container.querySelector('[data-testid="sidebar-row-trailing"]');
       assert.ok(trailing, "trailing badge renders when Needs you or Gate queue is active");
-      assert.match(trailing.textContent ?? "", /Needs you · 2/);
-      assert.match(trailing.textContent ?? "", /Gate · 1\+1/);
+      assert.match(trailing.textContent ?? "", /Needs you · 2 · Gate running · \+1/);
 
       // Clicking opens Factory overview screen
       const button = entry.querySelector("button")!;

@@ -9604,8 +9604,8 @@ test("ADR 0068 (Ticket 05): overview snapshot, PanelView queue projection, and G
   const projB = ov.projects.find((p) => p.slug === resB.slug)!;
   assert.equal(projA.supervisor.statusLabel, "idle");
   assert.equal(projA.lead.statusLabel, "working");
-  assert.equal(projA.activePeer?.task, "TA-1");
-  assert.equal(projA.activePeer?.disposition, "engineer");
+  assert.equal(projA.peers[0]?.task, "TA-1");
+  assert.equal(projA.peers[0]?.disposition, "engineer");
   assert.equal(projA.latestGate?.state, "running");
   assert.equal(projB.supervisor.statusLabel, "vacant");
   assert.equal(projB.latestGate?.state, "queued");
@@ -9656,6 +9656,9 @@ test("ADR 0068 (Ticket 05): overview snapshot, PanelView queue projection, and G
   const resumeRes = gateQueueResume.output.parse(await handlers.gateQueueResume({}));
   assert.ok(resumeRes.ok);
   assert.equal(resumeRes.gateQueue.paused, false);
+  const snapAfter = await handlers.snapshot({});
+  assert.ok(snapAfter.ok);
+  assert.equal(snapAfter.view.gateQueueConcurrency, 2, "snapshot view includes updated gateQueueConcurrency for Settings");
   const ovAfter = overview.output.parse(await handlers.overview({}));
   assert.ok(ovAfter.ok);
   assert.equal(ovAfter.gateQueue.paused, false);

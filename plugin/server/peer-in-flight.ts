@@ -51,6 +51,40 @@ export function taskHasSettledPeerOutcome(task: TaskView, queuedPeerBlockerTasks
 }
 
 /**
+ * Tasks with an open Claim/Gate (`gate_queued`, `claim_reported`, or
+ * `gate_started` whose `(task, attempt)` has not yet reached `gate_finished`,
+ * `contract_set`, `task_closed`, `needs_human`, or `attempt_accepted`).
+ */
+export function tasksWithOpenGate(events: readonly LedgerEvent[]): Set<string> {
+  const openAttempts = new Map<string, Set<number>>();
+  for (const evt of events) {
+    if (!("task" in evt) || typeof evt.task !== "string") continue;
+    if (
+      (evt.event === "gate_queued" || evt.event === "claim_reported" || evt.event === "gate_started") &&
+      typeof evt.attempt === "number"
+    ) {
+      const attempts = openAttempts.get(evt.task) ?? new Set<number>();
+      attempts.add(evt.attempt);
+      openAttempts.set(evt.task, attempts);
+    } else if (evt.event === "gate_finished" && typeof evt.attempt === "number") {
+      const attempts = openAttempts.get(evt.task);
+      if (attempts !== undefined) {
+        attempts.delete(evt.attempt);
+        if (attempts.size === 0) openAttempts.delete(evt.task);
+      }
+    } else if (
+      evt.event === "contract_set" ||
+      evt.event === "task_closed" ||
+      evt.event === "needs_human" ||
+      evt.event === "attempt_accepted"
+    ) {
+      openAttempts.delete(evt.task);
+    }
+  }
+  return new Set(openAttempts.keys());
+}
+
+/**
  * The driver-held signal, derived from the ledger alone (spec §Implementation
  * Decisions 4, last bullet): a synchronous CLI Driver wave is in flight while
  * any task's latest spawn round is still open — `spawn_dispatched` with
@@ -268,6 +302,20 @@ export function projectPeersInFlight(input: {
       (peer) => peerIsRunning(peer) || (dispatchedAndOpen && peer.status !== "error"),
     );
     if (holders.length > 0) hold(task.task, holders.map((peer) => peer.id));
+  }
+  // An open Claim/Gate (`gate_queued`, `claim_reported`, `gate_started` without
+  // `gate_finished` / terminal close) keeps the Task in flight even if the
+  // Peer session exited or disappeared while waiting in the queue.
+  for (const task of tasksWithOpenGate(activeWaveEvents)) {
+    if (held.has(task)) continue;
+    held.set(
+      task,
+      new Set(
+        boundTaskPeers({ stateDir, slug, task, events, live })
+          .filter((peer) => peer.status !== "error")
+          .map((peer) => peer.id),
+      ),
+    );
   }
   return [...held.entries()].map(([task, ids]) => ({ task, agentIds: [...ids] }));
 }

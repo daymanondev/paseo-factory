@@ -70,29 +70,12 @@ export function FactoryOverviewSidebarItem({
         testID="factory-sidebar-overview-badge"
         style={{ flexDirection: "row", alignItems: "center", gap: SPACING[1] }}
       >
-        {summary.needsYouCount > 0 ? (
-          <ToneBadge
-            theme={theme}
-            label={`Needs you · ${summary.needsYouCount}`}
-            colour={palette.wait}
-            dot={false}
-          />
-        ) : null}
-        {summary.runningCount > 0 ? (
-          <ToneBadge
-            theme={theme}
-            label={summary.queuedCount > 0 ? `Gate · ${summary.runningCount}+${summary.queuedCount}` : "Gate running"}
-            colour={palette.ok}
-            dot
-          />
-        ) : summary.queuedCount > 0 ? (
-          <ToneBadge
-            theme={theme}
-            label={summary.paused ? `Paused · ${summary.queuedCount}` : `${summary.queuedCount} queued`}
-            colour={palette.wait}
-            dot={false}
-          />
-        ) : null}
+        <ToneBadge
+          theme={theme}
+          label={summary.label}
+          colour={summary.tone === "ok" ? palette.ok : palette.wait}
+          dot={summary.runningCount > 0}
+        />
       </View>
     );
 
