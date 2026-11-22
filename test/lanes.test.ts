@@ -18,6 +18,7 @@ import {
   loadLanes,
   mergeLaneProfilesFiles,
   migrateLegacyZcodeLane,
+  normalizeLaneWithProviders,
   parseLane,
   resetProjectLanes,
   resolvePeerThinkingLane,
@@ -1234,4 +1235,68 @@ test("sibling effort models (antigravity/agy with thinkingOptions: []) switch wi
   });
   assert.equal(resolvePeerThinkingLane("antigravity/gemini-partial-high", "low", partialCatalog), "antigravity/gemini-partial-medium");
   assert.equal(resolvePeerThinkingLane("antigravity/gemini-gap-high", "medium", partialCatalog), "antigravity/gemini-gap-high");
+});
+
+test("normalizeLaneWithProviders normalizes legacy effort-suffixed lanes when the live catalog advertises the base model with matching thinkingOptions (ADR 0067)", () => {
+  const agy017Catalog = catalogOf(
+    {
+      provider: "antigravity",
+      models: [
+        { id: "gemini-4-argon", thinkingOptions: [{ id: "low" }, { id: "medium" }, { id: "high" }] },
+        { id: "gemini-4-hydrogen", thinkingOptions: [{ id: "low" }, { id: "medium" }, { id: "high" }, { id: "xhigh" }] },
+        { id: "gemini-fixed", thinkingOptions: [] },
+      ],
+    },
+    {
+      provider: "opencode",
+      models: [{ id: "opencode/model", thinkingOptions: [{ id: "high" }] }],
+    },
+  );
+
+  // Normalizes <provider>/<base>-<tier> -> <provider>/<base>:<tier> when base advertises matching tier
+  assert.equal(normalizeLaneWithProviders("antigravity/gemini-4-argon-high", agy017Catalog), "antigravity/gemini-4-argon:high");
+  assert.equal(normalizeLaneWithProviders("antigravity/gemini-4-hydrogen-xhigh", agy017Catalog), "antigravity/gemini-4-hydrogen:xhigh");
+  assert.equal(normalizeLaneWithProviders("agy/gemini-4-argon-low", agy017Catalog), "agy/gemini-4-argon:low");
+  assert.equal(normalizeLaneWithProviders("opencode/opencode/model-high", agy017Catalog), "opencode/opencode/model:high");
+
+  // Leaves unchanged when: missing tier in thinkingOptions, empty thinkingOptions, exact match, already has :thinking, empty base, eye.json, or unavailable catalog
+  assert.equal(normalizeLaneWithProviders("antigravity/gemini-4-argon-max", agy017Catalog), "antigravity/gemini-4-argon-max");
+  assert.equal(normalizeLaneWithProviders("antigravity/gemini-fixed-high", agy017Catalog), "antigravity/gemini-fixed-high");
+  assert.equal(normalizeLaneWithProviders("antigravity/gemini-4-argon:high", agy017Catalog), "antigravity/gemini-4-argon:high");
+  assert.equal(normalizeLaneWithProviders("antigravity/gemini-4-argon-high:low", agy017Catalog), "antigravity/gemini-4-argon-high:low");
+  assert.equal(normalizeLaneWithProviders("antigravity/-high", agy017Catalog), "antigravity/-high");
+  assert.equal(normalizeLaneWithProviders("eye.json", agy017Catalog), "eye.json");
+  assert.equal(normalizeLaneWithProviders("antigravity/gemini-4-argon-high", undefined), "antigravity/gemini-4-argon-high");
+  assert.equal(normalizeLaneWithProviders("antigravity/gemini-4-argon-high", []), "antigravity/gemini-4-argon-high");
+
+  // Exact match in catalog wins even if base also exists
+  const directMatchCatalog = catalogOf({
+    provider: "antigravity",
+    models: [
+      { id: "gemini-4-argon-high", thinkingOptions: [] },
+      { id: "gemini-4-argon", thinkingOptions: [{ id: "high" }] },
+    ],
+  });
+  assert.equal(normalizeLaneWithProviders("antigravity/gemini-4-argon-high", directMatchCatalog), "antigravity/gemini-4-argon-high");
+});
+
+test("resolvePeerThinkingLane normalizes legacy effort-suffixed lanes onto live base models with thinkingOptions for both undefined and explicit thinking overrides (ADR 0067)", () => {
+  const agy017Catalog = catalogOf({
+    provider: "antigravity",
+    models: [
+      { id: "gemini-4-hydrogen", thinkingOptions: [{ id: "low" }, { id: "medium" }, { id: "high" }, { id: "xhigh" }] },
+      { id: "gemini-limited", thinkingOptions: [{ id: "low" }, { id: "medium" }] },
+    ],
+  });
+
+  // Undefined override still normalizes legacy suffix against 0.17.1 catalog
+  assert.equal(resolvePeerThinkingLane("antigravity/gemini-4-hydrogen-high", undefined, agy017Catalog), "antigravity/gemini-4-hydrogen:high");
+  assert.equal(resolvePeerThinkingLane("agy/gemini-4-hydrogen-medium", undefined, agy017Catalog), "agy/gemini-4-hydrogen:medium");
+
+  // Explicit Lead override maps onto base model + requested or nearest supported thinkingOptionId
+  assert.equal(resolvePeerThinkingLane("antigravity/gemini-4-hydrogen-high", "low", agy017Catalog), "antigravity/gemini-4-hydrogen:low");
+  assert.equal(resolvePeerThinkingLane("antigravity/gemini-4-hydrogen-high", "max", agy017Catalog), "antigravity/gemini-4-hydrogen:high");
+  assert.equal(resolvePeerThinkingLane("antigravity/gemini-limited-high", "low", agy017Catalog), "antigravity/gemini-limited:low");
+  assert.equal(resolvePeerThinkingLane("antigravity/gemini-limited-high", "high", agy017Catalog), "antigravity/gemini-limited:medium");
+  assert.equal(resolvePeerThinkingLane("antigravity/gemini-limited-high", undefined, agy017Catalog), "antigravity/gemini-limited-high");
 });

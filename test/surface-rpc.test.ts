@@ -3743,6 +3743,281 @@ test("v0.0.24 (ADR 0015 §1): lanesSet sanitizes unsupported :thinking before sa
   assert.equal(await handlers.sanitizeLane("opencode/opencode/nemotron-3-ultra-free:max"), "opencode/opencode/nemotron-3-ultra-free");
 });
 
+test("ADR 0067: sanitizeLaneWithProviders, lanesSet, lanesSetBatch, and onboardingCommit normalize legacy effort-suffixed Antigravity lanes on explicit saves", async (t) => {
+  const agy017Providers: ProviderEntry[] = [
+    {
+      provider: "antigravity",
+      available: true,
+      models: [
+        {
+          id: "gemini-4-argon",
+          label: "Gemini 4 Argon",
+          thinkingOptions: [
+            { id: "low", label: "Low" },
+            { id: "medium", label: "Medium" },
+            { id: "high", label: "High" },
+          ],
+        },
+        { id: "gemini-fixed", label: "Gemini Fixed", thinkingOptions: [] },
+      ],
+    },
+  ];
+
+  assert.equal(sanitizeLaneWithProviders("antigravity/gemini-4-argon-high", agy017Providers), "antigravity/gemini-4-argon:high");
+  assert.equal(sanitizeLaneWithProviders("agy/gemini-4-argon-low", agy017Providers), "agy/gemini-4-argon:low");
+  assert.equal(sanitizeLaneWithProviders("antigravity/gemini-fixed-high", agy017Providers), "antigravity/gemini-fixed-high");
+  assert.equal(sanitizeLaneWithProviders("antigravity/gemini-4-argon-max", agy017Providers), "antigravity/gemini-4-argon-max");
+  assert.equal(
+    sanitizeLaneWithProviders("antigravity/gemini-4-argon-high", [
+      {
+        provider: "antigravity",
+        available: true,
+        models: [{ id: "gemini-4-argon-high", label: "Argon High", thinkingOptions: [] }],
+      },
+    ]),
+    "antigravity/gemini-4-argon-high",
+  );
+
+  const project = makeProject(t, "agy-save-norm");
+  const onboardRepo = makeProject(t, "agy-onboard-norm");
+  const { stateDir, handlers, fake, modelSyncs, thinkingSyncs } = makeSurface(t, [
+    {
+      id: "agent-sup-agy",
+      labels: { seat: "supervisor", project: project.slug },
+      provider: "antigravity",
+      model: "gemini-4-argon",
+    },
+  ]);
+
+  fake.daemon.providers = {
+    listAvailable: async () => ({ providers: [{ provider: "antigravity", available: true }] }),
+    listModels: async () => ({ models: agy017Providers[0]!.models! }),
+  };
+
+  const single = await handlers.lanesSet({
+    lane: "supervisor",
+    value: "antigravity/gemini-4-argon-high",
+    projectRoot: project.root,
+  });
+  assert.ok(single.ok, single.ok ? "" : single.error);
+  assert.equal(single.lanes.supervisor, "antigravity/gemini-4-argon:high");
+  assert.deepEqual(modelSyncs, [{ agentId: "agent-sup-agy", model: "gemini-4-argon" }]);
+  assert.deepEqual(thinkingSyncs, [{ agentId: "agent-sup-agy", thinkingOptionId: "high" }]);
+
+  const batch = await handlers.lanesSetBatch({
+    lanes: { lead: "antigravity/gemini-4-argon-low", worker: "agy/gemini-4-argon-medium" },
+    projectRoot: project.root,
+  });
+  assert.ok(batch.ok, batch.ok ? "" : batch.error);
+  assert.equal(batch.lanes.lead, "antigravity/gemini-4-argon:low");
+  assert.equal(batch.lanes.worker, "agy/gemini-4-argon:medium");
+
+  const persisted = JSON.parse(readFileSync(join(stateDir, "projects", project.slug, "lanes.json"), "utf8")) as Record<string, string>;
+  assert.deepEqual(persisted, {
+    supervisor: "antigravity/gemini-4-argon:high",
+    lead: "antigravity/gemini-4-argon:low",
+    worker: "agy/gemini-4-argon:medium",
+  });
+
+  const commit = await handlers.onboardingCommit({
+    folder: onboardRepo.root,
+    models: { supervisor: "antigravity/gemini-4-argon-high" },
+  });
+  assert.ok(commit.ok, commit.ok ? "" : commit.error);
+  const onboardedLanes = JSON.parse(readFileSync(join(stateDir, "projects", onboardRepo.slug, "lanes.json"), "utf8")) as Record<string, string>;
+  assert.equal(onboardedLanes.supervisor, "antigravity/gemini-4-argon:high");
+});
+
+test("ADR 0067: profilesApply and onboardingCommit with profileId persist normalized Antigravity lanes to lanes.json without mutating profiles.json on disk, and profilesSave normalizes explicit saves", async (t) => {
+  const project = makeProject(t, "agy-profile-apply");
+  const onboardRepo = makeProject(t, "agy-profile-onboard");
+  const { stateDir, handlers, fake, modelSyncs, thinkingSyncs } = makeSurface(t, [
+    {
+      id: "agent-sup-prof",
+      labels: { seat: "supervisor", project: project.slug },
+      provider: "antigravity",
+      model: "gemini-4-argon-medium",
+    },
+  ]);
+
+  // Seed legacy profile directly on disk (simulating a pre-0.17.1 or vault-synced profiles.json).
+  const legacyProfileLanes = {
+    supervisor: "antigravity/gemini-4-argon-high",
+    lead: "antigravity/gemini-4-argon-medium",
+    worker: "agy/gemini-4-argon-low",
+    watch: "pi/zcode/glm-5.3",
+    freshEyes: "eye.json",
+  };
+  writeFileSync(
+    join(stateDir, "profiles.json"),
+    `${JSON.stringify({
+      profiles: {
+        "legacy-agy": {
+          name: "Legacy Agy",
+          lanes: legacyProfileLanes,
+          updatedAt: "2026-11-20T00:00:00.000Z",
+        },
+      },
+    }, null, 2)}\n`,
+  );
+
+  fake.daemon.providers = {
+    listAvailable: async () => ({ providers: [{ provider: "antigravity", available: true }] }),
+    listModels: async () => ({
+      models: [
+        {
+          id: "gemini-4-argon",
+          label: "Gemini 4 Argon",
+          thinkingOptions: [
+            { id: "low", label: "Low" },
+            { id: "medium", label: "Medium" },
+            { id: "high", label: "High" },
+          ],
+        },
+      ],
+    }),
+  };
+
+  const applied = await handlers.profilesApply({ profileId: "legacy-agy", projectRoot: project.root });
+  assert.ok(applied.ok, applied.ok ? "" : applied.error);
+  assert.equal(applied.lanes.supervisor, "antigravity/gemini-4-argon:high");
+  assert.equal(applied.lanes.lead, "antigravity/gemini-4-argon:medium");
+  assert.equal(applied.lanes.worker, "agy/gemini-4-argon:low");
+  assert.deepEqual(modelSyncs, [{ agentId: "agent-sup-prof", model: "gemini-4-argon" }]);
+  assert.deepEqual(thinkingSyncs, [{ agentId: "agent-sup-prof", thinkingOptionId: "high" }]);
+
+  const persistedLanes = JSON.parse(readFileSync(join(stateDir, "projects", project.slug, "lanes.json"), "utf8")) as Record<string, string>;
+  assert.deepEqual(persistedLanes, {
+    supervisor: "antigravity/gemini-4-argon:high",
+    lead: "antigravity/gemini-4-argon:medium",
+    worker: "agy/gemini-4-argon:low",
+    watch: "pi/zcode/glm-5.3",
+    freshEyes: "eye.json",
+  });
+
+  // Legacy profile entry inside profiles.json must remain unmutated on disk (cross-host 0.16.x compatibility).
+  const profilesFile = JSON.parse(readFileSync(join(stateDir, "profiles.json"), "utf8")) as {
+    profiles: Record<string, { lanes: Record<string, string> }>;
+  };
+  assert.deepEqual(profilesFile.profiles["legacy-agy"]?.lanes, legacyProfileLanes);
+
+  // Snapshot sees the normalized lanes and recognizes the applied profile as unmodified.
+  const snap = await handlers.snapshot({ projectRoot: project.root });
+  assert.ok(snap.ok, snap.ok ? "" : snap.error);
+  assert.equal(snap.view.activeProfileId, "legacy-agy");
+  assert.equal(snap.view.activeProfileModified, false);
+
+  // Onboarding commit with legacy profileId also persists normalized lanes to the new Project's lanes.json.
+  const commit = await handlers.onboardingCommit({
+    folder: onboardRepo.root,
+    profileId: "legacy-agy",
+  });
+  assert.ok(commit.ok, commit.ok ? "" : commit.error);
+  const onboardLanes = JSON.parse(readFileSync(join(stateDir, "projects", onboardRepo.slug, "lanes.json"), "utf8")) as Record<string, string>;
+  assert.equal(onboardLanes.supervisor, "antigravity/gemini-4-argon:high");
+  assert.equal(onboardLanes.worker, "agy/gemini-4-argon:low");
+
+  // Explicit Owner profile save normalizes legacy Antigravity lanes when the live catalog supports it.
+  const explicitSave = await handlers.profilesSave({
+    name: "Normalized Agy",
+    lanes: legacyProfileLanes,
+  });
+  assert.ok(explicitSave.ok, explicitSave.ok ? "" : explicitSave.error);
+  assert.equal(explicitSave.profile.lanes.supervisor, "antigravity/gemini-4-argon:high");
+  assert.equal(explicitSave.profile.lanes.worker, "agy/gemini-4-argon:low");
+});
+
+test("ADR 0067: snapshot, seatsDirectory, and seat launch normalize legacy Antigravity lanes in memory without mutating lanes.json or profiles.json on disk", async (t) => {
+  const project = makeProject(t, "agy-read-norm");
+  const { stateDir, handlers, fake } = makeSurface(t, [
+    {
+      id: "agent-sup-legacy",
+      labels: { seat: "supervisor", project: project.slug },
+      provider: "factory-supervisor",
+      thinkingOptionId: "high",
+      cwd: project.root,
+    },
+  ]);
+
+  const legacyMachineRaw = `${JSON.stringify({
+    supervisor: "antigravity/gemini-4-argon-high",
+    lead: "antigravity/gemini-4-argon-medium",
+    worker: "antigravity/gemini-4-argon-low",
+  }, null, 2)}\n`;
+  const legacyProjectRaw = `${JSON.stringify({
+    supervisor: "antigravity/gemini-4-argon-high",
+    lead: "agy/gemini-4-argon-medium",
+    worker: "antigravity/gemini-4-argon-low",
+  }, null, 2)}\n`;
+  const legacyProfilesRaw = `${JSON.stringify({
+    profiles: {
+      "legacy-agy": {
+        name: "Legacy Agy",
+        lanes: {
+          supervisor: "antigravity/gemini-4-argon-high",
+          lead: "agy/gemini-4-argon-medium",
+          worker: "antigravity/gemini-4-argon-low",
+          watch: "pi/zcode/glm-5.3",
+          freshEyes: "pi/zcode/glm-5.3",
+        },
+        updatedAt: "2026-11-20T00:00:00.000Z",
+      },
+    },
+    activeProfileByScope: { [project.slug]: "legacy-agy" },
+  }, null, 2)}\n`;
+
+  writeFileSync(join(stateDir, "lanes.json"), legacyMachineRaw);
+  mkdirSync(join(stateDir, "projects", project.slug), { recursive: true });
+  writeProjectRegistration(stateDir, project.slug, { root: project.root, supervisor: "agent-sup-legacy" });
+  writeFileSync(join(stateDir, "projects", project.slug, "lanes.json"), legacyProjectRaw);
+  writeFileSync(join(stateDir, "profiles.json"), legacyProfilesRaw);
+
+  fake.daemon.providers = {
+    listAvailable: async () => ({ providers: [{ provider: "antigravity", available: true }] }),
+    listModels: async () => ({
+      models: [
+        {
+          id: "gemini-4-argon",
+          label: "Gemini 4 Argon",
+          thinkingOptions: [
+            { id: "low", label: "Low" },
+            { id: "medium", label: "Medium" },
+            { id: "high", label: "High" },
+          ],
+        },
+      ],
+    }),
+  };
+
+  const snap = await handlers.snapshot({ projectRoot: project.root });
+  assert.ok(snap.ok, snap.ok ? "" : snap.error);
+  assert.equal(snap.view.lanes.supervisor, "antigravity/gemini-4-argon:high");
+  assert.equal(snap.view.lanes.lead, "agy/gemini-4-argon:medium");
+  assert.equal(snap.view.lanes.worker, "antigravity/gemini-4-argon:low");
+  assert.equal(snap.view.machineLanes.supervisor, "antigravity/gemini-4-argon:high");
+  assert.deepEqual(snap.view.panel.seats?.supervisor.lane, { provider: "antigravity", model: "gemini-4-argon", thinking: "high", scope: "project" });
+  assert.deepEqual(snap.view.panel.seats?.lead.lane, { provider: "agy", model: "gemini-4-argon", thinking: "medium", scope: "project" });
+  assert.deepEqual(snap.view.panel.defaultWorker?.lane, { provider: "antigravity", model: "gemini-4-argon", thinking: "low", scope: "project" });
+  assert.equal(snap.view.profiles[0]?.lanes.supervisor, "antigravity/gemini-4-argon:high");
+  assert.equal(snap.view.activeProfileId, "legacy-agy");
+  assert.equal(snap.view.activeProfileModified, false);
+  assert.equal(snap.view.supervisor?.lane?.model, "gemini-4-argon");
+
+  const dir = await handlers.seatsDirectory({});
+  assert.ok(dir.ok);
+  assert.deepEqual(dir.seats[0]?.lane, { provider: "antigravity", model: "gemini-4-argon", thinking: "high", scope: "project" });
+
+  // Launching a vacant Lead resolves normalized provider + thinkingOptionId at launch time.
+  const leadEnsure = await handlers.leadEnsure({ projectRoot: project.root });
+  assert.ok(leadEnsure.ok, leadEnsure.ok ? "" : leadEnsure.error);
+  assert.deepEqual(fake.created.at(-1)?.config, { provider: "agy/gemini-4-argon", thinkingOptionId: "medium" });
+
+  // Disk files stay byte-for-byte unmutated across reads and seat launches!
+  assert.equal(readFileSync(join(stateDir, "lanes.json"), "utf8"), legacyMachineRaw);
+  assert.equal(readFileSync(join(stateDir, "projects", project.slug, "lanes.json"), "utf8"), legacyProjectRaw);
+  assert.equal(readFileSync(join(stateDir, "profiles.json"), "utf8"), legacyProfilesRaw);
+});
+
 test("v0.0.24 (ADR 0015 §1–§2): ensureSeat requires handoff for errored or provider-mismatched seats and syncs healthy model/thinking in-place", async (t) => {
   const project = makeProject(t, "ensure-self-heal");
   const agents: FakeAgent[] = [

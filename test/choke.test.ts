@@ -1572,6 +1572,67 @@ test("Seam 2: a factory-supervisor create rewrites onto Project A's supervisor p
   );
   assert.equal(agyInA.config.provider, "antigravity");
   assert.equal((agyInA.config as { model?: string }).model, "gemini-3.1-pro-high");
+
+  // ADR 0067: with a Paseo 0.17.1 Antigravity catalog advertising base models + thinkingOptions,
+  // legacy effort-suffixed lanes normalize on create without mutating lanes.json on disk.
+  saveLanes(stateDir, { supervisor: "antigravity/gemini-4-argon-high", lead: "agy/gemini-4-argon-low" }, "project-a-111111");
+  const agy017Catalog = [
+    {
+      provider: "antigravity",
+      models: [
+        { id: "gemini-4-argon", label: "Gemini 4 Argon", thinkingOptions: [{ id: "low" }, { id: "high" }] },
+        { id: "gemini-fixed", label: "Gemini Fixed", thinkingOptions: [] },
+      ],
+    },
+  ];
+  const agySup017 = normalizeAgentCreateRequest(
+    { config: { provider: "factory-supervisor", cwd: projectA, thinkingOptionId: "medium" } },
+    { stateDir, providers: agy017Catalog },
+  );
+  assert.equal(agySup017.config.provider, "antigravity");
+  assert.equal((agySup017.config as { model?: string }).model, "gemini-4-argon");
+  assert.equal(agySup017.config.thinkingOptionId, "high");
+  const agyLead017 = normalizeAgentCreateRequest(
+    { config: { provider: "factory-lead", cwd: projectA } },
+    { stateDir, providers: agy017Catalog },
+  );
+  assert.equal(agyLead017.config.provider, "antigravity");
+  assert.equal((agyLead017.config as { model?: string }).model, "gemini-4-argon");
+  assert.equal(agyLead017.config.thinkingOptionId, "low");
+
+  const directCombined = normalizeAgentCreateRequest(
+    { config: { provider: "antigravity/gemini-4-argon-high", cwd: projectA } },
+    { stateDir, providers: agy017Catalog },
+  );
+  assert.equal(directCombined.config.provider, "antigravity/gemini-4-argon");
+  assert.equal(directCombined.config.thinkingOptionId, "high");
+
+  const directSplit = normalizeAgentCreateRequest(
+    { config: { provider: "antigravity", model: "gemini-4-argon-high", cwd: projectA } as { provider: string; model?: string; cwd: string } },
+    { stateDir, providers: agy017Catalog },
+  );
+  assert.equal(directSplit.config.provider, "antigravity");
+  assert.equal((directSplit.config as { model?: string }).model, "gemini-4-argon");
+  assert.equal(directSplit.config.thinkingOptionId, "high");
+
+  const directExplicitThinking = normalizeAgentCreateRequest(
+    { config: { provider: "antigravity/gemini-4-argon-high", thinkingOptionId: "low", cwd: projectA } },
+    { stateDir, providers: agy017Catalog },
+  );
+  assert.equal(directExplicitThinking.config.provider, "antigravity/gemini-4-argon");
+  assert.equal(directExplicitThinking.config.thinkingOptionId, "low");
+
+  const fixedPassThrough = normalizeAgentCreateRequest(
+    { config: { provider: "antigravity/gemini-fixed-high", cwd: projectA } },
+    { stateDir, providers: agy017Catalog },
+  );
+  assert.equal(fixedPassThrough.config.provider, "antigravity/gemini-fixed-high");
+  assert.equal("thinkingOptionId" in fixedPassThrough.config, false);
+
+  // lanes.json on disk stays unmutated by read/create normalization
+  const onDisk = JSON.parse(readFileSync(join(stateDir, "projects", "project-a-111111", "lanes.json"), "utf8")) as Record<string, string>;
+  assert.equal(onDisk.supervisor, "antigravity/gemini-4-argon-high");
+  assert.equal(onDisk.lead, "agy/gemini-4-argon-low");
 });
 
 test("a legacy zcode lane's seat rewrite migrates onto pi/zcode/<model> and carries the runtime model id (ADR 0055)", (t) => {

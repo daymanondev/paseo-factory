@@ -58,7 +58,7 @@ import type { ChokeDecision, MemoryFence } from "./core/choke.ts";
 import { factoryRegistryFor, listProjectRegistrations, resolveTargetProject } from "./projects.ts";
 import type { FactoryRegistry, TargetProjectContext } from "./projects.ts";
 import { readCorrelations } from "./correlations.ts";
-import { loadLanes, parseLane } from "./core/lanes.ts";
+import { loadLanes, normalizeLaneWithProviders, parseLane } from "./core/lanes.ts";
 import { resolveOrBootstrapProject } from "./core/project.ts";
 import { SEAT_TITLES, inferRoleFromProviderId, resolveEffectiveProviderFamily } from "./roles.ts";
 import type { SeatName } from "./roles.ts";
@@ -291,7 +291,7 @@ function normalizeBareProviderModel(rawProvider: string, providers?: readonly Pr
  */
 export function normalizeAgentCreateRequest<
   T extends {
-    config: { provider?: string; thinkingOptionId?: string; cwd?: string; title?: string | null; labels?: Record<string, string> };
+    config: { provider?: string; model?: string; thinkingOptionId?: string; cwd?: string; title?: string | null; labels?: Record<string, string> };
     labels?: Record<string, string>;
   },
 >(
@@ -300,7 +300,7 @@ export function normalizeAgentCreateRequest<
   providers?: readonly ProviderCatalogEntry[],
 ): T & { labels?: Record<string, string>; config: T["config"] & { labels?: Record<string, string>; thinkingOptionId?: string } };
 export function normalizeAgentCreateRequest<
-  T extends { provider?: string; thinkingOptionId?: string; cwd?: string; title?: string | null; labels?: Record<string, string> },
+  T extends { provider?: string; model?: string; thinkingOptionId?: string; cwd?: string; title?: string | null; labels?: Record<string, string> },
 >(
   config: T,
   stateDirOrOptions?: string | NormalizeCreateOptions,
@@ -319,6 +319,7 @@ export function normalizeAgentCreateRequest(
     "config" in requestOrConfig && typeof requestOrConfig.config === "object" && requestOrConfig.config !== null;
   const config = (hasNestedConfig ? requestOrConfig.config : requestOrConfig) as {
     provider?: string;
+    model?: string;
     thinkingOptionId?: string;
     cwd?: string;
     title?: string | null;
@@ -333,21 +334,50 @@ export function normalizeAgentCreateRequest(
   // never a bare model to prefix — and is itself deterministic seat identity.
   const factoryProviderSeat = inferRoleFromProviderId(rawProvider);
   let normalizedProvider = factoryProviderSeat !== undefined ? rawProvider : normalizeBareProviderModel(rawProvider, providers);
+  let normalizedModel = typeof config.model === "string" ? config.model : undefined;
+  let normalizedThinkingOptionId: string | undefined;
+
+  if (factoryProviderSeat === undefined) {
+    const splitInput =
+      !normalizedProvider.includes("/") && normalizedProvider !== "" && normalizedModel !== undefined && normalizedModel !== "";
+    const candidate = normalizedProvider.includes("/")
+      ? normalizedProvider
+      : splitInput
+        ? `${normalizedProvider}/${normalizedModel}`
+        : undefined;
+    if (candidate !== undefined) {
+      const catalogNormalized = normalizeLaneWithProviders(candidate, providers);
+      if (catalogNormalized !== candidate) {
+        const parsedCatalog = parseLane(catalogNormalized);
+        if (parsedCatalog !== undefined) {
+          if (!splitInput) normalizedProvider = `${parsedCatalog.provider}/${parsedCatalog.model}`;
+          if (splitInput || (normalizedModel !== undefined && normalizedModel !== "")) {
+            normalizedModel = parsedCatalog.model;
+          }
+          normalizedThinkingOptionId = parsedCatalog.thinking;
+        }
+      }
+    }
+  }
 
   let stripThinkingOptionId = false;
   const parsedLane = parseLane(normalizedProvider);
-  if (parsedLane !== undefined) {
-    const meta = findCatalogModelMeta(parsedLane.provider, parsedLane.model, providers);
+  const rawThinkingOptionId =
+    typeof config.thinkingOptionId === "string" && config.thinkingOptionId !== "" ? config.thinkingOptionId : undefined;
+  if (parsedLane !== undefined || (normalizedProvider !== "" && normalizedModel !== undefined && normalizedModel !== "")) {
+    const meta =
+      parsedLane !== undefined
+        ? findCatalogModelMeta(parsedLane.provider, parsedLane.model, providers)
+        : findCatalogModelMeta(normalizedProvider, normalizedModel!, providers);
     const thinkingOptions = meta?.thinkingOptions;
     if (thinkingOptions !== undefined && thinkingOptions !== null) {
       if (
+        parsedLane !== undefined &&
         parsedLane.thinking !== undefined &&
         (thinkingOptions.length === 0 || !thinkingOptions.some((o) => o.id === parsedLane.thinking))
       ) {
         normalizedProvider = `${parsedLane.provider}/${parsedLane.model}`;
       }
-      const rawThinkingOptionId =
-        typeof config.thinkingOptionId === "string" && config.thinkingOptionId !== "" ? config.thinkingOptionId : undefined;
       if (
         rawThinkingOptionId !== undefined &&
         (thinkingOptions.length === 0 || !thinkingOptions.some((o) => o.id === rawThinkingOptionId))
@@ -357,6 +387,8 @@ export function normalizeAgentCreateRequest(
     }
   }
   const providerChanged = normalizedProvider !== rawProvider;
+  const modelChanged = normalizedModel !== config.model;
+  const setThinkingOptionId = normalizedThinkingOptionId !== undefined && (rawThinkingOptionId === undefined || stripThinkingOptionId);
 
   const existingSeat = config.labels?.seat ?? topLabels?.seat;
   // The provider id outranks the title guess (ADR 0017 §2): a
@@ -432,22 +464,26 @@ export function normalizeAgentCreateRequest(
     }
   }
 
-  if (seatRewrite === undefined && !providerChanged && !stripThinkingOptionId && nextLabels === undefined) {
+  if (seatRewrite === undefined && !providerChanged && !modelChanged && !stripThinkingOptionId && !setThinkingOptionId && nextLabels === undefined) {
     return requestOrConfig;
   }
 
   const updatedConfig: Record<string, unknown> = {
     ...config,
     provider: seatRewrite?.provider ?? (providerChanged ? normalizedProvider : config.provider),
-    ...(seatRewrite?.model !== undefined ? { model: seatRewrite.model } : {}),
-    ...(seatRewrite?.thinkingOptionId !== undefined ? { thinkingOptionId: seatRewrite.thinkingOptionId } : {}),
+    ...(seatRewrite?.model !== undefined ? { model: seatRewrite.model } : modelChanged && normalizedModel !== undefined ? { model: normalizedModel } : {}),
+    ...(seatRewrite?.thinkingOptionId !== undefined
+      ? { thinkingOptionId: seatRewrite.thinkingOptionId }
+      : setThinkingOptionId
+        ? { thinkingOptionId: normalizedThinkingOptionId }
+        : {}),
     ...(seatRewrite !== undefined ? { labels: seatRewrite.labels } : nextLabels !== undefined ? { labels: nextLabels } : {}),
   };
   // A seat rewrite owns the thinking field: the request's old
   // `thinkingOptionId` named the role provider's model, not the Project lane's.
   if (seatRewrite !== undefined && seatRewrite.thinkingOptionId === undefined) {
     delete updatedConfig.thinkingOptionId;
-  } else if (stripThinkingOptionId) {
+  } else if (stripThinkingOptionId && !setThinkingOptionId) {
     delete updatedConfig.thinkingOptionId;
   }
 
