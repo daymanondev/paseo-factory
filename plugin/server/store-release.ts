@@ -89,26 +89,14 @@ export interface StoreReleaseInput {
   notifyLead?: (input: { slug: string; text: string }) => Promise<void> | void;
 }
 
-export type StoreReleaseSettledOutcome =
-  | {
-      status: "paused-hole";
-      runId: string;
-      holeKind: string;
-      phase: string;
-      hasConsoleGuide: boolean;
-      guidePath?: string;
-    }
-  | {
-      status: "completed";
-      runId: string;
-      platforms: string[];
-    }
-  | {
-      status: "failed";
-      runId: string;
-      failureClass: StoreReleaseFailureClass;
-      code: string;
-    };
+export interface StoreReleaseSettledPause {
+  status: "paused-hole";
+  runId: string;
+  holeKind: string;
+  phase: string;
+  hasConsoleGuide: boolean;
+  guidePath?: string;
+}
 
 export type StoreReleaseResult =
   | {
@@ -130,7 +118,7 @@ export type StoreReleaseResult =
       platforms: StoreReleasePlatformTarget[];
       runner: { binPath: string };
       /** Background completion handle (awaited by tests; fire-and-forget from Spool). */
-      settled: Promise<StoreReleaseSettledOutcome>;
+      settled: Promise<StoreReleaseSettledPause | undefined>;
     }
   | {
       ok: false;
@@ -581,134 +569,255 @@ function shouldClearOnRequestCompletion(
   return playbook === "submit-production" || playbook === "full-release";
 }
 
+interface ParsedConsoleGuideWarning {
+  platform: string;
+  title: string;
+  lesson: string;
+  matchedTraits: string[];
+}
+
+interface ParsedConsoleCompletedByApiItem {
+  platform: string;
+  label: string;
+  detail?: string;
+}
+
+interface ParsedConsoleGuideCopyField {
+  label: string;
+  value: string;
+}
+
+interface ParsedConsoleGuideAnswer {
+  question: string;
+  answer: string;
+  reason?: string;
+}
+
+interface ParsedConsoleGuideStep {
+  order: number;
+  title: string;
+  menuPath?: string;
+  url?: string;
+  instructions: string[];
+  copyFields: ParsedConsoleGuideCopyField[];
+  answers: ParsedConsoleGuideAnswer[];
+}
+
+interface ParsedConsoleGuideSection {
+  platform: string;
+  title: string;
+  steps: ParsedConsoleGuideStep[];
+}
+
+interface ParsedConsoleGuide {
+  version: string;
+  appName?: string;
+  slug?: string;
+  platforms: string[];
+  completedByApi: ParsedConsoleCompletedByApiItem[];
+  antiRejectionWarnings: ParsedConsoleGuideWarning[];
+  sections: ParsedConsoleGuideSection[];
+}
+
 interface ExtractedConsoleGuide {
-  guide: Record<string, unknown>;
+  guide: ParsedConsoleGuide;
   guidePath?: string;
   day0KitPath?: string;
   bundleId?: string;
   packageName?: string;
+  siblingPayload?: Record<string, unknown>;
 }
+
+const OMITTED_GUIDE_PAYLOAD_KEYS = new Set(["consoleGuide", "consoleChecklist"]);
 
 function nonEmptyString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() !== "" ? value.trim() : undefined;
 }
 
+function nonEmptyStrings(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.map(nonEmptyString).filter((item): item is string => item !== undefined);
+}
+
+function stringifyGuideValue(value: unknown): string {
+  return typeof value === "string" ? value : JSON.stringify(value ?? "");
+}
+
+function finiteNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function parseConsoleGuideStep(raw: Record<string, unknown>, fallbackOrder: number): ParsedConsoleGuideStep {
+  const order = finiteNumber(raw.order) ?? fallbackOrder;
+  const menuPath = nonEmptyString(raw.menuPath);
+  const url = nonEmptyString(raw.url);
+  const copyFields = Array.isArray(raw.copyFields)
+    ? raw.copyFields.filter(isPlainRecord).map((field) => ({
+        label: nonEmptyString(field.label) ?? nonEmptyString(field.id) ?? "Value",
+        value: stringifyGuideValue(field.value),
+      }))
+    : [];
+  const answers = Array.isArray(raw.answers)
+    ? raw.answers.filter(isPlainRecord).map((ans) => {
+        const reason = nonEmptyString(ans.reason);
+        return {
+          question: nonEmptyString(ans.question) ?? "Question",
+          answer: stringifyGuideValue(ans.answer),
+          ...(reason !== undefined ? { reason } : {}),
+        };
+      })
+    : [];
+  return {
+    order,
+    title: nonEmptyString(raw.title) ?? `Step ${order}`,
+    ...(menuPath !== undefined ? { menuPath } : {}),
+    ...(url !== undefined ? { url } : {}),
+    instructions: nonEmptyStrings(raw.instructions),
+    copyFields,
+    answers,
+  };
+}
+
+function parseConsoleGuide(raw: Record<string, unknown>): ParsedConsoleGuide {
+  const appName = nonEmptyString(raw.appName);
+  const slug = nonEmptyString(raw.slug);
+  const completedByApi = Array.isArray(raw.completedByApi)
+    ? raw.completedByApi.filter(isPlainRecord).map((item) => {
+        const detail = nonEmptyString(item.detail);
+        return {
+          platform: nonEmptyString(item.platform) ?? "shared",
+          label: nonEmptyString(item.label) ?? "Completed",
+          ...(detail !== undefined ? { detail } : {}),
+        };
+      })
+    : [];
+  const antiRejectionWarnings = Array.isArray(raw.antiRejectionWarnings)
+    ? raw.antiRejectionWarnings.filter(isPlainRecord).map((w) => ({
+        platform: nonEmptyString(w.platform) ?? "shared",
+        title: nonEmptyString(w.title) ?? "Warning",
+        lesson: nonEmptyString(w.lesson) ?? "",
+        matchedTraits: nonEmptyStrings(w.matchedTraits),
+      }))
+    : [];
+  const sections = Array.isArray(raw.sections)
+    ? raw.sections.filter(isPlainRecord).map((section) => {
+        const platform = nonEmptyString(section.platform) ?? "shared";
+        const rawSteps = Array.isArray(section.steps) ? section.steps.filter(isPlainRecord) : [];
+        const sortedSteps = [...rawSteps].sort(
+          (a, b) => (finiteNumber(a.order) ?? Number.MAX_SAFE_INTEGER) - (finiteNumber(b.order) ?? Number.MAX_SAFE_INTEGER),
+        );
+        return {
+          platform,
+          title: nonEmptyString(section.title) ?? platform,
+          steps: sortedSteps.map((step, idx) => parseConsoleGuideStep(step, idx + 1)),
+        };
+      })
+    : [];
+  return {
+    version: nonEmptyString(raw.consoleGuideVersion) ?? nonEmptyString(raw.version) ?? "unknown",
+    ...(appName !== undefined ? { appName } : {}),
+    ...(slug !== undefined ? { slug } : {}),
+    platforms: nonEmptyStrings(raw.platforms),
+    completedByApi,
+    antiRejectionWarnings,
+    sections,
+  };
+}
+
+function extractSiblingPayload(payload: Record<string, unknown>): Record<string, unknown> | undefined {
+  const entries = Object.entries(payload).filter(([key, val]) => !OMITTED_GUIDE_PAYLOAD_KEYS.has(key) && val !== undefined);
+  return entries.length > 0 ? Object.fromEntries(entries) : undefined;
+}
+
 function extractConsoleGuidePayload(payload: unknown): ExtractedConsoleGuide | null {
   if (!isPlainRecord(payload) || !isPlainRecord(payload.consoleGuide)) return null;
-  const guide = payload.consoleGuide;
+  const rawGuide = payload.consoleGuide;
   const hasKnownShape =
-    nonEmptyString(guide.consoleGuideVersion) !== undefined ||
-    nonEmptyString(guide.version) !== undefined ||
-    Array.isArray(guide.sections) ||
-    Array.isArray(guide.completedByApi) ||
-    Array.isArray(guide.antiRejectionWarnings);
+    nonEmptyString(rawGuide.consoleGuideVersion) !== undefined ||
+    nonEmptyString(rawGuide.version) !== undefined ||
+    Array.isArray(rawGuide.sections) ||
+    Array.isArray(rawGuide.completedByApi) ||
+    Array.isArray(rawGuide.antiRejectionWarnings);
   if (!hasKnownShape) return null;
   const guidePath = nonEmptyString(payload.consoleGuidePath) ?? nonEmptyString(payload.guidePath);
   const day0KitPath = nonEmptyString(payload.day0KitPath);
   const bundleId = nonEmptyString(payload.bundleId);
   const packageName = nonEmptyString(payload.packageName);
+  const siblingPayload = extractSiblingPayload(payload);
   return {
-    guide,
+    guide: parseConsoleGuide(rawGuide),
     ...(guidePath !== undefined ? { guidePath } : {}),
     ...(day0KitPath !== undefined ? { day0KitPath } : {}),
     ...(bundleId !== undefined ? { bundleId } : {}),
     ...(packageName !== undefined ? { packageName } : {}),
+    ...(siblingPayload !== undefined ? { siblingPayload } : {}),
   };
+}
+
+const MAX_CONSOLE_GUIDE_DIGEST_CHARS = 16000;
+
+function boundConsoleGuideDigest(full: string, guidePath: string | undefined, maxChars = MAX_CONSOLE_GUIDE_DIGEST_CHARS): string {
+  if (full.length <= maxChars) return full;
+  const notice = `\n... [Console handoff guide truncated at ${maxChars} chars; see full guide at ${guidePath ?? "CONSOLE_GUIDE.md"}]`;
+  const budget = Math.max(0, maxChars - notice.length);
+  const slice = full.slice(0, budget);
+  const lastNewline = full[budget] === "\n" ? budget : slice.lastIndexOf("\n");
+  const head = lastNewline > 0 ? slice.slice(0, lastNewline) : slice;
+  return `${head}${notice}`;
 }
 
 function formatConsoleHandoffGuideDigest(extracted: ExtractedConsoleGuide): string {
   const { guide, guidePath, day0KitPath, bundleId, packageName } = extracted;
-  const guideVersion = nonEmptyString(guide.consoleGuideVersion) ?? nonEmptyString(guide.version) ?? "unknown";
-  const appName = nonEmptyString(guide.appName);
-  const slug = nonEmptyString(guide.slug);
-  const platforms = Array.isArray(guide.platforms)
-    ? guide.platforms.filter((p): p is string => typeof p === "string" && p.trim() !== "")
-    : [];
-
-  const lines: string[] = [`## Console handoff guide (version ${guideVersion})`];
+  const lines: string[] = [`## Console handoff guide (version ${guide.version})`];
   const meta: string[] = [];
-  if (appName !== undefined) meta.push(`App: ${appName}${slug !== undefined ? ` (${slug})` : ""}`);
-  if (platforms.length > 0) meta.push(`Platforms: ${platforms.join(", ")}`);
+  if (guide.appName !== undefined) meta.push(`App: ${guide.appName}${guide.slug !== undefined ? ` (${guide.slug})` : ""}`);
+  if (guide.platforms.length > 0) meta.push(`Platforms: ${guide.platforms.join(", ")}`);
   if (bundleId !== undefined) meta.push(`Bundle ID: ${bundleId}`);
   if (packageName !== undefined) meta.push(`Package name: ${packageName}`);
   if (meta.length > 0) lines.push(meta.join(" | "));
   if (guidePath !== undefined) lines.push(`- CONSOLE_GUIDE.md: ${guidePath}`);
   if (day0KitPath !== undefined) lines.push(`- Day-0 kit: ${day0KitPath}`);
 
-  const warnings = Array.isArray(guide.antiRejectionWarnings) ? guide.antiRejectionWarnings.filter(isPlainRecord) : [];
-  if (warnings.length > 0) {
+  if (guide.antiRejectionWarnings.length > 0) {
     lines.push("", "### Anti-rejection warnings");
-    for (const w of warnings) {
-      const platform = nonEmptyString(w.platform) ?? "shared";
-      const title = nonEmptyString(w.title) ?? "Warning";
-      const lesson = nonEmptyString(w.lesson) ?? "";
-      const traits = Array.isArray(w.matchedTraits)
-        ? w.matchedTraits.filter((t): t is string => typeof t === "string" && t.trim() !== "")
-        : [];
-      const traitSuffix = traits.length > 0 ? ` (matchedTraits: ${traits.join(", ")})` : "";
-      lines.push(`- [${platform}] ${title}: ${lesson}${traitSuffix}`);
+    for (const w of guide.antiRejectionWarnings) {
+      const traitSuffix = w.matchedTraits.length > 0 ? ` (matchedTraits: ${w.matchedTraits.join(", ")})` : "";
+      lines.push(`- [${w.platform}] ${w.title}: ${w.lesson}${traitSuffix}`);
     }
   }
 
-  const completed = Array.isArray(guide.completedByApi) ? guide.completedByApi.filter(isPlainRecord) : [];
-  if (completed.length > 0) {
+  if (guide.completedByApi.length > 0) {
     lines.push("", "### Done by API");
-    for (const item of completed) {
-      const platform = nonEmptyString(item.platform) ?? "shared";
-      const label = nonEmptyString(item.label) ?? "Completed";
-      const detail = nonEmptyString(item.detail);
-      lines.push(`- [x] [${platform}] ${label}${detail !== undefined ? ` — ${detail}` : ""}`);
+    for (const item of guide.completedByApi) {
+      lines.push(`- [x] [${item.platform}] ${item.label}${item.detail !== undefined ? ` — ${item.detail}` : ""}`);
     }
   }
 
-  const sections = Array.isArray(guide.sections) ? guide.sections.filter(isPlainRecord) : [];
-  for (const section of sections) {
-    const sectionPlatform = nonEmptyString(section.platform) ?? "shared";
-    const sectionTitle = nonEmptyString(section.title) ?? sectionPlatform;
-    lines.push("", `### ${sectionTitle} (${sectionPlatform})`);
-    const rawSteps = Array.isArray(section.steps) ? section.steps.filter(isPlainRecord) : [];
-    const steps = [...rawSteps].sort((a, b) => {
-      const ao = typeof a.order === "number" && Number.isFinite(a.order) ? a.order : Number.MAX_SAFE_INTEGER;
-      const bo = typeof b.order === "number" && Number.isFinite(b.order) ? b.order : Number.MAX_SAFE_INTEGER;
-      return ao - bo;
-    });
-    for (const [idx, step] of steps.entries()) {
-      const order = typeof step.order === "number" && Number.isFinite(step.order) ? step.order : idx + 1;
-      const title = nonEmptyString(step.title) ?? `Step ${order}`;
-      lines.push(`${order}. ${title}`);
-      const menuPath = nonEmptyString(step.menuPath);
-      if (menuPath !== undefined) lines.push(`   - Menu path: ${menuPath}`);
-      const url = nonEmptyString(step.url);
-      if (url !== undefined) lines.push(`   - URL: ${url}`);
-      const instructions = Array.isArray(step.instructions)
-        ? step.instructions.filter((i): i is string => typeof i === "string" && i.trim() !== "")
-        : [];
-      for (const instr of instructions) {
+  for (const section of guide.sections) {
+    lines.push("", `### ${section.title} (${section.platform})`);
+    for (const step of section.steps) {
+      lines.push(`${step.order}. ${step.title}`);
+      if (step.menuPath !== undefined) lines.push(`   - Menu path: ${step.menuPath}`);
+      if (step.url !== undefined) lines.push(`   - URL: ${step.url}`);
+      for (const instr of step.instructions) {
         lines.push(`   - ${instr}`);
       }
-      const copyFields = Array.isArray(step.copyFields) ? step.copyFields.filter(isPlainRecord) : [];
-      if (copyFields.length > 0) {
+      if (step.copyFields.length > 0) {
         lines.push(`   - Copy values:`);
-        for (const field of copyFields) {
-          const label = nonEmptyString(field.label) ?? nonEmptyString(field.id) ?? "Value";
-          const value = typeof field.value === "string" ? field.value : JSON.stringify(field.value ?? "");
-          lines.push(`     - ${label}: ${value}`);
+        for (const field of step.copyFields) {
+          lines.push(`     - ${field.label}: ${field.value}`);
         }
       }
-      const answers = Array.isArray(step.answers) ? step.answers.filter(isPlainRecord) : [];
-      if (answers.length > 0) {
+      if (step.answers.length > 0) {
         lines.push(`   - Questionnaire answers:`);
-        for (const ans of answers) {
-          const question = nonEmptyString(ans.question) ?? "Question";
-          const answer = typeof ans.answer === "string" ? ans.answer : JSON.stringify(ans.answer ?? "");
-          const reason = nonEmptyString(ans.reason);
-          lines.push(`     - ${question} -> ${answer}${reason !== undefined ? ` (Reason: ${reason})` : ""}`);
+        for (const ans of step.answers) {
+          lines.push(`     - ${ans.question} -> ${ans.answer}${ans.reason !== undefined ? ` (Reason: ${ans.reason})` : ""}`);
         }
       }
     }
   }
 
-  return lines.join("\n");
+  return boundConsoleGuideDigest(lines.join("\n"), guidePath);
 }
 
 async function settleStoreReleaseRun(params: {
@@ -720,7 +829,7 @@ async function settleStoreReleaseRun(params: {
   vaultRunner: VaultRunner;
   cliArgs: string[];
   runnerEnv: Record<string, string>;
-}): Promise<StoreReleaseSettledOutcome> {
+}): Promise<StoreReleaseSettledPause | undefined> {
   const { input, ctx, action, trackingRunId, runner, vaultRunner, cliArgs, runnerEnv } = params;
   let out: StoreReleaseRunnerOutput;
   try {
@@ -750,12 +859,7 @@ async function settleStoreReleaseRun(params: {
         `Policy: tool-bug — halt immediately, do NOT dispatch an app Peer to work around the runner, and report to Supervisor.`,
       ].join("\n"),
     });
-    return {
-      status: "failed",
-      runId: trackingRunId,
-      failureClass: "tool-bug",
-      code: "runner-spawn-failed",
-    };
+    return undefined;
   }
 
   const stdoutObj = parseJsonObject(out.stdout) as ParsedRunnerSummary | null;
@@ -792,21 +896,24 @@ async function settleStoreReleaseRun(params: {
       });
     });
 
-    const holeSummaryLines = extractedGuide !== null
-      ? [
-          `[Store release paused at Hole] action=${action} runId=${settledRunId} phase=${holePhase} holeKind=${holeKind}`,
-          formatConsoleHandoffGuideDigest(extractedGuide),
-          ...(pausedHole?.resolutionSpec !== undefined ? [`Resolution spec: ${JSON.stringify(pausedHole.resolutionSpec)}`] : []),
-          ...(keystoreWriteBackNote ? [`Vault write-back: ${keystoreWriteBackNote}`] : []),
-          `Next: Relay this Console handoff guide verbatim to Supervisor (preserving exact URLs, values, answers, anti-rejection warnings, and CONSOLE_GUIDE.md path) so the Owner can complete the Console steps and confirm in chat to dispatch resume (runId=${settledRunId}).`,
-        ]
-      : [
-          `[Store release paused at Hole] action=${action} runId=${settledRunId} phase=${holePhase} holeKind=${holeKind}`,
-          ...(pausedHole?.payload !== undefined ? [`Payload: ${JSON.stringify(pausedHole.payload)}`] : []),
-          ...(pausedHole?.resolutionSpec !== undefined ? [`Resolution spec: ${JSON.stringify(pausedHole.resolutionSpec)}`] : []),
-          ...(keystoreWriteBackNote ? [`Vault write-back: ${keystoreWriteBackNote}`] : []),
-          `Next: Report this Hole summary to Supervisor so the Owner can approve/resolve it (in Supervisor chat or Release Lab UI) and dispatch resume.`,
-        ];
+    const holeSummaryLines = [
+      `[Store release paused at Hole] action=${action} runId=${settledRunId} phase=${holePhase} holeKind=${holeKind}`,
+      ...(extractedGuide !== null
+        ? [
+            formatConsoleHandoffGuideDigest(extractedGuide),
+            ...(extractedGuide.siblingPayload !== undefined
+              ? [`Payload context: ${JSON.stringify(extractedGuide.siblingPayload)}`]
+              : []),
+          ]
+        : pausedHole?.payload !== undefined
+          ? [`Payload: ${JSON.stringify(pausedHole.payload)}`]
+          : []),
+      ...(pausedHole?.resolutionSpec !== undefined ? [`Resolution spec: ${JSON.stringify(pausedHole.resolutionSpec)}`] : []),
+      ...(keystoreWriteBackNote ? [`Vault write-back: ${keystoreWriteBackNote}`] : []),
+      extractedGuide !== null
+        ? `Next: Relay this Console handoff guide verbatim to Supervisor (preserving exact URLs, values, answers, anti-rejection warnings, and CONSOLE_GUIDE.md path) so the Owner can complete the Console steps and confirm in chat to dispatch resume (runId=${settledRunId}).`
+        : `Next: Report this Hole summary to Supervisor so the Owner can approve/resolve it (in Supervisor chat or Release Lab UI) and dispatch resume.`,
+    ];
     await input.notifyLead?.({
       slug: input.projectSlug,
       text: holeSummaryLines.join("\n"),
@@ -843,11 +950,7 @@ async function settleStoreReleaseRun(params: {
         `Next: Update per-app Store notebook card if appropriate and report completion to Supervisor.`,
       ].join("\n"),
     });
-    return {
-      status: "completed",
-      runId: settledRunId,
-      platforms: settledPlatforms,
-    };
+    return undefined;
   }
 
   // Failed outcome (either stdout run status="failed" or non-zero exit with stderr JSON / text)
@@ -894,12 +997,7 @@ async function settleStoreReleaseRun(params: {
       routePolicy,
     ].join("\n"),
   });
-  return {
-    status: "failed",
-    runId: settledRunId,
-    failureClass,
-    code,
-  };
+  return undefined;
 }
 
 export async function storeReleaseProject(input: StoreReleaseInput): Promise<StoreReleaseResult> {
@@ -938,7 +1036,7 @@ export async function storeReleaseProject(input: StoreReleaseInput): Promise<Sto
     mode: ctx.mode,
   });
 
-  const settled: Promise<StoreReleaseSettledOutcome> = settleStoreReleaseRun({
+  const settled: Promise<StoreReleaseSettledPause | undefined> = settleStoreReleaseRun({
     input,
     ctx,
     action,
@@ -952,12 +1050,7 @@ export async function storeReleaseProject(input: StoreReleaseInput): Promise<Sto
       slug: input.projectSlug,
       text: `[Store release internal error] action=${action} runId=${trackingRunId}: ${err instanceof Error ? err.message : String(err)}`,
     });
-    return {
-      status: "failed" as const,
-      runId: trackingRunId,
-      failureClass: "tool-bug" as const,
-      code: "internal-error",
-    };
+    return undefined;
   });
 
   return {

@@ -385,7 +385,7 @@ function v2PayloadIsValid(event: Record<string, unknown>): boolean {
         nonempty(event.holeKind) &&
         nonempty(event.phase) &&
         (event.hasConsoleGuide === undefined || typeof event.hasConsoleGuide === "boolean") &&
-        optionalString("guidePath")
+        (event.guidePath === undefined || nonempty(event.guidePath))
       );
     case "store_release_completed":
       return (

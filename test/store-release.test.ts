@@ -1235,3 +1235,254 @@ test("paused-hole with consoleGuide formats lossless guide into Lead wakeup and 
   assert.equal(legacyEvent.hasConsoleGuide, undefined);
   assert.equal(legacyEvent.guidePath, undefined);
 });
+
+test("paused-hole with consoleGuide preserves sibling payload context while omitting consoleGuide and consoleChecklist", async (t) => {
+  const dir = makeTempDir("store-release-sibling-payload-");
+  disposeDir(t, dir);
+  const paseoHome = join(dir, "paseo-home");
+  const stateDir = join(paseoHome, "plugin-state", "paseo-factory");
+  const repoDir = makeMobileRepo(dir, ["android", "ios"]);
+  const project = ensureProjectRegistered(stateDir, repoDir);
+  assert.ok(project.ok);
+  const factory = createFactory({ stateDir: join(stateDir, "projects", project.slug) });
+  t.after(() => factory.history.stop());
+
+  acceptCommitOnRepo(factory, repoDir, "T-SIBLING");
+  await factory.accept({ task: "T-SIBLING", attempt: 1, accepted_by: "lead" });
+  installFakeRunnerPlugin(paseoHome);
+  writeVaultStoreEnv(paseoHome, {
+    ASC_KEY_PATH: "/tmp/synth-asc.p8",
+    ASC_KEY_ID: "SYNTHKEY",
+    ASC_ISSUER: "00000000-0000-0000-0000-000000000001",
+    APPLE_TEAM_ID: "SYNTHTEAM",
+    GPLAY_KEY_PATH: "/tmp/synth-gplay.json",
+  });
+  setProjectStoreReleaseSettings(stateDir, project.slug, { mode: "auto-staging" });
+
+  const listPlugins = async () => ({ ok: false as const, reason: "offline" });
+  const notifications: Array<{ slug: string; text: string }> = [];
+
+  const withSiblingsRes = await storeReleaseProject({
+    factory,
+    stateDir,
+    paseoHome,
+    projectSlug: project.slug,
+    projectRoot: repoDir,
+    action: "stage",
+    listPlugins,
+    notifyLead: (n) => { notifications.push(n); },
+    runner: async () => ({
+      exitCode: 0,
+      stdout: JSON.stringify({
+        id: "run-final-approval",
+        playbook: "stage-release",
+        status: "paused-hole",
+        phases: [{ id: "phase-7-final-gate", state: "paused-hole", hole: "final-release-approval" }],
+        pausedAtHole: {
+          phase: "phase-7-final-gate",
+          kind: "final-release-approval",
+          payload: {
+            readiness: { android: "internal-uploaded", ios: "testflight-valid" },
+            missingInputs: ["privacyPolicyUrl"],
+            legalPages: { mode: "day0-kit", manualHostingRequired: true },
+            consoleChecklist: ["redundant legacy checklist item"],
+            consoleGuide: {
+              consoleGuideVersion: "2026-11",
+              appName: "Demo App",
+              platforms: ["android", "ios"],
+              completedByApi: [],
+              antiRejectionWarnings: [],
+              sections: [
+                {
+                  id: "final",
+                  platform: "shared",
+                  title: "Final Approval",
+                  steps: [
+                    {
+                      id: "approve-prod",
+                      order: 1,
+                      title: "Approve production release",
+                      menuPath: "App Review -> Submit",
+                      instructions: ["Confirm readiness and reply to submit."],
+                      copyFields: [],
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        },
+      }),
+      stderr: "",
+    }),
+  });
+  assert.equal(withSiblingsRes.ok, true);
+  if (withSiblingsRes.ok && "settled" in withSiblingsRes) await withSiblingsRes.settled;
+
+  const withSiblingsText = notifications[0]?.text ?? "";
+  assert.match(withSiblingsText, /^Payload context: /m);
+  const contextLine = withSiblingsText.split("\n").find((l) => l.startsWith("Payload context: ")) ?? "";
+  const parsedContext = JSON.parse(contextLine.slice("Payload context: ".length)) as Record<string, unknown>;
+  assert.deepEqual(parsedContext, {
+    readiness: { android: "internal-uploaded", ios: "testflight-valid" },
+    missingInputs: ["privacyPolicyUrl"],
+    legalPages: { mode: "day0-kit", manualHostingRequired: true },
+  });
+
+  // When payload only has consoleGuide + consoleChecklist, Payload context line is omitted
+  const onlyGuideRes = await storeReleaseProject({
+    factory,
+    stateDir,
+    paseoHome,
+    projectSlug: project.slug,
+    projectRoot: repoDir,
+    action: "stage",
+    listPlugins,
+    notifyLead: (n) => { notifications.push(n); },
+    runner: async () => ({
+      exitCode: 0,
+      stdout: JSON.stringify({
+        id: "run-guide-only",
+        playbook: "stage-release",
+        status: "paused-hole",
+        phases: [{ id: "phase-2-day0-and-signing", state: "paused-hole", hole: "day0-store-init" }],
+        pausedAtHole: {
+          phase: "phase-2-day0-and-signing",
+          kind: "day0-store-init",
+          payload: {
+            consoleChecklist: ["legacy checklist"],
+            consoleGuide: {
+              consoleGuideVersion: "2026-11",
+              sections: [],
+            },
+          },
+        },
+      }),
+      stderr: "",
+    }),
+  });
+  assert.equal(onlyGuideRes.ok, true);
+  if (onlyGuideRes.ok && "settled" in onlyGuideRes) await onlyGuideRes.settled;
+  assert.doesNotMatch(notifications[1]?.text ?? "", /^Payload context:/m);
+});
+
+test("paused-hole with oversized consoleGuide bounds digest cleanly on a line boundary and points to full guide", async (t) => {
+  const dir = makeTempDir("store-release-guide-bound-");
+  disposeDir(t, dir);
+  const paseoHome = join(dir, "paseo-home");
+  const stateDir = join(paseoHome, "plugin-state", "paseo-factory");
+  const repoDir = makeMobileRepo(dir, ["android"]);
+  const project = ensureProjectRegistered(stateDir, repoDir);
+  assert.ok(project.ok);
+  const factory = createFactory({ stateDir: join(stateDir, "projects", project.slug) });
+  t.after(() => factory.history.stop());
+
+  acceptCommitOnRepo(factory, repoDir, "T-BOUND");
+  await factory.accept({ task: "T-BOUND", attempt: 1, accepted_by: "lead" });
+  installFakeRunnerPlugin(paseoHome);
+  writeVaultStoreEnv(paseoHome, { GPLAY_KEY_PATH: "/tmp/synth-gplay.json" });
+  setProjectStoreReleaseSettings(stateDir, project.slug, { mode: "auto-staging" });
+
+  const guidePath = join(repoDir, ".store-release", "day0-kit", "CONSOLE_GUIDE.md");
+  const manySteps = Array.from({ length: 120 }, (_, i) => ({
+    id: `step-${i + 1}`,
+    order: i + 1,
+    title: `Configure Play Console section ${i + 1}`,
+    menuPath: `Policy -> Section ${i + 1}`,
+    url: `https://console.example.invalid/play/step-${i + 1}`,
+    instructions: [
+      `Enter deterministic synthetic value-${i + 1} for compliance checklist line item ${i + 1} and save.`,
+    ],
+    copyFields: [{ id: `f-${i + 1}`, label: `Field ${i + 1}`, value: `synthetic-copy-value-${i + 1}` }],
+  }));
+
+  const notifications: Array<{ slug: string; text: string }> = [];
+  const makeOversizedRunner = (includeGuidePath: boolean) => async () => ({
+    exitCode: 0,
+    stdout: JSON.stringify({
+      id: includeGuidePath ? "run-bound-with-path" : "run-bound-no-path",
+      playbook: "stage-release",
+      status: "paused-hole",
+      phases: [{ id: "phase-2-day0-and-signing", state: "paused-hole", hole: "day0-store-init" }],
+      pausedAtHole: {
+        phase: "phase-2-day0-and-signing",
+        kind: "day0-store-init",
+        payload: {
+          ...(includeGuidePath ? { consoleGuidePath: guidePath } : {}),
+          consoleGuide: {
+            consoleGuideVersion: "2026-11",
+            appName: "Oversized Demo App",
+            platforms: ["android"],
+            completedByApi: [],
+            antiRejectionWarnings: [],
+            sections: [
+              {
+                id: "android-play",
+                platform: "android",
+                title: "Google Play Console Setup",
+                steps: manySteps,
+              },
+            ],
+          },
+        },
+      },
+    }),
+    stderr: "",
+  });
+
+  const withPathRes = await storeReleaseProject({
+    factory,
+    stateDir,
+    paseoHome,
+    projectSlug: project.slug,
+    projectRoot: repoDir,
+    action: "stage",
+    listPlugins: async () => ({ ok: false as const, reason: "offline" }),
+    notifyLead: (n) => { notifications.push(n); },
+    runner: makeOversizedRunner(true),
+  });
+  assert.equal(withPathRes.ok, true);
+  if (withPathRes.ok && "settled" in withPathRes) await withPathRes.settled;
+
+  const textWithPath = notifications[0]?.text ?? "";
+  const linesWithPath = textWithPath.split("\n");
+  const digestStart = linesWithPath.findIndex((l) => l.startsWith("## Console handoff guide"));
+  const digestEnd = linesWithPath.findIndex((l) => l.startsWith("Payload context: ") || l.startsWith("Next: "));
+  assert.ok(digestStart >= 0 && digestEnd > digestStart);
+  const digestWithPath = linesWithPath.slice(digestStart, digestEnd).join("\n");
+  assert.ok(digestWithPath.length <= 16000, `expected digest <= 16000 chars, got ${digestWithPath.length}`);
+  assert.match(digestWithPath, /^## Console handoff guide \(version 2026-11\)/);
+  assert.ok(digestWithPath.includes(`- CONSOLE_GUIDE.md: ${guidePath}`));
+  assert.match(digestWithPath, new RegExp(`truncated.*${guidePath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, "i"));
+  // Clean line boundary: the line right before the truncation notice must be a complete step/field line, never cut mid-line
+  const noticeLineIdx = linesWithPath.findIndex((l) => /truncated/i.test(l));
+  assert.ok(noticeLineIdx > digestStart);
+  const lineBeforeNotice = linesWithPath[noticeLineIdx - 1] ?? "";
+  assert.match(lineBeforeNotice, /(?:[Ss]ection \d+|step-\d+|save\.|Copy values:|synthetic-copy-value-\d+)$/);
+
+  // Without guidePath, truncation notice falls back to "CONSOLE_GUIDE.md"
+  const noPathRes = await storeReleaseProject({
+    factory,
+    stateDir,
+    paseoHome,
+    projectSlug: project.slug,
+    projectRoot: repoDir,
+    action: "stage",
+    listPlugins: async () => ({ ok: false as const, reason: "offline" }),
+    notifyLead: (n) => { notifications.push(n); },
+    runner: makeOversizedRunner(false),
+  });
+  assert.equal(noPathRes.ok, true);
+  if (noPathRes.ok && "settled" in noPathRes) await noPathRes.settled;
+
+  const textNoPath = notifications[1]?.text ?? "";
+  const linesNoPath = textNoPath.split("\n");
+  const digestNoPath = linesNoPath
+    .slice(
+      linesNoPath.findIndex((l) => l.startsWith("## Console handoff guide")),
+      linesNoPath.findIndex((l) => l.startsWith("Next: ")),
+    )
+    .join("\n");
+  assert.ok(digestNoPath.length <= 16000, `expected digest <= 16000 chars, got ${digestNoPath.length}`);
+  assert.match(digestNoPath, /truncated.*CONSOLE_GUIDE\.md/i);
+});

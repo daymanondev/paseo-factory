@@ -292,7 +292,7 @@ function v2PayloadIsValid(event) {
     case "store_release_started":
       return nonempty(event.runId) && typeof event.action === "string" && STORE_RELEASE_ACTIONS.includes(event.action) && Array.isArray(event.platforms) && event.platforms.every((item) => nonempty(item)) && typeof event.mode === "string" && STORE_RELEASE_MODES.includes(event.mode);
     case "store_release_paused":
-      return nonempty(event.runId) && nonempty(event.holeKind) && nonempty(event.phase) && (event.hasConsoleGuide === void 0 || typeof event.hasConsoleGuide === "boolean") && optionalString("guidePath");
+      return nonempty(event.runId) && nonempty(event.holeKind) && nonempty(event.phase) && (event.hasConsoleGuide === void 0 || typeof event.hasConsoleGuide === "boolean") && (event.guidePath === void 0 || nonempty(event.guidePath));
     case "store_release_completed":
       return nonempty(event.runId) && typeof event.action === "string" && STORE_RELEASE_ACTIONS.includes(event.action) && Array.isArray(event.platforms) && event.platforms.every((item) => nonempty(item)) && string("summary");
     case "store_release_failed":
