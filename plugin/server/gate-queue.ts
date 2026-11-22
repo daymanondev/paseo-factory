@@ -14,7 +14,7 @@ import {
   type GateQueueSnapshot,
 } from "./core/gate-queue-status.ts";
 import { atomicJson } from "./core/json-store.ts";
-import { projectStateDir } from "./core/project.ts";
+import { listProjectRegistrations, projectStateDir, readProjectRegistration, resolveProject } from "./core/project.ts";
 import type { FactoryRegistry } from "./projects.ts";
 
 export { GATE_QUEUE_FILENAME, GATE_QUEUE_SCHEMA_VERSION, type GateQueueFile, type GateQueueItem, type GateQueueSnapshot };
@@ -92,8 +92,73 @@ export interface GateQueue {
   stop(): void;
 }
 
-function randomQueueId(): string {
+export function randomQueueId(): string {
   return `gq-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
+}
+
+export interface GateProjectTarget {
+  slug?: string;
+  root?: string;
+}
+
+/**
+ * Resolves `(slug, root)` for a Project target from explicit slug and/or
+ * workspace/projectRoot path across registered Projects and git roots.
+ */
+export function resolveGateProjectTarget(input: {
+  stateDir: string;
+  project?: string;
+  workspace?: string;
+  requireKnownWorkspace?: boolean;
+  allowUnregisteredDeleteTarget?: boolean;
+  singleProjectFallback?: boolean;
+}): GateProjectTarget | undefined {
+  const rawRoot = input.workspace?.trim() ?? "";
+  const rawSlug = input.project?.trim() ?? "";
+  const regs = listProjectRegistrations(input.stateDir);
+  if (rawRoot !== "") {
+    const resolved = resolveProject(rawRoot);
+    if (resolved.ok) {
+      return { slug: rawSlug !== "" ? rawSlug : resolved.slug, root: resolved.root };
+    }
+    const normRaw = realpathSafe(resolve(rawRoot));
+    const matched = regs.find(
+      (reg) => reg.root === rawRoot || reg.slug === rawRoot || realpathSafe(resolve(reg.root)) === normRaw,
+    );
+    if (matched !== undefined) {
+      return { slug: rawSlug !== "" ? rawSlug : matched.slug, root: matched.root };
+    }
+    if (input.allowUnregisteredDeleteTarget === true && rawSlug !== "") {
+      const bySlug = readProjectRegistration(input.stateDir, rawSlug);
+      return bySlug !== undefined ? { slug: bySlug.slug, root: bySlug.root } : { slug: rawSlug, root: rawRoot };
+    }
+    if (input.requireKnownWorkspace === true) return undefined;
+    return { ...(rawSlug !== "" ? { slug: rawSlug } : {}), root: rawRoot };
+  }
+  if (rawSlug !== "") {
+    const reg = readProjectRegistration(input.stateDir, rawSlug);
+    return reg !== undefined ? { slug: reg.slug, root: reg.root } : { slug: rawSlug };
+  }
+  if (input.singleProjectFallback === true) {
+    return regs.length === 1 ? { slug: regs[0]!.slug, root: regs[0]!.root } : undefined;
+  }
+  return undefined;
+}
+
+/** Cancels every queued and running Gate belonging to `(slug, root)` before maintenance. */
+export async function cancelProjectGates(input: {
+  gateQueue: GateQueue | undefined;
+  stateDir: string;
+  slug: string;
+  root: string;
+  note: string;
+}): Promise<void> {
+  const { gateQueue, stateDir, slug, root, note } = input;
+  if (gateQueue === undefined) return;
+  await gateQueue.cancelMatching(
+    (item) => gateItemBelongsToProject(stateDir, slug, root, item),
+    { note, suppressSettled: true },
+  );
 }
 
 interface AbortControllerLike {

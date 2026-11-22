@@ -28,7 +28,7 @@ import { claimCliBinDir, ensureClaimCli, ensureGitShim, injectClaimCliPath } fro
 import { createChoke, normalizeAgentCreateRequest, startGitBlockIngestion } from "./server/choke.ts";
 import { createTimelineFetcher } from "./server/timeline.ts";
 import type { TimelineSourceApi } from "./server/timeline.ts";
-import { spoolRootFor, startSpool, settleClaimOutcome } from "./server/spool.ts";
+import { createGateQueueSettler, spoolRootFor, startSpool } from "./server/spool.ts";
 import { createGateQueue } from "./server/gate-queue.ts";
 import { createUsageRuntime } from "./server/usage-rollup.ts";
 import { createSurfaceHandlers, registerSurfaceRpc } from "./server/surface-rpc.ts";
@@ -113,10 +113,44 @@ export default function contribute(server: PluginServerContext) {
   });
   let paseoApi: TimelineSourceApi | undefined;
   let onPaseoCaptured: (() => void) | undefined;
+  let stopped = false;
+  let rpcRegistered = false;
+  const paseoWaiters = new Set<() => void>();
+  const notifyPaseoWaiters = (): void => {
+    for (const resolveWaiter of [...paseoWaiters]) {
+      paseoWaiters.delete(resolveWaiter);
+      resolveWaiter();
+    }
+  };
+  const waitForPaseoOrDelay = (delayMs: number): Promise<void> => {
+    if (paseoApi !== undefined || stopped) return Promise.resolve();
+    return new Promise<void>((resolveWaiter) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const done = (): void => {
+        if (timer !== undefined) clearTimeout(timer);
+        paseoWaiters.delete(done);
+        resolveWaiter();
+      };
+      paseoWaiters.add(done);
+      timer = setTimeout(done, delayMs);
+      timer.unref?.();
+    });
+  };
+  const waitForPaseoCapture = (): Promise<void> => {
+    if (paseoApi !== undefined || stopped) return Promise.resolve();
+    return new Promise<void>((resolveWaiter) => {
+      const done = (): void => {
+        paseoWaiters.delete(done);
+        resolveWaiter();
+      };
+      paseoWaiters.add(done);
+    });
+  };
   const capturePaseo = (context: { paseo?: unknown }): void => {
     if (paseoApi === undefined && context.paseo !== undefined) {
       paseoApi = context.paseo as unknown as TimelineSourceApi;
       log("watch: captured the daemon API — timeline feeds are live");
+      notifyPaseoWaiters();
       onPaseoCaptured?.();
     }
     if (context.paseo !== undefined) {
@@ -124,6 +158,27 @@ export default function contribute(server: PluginServerContext) {
     }
   };
   const fetchTimeline = createTimelineFetcher(() => paseoApi);
+  let paseoWarmupPromise: Promise<void> | undefined;
+  const ensurePaseoApi = (): Promise<void> => {
+    if (paseoApi !== undefined || stopped) return Promise.resolve();
+    if (paseoWarmupPromise !== undefined) return paseoWarmupPromise;
+    paseoWarmupPromise = (async () => {
+      await waitForPaseoOrDelay(50);
+      for (let attempt = 0; attempt < 3 && paseoApi === undefined && !stopped; attempt += 1) {
+        if (attempt > 0) await waitForPaseoOrDelay(75);
+        if (paseoApi !== undefined || stopped) break;
+        const warmed = await Promise.race([
+          waitForPaseoCapture().then(() => true),
+          warmPluginDaemonApiViaWs(home),
+        ]);
+        if (paseoApi !== undefined || stopped) break;
+        if (!warmed && !existsSync(join(home, "paseo.pid"))) break;
+      }
+    })().finally(() => {
+      paseoWarmupPromise = undefined;
+    });
+    return paseoWarmupPromise;
+  };
 
   // The one-time legacy root split (v0.0.89, ADR 0045 §2), BEFORE any Factory
   // opens, the Spool watcher starts, or an RPC is served: a legacy root
@@ -427,23 +482,14 @@ export default function contribute(server: PluginServerContext) {
       stateHub.emit("gate.queue");
       void refreshSleepInhibition();
     },
-    onSettled: async ({ item, outcome }) => {
-      const targetFactory =
-        item.useRootFactory === true ? factory : registry.factoryForProject(item.projectSlug);
-      await settleClaimOutcome({
-        factory: targetFactory,
-        task: item.task,
-        agent: item.agent,
-        outcome,
-        sha: item.sha,
-        workspace: item.cwd,
-        ...(item.useRootFactory === true || item.projectSlug === "root" ? {} : { projectSlug: item.projectSlug }),
-        usageMeter: (meterInput) => usage.meterTaskBoundary(meterInput),
-        peerMail: leadMail.notifyPeer,
-        daemon: () => paseoApi as never,
-        onLog: log,
-      });
-    },
+    onSettled: createGateQueueSettler({
+      rootFactory: factory,
+      registry,
+      usageMeter: (meterInput) => usage.meterTaskBoundary(meterInput),
+      peerMail: leadMail.notifyPeer,
+      daemon: () => paseoApi as never,
+      onLog: log,
+    }),
   });
   const sleepInhibitor = new SleepInhibitor({ onError: error => log(`sleep inhibition unavailable: ${String(error)}`) });
   let sleepCheckInFlight = false;
@@ -500,18 +546,43 @@ export default function contribute(server: PluginServerContext) {
   void refreshSleepInhibition();
   let mailRecovered = false;
   let gateQueueRecovered = false;
+  let gateQueueRecoveryPromise: Promise<void> | undefined;
+  const ensureGateQueueRecovered = (): void => {
+    if (
+      !rpcRegistered ||
+      gateQueueRecovered ||
+      gateQueueRecoveryPromise !== undefined ||
+      stopped ||
+      pendingUpgradeFor(stateDir) !== undefined
+    ) {
+      return;
+    }
+    gateQueueRecoveryPromise = (async () => {
+      if (gateQueue.hasRunning() || gateQueue.hasQueued()) {
+        await ensurePaseoApi();
+      } else {
+        void ensurePaseoApi();
+      }
+      if (stopped || pendingUpgradeFor(stateDir) !== undefined) return;
+      await gateQueue.startupRecovery();
+      gateQueueRecovered = true;
+    })()
+      .catch((error) => {
+        log(`gate-queue: recovery deferred — ${String(error)}`);
+      })
+      .finally(() => {
+        gateQueueRecoveryPromise = undefined;
+      });
+  };
   const resumeOrdinaryRuntime = (): void => {
-    if (pendingUpgradeFor(stateDir) !== undefined) return;
+    if (stopped || pendingUpgradeFor(stateDir) !== undefined) return;
     initializeOrdinaryRuntime();
     refreshPluginInstallation();
     if (!mailRecovered) {
       leadMail.startupRecovery();
       mailRecovered = true;
     }
-    if (!gateQueueRecovered) {
-      gateQueueRecovered = true;
-      void gateQueue.startupRecovery().catch((error) => log(`gate-queue: recovery deferred — ${String(error)}`));
-    }
+    ensureGateQueueRecovered();
     if (paseoApi !== undefined) void leadMail.pumpAll().catch((error) => log(`lead-mailbox: pump deferred — ${String(error)}`));
   };
   resumeOrdinaryRuntime();
@@ -732,12 +803,8 @@ export default function contribute(server: PluginServerContext) {
       stateHub.subscribe(input, context);
     });
   }
-  const warmupTimer = setTimeout(() => {
-    if (paseoApi === undefined) {
-      warmPluginDaemonApiViaWs(home);
-    }
-  }, 50);
-  warmupTimer.unref?.();
+  rpcRegistered = true;
+  ensureGateQueueRecovered();
 
   const gitBlocks = startGitBlockIngestion(factory, { onLog: log });
 
@@ -822,6 +889,8 @@ export default function contribute(server: PluginServerContext) {
   );
 
   return () => {
+    stopped = true;
+    notifyPaseoWaiters();
     sleepStopped = true;
     offHandoffProgress();
     stateWatcher?.close();
@@ -829,7 +898,6 @@ export default function contribute(server: PluginServerContext) {
     activityWatcher?.close();
     clearInterval(sleepSweepTimer);
     sleepInhibitor.stop();
-    clearTimeout(warmupTimer);
     clearTimeout(postReadySyncTimer);
     clearInterval(recoveryTimer);
     clearInterval(peerSweepTimer);

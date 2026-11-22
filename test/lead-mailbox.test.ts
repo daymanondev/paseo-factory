@@ -3767,3 +3767,99 @@ test("ADR 0058 + SleepInhibitor on gate_queued: hasActiveWork holds with no spaw
   assert.equal(await f.leadMail.hasActiveWork(), false, "settled Gate releases sleep inhibition");
 });
 
+test("ADR 0058 quiet-point holds on open gate_queued/gate_started even when Peer session exited/missing, and answerUnclaimedPeerTurn ignores intervening permit_allowed/git_blocked while queued", async (t) => {
+  const f = makeSpooledRuntime(t);
+  const holdWorktree = join(projectStateDir(f.stateDir, f.slug), "worktrees", "T-HOLD-EXITED");
+  mkdirSync(holdWorktree, { recursive: true });
+  f.factory.setContract({ task: "T-HOLD-EXITED", workspace: f.projectRoot, gate: "true", artifact: "README.md", scope: ["a"] });
+  f.factory.setContract({ task: "T-UNCLAIMED-INTERVENING", workspace: f.projectRoot, gate: "true", artifact: "README.md", scope: ["b"] });
+  writeFileSync(join(f.projectRoot, "work-hold.txt"), "work\n");
+  const sha = gitCommitAll(f.projectRoot, "work");
+
+  // 1. T-HOLD-EXITED has spawn_dispatched + gate_queued in its worktree, and Peer exited (not in fake.agents).
+  //    Lead crosses Handoff mark -> rotation_pending MUST stay HELD while gate_queued/gate_started is open.
+  f.factory.ledger.append({ event: "spawn_dispatched", task: "T-HOLD-EXITED", provider: "pi/zai/glm-5.3", arity: 1, worktree: holdWorktree, agent: "peer-gone" });
+  f.factory.ledger.append({ event: "gate_queued", task: "T-HOLD-EXITED", attempt: 1, sha, id: "gq-exited-1", agent: "peer-gone" });
+
+  f.fake.agents.push({
+    id: "lead-hold",
+    status: "running",
+    labels: { seat: "lead", project: f.slug },
+    cwd: f.projectRoot,
+    lastUsage: { contextWindowUsedTokens: 165_000, contextWindowMaxTokens: 200_000 },
+  });
+  writeProjectRegistration(f.stateDir, f.slug, { root: f.projectRoot, lead: "lead-hold" });
+
+  await f.leadMail.pumpProjectLead(f.slug);
+  assert.equal(readProjectRegistration(f.stateDir, f.slug)?.rotationState, "rotation_pending");
+  f.fake.agents.find((a) => a.id === "lead-hold")!.status = "idle";
+
+  await f.leadMail.onLeadTurnEnded({ agentId: "lead-hold", outcome: { kind: "completed" }, timeline: [] });
+  assert.equal(
+    readProjectRegistration(f.stateDir, f.slug)?.rotationState,
+    "rotation_pending",
+    "quiet-point stays HELD on open gate_queued even when Peer session is missing/exited",
+  );
+
+  // Also stays HELD after dequeue (`claim_reported` + `gate_started`) with Peer still missing/exited.
+  f.factory.ledger.append({ event: "claim_reported", task: "T-HOLD-EXITED", attempt: 1, sha, agent: "peer-gone" });
+  f.factory.ledger.append({ event: "gate_started", task: "T-HOLD-EXITED", attempt: 1, cmd: "true" });
+  await f.leadMail.onLeadTurnEnded({ agentId: "lead-hold", outcome: { kind: "completed" }, timeline: [] });
+  assert.equal(
+    readProjectRegistration(f.stateDir, f.slug)?.rotationState,
+    "rotation_pending",
+    "quiet-point stays HELD on open gate_started even when Peer session is missing/exited",
+  );
+
+  // 2. T-UNCLAIMED-INTERVENING has gate_queued followed by intervening `permit_allowed` and `git_blocked`.
+  //    Ending Peer turn MUST NOT trigger a false unclaimed-turn nudge while Claim is still queued!
+  f.fake.agents.push({
+    id: "peer-intervening",
+    status: "idle",
+    labels: { seat: "agent", project: f.slug, task: "T-UNCLAIMED-INTERVENING" },
+    cwd: join(projectStateDir(f.stateDir, f.slug), "worktrees", "T-UNCLAIMED-INTERVENING"),
+  });
+  f.factory.ledger.append({ event: "gate_queued", task: "T-UNCLAIMED-INTERVENING", attempt: 1, sha, id: "gq-int-1", agent: "peer-intervening" });
+  f.factory.ledger.append({ event: "permit_allowed", task: "T-UNCLAIMED-INTERVENING", agent: "peer-intervening", name: "Bash", kind: "tool", summary: "ok" });
+  f.factory.ledger.append({ event: "git_blocked", blockId: "gb-int-1", task: "T-UNCLAIMED-INTERVENING", command: "git push", rule: "release-fence", reason: "blocked", cwd: f.projectRoot });
+
+  await f.leadMail.onLeadTurnEnded({ agentId: "peer-intervening", outcome: { kind: "completed" }, timeline: [] });
+  assert.equal(
+    f.fake.sent.filter((s) => s.agentId === "peer-intervening").length,
+    0,
+    "intervening permit_allowed / git_blocked after gate_queued must NEVER trigger unclaimed-turn nudge",
+  );
+
+  // 3. Once both open Gates finish (`gate_finished` + `report_written`), quiet-point releases so Lead advances into handing_over.
+  f.factory.ledger.append({ event: "gate_finished", task: "T-HOLD-EXITED", attempt: 1, exit: 0, verdict: "green", sha, note: "" });
+  f.factory.ledger.append({ event: "report_written", task: "T-HOLD-EXITED", attempt: 1, path: "reports/T-HOLD-EXITED-1.md" });
+  f.factory.ledger.append({ event: "gate_finished", task: "T-UNCLAIMED-INTERVENING", attempt: 1, exit: 0, verdict: "green", sha, note: "" });
+  f.factory.ledger.append({ event: "report_written", task: "T-UNCLAIMED-INTERVENING", attempt: 1, path: "reports/T-UNCLAIMED-INTERVENING-1.md" });
+  await f.leadMail.onLeadTurnEnded({ agentId: "lead-hold", outcome: { kind: "completed" }, timeline: [] });
+  assert.equal(
+    readProjectRegistration(f.stateDir, f.slug)?.rotationState,
+    "handing_over",
+    "once open gate_queued/gate_started finish, quiet-point releases for Lead handoff",
+  );
+
+  // 4. Separate normal-state Project: notifyPeer delivers verdict on gate_finished without false suppression from sibling gate_queued.
+  const f2 = makeSpooledRuntime(t);
+  f2.factory.setContract({ task: "T-DELIVER", workspace: f2.projectRoot, gate: "true", artifact: "README.md", scope: ["x"] });
+  f2.factory.setContract({ task: "T-SIBLING-Q", workspace: f2.projectRoot, gate: "true", artifact: "README.md", scope: ["y"] });
+  writeFileSync(join(f2.projectRoot, "work2.txt"), "work2\n");
+  const sha2 = gitCommitAll(f2.projectRoot, "work2");
+  f2.fake.agents.push(
+    { id: "lead-2", status: "idle", labels: { seat: "lead", project: f2.slug }, cwd: f2.projectRoot },
+    { id: "peer-sib", status: "running", labels: { seat: "agent", project: f2.slug, task: "T-SIBLING-Q" }, cwd: join(projectStateDir(f2.stateDir, f2.slug), "worktrees", "T-SIBLING-Q") },
+  );
+  writeProjectRegistration(f2.stateDir, f2.slug, { root: f2.projectRoot, lead: "lead-2" });
+  f2.factory.ledger.append({ event: "spawn_dispatched", task: "T-SIBLING-Q", provider: "pi/zai/glm-5.3", arity: 1, worktree: join(projectStateDir(f2.stateDir, f2.slug), "worktrees", "T-SIBLING-Q"), agent: "peer-sib" });
+  f2.factory.ledger.append({ event: "gate_queued", task: "T-SIBLING-Q", attempt: 1, sha: sha2, id: "gq-sib-1", agent: "peer-sib" });
+  f2.factory.ledger.append({ event: "gate_finished", task: "T-DELIVER", attempt: 1, exit: 0, verdict: "green", sha: sha2, note: "" });
+  await f2.leadMail.notifyPeer({ task: "T-DELIVER", kind: "verdict", text: "Task T-DELIVER attempt 1 ended GREEN" });
+  assert.ok(
+    f2.fake.sent.some((s) => s.agentId === "lead-2" && /T-DELIVER attempt 1 ended GREEN/.test(s.text)),
+    "notifyPeer delivers verdict on gate_finished without false suppression from sibling gate_queued",
+  );
+});
+

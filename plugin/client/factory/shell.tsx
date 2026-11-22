@@ -9,7 +9,7 @@ import { openExternalUrl, useRpc } from "@getpaseo/plugin/client";
 import { Modal, ScrollView, useToast } from "@getpaseo/plugin/client/ui";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Text, View } from "react-native";
-import { skillsImport, skillsPackSave, skillsPackDelete, skillsPackReset, skillsTogglePack, lanesSet, lanesReset, lanesSetBatch, handoffStart, handoffReplaceNow, handoffCancel, handoffRetry, handoffHandover, onboardingInspect, onboardingStart, onboardingStatus, openDesignCatalog, openDesignSync, helperMcpsSyncAndProbe, helperMcpsSetEnabled, pluginsInstall, pluginsManage, pluginsCheckUpdates, releaseSettingsRead, releaseSettingsWrite, storeReleaseRead, storeReleaseWrite, githubPublishPreflight, githubPublish, selfUpdateApply, selfUpdateStatus, profilesApply, profilesDelete, profilesSave, projectDelete, projectReset, projectRotate, snapshot, stateUpdates, supervisorAdopt, supervisorStart, vaultConfigure, vaultHydrate, vaultImport, vaultSync, gateQueueCancel } from "../../shared/rpc.ts";
+import { skillsImport, skillsPackSave, skillsPackDelete, skillsPackReset, skillsTogglePack, lanesSet, lanesReset, lanesSetBatch, handoffStart, handoffReplaceNow, handoffCancel, handoffRetry, handoffHandover, onboardingInspect, onboardingStart, onboardingStatus, openDesignCatalog, openDesignSync, helperMcpsSyncAndProbe, helperMcpsSetEnabled, pluginsInstall, pluginsManage, pluginsCheckUpdates, releaseSettingsRead, releaseSettingsWrite, storeReleaseRead, storeReleaseWrite, githubPublishPreflight, githubPublish, selfUpdateApply, selfUpdateStatus, profilesApply, profilesDelete, profilesSave, projectDelete, projectReset, projectRotate, snapshot, stateUpdates, supervisorAdopt, supervisorStart, vaultConfigure, vaultHydrate, vaultImport, vaultSync, gateQueueCancel, gateQueueConcurrency } from "../../shared/rpc.ts";
 import { GH_LOGIN_CMD } from "./github-release-card.tsx";
 import type { GitHubPublishSubmitInput, ReleaseCardFeedback } from "./github-release-card.tsx";
 import type { StoreReleaseCardFeedback } from "./store-release-card.tsx";
@@ -37,6 +37,7 @@ import { DiagnosticsBody, PrerequisiteSetupCard, SettingsReadOnly, SettingsScree
 import { settingsWarnings } from "./settings-state.ts";
 import { isCoreSelfRestartError, resolveCoreRestartWatch } from "./plugin-feedback.ts";
 import type { ActivePluginAct, PluginsNote } from "./plugin-feedback.ts";
+import { useGateQueueCancel } from "./gate-queue-cancel.ts";
 
 /** The navigation slice the shell uses — `openAgent` jumps to a session. */
 export interface Navigation {
@@ -125,6 +126,7 @@ export function FactoryShell({
   const vaultSyncCall = useRpc(vaultSync);
   const vaultImportCall = useRpc(vaultImport);
   const gateQueueCancelCall = useRpc(gateQueueCancel);
+  const gateQueueConcurrencyCall = useRpc(gateQueueConcurrency);
 
   const [busy, setBusy] = useState(false);
   const [handover, setHandover] = useState<{ seat: string; text: string; source: "extracted" | "substitute" } | null>(null);
@@ -147,8 +149,6 @@ export function FactoryShell({
   const [releaseFeedback, setReleaseFeedback] = useState<ReleaseCardFeedback | null>(null);
   const [releaseCopiedLogin, setReleaseCopiedLogin] = useState(false);
   const [containerWidth, setContainerWidth] = useState<number>(0);
-  const [cancellingGateQueueIds, setCancellingGateQueueIds] = useState<string[]>([]);
-  const cancellingGateQueueIdsRef = useRef<Set<string>>(new Set());
   const [gateQueueCancelError, setGateQueueCancelError] = useState<GateQueueCancelError | null>(null);
   const mountedRef = useRef(true);
   const scopeRootRef = useRef(dir);
@@ -157,6 +157,20 @@ export function FactoryShell({
   const refreshRef = useRef<() => void>(() => {});
   const onboardingProgressRef = useRef<(projectRoot?: string) => void>(() => {});
   const [onboardingHoldFolder, setOnboardingHoldFolder] = useState<string | null>(null);
+  const { cancellingIds: cancellingGateQueueIds, cancelItem: cancelGateQueueItemAsync } = useGateQueueCancel({
+    call: (input) => gateQueueCancelCall(input),
+    mountedRef,
+    scopeKey: dir,
+    onStart: () => setGateQueueCancelError(null),
+    onSuccess: () => {
+      toast.show("Gate cancelled", { variant: "success" });
+      refreshRef.current();
+    },
+    onFailure: (id, message) => {
+      setGateQueueCancelError({ queueId: id, message });
+      toast.error(`Cancel Gate: ${message}`);
+    },
+  });
 
   useEffect(() => {
     mountedRef.current = true;
@@ -638,35 +652,7 @@ export function FactoryShell({
     void act("Delete Project", () => projectDeleteCall({ projectRoot: target.root, projectSlug: target.slug, project: target.slug }));
   };
   const cancelGateQueueItem = (id: string): void => {
-    if (cancellingGateQueueIdsRef.current.has(id)) return;
-    const callScope = scopeRoot;
-    cancellingGateQueueIdsRef.current.add(id);
-    setCancellingGateQueueIds((prev) => (prev.includes(id) ? prev : [...prev, id]));
-    setGateQueueCancelError(null);
-    void (async () => {
-      try {
-        const reply = await gateQueueCancelCall({ queueId: id });
-        if (!mountedRef.current || scopeRootRef.current !== callScope) return;
-        if (!reply.ok) {
-          const message = reply.error || "Could not cancel Gate queue item.";
-          setGateQueueCancelError({ queueId: id, message });
-          toast.error(`Cancel Gate: ${message}`);
-          return;
-        }
-        toast.show("Gate cancelled", { variant: "success" });
-        refresh();
-      } catch (error) {
-        if (!mountedRef.current || scopeRootRef.current !== callScope) return;
-        const message = error instanceof Error ? error.message : String(error);
-        setGateQueueCancelError({ queueId: id, message });
-        toast.error(`Cancel Gate: ${message}`);
-      } finally {
-        cancellingGateQueueIdsRef.current.delete(id);
-        if (mountedRef.current) {
-          setCancellingGateQueueIds((prev) => prev.filter((item) => item !== id));
-        }
-      }
-    })();
+    void cancelGateQueueItemAsync(id);
   };
   const incompleteTools = (view.companionTools ?? []).filter((t) => t.status !== "running" || t.error !== null);
   const isInstallingPrereqs = activePluginAct !== null && activePluginAct.kind === "install" && activePluginAct.target === "all";
@@ -988,7 +974,22 @@ export function FactoryShell({
                 />
               ),
               vault: vaultPane,
-              diagnostics: <DiagnosticsBody theme={theme} view={view} serverId={serverId} />,
+              diagnostics: (
+                <DiagnosticsBody
+                  theme={theme}
+                  view={view}
+                  serverId={serverId}
+                  busy={busy}
+                  onSetGateQueueConcurrency={(concurrency) =>
+                    act("gate-queue-concurrency", async () => {
+                      const reply = await gateQueueConcurrencyCall({ concurrency });
+                      return reply.ok
+                        ? { ok: true as const, summary: `Gate queue concurrency set to ${reply.gateQueue.concurrency}` }
+                        : reply;
+                    })
+                  }
+                />
+              ),
             }
       }
     />

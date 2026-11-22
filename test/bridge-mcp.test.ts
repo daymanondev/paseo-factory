@@ -1337,9 +1337,15 @@ test("the MCP fallback spawn prompt branches on the disposition (ticket 03, ADR 
   assert.ok(readOnlyPrompt.includes("outcome"), "the handoff fields still ride the instruction");
   assert.match(readOnlyPrompt, /blocking defects/, "the reviewer disposition's evidence expectation rides the prompt");
 
-  // 2. The engineer fallback prompt keeps today's gate + commit + claim clause.
+  // 2. The engineer fallback prompt instructs fast slice checks + commit + claim + end turn when queued.
   const engineerPrompt = createdPrompts[1]!;
-  assert.ok(engineerPrompt.includes("pass gate `npm test`, commit on branch factory/ENGD-1, and call agent_claim."), "the engineer clause stays verbatim");
+  assert.ok(
+    engineerPrompt.includes(
+      "run fast slice checks during TDD (never pre-run the full cumulative Gate), commit on branch factory/ENGD-1, call agent_claim (the daemon GateQueue runs the Gate asynchronously), and end your turn immediately once `queued`.",
+    ),
+    "the engineer clause avoids pre-running the full cumulative Gate and instructs end-of-turn on queued",
+  );
+  assert.ok(!engineerPrompt.includes("pass gate `npm test`"), "engineer is never told to pass the full Gate before agent_claim");
   assert.ok(!engineerPrompt.includes("read-only-disposition-fence"), "no read-only fence leaks into the engineer prompt");
 });
 

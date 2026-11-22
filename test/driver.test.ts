@@ -45,8 +45,10 @@ import { awaitReply, submit } from "../plugin/bin/spool-client.mjs";
 test("renderBrief bakes the task and the driver's PATH into the runbook template, verbatim otherwise", () => {
   const brief = renderBrief("live05-driver", "/custom/bin:/usr/bin");
 
-  assert.ok(brief.includes("Do the assigned work on branch `live05-driver`."));
+  assert.ok(brief.includes("Do the assigned work on branch `live05-driver`."), "keeps canonical branch header");
+  assert.ok(brief.includes("fast slice checks during TDD (never pre-run the full cumulative Gate)"), "instructs slice checks rather than pre-running the full Gate");
   assert.ok(brief.includes("`factory-claim --task live05-driver --sha <sha>`"));
+  assert.ok(brief.includes("end your turn immediately once `queued`"));
   assert.ok(brief.includes("If the result is RED: read the note line, fix, make a NEW commit, claim"));
   assert.ok(brief.includes("Never edit tests just to make them green."));
   assert.ok(brief.includes('export\nPATH="/custom/bin:/usr/bin" first.'), "the PATH-export line carries the baked value, not the runbook's hardcoded nvm path");
@@ -128,7 +130,7 @@ test("renderBrief branches on the read-only dispositions (ticket 03, ADR 0054 §
 test("renderBrief keeps the engineer law byte-identical on the engineer and omitted dispositions (ticket 03)", () => {
   const explicit = renderBrief("live03-eng", "/custom/bin", undefined, undefined, "factory/live03-eng", "engineer");
   const omitted = renderBrief("live03-eng", "/custom/bin", undefined, undefined, "factory/live03-eng");
-  assert.ok(explicit.includes("When done: commit, run\n`git rev-parse HEAD`, then `factory-claim --task live03-eng --sha <sha>`."));
+  assert.ok(explicit.includes("when done: commit, run\n`git rev-parse HEAD`, then `factory-claim --task live03-eng --sha <sha>`, and end your turn immediately once `queued`"));
   assert.equal(explicit, omitted, "an explicit engineer disposition renders byte-identically to the omitted default");
   assert.ok(!explicit.includes("Read-Only") && !explicit.includes("read-only-disposition-fence"), "no read-only fence leaks into the engineer brief");
 });

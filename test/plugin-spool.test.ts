@@ -547,9 +547,9 @@ test("a message-less repoke (omitted or empty) sends today's fixed continuation 
   assert.ok(nudge.includes("(no description on this Contract)"), "a Contract without a description says so plainly");
   assert.ok(
     nudge.endsWith(
-      "Continue inside your Task worktree on branch factory/T-STALL, run the gate `npm test`, commit your changes, and call `paseo-factory_agent_claim` (or `agent_claim`).",
+      "Continue inside your Task worktree on branch factory/T-STALL, run fast slice checks during TDD (never pre-run the full cumulative Gate), commit your changes, call `paseo-factory_agent_claim` (or `agent_claim`), and end your turn immediately once `queued`; the daemon GateQueue runs `npm test` asynchronously.",
     ),
-    "the engineer completion footer stays verbatim below the snapshot",
+    "the engineer completion footer uses fast slice checks and async claim wording",
   );
 
   // The empty-string message is the omitted spelling — and the one-per-task

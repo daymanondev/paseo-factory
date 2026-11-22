@@ -22,9 +22,9 @@ import type {
 import { useRpc } from "@getpaseo/plugin/client";
 import { Icon, Loading, Modal, ScrollView, copyText, useToast } from "@getpaseo/plugin/client/ui";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ReactNode } from "react";
 import { Pressable, Text, View } from "react-native";
 import { gateQueueCancel, gateQueuePause, gateQueueResume, overview, stateUpdates } from "../../shared/rpc.ts";
+import { useGateQueueCancel } from "./gate-queue-cancel.ts";
 import type {
   FactoryOverviewView,
   GateQueueEntryView,
@@ -105,7 +105,6 @@ function GateQueueRow({
   onInspectLog,
   onCancel,
   cancelling = false,
-  renderItemControls,
 }: {
   theme: PluginTheme;
   entry: GateQueueEntryView;
@@ -113,7 +112,6 @@ function GateQueueRow({
   onInspectLog?: (entry: GateQueueEntryView) => void;
   onCancel?: (id: string) => void;
   cancelling?: boolean;
-  renderItemControls?: (entry: GateQueueEntryView) => ReactNode;
 }) {
   const palette = factoryPalette(theme);
   const running = entry.status === "running";
@@ -210,7 +208,6 @@ function GateQueueRow({
             }}
           />
         ) : null}
-        {renderItemControls?.(entry)}
       </View>
     </View>
   );
@@ -228,7 +225,7 @@ function OverviewProjectRow({
   onOpenProject?: (project: OverviewProjectEntry) => void;
 }) {
   const palette = factoryPalette(theme);
-  const peers = project.peers.length > 0 ? project.peers : project.activePeer !== null ? [project.activePeer] : [];
+  const peers = project.peers;
   const latest =
     project.latestGate === null ? null : latestGatePillProps(theme, project.latestGate, project.gateQueuePosition, now);
   const canOpen = project.workspaceId !== null && onOpenProject !== undefined;
@@ -383,8 +380,6 @@ export function FactoryOverviewView({
   onCancelQueueItem,
   cancellingQueueIds = [],
   queueActionError = null,
-  queueHeaderControls,
-  renderQueueItemControls,
 }: {
   theme: PluginTheme;
   view: FactoryOverviewView | null;
@@ -403,8 +398,6 @@ export function FactoryOverviewView({
   onCancelQueueItem?: (id: string) => void;
   cancellingQueueIds?: readonly string[];
   queueActionError?: string | null;
-  queueHeaderControls?: ReactNode;
-  renderQueueItemControls?: (entry: GateQueueEntryView) => ReactNode;
 }) {
   const palette = factoryPalette(theme);
   const toast = useToast();
@@ -527,31 +520,28 @@ export function FactoryOverviewView({
                     <Pill theme={theme} label={`Concurrency · ${gateQueue.concurrency}`} mono />
                   ) : null}
                 </View>
-                {onTogglePause !== undefined || queueHeaderControls ? (
+                {onTogglePause !== undefined ? (
                   <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[1.5] }}>
-                    {onTogglePause !== undefined ? (
-                      <Btn
-                        theme={theme}
-                        small
-                        variant={gateQueue.paused ? "primary" : "secondary"}
-                        icon={gateQueue.paused ? "Play" : "Pause"}
-                        testID="factory-queue-pause-toggle"
-                        label={
-                          pausePending
-                            ? gateQueue.paused
-                              ? "Resuming..."
-                              : "Pausing..."
-                            : gateQueue.paused
-                              ? "Resume queue"
-                              : "Pause queue"
-                        }
-                        disabled={pausePending}
-                        onPress={() => {
-                          if (!pausePending) onTogglePause();
-                        }}
-                      />
-                    ) : null}
-                    {queueHeaderControls}
+                    <Btn
+                      theme={theme}
+                      small
+                      variant={gateQueue.paused ? "primary" : "secondary"}
+                      icon={gateQueue.paused ? "Play" : "Pause"}
+                      testID="factory-queue-pause-toggle"
+                      label={
+                        pausePending
+                          ? gateQueue.paused
+                            ? "Resuming..."
+                            : "Pausing..."
+                          : gateQueue.paused
+                            ? "Resume queue"
+                            : "Pause queue"
+                      }
+                      disabled={pausePending}
+                      onPress={() => {
+                        if (!pausePending) onTogglePause();
+                      }}
+                    />
                   </View>
                 ) : null}
               </View>
@@ -587,7 +577,6 @@ export function FactoryOverviewView({
                       tickDeltaMs={tickDeltaMs}
                       onInspectLog={handleInspectLog}
                       {...(onCancelQueueItem === undefined ? {} : { onCancel: onCancelQueueItem, cancelling: cancellingQueueIds.includes(entry.id) })}
-                      {...(renderQueueItemControls === undefined ? {} : { renderItemControls: renderQueueItemControls })}
                     />
                   ))}
                   {gateQueue.queued.map((entry) => (
@@ -598,7 +587,6 @@ export function FactoryOverviewView({
                       tickDeltaMs={tickDeltaMs}
                       {...(entry.logPath !== null && entry.logExists ? { onInspectLog: handleInspectLog } : {})}
                       {...(onCancelQueueItem === undefined ? {} : { onCancel: onCancelQueueItem, cancelling: cancellingQueueIds.includes(entry.id) })}
-                      {...(renderQueueItemControls === undefined ? {} : { renderItemControls: renderQueueItemControls })}
                     />
                   ))}
                 </View>
@@ -746,10 +734,8 @@ export function OverviewScreen({
   const lastViewRef = useRef<FactoryOverviewView | null>(null);
   const pollValueRef = useRef<FactoryOverviewView | null>(null);
   const pauseInFlightRef = useRef(false);
-  const cancellingIdsRef = useRef<Set<string>>(new Set());
   const mountedRef = useRef(true);
   const [pausePending, setPausePending] = useState(false);
-  const [cancellingIds, setCancellingIds] = useState<string[]>([]);
   const [queueActionError, setQueueActionError] = useState<string | null>(null);
   const [gateQueueOverride, setGateQueueOverride] = useState<{
     gateQueue: GateQueueView;
@@ -878,30 +864,16 @@ export function OverviewScreen({
     }
   };
 
-  const handleCancelQueueItem = async (id: string): Promise<void> => {
-    if (cancellingIdsRef.current.has(id)) return;
-    cancellingIdsRef.current.add(id);
-    setCancellingIds((prev) => (prev.includes(id) ? prev : [...prev, id]));
-    setQueueActionError(null);
-    try {
-      const reply = await cancelQueueCall({ queueId: id });
-      if (!mountedRef.current) return;
-      if (!reply.ok) {
-        setQueueActionError(reply.error || "Could not cancel Gate queue item.");
-        return;
-      }
-      setGateQueueOverride({ gateQueue: reply.gateQueue, basePollValue: pollValueRef.current });
+  const { cancellingIds, cancelItem: handleCancelQueueItem } = useGateQueueCancel({
+    call: (input) => cancelQueueCall(input),
+    mountedRef,
+    onStart: () => setQueueActionError(null),
+    onSuccess: (gateQueue) => {
+      setGateQueueOverride({ gateQueue, basePollValue: pollValueRef.current });
       poll.refresh();
-    } catch (err) {
-      if (!mountedRef.current) return;
-      setQueueActionError(err instanceof Error ? err.message : String(err));
-    } finally {
-      cancellingIdsRef.current.delete(id);
-      if (mountedRef.current) {
-        setCancellingIds((prev) => prev.filter((item) => item !== id));
-      }
-    }
-  };
+    },
+    onFailure: (_id, message) => setQueueActionError(message),
+  });
 
   const openWorkspacePanel = (workspaceId: string): void => {
     navigation?.openWorkspace({

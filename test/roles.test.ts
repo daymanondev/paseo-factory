@@ -6,6 +6,7 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { buildRoleKickoffPrompt, LEAD_WAVE_LAWS, renderRoleAppendSystem, renderRoleContract, renderSeatBootstrapPrompt, SUPERVISOR_OUTCOME_BOUNDARY } from "../src/roles-contract.ts";
 import { buildSeatKickoffPacket } from "../src/preflight.ts";
+import { repokeCompletionFooter } from "../src/disposition-prompt.ts";
 import { ROLE_PROMPTS } from "../src/pi-home.ts";
 import { CorrelationRegistry } from "../src/correlations.ts";
 import { ensureGitRepository, readProjectRegistration, resolveOrBootstrapProject, resolveProject } from "../plugin/server/core/project.ts";
@@ -2781,4 +2782,20 @@ test("ADR 0068 role contracts enforce single writable Peer per Project, serial t
     assert.match(surface, /never pre-run the full cumulative Gate before/i);
     assert.match(surface, /agent_claim.*queued.*end your turn immediately.*sleep live at zero tokens/i);
   }
+
+  const footer = repokeCompletionFooter("T-04", {
+    event: "contract_set",
+    seq: 1,
+    ts: "2026-11-22T00:00:00.000Z",
+    task: "T-04",
+    workspace: "/tmp/repo",
+    gate: "npm test",
+    artifact: "src/index.ts",
+    base: "0".repeat(40),
+    disposition: "engineer",
+  });
+  assert.doesNotMatch(footer, /run the gate `/i);
+  assert.match(footer, /fast slice checks/i);
+  assert.match(footer, /never pre-run the full cumulative Gate/i);
+  assert.match(footer, /queued/i);
 });

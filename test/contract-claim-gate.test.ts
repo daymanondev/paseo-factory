@@ -737,6 +737,14 @@ test("gate-queue ticket 01: claim enforces Contract timeoutSeconds (and 900s def
     const factory = createFactory({ stateDir });
     const sha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: workspace, encoding: "utf8" }).trim();
 
+    const yieldBriefly = (): Promise<void> =>
+      new Promise((resolve) => {
+        const iv = setInterval(() => {
+          clearInterval(iv);
+          resolve();
+        }, 10);
+      });
+
     t.mock.timers.enable({ apis: ["setTimeout"] });
     let settled = false;
     let claimPromise: Promise<Awaited<ReturnType<typeof factory.claim>>> | undefined;
@@ -746,10 +754,10 @@ test("gate-queue ticket 01: claim enforces Contract timeoutSeconds (and 900s def
         return res;
       });
 
-      const deadline = Date.now() + 5_000;
+      const deadline = Date.now() + 20_000;
       while (!existsSync(pidPath)) {
-        if (Date.now() >= deadline) throw new Error(`${scenario.name}: descendant did not start within 5s`);
-        await new Promise((resolve) => setImmediate(resolve));
+        if (Date.now() >= deadline) throw new Error(`${scenario.name}: descendant did not start within 20s`);
+        await yieldBriefly();
       }
 
       // Tick right up to expectedTimeoutMs - 1: must NOT time out prematurely (including past old 300s ceiling).
@@ -763,9 +771,9 @@ test("gate-queue ticket 01: claim enforces Contract timeoutSeconds (and 900s def
 
       // Crossing expectedTimeoutMs triggers detached -pgid SIGKILL and red timeout Verdict.
       t.mock.timers.tick(1);
-      const settleDeadline = Date.now() + 2_000;
+      const settleDeadline = Date.now() + 10_000;
       while (!settled && Date.now() < settleDeadline) {
-        await new Promise((resolve) => setImmediate(resolve));
+        await yieldBriefly();
       }
       assert.equal(settled, true, `${scenario.name}: claim must settle on timeout after ${scenario.expectedTimeoutMs}ms`);
       const outcome = await claimPromise;
@@ -777,14 +785,17 @@ test("gate-queue ticket 01: claim enforces Contract timeoutSeconds (and 900s def
       assert.ok(existsSync(outcome.reportPath), `${scenario.name}: report written on timeout`);
       assert.ok(deadStatus === "" || deadStatus.startsWith("Z"), `${scenario.name}: descendant ${pid} must be reaped (status=${deadStatus})`);
     } finally {
+      t.mock.timers.reset();
       if (!settled) {
         for (const file of [pidPath, parentPidPath]) {
           if (!existsSync(file)) continue;
           try { process.kill(Number(readFileSync(file, "utf8")), "SIGKILL"); } catch { /* already dead */ }
         }
-        await claimPromise?.catch(() => {});
+        await Promise.race([
+          claimPromise?.catch(() => {}),
+          new Promise<void>((resolve) => setTimeout(resolve, 2_000)),
+        ]);
       }
-      t.mock.timers.reset();
     }
   };
 

@@ -18,7 +18,7 @@ import { provisionPiAgentHome } from "./core/pi-home.ts";
 import { expandHome, pluginDirFor } from "./paths.ts";
 import { liveSeatCandidates, seatCandidates } from "./seats.ts";
 import { checkProjectResetRepository, removeProjectStateDirectory, resetProjectRepository } from "./project-reset.ts";
-import { gateItemBelongsToProject } from "./gate-queue.ts";
+import { cancelProjectGates, gateItemBelongsToProject, resolveGateProjectTarget } from "./gate-queue.ts";
 import type { GateQueue } from "./gate-queue.ts";
 import { GATE_QUEUE_FILENAME, readPersistedGateQueue, snapshotFromGateQueueFile } from "./core/gate-queue-status.ts";
 import type { GateQueueItem, GateQueueSnapshot } from "./core/gate-queue-status.ts";
@@ -835,20 +835,13 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     return null;
   };
 
-  const cancelProjectGates = async (slug: string, root: string, note: string): Promise<void> => {
-    const queue = resolveGateQueue();
-    if (queue === undefined) return;
-    await queue.cancelMatching(
-      (item) => gateItemBelongsToProject(deps.stateDir, slug, root, item),
-      { note, suppressSettled: true },
-    );
-  };
-
   const cancelGatesBeforeProjectMaintenance = async (
     kind: "projectReset" | "projectDelete",
     rawInput: unknown,
     rawContext: unknown,
   ): Promise<void> => {
+    const queue = resolveGateQueue();
+    if (queue === undefined) return;
     const input = (rawInput !== null && typeof rawInput === "object" ? rawInput : {}) as {
       projectRoot?: string;
       projectSlug?: string;
@@ -869,7 +862,13 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       if (isProjectSeat(callerSeat)) return;
       const target = resolveDeleteTarget(input);
       if (!target.ok) return;
-      await cancelProjectGates(target.project.slug, target.project.root, "cancelled-by-project-delete");
+      await cancelProjectGates({
+        gateQueue: queue,
+        stateDir: deps.stateDir,
+        slug: target.project.slug,
+        root: target.project.root,
+        note: "cancelled-by-project-delete",
+      });
       return;
     }
     const target = resolveActTarget(input, "reset");
@@ -882,7 +881,13 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         return;
       }
     }
-    await cancelProjectGates(target.project.slug, target.project.root, "cancelled-by-project-reset");
+    await cancelProjectGates({
+      gateQueue: queue,
+      stateDir: deps.stateDir,
+      slug: target.project.slug,
+      root: target.project.root,
+      note: "cancelled-by-project-reset",
+    });
   };
   let localUpdateSnapshot: { statuses: ReadonlyMap<string, DaemonPluginSourceStatus>; checkedAt: string } | null = null;
   let localToolUpdateSnapshot: Record<"factory-skills-pack", CompanionToolUpdateStatus> | null = null;
@@ -3323,7 +3328,6 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           vacant: panel.seats!.lead.vacant,
           agentId: panel.seats!.lead.agentId,
         },
-        activePeer: overviewPeers[0] ?? null,
         peers: overviewPeers,
         latestGate: latestGateOf(events, projectQueueItems),
         gateQueueStatus,
@@ -3705,6 +3709,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           skillHub: inspectSkillHub({ stateDir: deps.stateDir, paseoHome: deps.home, slpLanes: effectiveLanes, userHome: resolveSurfaceUserHome(), projectRoot: enrichedProject?.root, configuredPacks }),
           companionTools: buildCompanionToolsView(),
           helperMcps: helperMcpRoster(discoverHelperMcps({ stateDir: deps.stateDir, userHome: resolveSurfaceUserHome() }).servers),
+          gateQueueConcurrency: currentGateQueueSnapshot().concurrency,
           ...profileInfo,
         },
       };
@@ -3773,24 +3778,13 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       if (queue === undefined) return failure("gate-queue-unavailable", "Gate queue is not active on this server");
       const targetId = input.queueId?.trim() || input.id?.trim() || undefined;
       const targetTask = input.task?.trim() || undefined;
-      let targetSlug = input.projectSlug?.trim() || undefined;
-      let targetRoot: string | undefined;
-      if (input.projectRoot !== undefined && input.projectRoot.trim() !== "") {
-        const rawRoot = input.projectRoot.trim();
-        const resolved = resolveProject(rawRoot);
-        if (resolved.ok) {
-          targetSlug = targetSlug ?? resolved.slug;
-          targetRoot = resolved.root;
-        } else {
-          const matched = listProjectRegistrations(deps.stateDir).find(
-            (reg) => reg.root === rawRoot || realpathSafe(resolve(reg.root)) === realpathSafe(resolve(rawRoot)),
-          );
-          targetSlug = targetSlug ?? matched?.slug;
-          targetRoot = matched?.root ?? rawRoot;
-        }
-      } else if (targetSlug !== undefined) {
-        targetRoot = readProjectRegistration(deps.stateDir, targetSlug)?.root;
-      }
+      const resolvedTarget = resolveGateProjectTarget({
+        stateDir: deps.stateDir,
+        project: input.projectSlug,
+        workspace: input.projectRoot,
+      });
+      const targetSlug = resolvedTarget?.slug;
+      const targetRoot = resolvedTarget?.root;
 
       if (targetId === undefined && (targetTask === undefined || (targetSlug === undefined && targetRoot === undefined))) {
         return failure("invalid-cancel-target", "provide queueId (or id), or task with projectSlug/projectRoot");
@@ -4540,7 +4534,6 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       if (!target.ok) return target;
       const project = target.project;
 
-      await cancelProjectGates(project.slug, project.root, "cancelled-by-project-delete");
       const daemon = resolveDaemon(context);
       const { projectDir, worktreesDir, projectTaskSet, archivedSeats, archivedAgents } =
         await cleanupProjectArtifacts(daemon, project, {
@@ -4644,7 +4637,6 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         try { checkProjectResetRepository(project.root, protectedPluginDir); }
         catch (err) { return failure("repository-reset-refused", messageOf(err)); }
       }
-      await cancelProjectGates(project.slug, project.root, "cancelled-by-project-reset");
       const daemon = resolveDaemon(context);
       const { projectDir, worktreesDir, projectTaskSet, archivedAgents } =
         await cleanupProjectArtifacts(daemon, project, {
@@ -5686,7 +5678,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
             ? lane.history.withExclusiveMaintenance(() => value.apply(receiver, args))
             : lane.history.runOperation(() => value.apply(receiver, args), { newWork: true });
         const pending =
-          key === "projectReset" || key === "projectDelete"
+          !lane.history.maintenanceActive && (key === "projectReset" || key === "projectDelete")
             ? cancelGatesBeforeProjectMaintenance(key, args[0], args[1]).then(execute)
             : execute();
         if (deps.onStateChange === undefined) return pending;
