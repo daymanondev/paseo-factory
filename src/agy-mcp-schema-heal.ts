@@ -7,7 +7,7 @@ import type { ToolDefinition } from "./mcp/shared.ts";
 
 const ALLOWED_ROLES = new Set(["supervisor", "lead", "agent"]);
 const AGY_APP_DATA_NAMES = ["antigravity", "antigravity-cli"] as const;
-const AGY_SERVER_DIR_NAME = "paseo-factory_paseo_factory";
+const AGY_SERVER_DIR_NAMES = ["paseo-factory_paseo_factory", "paseo_factory"] as const;
 
 interface HealTarget {
   serverDir: string;
@@ -39,9 +39,11 @@ function resolveHealTarget(targetPath: string): HealTarget | null {
   if (toolName === "" || toolName.includes("/") || toolName.includes("\\")) return null;
 
   for (const appName of AGY_APP_DATA_NAMES) {
-    const serverDir = resolve(resolvedHome, ".gemini", appName, "mcp", AGY_SERVER_DIR_NAME);
-    if (parentDir === serverDir) {
-      return { serverDir, targetFile: resolvedTarget, toolName };
+    for (const serverDirName of AGY_SERVER_DIR_NAMES) {
+      const serverDir = resolve(resolvedHome, ".gemini", appName, "mcp", serverDirName);
+      if (parentDir === serverDir) {
+        return { serverDir, targetFile: resolvedTarget, toolName };
+      }
     }
   }
   return null;

@@ -310,3 +310,63 @@ test("agy-pre-tool-hook works when copied alone into an empty directory with zer
   assert.equal(res.output.decision, "allow");
   assertHealedSchemaMatchesCatalog(schemaPath, "supervisor_dispatch_lead");
 });
+
+test("agy-pre-tool-hook self-heals per-session mcp/paseo_factory schemas across CLI and IDE paths while enforcing role and path fences", (t) => {
+  const dir = makeTempDir("agy-schema-persession-");
+  disposeDir(t, dir);
+  const homeDir = join(dir, "home");
+  const workspaceDir = join(dir, "workspace");
+  const stateDir = join(dir, "state");
+
+  const validCases = [
+    { seat: "supervisor", appDir: "antigravity-cli", toolName: "supervisor_dispatch_lead" },
+    { seat: "supervisor", appDir: "antigravity", toolName: "supervisor_accept_task" },
+    { seat: "lead", appDir: "antigravity-cli", toolName: "lead_merge" },
+    { seat: "lead", appDir: "antigravity", toolName: "lead_set_contract" },
+    { seat: "agent", appDir: "antigravity-cli", toolName: "agent_claim" },
+    { seat: "agent", appDir: "antigravity", toolName: "agent_escalate_blocker" },
+  ] as const;
+
+  for (const { seat, appDir, toolName } of validCases) {
+    const schemaPath = join(homeDir, ".gemini", appDir, "mcp", "paseo_factory", `${toolName}.json`);
+    assert.equal(existsSync(schemaPath), false, `precondition: ${schemaPath} absent`);
+
+    const res = runHook(
+      {
+        toolCall: { name: "read_file", args: { Path: schemaPath } },
+        workspacePaths: [workspaceDir],
+      },
+      {
+        HOME: homeDir,
+        PASEO_FACTORY_SEAT: seat,
+        PASEO_FACTORY_STATE_DIR: stateDir,
+        PASEO_FACTORY_PROJECT_ROOT: workspaceDir,
+      },
+    );
+
+    assert.equal(res.status, 0, res.stderr);
+    assert.equal(res.output.decision, "allow");
+    assertHealedSchemaMatchesCatalog(schemaPath, toolName);
+  }
+
+  // Negative checks under per-session paseo_factory directory
+  const negHome = join(dir, "neg-home");
+  const perSessionCliDir = join(negHome, ".gemini", "antigravity-cli", "mcp", "paseo_factory");
+  const negatives = [
+    { seat: "agent", target: join(perSessionCliDir, "lead_merge.json"), desc: "agent cannot heal lead schema under paseo_factory" },
+    { seat: "supervisor", target: join(perSessionCliDir, "agent_claim.json"), desc: "supervisor cannot heal agent schema under paseo_factory" },
+    { seat: "lead", target: join(perSessionCliDir, "supervisor_dispatch_lead.json"), desc: "lead cannot heal supervisor schema under paseo_factory" },
+    { seat: "lead", target: join(perSessionCliDir, "unknown_tool.json"), desc: "unknown tool rejected under paseo_factory" },
+    { seat: "lead", target: `${perSessionCliDir}/../paseo_factory/lead_merge.json`, desc: "traversal rejected under paseo_factory" },
+    { seat: "lead", target: join(negHome, ".gemini", "antigravity-ide", "mcp", "paseo_factory", "lead_merge.json"), desc: "unrelated antigravity-ide rejected under paseo_factory" },
+  ];
+  for (const { seat, target, desc } of negatives) {
+    const res = runHook(
+      { toolCall: { name: "read_file", args: { Path: target } }, workspacePaths: [workspaceDir] },
+      { HOME: negHome, PASEO_FACTORY_SEAT: seat, PASEO_FACTORY_STATE_DIR: stateDir, PASEO_FACTORY_PROJECT_ROOT: workspaceDir },
+    );
+    assert.equal(res.status, 0, `${desc}: ${res.stderr}`);
+    assert.equal(res.output.decision, "allow", desc);
+  }
+  assert.equal(existsSync(join(negHome, ".gemini")), false, "rejected paseo_factory requests create nothing");
+});

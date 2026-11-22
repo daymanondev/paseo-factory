@@ -3,9 +3,11 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
+import contribute from "../plugin/index.server.ts";
 import { pluginDirFor, resolvePaseoHome, stateDirFor } from "../plugin/server/paths.ts";
 import { claimCliBinDir, ensureClaimCli, ensureGitShim, injectClaimCliPath } from "../plugin/server/shell.ts";
 import { Ledger } from "../plugin/server/core/ledger.ts";
+import { resolveProject } from "../plugin/server/core/project.ts";
 import { disposeDir, gitCommitAll, makeTempDir, repoRoot } from "./helpers.ts";
 import type { PluginSessionOpenRequest } from "@getpaseo/plugin/server";
 
@@ -471,6 +473,183 @@ test("ensureClaimCli and ensureGitShim stage self-contained runtime-bin scripts 
     env: { ...process.env, FACTORY_STATE_DIR: stateDir, PATH: pathWithShim, PASEO_FACTORY_SEAT: "lead" },
   });
   assert.equal(statusOut.status, 0, `git wrapper failed after plugin checkout deletion: ${statusOut.stderr}`);
+});
+
+test("contribute gates Antigravity per-session MCP and stale mcp_config.json cleanup via server.registerWorktreeManager (ADR 0067)", async (t) => {
+  const prevHome = process.env.HOME;
+  const prevPaseoHome = process.env.PASEO_HOME;
+  const prevAgyPlugins = process.env.PASEO_FACTORY_AGY_PLUGINS_DIR;
+  delete process.env.PASEO_FACTORY_AGY_PLUGINS_DIR;
+  t.after(() => {
+    if (prevHome === undefined) delete process.env.HOME;
+    else process.env.HOME = prevHome;
+    if (prevPaseoHome === undefined) delete process.env.PASEO_HOME;
+    else process.env.PASEO_HOME = prevPaseoHome;
+    if (prevAgyPlugins === undefined) delete process.env.PASEO_FACTORY_AGY_PLUGINS_DIR;
+    else process.env.PASEO_FACTORY_AGY_PLUGINS_DIR = prevAgyPlugins;
+  });
+
+  // 1. >=0.17.1 host (server.registerWorktreeManager present, never invoked)
+  {
+    const homeDir = makeTempDir("shell-v0171-");
+    disposeDir(t, homeDir);
+    const paseoHome = join(homeDir, ".paseo");
+    const stateDir = stateDirFor(paseoHome);
+    process.env.HOME = homeDir;
+    process.env.PASEO_HOME = paseoHome;
+
+    const repoDir = join(homeDir, "repo");
+    mkdirSync(repoDir, { recursive: true });
+    writeFileSync(join(repoDir, "README.md"), "# repo\n");
+    gitCommitAll(repoDir, "init");
+    const resolved = resolveProject(repoDir);
+    assert.ok(resolved.ok);
+    const slug = resolved.ok ? resolved.slug : "";
+
+    mkdirSync(stateDir, { recursive: true });
+    writeFileSync(join(stateDir, "lanes.json"), JSON.stringify({ worker: "antigravity/gemini-4-argon" }));
+    mkdirSync(join(homeDir, ".pi", "agent"), { recursive: true });
+    writeFileSync(
+      join(homeDir, ".pi", "agent", "mcp.json"),
+      JSON.stringify({ mcpServers: { docs: { command: process.execPath, args: ["--version"] } } }),
+    );
+
+    const agyPluginDir = join(homeDir, ".gemini", "config", "plugins", "paseo-factory");
+    mkdirSync(agyPluginDir, { recursive: true });
+    writeFileSync(join(agyPluginDir, "mcp_config.json"), JSON.stringify({ stale: true }));
+
+    const hooks = new Map<string, (payload: unknown, context: unknown) => Promise<unknown>>();
+    const server = {
+      addHook: (name: string, handler: (payload: unknown, context: unknown) => Promise<unknown>) => {
+        hooks.set(name, handler);
+        return () => { hooks.delete(name); };
+      },
+      handle: () => () => {},
+      registerWorktreeManager: () => {
+        throw new Error("registerWorktreeManager must not be invoked at boot");
+      },
+    } as unknown as Parameters<typeof contribute>[0];
+
+    const stop = contribute(server);
+    t.after(() => stop());
+
+    // Ordinary boot cleans stale mcp_config.json while keeping plugin.json and hooks.json
+    assert.equal(existsSync(join(agyPluginDir, "plugin.json")), true);
+    assert.equal(existsSync(join(agyPluginDir, "hooks.json")), true);
+    assert.equal(existsSync(join(agyPluginDir, "mcp_config.json")), false, "boot cleans stale global mcp_config.json on >=0.17.1");
+
+    const createHook = hooks.get("agent.create.before")!;
+    const supOut = await createHook(
+      { request: { config: { provider: "antigravity/gemini-2.5-pro", cwd: repoDir, title: "Supervisor — repo", modeId: "default" } } },
+      {},
+    ) as {
+      config: { mcpServers?: Record<string, { args?: string[]; env?: Record<string, string> }>; modeId?: string };
+      env?: Record<string, string>;
+    };
+    assert.ok(supOut?.config.mcpServers?.paseo_factory !== undefined, "Supervisor receives per-session paseo_factory");
+    assert.equal(supOut.config.mcpServers.paseo_factory.env?.ELECTRON_RUN_AS_NODE, "1");
+    assert.ok(supOut.config.mcpServers.paseo_factory.args?.includes(supOut.env!.PASEO_FACTORY_CORRELATION!));
+    assert.ok(supOut.config.mcpServers.paseo_factory.args?.includes("supervisor"));
+    assert.ok(supOut.config.mcpServers.paseo_factory.args?.includes(slug));
+    assert.ok(supOut.config.mcpServers.paseo_factory.args?.includes(repoDir));
+    assert.equal(supOut.config.mcpServers.docs, undefined, "Supervisor never receives Helper MCPs");
+    assert.equal("modeId" in supOut.config, false, "Antigravity keeps modeId unset");
+
+    const worktreeDir = join(stateDir, "projects", slug, "worktrees", "T-03");
+    mkdirSync(worktreeDir, { recursive: true });
+    const peerOut = await createHook(
+      { request: { config: { provider: "factory-peer", cwd: worktreeDir, title: "T-03" } } },
+      {},
+    ) as {
+      config: { mcpServers?: Record<string, { args?: string[]; env?: Record<string, string> }>; modeId?: string };
+      env?: Record<string, string>;
+    };
+    assert.ok(peerOut?.config.mcpServers?.paseo_factory !== undefined, "Antigravity Peer receives per-session paseo_factory");
+    assert.equal(peerOut.config.mcpServers.paseo_factory.env?.ELECTRON_RUN_AS_NODE, "1");
+    assert.ok(peerOut.config.mcpServers.paseo_factory.args?.includes(peerOut.env!.PASEO_FACTORY_CORRELATION!));
+    assert.ok(peerOut.config.mcpServers.paseo_factory.args?.includes("agent"));
+    assert.ok(peerOut.config.mcpServers.paseo_factory.args?.includes(slug));
+    assert.ok(peerOut.config.mcpServers.paseo_factory.args?.includes(worktreeDir));
+    assert.ok(peerOut.config.mcpServers.paseo_factory.args?.includes("--task") && peerOut.config.mcpServers.paseo_factory.args?.includes("T-03"));
+    assert.ok(peerOut.config.mcpServers.docs !== undefined, "Antigravity Peer receives enabled Helper MCPs");
+    assert.equal("modeId" in peerOut.config, false);
+    assert.equal(existsSync(join(agyPluginDir, "mcp_config.json")), false);
+  }
+
+  // 2. <0.17.1 host (no registerWorktreeManager): fails closed to global mcp_config.json
+  {
+    const homeDir = makeTempDir("shell-legacy-");
+    disposeDir(t, homeDir);
+    const paseoHome = join(homeDir, ".paseo");
+    process.env.HOME = homeDir;
+    process.env.PASEO_HOME = paseoHome;
+
+    const repoDir = join(homeDir, "repo");
+    mkdirSync(repoDir, { recursive: true });
+    writeFileSync(join(repoDir, "README.md"), "# repo\n");
+    gitCommitAll(repoDir, "init");
+
+    const agyPluginDir = join(homeDir, ".gemini", "config", "plugins", "paseo-factory");
+    mkdirSync(agyPluginDir, { recursive: true });
+    writeFileSync(join(agyPluginDir, "mcp_config.json"), JSON.stringify({ legacy: true }));
+
+    const hooks = new Map<string, (payload: unknown, context: unknown) => Promise<unknown>>();
+    const server = {
+      addHook: (name: string, handler: (payload: unknown, context: unknown) => Promise<unknown>) => {
+        hooks.set(name, handler);
+        return () => { hooks.delete(name); };
+      },
+      handle: () => () => {},
+    } as unknown as Parameters<typeof contribute>[0];
+
+    const stop = contribute(server);
+    t.after(() => stop());
+
+    // Legacy boot leaves pre-existing mcp_config.json untouched
+    assert.equal(existsSync(join(agyPluginDir, "mcp_config.json")), true);
+
+    const createHook = hooks.get("agent.create.before")!;
+    const out = await createHook(
+      { request: { config: { provider: "antigravity/gemini-2.5-pro", cwd: repoDir, title: "Supervisor — repo" } } },
+      {},
+    ) as { config: Record<string, unknown> };
+    assert.equal("mcpServers" in out.config, false, "<0.17.1 host omits config.mcpServers on Antigravity");
+    assert.equal(existsSync(join(agyPluginDir, "mcp_config.json")), true);
+    assert.equal(existsSync(join(agyPluginDir, "plugin.json")), true);
+    assert.equal(existsSync(join(agyPluginDir, "hooks.json")), true);
+  }
+
+  // 3. >=0.17.1 boot fails open if ~/.gemini is blocked / unwritable
+  {
+    const homeDir = makeTempDir("shell-v0171-unwritable-");
+    disposeDir(t, homeDir);
+    const paseoHome = join(homeDir, ".paseo");
+    process.env.HOME = homeDir;
+    process.env.PASEO_HOME = paseoHome;
+    writeFileSync(join(homeDir, ".gemini"), "blocked by file\n");
+
+    const server = {
+      addHook: () => () => {},
+      handle: () => () => {},
+      registerWorktreeManager: () => () => {},
+    } as unknown as Parameters<typeof contribute>[0];
+
+    const logs: string[] = [];
+    const realLog = console.log;
+    console.log = (...args: unknown[]) => { logs.push(args.join(" ")); };
+    let stop: (() => void) | undefined;
+    try {
+      stop = contribute(server);
+    } finally {
+      console.log = realLog;
+    }
+    stop?.();
+    assert.equal(
+      logs.some((line) => line.includes("antigravity: could not reconcile plugin bundle")),
+      true,
+      "unwritable .gemini logs warning without failing boot",
+    );
+  }
 });
 
 test("check-bundle stays green under the git hook environment (GIT_DIR/GIT_INDEX_FILE exported)", { timeout: 120_000 }, () => {

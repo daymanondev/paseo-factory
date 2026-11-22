@@ -2187,3 +2187,167 @@ test("Lead and Supervisor role laws teach Store release contracts, Hole relay, 2
   assert.match(leadContract, /paseo-factory_lead_store_release/);
   assert.match(leadContract, /paseo-factory_lead_record_store_note/);
 });
+
+test("provisionAgyPlugin writes global mcp_config.json only when perSessionMcp is false and removes stale mcp_config.json when perSessionMcp is true (ADR 0067)", async (t) => {
+  const { provisionAgyPlugin } = await import("../src/agy-home.ts");
+  const dir = makeTempDir("agy-provision-");
+  disposeDir(t, dir);
+  const stateDir = join(dir, "state");
+  const userHome = join(dir, "home");
+
+  // Legacy (<0.17.1): default writes plugin.json, hooks.json, hook-launcher.cjs, and mcp_config.json
+  const pluginDir = provisionAgyPlugin({ stateDir, userHome });
+  assert.equal(existsSync(join(pluginDir, "plugin.json")), true);
+  assert.equal(existsSync(join(pluginDir, "hooks.json")), true);
+  assert.equal(existsSync(join(pluginDir, "hook-launcher.cjs")), true);
+  assert.equal(existsSync(join(pluginDir, "mcp_config.json")), true);
+  const hooksBefore = readFileSync(join(pluginDir, "hooks.json"), "utf8");
+
+  // >=0.17.1 (perSessionMcp: true): removes stale mcp_config.json while preserving plugin.json and hooks.json
+  provisionAgyPlugin({ stateDir, userHome, perSessionMcp: true });
+  assert.equal(existsSync(join(pluginDir, "plugin.json")), true);
+  assert.equal(existsSync(join(pluginDir, "hooks.json")), true);
+  assert.equal(existsSync(join(pluginDir, "hook-launcher.cjs")), true);
+  assert.equal(existsSync(join(pluginDir, "mcp_config.json")), false, "stale global mcp_config.json must be removed under perSessionMcp");
+  assert.equal(readFileSync(join(pluginDir, "hooks.json"), "utf8"), hooksBefore);
+
+  // Calling again when mcp_config.json is already absent stays idempotent
+  provisionAgyPlugin({ stateDir, userHome, perSessionMcp: true });
+  assert.equal(existsSync(join(pluginDir, "mcp_config.json")), false);
+});
+
+test("applyProviderExecutionFence attaches per-session paseo_factory and Peer-only Helper MCPs on antigravity when perSessionAgyMcp is true, while keeping modeId unset and cleaning mcp_config.json (ADR 0067)", (t) => {
+  const dir = makeTempDir("roles-agy-fence-v0171-");
+  disposeDir(t, dir);
+  const stateDir = join(dir, "state");
+  const userHome = join(dir, "home");
+  const repoDir = makeGitRepo(dir);
+  mkdirSync(join(userHome, ".pi", "agent"), { recursive: true });
+  writeFileSync(join(userHome, ".pi", "agent", "mcp.json"), JSON.stringify({ mcpServers: { docs: { command: process.execPath, args: ["--version"] } } }));
+
+  const agyPluginDir = join(userHome, ".gemini", "config", "plugins", "paseo-factory");
+  mkdirSync(agyPluginDir, { recursive: true });
+  writeFileSync(join(agyPluginDir, "mcp_config.json"), JSON.stringify({ stale: true }));
+
+  for (const role of ["supervisor", "lead", "agent"] as const) {
+    const fenced = applyProviderExecutionFence(
+      {
+        provider: "antigravity/gemini-2.5-pro",
+        cwd: repoDir,
+        modeId: "default",
+        mcpServers: { stray: { command: "unused" } },
+      },
+      {
+        stateDir,
+        userHome,
+        role,
+        projectSlug: "repo-123",
+        ...(role === "agent" ? { task: "T-01" } : {}),
+        correlationId: `cor_${role}`,
+        perSessionAgyMcp: true,
+      },
+    );
+
+    assert.equal("modeId" in fenced, false, `${role}: antigravity keeps modeId unset (full-access)`);
+    const servers = fenced.mcpServers as Record<string, { type?: string; command?: string; args?: string[]; env?: Record<string, string> }> | undefined;
+    assert.ok(servers !== undefined, `${role}: per-session mcpServers attached`);
+    assert.equal(servers.stray, undefined, `${role}: stray MCPs stripped`);
+
+    const bridge = servers.paseo_factory;
+    assert.ok(bridge !== undefined, `${role}: paseo_factory attached`);
+    assert.equal(bridge.type, "stdio");
+    assert.equal(bridge.command, process.execPath);
+    assert.equal(bridge.env?.ELECTRON_RUN_AS_NODE, "1");
+    assert.equal(bridge.env?.PASEO_FACTORY_CORRELATION, `cor_${role}`);
+    assert.equal(bridge.env?.PASEO_FACTORY_SEAT, role);
+    assert.ok(bridge.args?.includes("--correlation") && bridge.args?.includes(`cor_${role}`));
+    assert.ok(bridge.args?.includes("--role") && bridge.args?.includes(role));
+    assert.ok(bridge.args?.includes("--project") && bridge.args?.includes("repo-123"));
+    assert.ok(bridge.args?.includes("--workspace") && bridge.args?.includes(repoDir));
+    if (role === "agent") {
+      assert.ok(bridge.args?.includes("--task") && bridge.args?.includes("T-01"));
+      assert.ok(servers.docs !== undefined, "Peer receives enabled Helper MCPs on antigravity");
+    } else {
+      assert.equal(bridge.args?.includes("--task"), false);
+      assert.equal(servers.docs, undefined, `${role} never receives Helper MCPs`);
+    }
+  }
+
+  assert.equal(existsSync(join(agyPluginDir, "plugin.json")), true);
+  assert.equal(existsSync(join(agyPluginDir, "hooks.json")), true);
+  assert.equal(existsSync(join(agyPluginDir, "mcp_config.json")), false, "stale global mcp_config.json removed");
+
+  // Default (perSessionAgyMcp omitted) stays fail-closed to <0.17.1 global mcp_config.json
+  const legacyFenced = applyProviderExecutionFence(
+    { provider: "antigravity/gemini-2.5-pro", cwd: repoDir, mcpServers: { stray: { command: "unused" } } },
+    { stateDir, userHome, role: "agent", projectSlug: "repo-123", task: "T-01", correlationId: "cor_legacy" },
+  );
+  assert.equal("mcpServers" in legacyFenced, false);
+  assert.equal(existsSync(join(agyPluginDir, "mcp_config.json")), true);
+});
+
+test("injectRoleOnCreate threads perSessionAgyMcp into both seat and Task-worktree Peer fences for antigravity and agy lanes (ADR 0067)", (t) => {
+  const dir = makeTempDir("roles-agy-inject-");
+  disposeDir(t, dir);
+  const stateDir = join(dir, "state");
+  const userHome = join(dir, "home");
+  const repoDir = makeGitRepo(dir);
+  const resolved = resolveProject(repoDir);
+  assert.ok(resolved.ok);
+  const slug = resolved.ok ? resolved.slug : "";
+
+  mkdirSync(stateDir, { recursive: true });
+  writeFileSync(
+    join(stateDir, "lanes.json"),
+    `${JSON.stringify({ supervisor: "antigravity/gemini-4-argon", lead: "antigravity/gemini-4-argon", worker: "agy/gemini-4-argon" }, null, 2)}\n`,
+  );
+  mkdirSync(join(userHome, ".pi", "agent"), { recursive: true });
+  writeFileSync(join(userHome, ".pi", "agent", "mcp.json"), JSON.stringify({ mcpServers: { docs: { command: process.execPath, args: ["--version"] } } }));
+
+  const agyPluginDir = join(userHome, ".gemini", "config", "plugins", "paseo-factory");
+  mkdirSync(agyPluginDir, { recursive: true });
+  writeFileSync(join(agyPluginDir, "mcp_config.json"), JSON.stringify({ stale: true }));
+
+  // Seat path (`factory-supervisor` + `factory-lead` with antigravity lanes)
+  for (const role of ["supervisor", "lead"] as const) {
+    const res = injectRoleOnCreate<AgentCreateRequest>(
+      { config: { provider: `factory-${role}`, cwd: repoDir, title: `Start ${role}` } },
+      stateDir,
+      userHome,
+      { perSessionAgyMcp: true },
+    );
+    assert.ok(res !== undefined);
+    const servers = res.config.mcpServers as Record<string, { args?: string[] }> | undefined;
+    assert.ok(servers?.paseo_factory !== undefined, `${role}: paseo_factory attached`);
+    assert.equal(servers.docs, undefined, `${role}: Helper MCP excluded`);
+    assert.equal("modeId" in res.config, false);
+  }
+  assert.equal(existsSync(join(agyPluginDir, "mcp_config.json")), false, "stale mcp_config.json removed on seat create");
+
+  // Task-worktree Peer path (`factory-peer` with `agy/gemini-4-argon` worker lane)
+  const worktreeDir = join(stateDir, "projects", slug, "worktrees", "T-09");
+  mkdirSync(worktreeDir, { recursive: true });
+  const peerRes = injectRoleOnCreate<AgentCreateRequest>(
+    { config: { provider: "factory-peer", cwd: worktreeDir, title: "T-09" } },
+    stateDir,
+    userHome,
+    { perSessionAgyMcp: true },
+  );
+  assert.ok(peerRes !== undefined);
+  const peerServers = peerRes.config.mcpServers as Record<string, { args?: string[] }> | undefined;
+  assert.ok(peerServers?.paseo_factory !== undefined, "Peer receives per-session paseo_factory");
+  assert.ok(peerServers.paseo_factory.args?.includes("--task") && peerServers.paseo_factory.args?.includes("T-09"));
+  assert.ok(peerServers.docs !== undefined, "Peer receives enabled Helper MCPs on agy worker lane");
+  assert.equal(existsSync(join(agyPluginDir, "mcp_config.json")), false);
+
+  // Explicit false fails closed to <0.17.1 global mcp_config.json
+  const legacyRes = injectRoleOnCreate<AgentCreateRequest>(
+    { config: { provider: "antigravity/gemini-2.5-pro", cwd: repoDir, title: "Supervisor — repo" } },
+    stateDir,
+    userHome,
+    { perSessionAgyMcp: false },
+  );
+  assert.ok(legacyRes !== undefined);
+  assert.equal("mcpServers" in legacyRes.config, false);
+  assert.equal(existsSync(join(agyPluginDir, "mcp_config.json")), true);
+});
