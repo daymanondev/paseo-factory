@@ -127,6 +127,15 @@ if (!reply.ok) {
   process.exit(2);
 }
 
+if (reply.status === "queued") {
+  const ahead = Array.isArray(reply.ahead) ? reply.ahead.length : 0;
+  console.log(
+    `factory-claim: task ${args.values.task} attempt ${reply.attempt} — QUEUED (position ${reply.position ?? "?"}, ${ahead} ahead${reply.paused ? ", queue paused" : ""})`,
+  );
+  console.log("factory-claim: Gate queued in daemon — end your turn now and wait at zero tokens for outcome notification.");
+  process.exit(0);
+}
+
 console.log(`factory-claim: task ${args.values.task} attempt ${reply.attempt} — ${reply.verdict.toUpperCase()}`);
 if (reply.note !== undefined && reply.note !== "") {
   console.log(`note: ${reply.note}`);

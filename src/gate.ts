@@ -13,6 +13,14 @@ export interface GateInput {
   artifact?: string | undefined;
   /** Kill + red after this long. Defaults to DEFAULT_GATE_TIMEOUT_MS. */
   timeoutMs?: number | undefined;
+  /** Optional cancellation signal to immediately reap `-pgid` and end red. */
+  signal?: AbortSignal | undefined;
+  /** Optional daemon-shutdown signal: reaps `-pgid` cleanly without marking owner cancel. */
+  shutdownSignal?: AbortSignal | undefined;
+  /** Note recorded when aborted via `signal` (defaults to `"cancelled-by-owner"`). */
+  cancelNote?: string | undefined;
+  /** Optional callback invoked right after spawning with the shell PID (diagnostic metadata only). */
+  onSpawn?: ((pid: number | undefined) => void) | undefined;
 }
 
 export interface GateResult {
@@ -20,6 +28,10 @@ export interface GateResult {
   verdict: Verdict;
   note: string;
   timedOut: boolean;
+  /** True when stopped via `signal`. */
+  cancelled?: boolean;
+  /** True when stopped via `shutdownSignal` (plugin unload/restart). */
+  abortedOnShutdown?: boolean;
   /**
    * The raw combined stdout+stderr as it arrived, tail-capped to
    * GATE_OUTPUT_CAP_BYTES — persisted in full per attempt (ticket 02a) and fed
@@ -46,12 +58,33 @@ export interface GateResult {
  * level up, in `gate-<task>-<attempt>.log` next to the report.
  */
 export function runGate(input: GateInput): Promise<GateResult> {
-  const { cmd, cwd, artifact } = input;
+  const { cmd, cwd, artifact, signal, shutdownSignal, cancelNote, onSpawn } = input;
   const timeoutMs = input.timeoutMs ?? DEFAULT_GATE_TIMEOUT_MS;
+
+  if (shutdownSignal?.aborted) {
+    return Promise.resolve({
+      exit: null,
+      verdict: "red",
+      note: "daemon-shutdown",
+      timedOut: false,
+      abortedOnShutdown: true,
+    });
+  }
+  if (signal?.aborted) {
+    return Promise.resolve({
+      exit: null,
+      verdict: "red",
+      note: cancelNote ?? "cancelled-by-owner",
+      timedOut: false,
+      cancelled: true,
+    });
+  }
 
   return new Promise((resolve, reject) => {
     let raw = "";
     let timedOut = false;
+    let cancelled = false;
+    let abortedOnShutdown = false;
     let settled = false;
 
     // detached: true makes the shell a process-group leader so a timeout can
@@ -67,6 +100,7 @@ export function runGate(input: GateInput): Promise<GateResult> {
       env,
       stdio: ["ignore", "pipe", "pipe"],
     });
+    onSpawn?.(child.pid);
 
     // One interleaved stream, kept from the end: the note's summary and the
     // persisted log both want the output as it happened, not stdout-then-stderr.
@@ -102,6 +136,21 @@ export function runGate(input: GateInput): Promise<GateResult> {
       reapGroup(true);
     }, timeoutMs);
 
+    const onAbort = () => {
+      if (settled || timedOut || abortedOnShutdown) return;
+      cancelled = true;
+      clearTimeout(timer);
+      void reapGroup(true);
+    };
+    const onShutdown = () => {
+      if (settled || timedOut || cancelled) return;
+      abortedOnShutdown = true;
+      clearTimeout(timer);
+      void reapGroup(true);
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    shutdownSignal?.addEventListener("abort", onShutdown, { once: true });
+
     child.on("exit", () => {
       // Command execution ended. Cleanup has its own bound and must finish
       // even when redirected descendants let both output streams close early.
@@ -112,6 +161,8 @@ export function runGate(input: GateInput): Promise<GateResult> {
     child.on("error", (err) => {
       if (settled) return;
       settled = true;
+      signal?.removeEventListener("abort", onAbort);
+      shutdownSignal?.removeEventListener("abort", onShutdown);
       clearTimeout(timer);
       if (graceKillTimer !== undefined) clearTimeout(graceKillTimer);
       reject(err);
@@ -120,13 +171,37 @@ export function runGate(input: GateInput): Promise<GateResult> {
     child.on("close", async (code) => {
       if (settled) return;
       clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      shutdownSignal?.removeEventListener("abort", onShutdown);
       await reapGroup(false);
       if (settled) return;
       settled = true;
 
       const artifactState = artifact === undefined ? undefined : inspectArtifact(cwd, artifact);
+      if (abortedOnShutdown) {
+        resolve({
+          exit: null,
+          verdict: "red",
+          note: "daemon-shutdown",
+          timedOut: false,
+          abortedOnShutdown: true,
+        });
+        return;
+      }
       if (timedOut) {
         resolve({ exit: null, verdict: "red", note: `gate killed after ${timeoutMs}ms (timeout)`, timedOut: true, output: raw, ...(artifactState === undefined ? {} : { artifactPresent: artifactState.present }) });
+        return;
+      }
+      if (cancelled) {
+        resolve({
+          exit: null,
+          verdict: "red",
+          note: cancelNote ?? "cancelled-by-owner",
+          timedOut: false,
+          cancelled: true,
+          output: raw,
+          ...(artifactState === undefined ? {} : { artifactPresent: artifactState.present }),
+        });
         return;
       }
 

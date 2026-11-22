@@ -28,7 +28,8 @@ import { claimCliBinDir, ensureClaimCli, ensureGitShim, injectClaimCliPath } fro
 import { createChoke, normalizeAgentCreateRequest, startGitBlockIngestion } from "./server/choke.ts";
 import { createTimelineFetcher } from "./server/timeline.ts";
 import type { TimelineSourceApi } from "./server/timeline.ts";
-import { spoolRootFor, startSpool } from "./server/spool.ts";
+import { spoolRootFor, startSpool, settleClaimOutcome } from "./server/spool.ts";
+import { createGateQueue } from "./server/gate-queue.ts";
 import { createUsageRuntime } from "./server/usage-rollup.ts";
 import { createSurfaceHandlers, registerSurfaceRpc } from "./server/surface-rpc.ts";
 import { createStateHub } from "./server/state-hub.ts";
@@ -416,6 +417,30 @@ export default function contribute(server: PluginServerContext) {
     },
     onLog: log,
   });
+  const gateQueue = createGateQueue({
+    stateDir,
+    factory,
+    registry,
+    log,
+    onStateChange: () => {
+      stateHub.emit("gate_queue");
+      void refreshSleepInhibition();
+    },
+    onSettled: async ({ item, outcome }) => {
+      const targetFactory =
+        item.useRootFactory === true ? factory : registry.factoryForProject(item.projectSlug);
+      await settleClaimOutcome({
+        factory: targetFactory,
+        task: item.task,
+        agent: item.agent,
+        outcome,
+        sha: item.sha,
+        workspace: item.cwd,
+        usageMeter: (meterInput) => usage.meterTaskBoundary(meterInput),
+        peerMail: leadMail.notifyPeer,
+      });
+    },
+  });
   const sleepInhibitor = new SleepInhibitor({ onError: error => log(`sleep inhibition unavailable: ${String(error)}`) });
   let sleepCheckInFlight = false;
   let sleepCheckPending = false;
@@ -424,7 +449,7 @@ export default function contribute(server: PluginServerContext) {
     if (process.platform !== "darwin" || sleepStopped) return;
     if (sleepCheckInFlight) { sleepCheckPending = true; return; }
     sleepCheckInFlight = true;
-    try { sleepInhibitor.poke(await leadMail.hasActiveWork()); }
+    try { sleepInhibitor.poke((await leadMail.hasActiveWork()) || gateQueue.hasRunning() || gateQueue.hasQueued()); }
     catch (error) { log(`sleep activity check deferred: ${String(error)}`); }
     finally {
       sleepCheckInFlight = false;
@@ -437,7 +462,7 @@ export default function contribute(server: PluginServerContext) {
   if (process.platform === "darwin") {
     try {
       activityWatcher = watch(stateDir, { recursive: true, persistent: false }, (_event, file) => {
-        if (file && /(?:ledger\.jsonl|mailbox\.jsonl|project\.json|spool[/\\])/.test(String(file))) void refreshSleepInhibition();
+        if (file && /(?:ledger\.jsonl|mailbox\.jsonl|gate-queue\.json|project\.json|spool[/\\])/.test(String(file))) void refreshSleepInhibition();
       });
       activityWatcher.on("error", error => log(`sleep activity watch unavailable: ${String(error)}`));
     } catch (error) { log(`sleep activity watch unavailable: ${String(error)}`); }
@@ -470,6 +495,7 @@ export default function contribute(server: PluginServerContext) {
   sleepSweepTimer.unref?.();
   void refreshSleepInhibition();
   let mailRecovered = false;
+  let gateQueueRecovered = false;
   const resumeOrdinaryRuntime = (): void => {
     if (pendingUpgradeFor(stateDir) !== undefined) return;
     initializeOrdinaryRuntime();
@@ -477,6 +503,10 @@ export default function contribute(server: PluginServerContext) {
     if (!mailRecovered) {
       leadMail.startupRecovery();
       mailRecovered = true;
+    }
+    if (!gateQueueRecovered) {
+      gateQueueRecovered = true;
+      void gateQueue.startupRecovery().catch((error) => log(`gate-queue: recovery deferred — ${String(error)}`));
     }
     if (paseoApi !== undefined) void leadMail.pumpAll().catch((error) => log(`lead-mailbox: pump deferred — ${String(error)}`));
   };
@@ -538,7 +568,7 @@ export default function contribute(server: PluginServerContext) {
     },
   );
   const spool = startSpool(stateDir, factory, {
-    ordinaryReady: () => booted && mailRecovered,
+    ordinaryReady: () => booted && mailRecovered && gateQueueRecovered,
     onLog: log,
     ask: choke.spoolAskHandler,
     // Legacy CLI spelling now enters the same handoff engine as the Owner surface.
@@ -676,6 +706,7 @@ export default function contribute(server: PluginServerContext) {
     // The Per-Project Factory registry (v0.0.89, ADR 0045 §1): every
     // Project-scoped command routes onto the target Project's own Factory.
     registry,
+    gateQueue,
     storeReleaseNotify: async ({ slug, text }) => {
       await leadMail.enqueueLeadMail(slug, { from: "system", kind: "report", text });
       await leadMail.pumpProjectLead(slug);
@@ -803,6 +834,7 @@ export default function contribute(server: PluginServerContext) {
     offTurnEnded();
     offAgentArchived();
     gitBlocks.stop();
+    gateQueue.stop();
     spool.stop();
     leadMail.stop();
     usage.stop();

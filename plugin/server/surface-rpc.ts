@@ -1029,7 +1029,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
   const agentTaskIndex = (events: readonly LedgerEvent[] = deps.factory.ledger.events): Map<string, string> => {
     const index = new Map<string, string>();
     for (const evt of events) {
-      const agent = evt.event === "claim_reported" || evt.event === "meter_written" ? evt.agent : evt.event === "repoke_dispatched" ? evt.agent : undefined;
+      const agent = evt.event === "gate_queued" || evt.event === "claim_reported" || evt.event === "meter_written" ? evt.agent : evt.event === "repoke_dispatched" ? evt.agent : undefined;
       if ("task" in evt && typeof evt.task === "string" && typeof agent === "string" && agent !== "") index.set(agent, evt.task);
     }
     return index;

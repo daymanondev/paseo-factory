@@ -262,3 +262,49 @@ test("default Gate timeout is 900s (900_000ms) rather than 300s, and bounds are 
   assert.match(result.note, /900000ms.*timeout/);
   assert.ok(status === "" || status.startsWith("Z"), `process ${pid} must be reaped on timeout: ${status}`);
 });
+
+test("runGate aborts promptly via AbortSignal, reaping detached -pgid and recording red cancelNote", { skip: process.platform === "win32" }, async (t) => {
+  const dir = makeTempDir();
+  const pidPath = join(dir, "child.pid");
+  t.after(() => {
+    if (!existsSync(pidPath)) return;
+    try { process.kill(Number(readFileSync(pidPath, "utf8")), "SIGKILL"); } catch { /* already dead */ }
+  });
+  disposeDir(t, dir);
+
+  writeFileSync(join(dir, "sleeper.mjs"), `
+    import { writeFileSync } from "node:fs";
+    writeFileSync(${JSON.stringify(pidPath)}, String(process.pid));
+    setInterval(() => {}, 1000);
+  `);
+
+  const controller = new AbortController();
+  const gatePromise = runGate({
+    cmd: `exec '${process.execPath}' sleeper.mjs`,
+    cwd: dir,
+    timeoutMs: 30_000,
+    signal: controller.signal,
+    cancelNote: "cancelled-by-owner",
+  });
+
+  const deadline = Date.now() + 5_000;
+  while (!existsSync(pidPath)) {
+    if (Date.now() >= deadline) throw new Error("sleeper.mjs did not start within 5s");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+
+  const startedAt = Date.now();
+  controller.abort();
+  const result = await gatePromise;
+  const elapsed = Date.now() - startedAt;
+  const pid = Number(readFileSync(pidPath, "utf8"));
+  const status = spawnSync("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" }).stdout.trim();
+
+  assert.equal(result.verdict, "red");
+  assert.equal(result.exit, null);
+  assert.equal(result.timedOut, false);
+  assert.equal(result.cancelled, true);
+  assert.equal(result.note, "cancelled-by-owner");
+  assert.ok(elapsed < 2_000, `abort took ${elapsed}ms`);
+  assert.ok(status === "" || status.startsWith("Z"), `aborted process ${pid} must be reaped: ${status}`);
+});

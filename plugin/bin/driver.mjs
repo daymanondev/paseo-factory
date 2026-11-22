@@ -800,6 +800,16 @@ export function verdictOfThisRun(events, task) {
  * Claim, and the Owner resumes a paused one. A task the ledger never spawned
  * (a bare observe) keeps the old snapshot-only finish.
  */
+function hasOpenGate(events, task) {
+  let open = false;
+  for (const evt of events) {
+    if (evt.task !== task) continue;
+    if (evt.event === "gate_queued" || evt.event === "gate_started") open = true;
+    else if (evt.event === "gate_finished" || evt.event === "contract_set" || evt.event === "task_closed") open = false;
+  }
+  return open;
+}
+
 export function idleIsFinish(events, task) {
   let anchored = false;
   let settled = false;
@@ -1266,7 +1276,11 @@ export async function observeTasks(
             // Peer's: no meter, no archive; keep watching.
             if (entry.holdingIdle !== true) {
               entry.holdingIdle = true;
-              log(`factory: ${entry.task} agent idle with no Claim or verdict on the ledger — the task stays open (paused, or waiting for a nudge); not metering or archiving`);
+              log(
+                hasOpenGate(events, entry.task)
+                  ? `factory: ${entry.task} agent idle while Gate is queued/running — holding open at zero tokens; not metering or archiving`
+                  : `factory: ${entry.task} agent idle with no Claim or verdict on the ledger — the task stays open (paused, or waiting for a nudge); not metering or archiving`,
+              );
             }
             continue;
           }

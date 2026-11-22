@@ -59,6 +59,7 @@ function laneFamily(provider: string): string {
 /** Extracts a non-empty Peer agent id from a task-scoped ledger event when present. */
 function eventPeerAgentId(evt: AnyEvent): string | null {
   if (
+    evt.event === "gate_queued" ||
     evt.event === "claim_reported" ||
     evt.event === "meter_written" ||
     evt.event === "repoke_dispatched" ||
@@ -82,7 +83,7 @@ function attemptView(slice: readonly AnyEvent[], attempt: AttemptState, previous
   const report = lastOf(events, "report_written");
   const watch = lastOf(events, "watch_written");
   const eye = attempt.review;
-  const firstClaim = events.find((e) => e.event === "claim_reported");
+  const firstClaim = events.find((e) => e.event === "claim_reported") ?? events.find((e) => e.event === "gate_queued");
   const respawned =
     firstClaim !== undefined && slice.some((e) => e.event === "respawn_dispatched" && e.seq > previousEndSeq && e.seq <= firstClaim.seq);
   let agentId: string | null =
@@ -291,6 +292,8 @@ export function renderLedgerLine(evt: AnyEvent): string {
       return `ledger schema v${evt.version}`;
     case "contract_set":
       return `contract gate="${evt.gate}" artifact=${evt.artifact}${evt.scope === undefined ? "" : ` scope=[${evt.scope.join(",")}]`}${evt.skills === undefined ? "" : ` skills=[${evt.skills.join(",")}]`}`;
+    case "gate_queued":
+      return `gate #${evt.attempt} queued`;
     case "claim_reported":
       return `claim #${evt.attempt} ${evt.sha.slice(0, 7)}`;
     case "gate_started":

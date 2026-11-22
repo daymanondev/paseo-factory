@@ -3711,3 +3711,59 @@ test("Substitute Open Tasks evidence lists live work and omits accepted and clos
   const section = handover.text!.split("## Open Tasks\n")[1]!.split("\n\n## Recent timeline")[0]!;
   assert.equal(section, "T-open: waiting; Attempts: 0");
 });
+
+test("ADR 0058 + SleepInhibitor on gate_queued: hasActiveWork holds with no spawn_dispatched, idle Peer is NOT nudged after queued claim, and rotation_pending holds quiet point until settlement", async (t) => {
+  const f = makeSpooledRuntime(t);
+  f.factory.setContract({ task: "T-GQ", workspace: f.projectRoot, gate: "true", artifact: "README.md" });
+  writeFileSync(join(f.projectRoot, "work-gq.txt"), "queued claim work\n");
+  const sha = gitCommitAll(f.projectRoot, "work");
+
+  // 1. Even with zero spawn_dispatched events, open `gate_queued` holds `hasActiveWork()`.
+  f.factory.ledger.append({
+    event: "gate_queued",
+    task: "T-GQ",
+    attempt: 1,
+    sha,
+    id: "gq-hold-1",
+    agent: "peer-gq",
+  });
+  assert.equal(await f.leadMail.hasActiveWork(), true, "open gate_queued holds sleep inhibition");
+
+  // 2. Live idle Peer that just submitted an async claim (`gate_queued` is last task event)
+  //    MUST NOT be nudged by `answerUnclaimedPeerTurn` when its turn ends, and MUST hold `rotation_pending`.
+  f.fake.agents.push(
+    {
+      id: "lead-gq",
+      status: "running",
+      labels: { seat: "lead", project: f.slug },
+      cwd: f.projectRoot,
+      lastUsage: { contextWindowUsedTokens: 165_000, contextWindowMaxTokens: 200_000 },
+    },
+    { id: "peer-gq", status: "idle", labels: { task: "T-GQ", project: f.slug }, cwd: f.projectRoot },
+  );
+  writeProjectRegistration(f.stateDir, f.slug, { root: f.projectRoot, lead: "lead-gq" });
+
+  await f.leadMail.pumpProjectLead(f.slug);
+  assert.equal(readProjectRegistration(f.stateDir, f.slug)?.rotationState, "rotation_pending");
+  const leadRef = f.fake.agents.find((a) => a.id === "lead-gq")!;
+  leadRef.status = "idle";
+
+  await f.leadMail.onLeadTurnEnded({ agentId: "peer-gq", outcome: { kind: "completed" }, timeline: [] });
+  assert.equal(
+    f.fake.sent.filter((s) => s.agentId === "peer-gq").length,
+    0,
+    "idle Peer waiting on gate_queued must NEVER be nudged",
+  );
+  assert.equal(
+    readProjectRegistration(f.stateDir, f.slug)?.rotationState,
+    "rotation_pending",
+    "idle Peer on open gate_queued still holds Lead rotation_pending quiet point",
+  );
+
+  // 3. Settling the queued Gate (`claim_reported` -> `gate_started` -> `gate_finished`) releases active work.
+  f.factory.ledger.append({ event: "claim_reported", task: "T-GQ", attempt: 1, sha, agent: "peer-gq" });
+  f.factory.ledger.append({ event: "gate_started", task: "T-GQ", attempt: 1, cmd: "true" });
+  f.factory.ledger.append({ event: "gate_finished", task: "T-GQ", attempt: 1, exit: 0, verdict: "green", sha, note: "" });
+  assert.equal(await f.leadMail.hasActiveWork(), false, "settled Gate releases sleep inhibition");
+});
+

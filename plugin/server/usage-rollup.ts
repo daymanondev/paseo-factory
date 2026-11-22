@@ -406,7 +406,7 @@ function projectsWithSeat(stateDir: string, agentId: string): string[] {
 function lastTaskAgent(factory: Factory, task: string): string | undefined {
   let agentId: string | undefined;
   for (const evt of factory.ledger.eventsFor(task)) {
-    if (evt.event !== "claim_reported" && evt.event !== "meter_written") continue;
+    if (evt.event !== "gate_queued" && evt.event !== "claim_reported" && evt.event !== "meter_written") continue;
     if (typeof evt.agent === "string" && evt.agent.trim() !== "") agentId = evt.agent;
   }
   return agentId;
