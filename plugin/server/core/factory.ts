@@ -327,6 +327,7 @@ export type AdmitClaimResult =
       sha: string;
       contract: ContractSet;
       executionDir: string;
+      logPath: string;
       timeoutMs: number;
       handoff?: PeerHandoffFields;
       mechanical?: "lead_verify";
@@ -510,6 +511,12 @@ export interface Factory {
    * with a rendered Attempt report.
    */
   recordDaemonRestarted(input: { task: string; attempt: number }): ClaimOutcome;
+  /**
+   * Owner cancellation settlement for a `queued` Gate that had not started
+   * execution yet: closes it `verdict: "red"` (`cancelled-by-owner`) with a
+   * rendered Attempt report.
+   */
+  cancelQueuedClaim(input: { task: string; attempt: number; note?: string }): ClaimOutcome;
   /**
    * The Owner accepts one green Attempt (ADR 0002). Green is necessary, not
    * sufficient — this is the only acceptance act in the factory, and it is
@@ -1359,6 +1366,7 @@ export function createFactory(options: FactoryOptions): Factory {
           sha: resolved.full,
           contract,
           executionDir,
+          logPath: join(dataDir, `gate-${attemptEvidenceName(input.task, attempt, contract)}.log`),
           timeoutMs: options.timeoutMs ?? contractTimeoutMs(contract),
           ...(admittedHandoff === undefined ? {} : { handoff: admittedHandoff }),
           ...(mechanical === undefined ? {} : { mechanical }),
@@ -1412,6 +1420,21 @@ export function createFactory(options: FactoryOptions): Factory {
         contract,
         note: "daemon-restarted",
         includeGateStarted: true,
+      });
+    },
+
+    cancelQueuedClaim({ task, attempt, note = "cancelled-by-owner" }) {
+      assertTaskId(task);
+      const contract = this.contractFor(task);
+      if (!contract) throw new FactoryError("unknown-task", `no contract set for task ${task} — register one first`);
+      return settleQueuedAttemptRed({
+        ledger,
+        dataDir,
+        task,
+        attempt,
+        contract,
+        note,
+        includeGateStarted: false,
       });
     },
 
@@ -2082,7 +2105,7 @@ export function createFactory(options: FactoryOptions): Factory {
 
   };
   const asyncOperations = new Set(["claim", "admitClaim", "executeQueuedClaim", "accept"]);
-  const syncOperations = new Set(["setContract", "requestSpawn", "meter", "repoke", "respawn", "needsHuman", "recordDaemonRestarted", "resetProject"]);
+  const syncOperations = new Set(["setContract", "requestSpawn", "meter", "repoke", "respawn", "needsHuman", "recordDaemonRestarted", "cancelQueuedClaim", "resetProject"]);
   const wrappers = new Map<PropertyKey, unknown>();
   return new Proxy(factory, {
     get(target, key, receiver) {
@@ -2298,7 +2321,7 @@ async function finish(
 }
 
 /** V2 evidence belongs to a stable Contract epoch; legacy paths remain usable. */
-function attemptEvidenceName(task: string, attempt: number, contract: ContractSet | undefined): string {
+export function attemptEvidenceName(task: string, attempt: number, contract: Pick<ContractSet, "epoch_id"> | undefined): string {
   const epoch = contract?.epoch_id;
   return epoch === undefined ? `${task}-${attempt}` : `${task}-${createHash("sha256").update(epoch).digest("hex")}-${attempt}`;
 }

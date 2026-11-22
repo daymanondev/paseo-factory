@@ -11,7 +11,7 @@ import type { HandoffProgress } from "../shared/handoff.ts";
  */
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import type { AgentView, PanelNeedsYouItem, PanelOpenDesign, PanelPeerRow, PanelSeatRow, PanelSupervisorCandidateRow, PanelTone, PanelView, PanelProfile, ScopedLaneRef, SeatAllowedAction, ProjectView, TaskView } from "../shared/view.ts";
+import type { AgentView, PanelGateQueueEntry, PanelNeedsYouItem, PanelOpenDesign, PanelPeerRow, PanelSeatRow, PanelSupervisorCandidateRow, PanelTone, PanelView, PanelProfile, ScopedLaneRef, SeatAllowedAction, ProjectView, TaskView } from "../shared/view.ts";
 import { foldProjectUsageSummary, type ProjectUsageFile } from "./core/usage-status.ts";
 import { MAX_ATTEMPTS } from "./core/events.ts";
 import { openDesignBundleReady, readOpenDesignLink } from "./core/open-design/open-design-link-state.ts";
@@ -81,6 +81,7 @@ export interface PanelInput {
   handovers?: readonly string[];
   seatLanes?: Record<"supervisor" | "lead" | "worker", ScopedLaneRef>;
   profile?: PanelProfile;
+  gateQueue?: readonly PanelGateQueueEntry[];
   now: number;
 }
 
@@ -230,12 +231,20 @@ function supervisorCandidateRows(input: PanelInput): PanelSupervisorCandidateRow
 /** Live Peers: task-bound agents that are neither seat, whose Task is still open. */
 function peerRows(input: PanelInput): PanelPeerRow[] {
   const taskByName = new Map(input.tasks.map((task) => [task.task, task]));
+  const queueByTask = new Map<string, PanelGateQueueEntry>();
+  for (const entry of input.gateQueue ?? []) {
+    const existing = queueByTask.get(entry.task);
+    if (existing === undefined || (existing.status !== "running" && entry.status === "running")) {
+      queueByTask.set(entry.task, entry);
+    }
+  }
   const rows: PanelPeerRow[] = [];
   for (const agent of input.agents) {
     if (agent.seat === "lead" || agent.seat === "supervisor" || agent.id === input.supervisor?.id || agent.id === input.lead?.id || agent.task === null) continue;
     const task = taskByName.get(agent.task);
     if (task !== undefined && (task.status === "accepted" || task.status === "closed")) continue;
     const status = statusOf(agent);
+    const matchedQueue = queueByTask.get(agent.task);
 
     rows.push({
       ...seatFields(agent, input.seatLanes?.worker ?? fallbackLane, input.handoffs?.[`peer:${agent.task}`], input.handovers?.includes(`peer:${agent.task}`)),
@@ -249,6 +258,7 @@ function peerRows(input: PanelInput): PanelPeerRow[] {
       tone: status.tone,
       model: modelOf(agent),
       ...(agent.backgroundWorkCount === undefined ? {} : { backgroundWorkCount: agent.backgroundWorkCount }),
+      ...(matchedQueue === undefined ? {} : { gateQueue: matchedQueue }),
     });
   }
   return rows;
@@ -454,5 +464,6 @@ export function foldPanel(input: PanelInput): PanelView {
     },
     openDesign: openDesignOf(input.openDesign),
     onboarding: null,
+    ...(input.gateQueue === undefined ? {} : { gateQueue: [...input.gateQueue] }),
   };
 }

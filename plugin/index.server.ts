@@ -424,7 +424,7 @@ export default function contribute(server: PluginServerContext) {
     registry,
     log,
     onStateChange: () => {
-      stateHub.emit("gate_queue");
+      stateHub.emit("gate.queue");
       void refreshSleepInhibition();
     },
     onSettled: async ({ item, outcome }) => {

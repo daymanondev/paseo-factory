@@ -1641,9 +1641,9 @@ if (command === "status") {
     const events = readOne(join(stateDir, "projects", slug, "ledger.jsonl"));
     if (events.length === 0) {
       console.log(`factory: no tasks yet (ledger: ${join(stateDir, "projects", slug, "ledger.jsonl")})`);
-      process.exit(0);
+    } else {
+      for (const line of taskStatusLines(events)) console.log(line);
     }
-    for (const line of taskStatusLines(events)) console.log(line);
   } else {
     const streams = registered
       .map((slug) => ({ slug, events: readOne(join(stateDir, "projects", slug, "ledger.jsonl")) }))
@@ -1653,9 +1653,9 @@ if (command === "status") {
       const events = readOne(ledgerPath);
       if (events.length === 0) {
         console.log(`factory: no tasks yet (ledger: ${ledgerPath})`);
-        process.exit(0);
+      } else {
+        for (const line of taskStatusLines(events)) console.log(line);
       }
-      for (const line of taskStatusLines(events)) console.log(line);
     } else {
       // The "All projects" aggregate: each row attributed with its Project's
       // slug — two Projects may share a Task id (`T-01` in each).
@@ -1674,6 +1674,14 @@ if (command === "status") {
     console.log("");
     console.log("Token Usage");
     for (const line of usageLines) console.log(line);
+  }
+  // Machine-wide Gate queue summary (ADR 0068): read directly from
+  // `<stateDir>/gate-queue.json` without a spool round trip.
+  const { statusGateQueueLines } = await import("./gate-queue-status.mjs");
+  const gateQueueLines = statusGateQueueLines(stateDir);
+  if (gateQueueLines.length > 0) {
+    console.log("");
+    for (const line of gateQueueLines) console.log(line);
   }
   process.exit(0);
 }

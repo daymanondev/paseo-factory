@@ -2,40 +2,22 @@ import { realpathSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import type { PeerHandoffFields } from "./core/events.ts";
 import type { ClaimOutcome, Factory } from "./core/factory.ts";
-import { atomicJson, readOptionalJson } from "./core/json-store.ts";
+import {
+  GATE_QUEUE_FILENAME,
+  GATE_QUEUE_SCHEMA_VERSION,
+  cloneGateQueueItem as cloneItem,
+  normalizeGateQueueConcurrency as normalizeConcurrency,
+  readPersistedGateQueue as readPersistedQueue,
+  snapshotFromGateQueueFile as snapshotFromFile,
+  type GateQueueFile,
+  type GateQueueItem,
+  type GateQueueSnapshot,
+} from "./core/gate-queue-status.ts";
+import { atomicJson } from "./core/json-store.ts";
 import { projectStateDir } from "./core/project.ts";
 import type { FactoryRegistry } from "./projects.ts";
 
-export const GATE_QUEUE_SCHEMA_VERSION = 1 as const;
-export const GATE_QUEUE_FILENAME = "gate-queue.json";
-
-export interface GateQueueItem {
-  id: string;
-  projectSlug: string;
-  useRootFactory?: boolean;
-  task: string;
-  attempt: number;
-  sha: string;
-  cmd: string;
-  cwd: string;
-  artifact?: string;
-  timeoutMs: number;
-  agent?: string;
-  handoff?: PeerHandoffFields;
-  mechanical?: "lead_verify";
-  enqueuedAt: string;
-  startedAt?: string;
-  status: "queued" | "running";
-  pid?: number;
-}
-
-export interface GateQueueFile {
-  schemaVersion: typeof GATE_QUEUE_SCHEMA_VERSION;
-  paused: boolean;
-  pausedAt?: string;
-  concurrency: number;
-  items: GateQueueItem[];
-}
+export { GATE_QUEUE_FILENAME, GATE_QUEUE_SCHEMA_VERSION, type GateQueueFile, type GateQueueItem, type GateQueueSnapshot };
 
 export interface GateQueueAheadEntry {
   id: string;
@@ -55,6 +37,7 @@ export interface GateQueueEnqueueInput {
   cmd: string;
   cwd: string;
   artifact?: string;
+  logPath?: string;
   timeoutMs: number;
   agent?: string;
   handoff?: PeerHandoffFields;
@@ -66,14 +49,6 @@ export interface GateQueueEnqueueResult {
   position: number;
   ahead: GateQueueAheadEntry[];
   paused: boolean;
-}
-
-export interface GateQueueSnapshot {
-  paused: boolean;
-  pausedAt?: string;
-  concurrency: number;
-  running: GateQueueItem[];
-  queued: GateQueueItem[];
 }
 
 export interface GateQueueSettledContext {
@@ -117,20 +92,52 @@ export interface GateQueue {
   stop(): void;
 }
 
-function normalizeConcurrency(value: unknown, fallback = 1): number {
-  if (typeof value !== "number" || !Number.isInteger(value) || value < 1) return fallback;
-  return value;
-}
-
-function cloneItem(item: GateQueueItem): GateQueueItem {
-  return {
-    ...item,
-    ...(item.handoff === undefined ? {} : { handoff: { ...item.handoff } }),
-  };
-}
-
 function randomQueueId(): string {
   return `gq-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
+}
+
+interface AbortControllerLike {
+  readonly signal: AbortSignal;
+  abort(reason?: unknown): void;
+}
+
+/**
+ * Uses native `AbortController` at runtime, falling back to a minimal
+ * structural signal when evaluated inside restricted VM test sandboxes.
+ */
+function makeAbortController(): AbortControllerLike {
+  if (typeof AbortController === "function") return new AbortController();
+  const listeners = new Set<() => void>();
+  let aborted = false;
+  let reason: unknown = undefined;
+  const signal = {
+    get aborted() {
+      return aborted;
+    },
+    get reason() {
+      return reason;
+    },
+    addEventListener(type: string, listener: (() => void) | { handleEvent?: () => void }) {
+      if (type !== "abort" || aborted) return;
+      const fn = typeof listener === "function" ? listener : () => listener.handleEvent?.();
+      listeners.add(fn);
+    },
+    removeEventListener(type: string, listener: (() => void) | { handleEvent?: () => void }) {
+      if (type !== "abort") return;
+      if (typeof listener === "function") listeners.delete(listener);
+    },
+  } as unknown as AbortSignal;
+  return {
+    signal,
+    abort(nextReason?: unknown) {
+      if (aborted) return;
+      aborted = true;
+      reason = nextReason;
+      const snapshot = [...listeners];
+      listeners.clear();
+      for (const fn of snapshot) fn();
+    },
+  };
 }
 
 function realpathSafe(path: string): string {
@@ -166,63 +173,6 @@ export function gateItemBelongsToProject(
   return isPathInsideDir(item.cwd, root) || isPathInsideDir(item.cwd, worktreesDir);
 }
 
-function isValidPersistedItem(raw: unknown): raw is GateQueueItem {
-  if (typeof raw !== "object" || raw === null) return false;
-  const obj = raw as Record<string, unknown>;
-  return (
-    typeof obj.id === "string" &&
-    obj.id.length > 0 &&
-    typeof obj.projectSlug === "string" &&
-    obj.projectSlug.length > 0 &&
-    typeof obj.task === "string" &&
-    obj.task.length > 0 &&
-    typeof obj.attempt === "number" &&
-    Number.isInteger(obj.attempt) &&
-    obj.attempt >= 1 &&
-    typeof obj.sha === "string" &&
-    typeof obj.cmd === "string" &&
-    typeof obj.cwd === "string" &&
-    typeof obj.timeoutMs === "number" &&
-    typeof obj.enqueuedAt === "string" &&
-    (obj.status === "queued" || obj.status === "running")
-  );
-}
-
-function readPersistedQueue(path: string, fallbackConcurrency: number): GateQueueFile | undefined {
-  let raw: unknown;
-  try {
-    raw = readOptionalJson(path, "invalid-gate-queue");
-  } catch {
-    return undefined;
-  }
-  if (raw === undefined || typeof raw !== "object" || raw === null) return undefined;
-  const obj = raw as Record<string, unknown>;
-  const paused = obj.paused === true;
-  const pausedAt = paused && typeof obj.pausedAt === "string" ? obj.pausedAt : undefined;
-  const concurrency = normalizeConcurrency(obj.concurrency, fallbackConcurrency);
-  const rawItems = Array.isArray(obj.items) ? obj.items : [];
-  const items = rawItems.filter(isValidPersistedItem).map((item) => cloneItem(item));
-  return {
-    schemaVersion: GATE_QUEUE_SCHEMA_VERSION,
-    paused,
-    ...(pausedAt === undefined ? {} : { pausedAt }),
-    concurrency,
-    items,
-  };
-}
-
-function snapshotFromFile(file: GateQueueFile): GateQueueSnapshot {
-  const running = file.items.filter((item) => item.status === "running").map(cloneItem);
-  const queued = file.items.filter((item) => item.status === "queued").map(cloneItem);
-  return {
-    paused: file.paused,
-    ...(file.pausedAt === undefined ? {} : { pausedAt: file.pausedAt }),
-    concurrency: file.concurrency,
-    running,
-    queued,
-  };
-}
-
 /**
  * Persisted machine-wide FIFO Gate queue (ADR 0068).
  *
@@ -247,12 +197,12 @@ export function createGateQueue(options: GateQueueOptions): GateQueue {
 
   let stopped = false;
   let recovered = false;
-  const shutdownController = new AbortController();
+  const shutdownController = makeAbortController();
   const activeRuns = new Map<
     string,
     {
       item: GateQueueItem;
-      controller: AbortController;
+      controller: AbortControllerLike;
       cancelNote?: string;
       suppressSettled?: boolean;
       completion: Promise<void>;
@@ -291,10 +241,10 @@ export function createGateQueue(options: GateQueueOptions): GateQueue {
   };
 
   const startItem = (item: GateQueueItem): void => {
-    const controller = new AbortController();
+    const controller = makeAbortController();
     const runEntry: {
       item: GateQueueItem;
-      controller: AbortController;
+      controller: AbortControllerLike;
       cancelNote?: string;
       suppressSettled?: boolean;
       completion: Promise<void>;
@@ -414,6 +364,7 @@ export function createGateQueue(options: GateQueueOptions): GateQueue {
         cmd: input.cmd,
         cwd: input.cwd,
         ...(input.artifact === undefined || input.artifact.trim() === "" ? {} : { artifact: input.artifact }),
+        ...(input.logPath === undefined || input.logPath.trim() === "" ? {} : { logPath: input.logPath }),
         timeoutMs: input.timeoutMs,
         ...(input.agent === undefined || input.agent.trim() === "" ? {} : { agent: input.agent }),
         ...(input.handoff === undefined ? {} : { handoff: { ...input.handoff } }),
@@ -488,15 +439,15 @@ export function createGateQueue(options: GateQueueOptions): GateQueue {
       return removed.length > 0;
     },
 
-    async cancelMatching(predicate, options = "cancelled-by-owner") {
-      const note = typeof options === "string" ? options : (options.note ?? "cancelled-by-owner");
-      const suppressSettled = typeof options === "object" && options.suppressSettled === true;
+    async cancelMatching(predicate, cancelOptions = "cancelled-by-owner") {
+      const note = typeof cancelOptions === "string" ? cancelOptions : (cancelOptions.note ?? "cancelled-by-owner");
+      const suppressSettled = typeof cancelOptions === "object" && cancelOptions.suppressSettled === true;
       const matching = state.items.filter((entry) => predicate(cloneItem(entry)));
       if (matching.length === 0) return [];
 
       const cancelled: GateQueueItem[] = [];
       const activeCompletions: Promise<void>[] = [];
-      const toRemoveQueuedIds = new Set<string>();
+      const toRemoveQueued: GateQueueItem[] = [];
 
       for (const item of matching) {
         cancelled.push(cloneItem(item));
@@ -507,14 +458,33 @@ export function createGateQueue(options: GateQueueOptions): GateQueue {
           active.controller.abort(note);
           activeCompletions.push(active.completion);
         } else {
-          toRemoveQueuedIds.add(item.id);
+          toRemoveQueued.push(item);
         }
       }
 
-      if (toRemoveQueuedIds.size > 0) {
-        state.items = state.items.filter((entry) => !toRemoveQueuedIds.has(entry.id));
+      if (toRemoveQueued.length > 0) {
+        const removeIds = new Set(toRemoveQueued.map((item) => item.id));
+        state.items = state.items.filter((entry) => !removeIds.has(entry.id));
         persist();
         emitChange();
+        if (!suppressSettled) {
+          for (const item of toRemoveQueued) {
+            let outcome: ClaimOutcome | undefined;
+            try {
+              const targetFactory = resolveTargetFactory(item);
+              outcome = targetFactory.cancelQueuedClaim({
+                task: item.task,
+                attempt: item.attempt,
+                note,
+              });
+            } catch (err) {
+              options.log?.(`gate-queue: cancelQueuedClaim failed for ${item.projectSlug}/${item.task}#${item.attempt}: ${err instanceof Error ? err.message : String(err)}`);
+            }
+            if (outcome !== undefined) {
+              await notifySettled({ item: cloneItem(item), outcome, restarted: false });
+            }
+          }
+        }
       }
 
       if (activeCompletions.length > 0) {

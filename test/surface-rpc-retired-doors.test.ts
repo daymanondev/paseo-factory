@@ -123,3 +123,19 @@ test("ADR 0066: storeReleaseRead and storeReleaseWrite are registered on the sur
   assert.ok(names.includes("factory.store_release.read"), "factory.store_release.read must be registered");
   assert.ok(names.includes("factory.store_release.write"), "factory.store_release.write must be registered");
 });
+
+test("ADR 0068 (Ticket 05): overview and Gate queue control RPCs are registered while retired doors remain absent", (t) => {
+  const names = registeredMethods(t);
+  for (const expected of [
+    "factory.overview",
+    "factory.gate.queue.cancel",
+    "factory.gate.queue.pause",
+    "factory.gate.queue.resume",
+    "factory.gate.queue.concurrency",
+  ]) {
+    assert.ok(names.includes(expected), `${expected} must be registered`);
+  }
+  for (const retired of ["factory.accept", "factory.lead.start", "factory.retro", "factory.task.detail", "factory.project.add"]) {
+    assert.equal(names.includes(retired), false, `${retired} must remain retired`);
+  }
+});

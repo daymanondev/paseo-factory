@@ -318,3 +318,56 @@ test("seatsDirectory degrades cleanly when daemon listing fails and all seats ar
   assert.equal(entry.backgroundWorkCount, 0);
   assert.equal(workspaceRowBadgePlan("ws-root", reply.projects), null);
 });
+
+test("seatsDirectory projects Gate queue status, position, and paused state from persisted gate-queue.json", async (t) => {
+  const { stateDir, project, handlers } = setupDirectorySurface(t, (p) => [
+    { id: "lead-1", status: "idle", labels: { seat: "lead", project: p.slug }, cwd: p.root, workspaceId: "ws-root" },
+  ]);
+
+  writeFileSync(
+    join(stateDir, "gate-queue.json"),
+    JSON.stringify({
+      schemaVersion: 1,
+      paused: true,
+      pausedAt: "2026-11-22T10:00:00.000Z",
+      concurrency: 1,
+      items: [
+        {
+          id: "gq-other",
+          projectSlug: "other-proj-111111",
+          task: "T-OTHER",
+          attempt: 1,
+          sha: "1111111",
+          cmd: "npm test",
+          cwd: "/tmp/other",
+          timeoutMs: 900_000,
+          enqueuedAt: "2026-11-22T10:00:00.000Z",
+          startedAt: "2026-11-22T10:00:01.000Z",
+          status: "running",
+        },
+        {
+          id: "gq-this",
+          projectSlug: project.slug,
+          task: "T-WAIT",
+          attempt: 2,
+          sha: "2222222",
+          cmd: "npm test",
+          cwd: project.root,
+          timeoutMs: 900_000,
+          enqueuedAt: "2026-11-22T10:00:05.000Z",
+          status: "queued",
+        },
+      ],
+    }),
+  );
+
+  const reply = await handlers.seatsDirectory({});
+  assert.ok(reply.ok);
+  const parsed = seatsDirectoryRpc.output.parse(reply);
+  assert.ok(parsed.ok);
+  assert.deepEqual(parsed.gateQueue, { paused: true, concurrency: 1, runningCount: 1, queuedCount: 1 });
+  const entry = parsed.projects.find((p) => p.slug === project.slug)!;
+  assert.equal(entry.gateQueueStatus, "queued");
+  assert.equal(entry.gateQueuePosition, 2);
+  assert.equal(entry.gateQueuePaused, true);
+});

@@ -1261,3 +1261,221 @@ test("async GREEN wakes Lead immediately without false driverWavesInFlight suppr
     await h.gateQueue.cancelItem(clOther.queueId, { suppressSettled: true });
   }
 });
+
+test("Seam 1 (Ticket 05): Pause/Resume & concurrency persist across restart, empty gate bypasses Pause, and Owner Cancel settles both queued and running Gates red (cancelled-by-owner) and wakes Lead", async (t) => {
+  const dir = makeTempDir("gate-queue-controls-");
+  disposeDir(t, dir);
+  const stateDir = join(dir, "state");
+  const rootA = join(dir, "proj-a");
+  const rootB = join(dir, "proj-b");
+  mkdirSync(rootA, { recursive: true });
+  mkdirSync(rootB, { recursive: true });
+  writeFileSync(join(rootA, "README.md"), "a\n");
+  writeFileSync(join(rootB, "README.md"), "b\n");
+  const shaA = gitCommitAll(rootA, "init-a");
+  const shaB = gitCommitAll(rootB, "init-b");
+  const regA = ensureProjectRegistered(stateDir, rootA);
+  const regB = ensureProjectRegistered(stateDir, rootB);
+  assert.ok(regA.ok && regB.ok);
+
+  const registry1 = createFactoryRegistry({ stateDir });
+  const fA1 = registry1.factoryForProject(regA.slug);
+  const fB1 = registry1.factoryForProject(regB.slug);
+  const fake = makeFakeDaemon([
+    { id: "lead-a", status: "idle", labels: { seat: "lead", project: regA.slug }, cwd: regA.root },
+    { id: "lead-b", status: "idle", labels: { seat: "lead", project: regB.slug }, cwd: regB.root },
+    { id: "peer-a1", status: "idle", labels: { seat: "agent", project: regA.slug, task: "TA-CANCEL-Q" }, cwd: regA.root },
+    { id: "peer-b1", status: "idle", labels: { seat: "agent", project: regB.slug, task: "TB-RUN-CANCEL" }, cwd: regB.root },
+  ]);
+  writeProjectRegistration(stateDir, regA.slug, { root: regA.root, lead: "lead-a" });
+  writeProjectRegistration(stateDir, regB.slug, { root: regB.root, lead: "lead-b" });
+
+  const surface1 = createSurfaceHandlers({ factory: registry1.root, registry: registry1, stateDir, home: dir, daemon: fake.daemon });
+  const leadMail1 = createLeadMailRuntime({
+    factory: registry1.root,
+    registry: registry1,
+    stateDir,
+    daemon: fake.daemon,
+    ensureLead: (i) => surface1.leadEnsure(i),
+    retireLead: (i) => surface1.leadRotate(i),
+  });
+  let stateChanges1 = 0;
+  const q1 = createGateQueue({
+    stateDir,
+    factory: registry1.root,
+    registry: registry1,
+    onStateChange: () => {
+      stateChanges1 += 1;
+    },
+    onSettled: async ({ item, outcome }) => {
+      await settleClaimOutcome({
+        factory: registry1.factoryForProject(item.projectSlug),
+        task: item.task,
+        agent: item.agent,
+        outcome,
+        sha: item.sha,
+        workspace: item.cwd,
+        peerMail: leadMail1.notifyPeer,
+        daemon: fake.daemon,
+        projectSlug: item.projectSlug,
+      });
+    },
+  });
+
+  // 1. Concurrency validation (>= 1 integer).
+  assert.throws(() => q1.setConcurrency(0), /integer >= 1/);
+  assert.throws(() => q1.setConcurrency(-2), /integer >= 1/);
+  assert.throws(() => q1.setConcurrency(1.5), /integer >= 1/);
+  assert.throws(() => q1.setConcurrency(Number.NaN), /integer >= 1/);
+  assert.equal(q1.snapshot().concurrency, 1);
+
+  assert.equal(q1.setConcurrency(2).concurrency, 2);
+  const pausedSnap = q1.pause();
+  assert.equal(pausedSnap.paused, true);
+  assert.ok(pausedSnap.pausedAt);
+  assert.ok(stateChanges1 >= 2, "concurrency update and pause emit onStateChange");
+
+  // 2. While paused: shell Gates enqueue FIFO without starting; read-only empty gate bypasses pause immediately.
+  fA1.setContract({ task: "TA-CANCEL-Q", workspace: regA.root, gate: "echo never-ran", artifact: "README.md", scope: ["s1"] });
+  fA1.setContract({ task: "TA-RESUME-1", workspace: regA.root, gate: `${JSON.stringify(process.execPath)} -e "setTimeout(() => process.exit(0), 60)"`, artifact: "README.md", scope: ["s2"] });
+  fB1.setContract({ task: "TB-RESUME-2", workspace: regB.root, gate: `${JSON.stringify(process.execPath)} -e "setTimeout(() => process.exit(0), 60)"`, artifact: "README.md", scope: ["s1"] });
+  fB1.setContract({ task: "TB-SCOUT", workspace: regB.root, gate: "", disposition: "scout" });
+
+  const cQ1 = await handleSpoolRequest(registry1.root, { id: "c-q1", kind: "claim", task: "TA-CANCEL-Q", sha: shaA, handoff, agent: "peer-a1", projectSlug: regA.slug }, { gateQueue: q1, peerMail: leadMail1.notifyPeer, daemon: fake.daemon }, registry1);
+  const cQ2 = await handleSpoolRequest(registry1.root, { id: "c-q2", kind: "claim", task: "TA-RESUME-1", sha: shaA, handoff, agent: "peer-a2", projectSlug: regA.slug }, { gateQueue: q1, peerMail: leadMail1.notifyPeer, daemon: fake.daemon }, registry1);
+  const cQ3 = await handleSpoolRequest(registry1.root, { id: "c-q3", kind: "claim", task: "TB-RESUME-2", sha: shaB, handoff, agent: "peer-b2", projectSlug: regB.slug }, { gateQueue: q1, peerMail: leadMail1.notifyPeer, daemon: fake.daemon }, registry1);
+  assert.equal(cQ1.ok && cQ1.status === "queued" && cQ1.paused, true);
+  assert.equal(cQ2.ok && cQ2.status === "queued" && cQ2.position, 2);
+  assert.equal(cQ3.ok && cQ3.status === "queued" && cQ3.position, 3);
+  assert.equal(q1.snapshot().running.length, 0, "paused queue does not start shell Gates");
+  assert.equal(q1.snapshot().queued.length, 3);
+
+  const cEmpty = await handleSpoolRequest(registry1.root, { id: "c-empty", kind: "claim", task: "TB-SCOUT", handoff, agent: "peer-scout", projectSlug: regB.slug }, { gateQueue: q1, peerMail: leadMail1.notifyPeer, daemon: fake.daemon }, registry1);
+  assert.equal(cEmpty.ok, true);
+  if (cEmpty.ok) {
+    assert.equal(cEmpty.status, undefined);
+    assert.equal(cEmpty.verdict, "green");
+  }
+  await until(() => {
+    assert.ok(fake.sent.some((s) => s.agentId === "lead-b" && /Task TB-SCOUT attempt 1 ended GREEN/.test(s.text)));
+  });
+  await leadMail1.onLeadTurnEnded({ agentId: "lead-b", outcome: { kind: "completed" }, turnId: null, timeline: [] });
+
+  // 3. Simulated daemon restart preserves paused: true, concurrency: 2, and queued FIFO items.
+  q1.stop();
+  leadMail1.stop();
+  registry1.stop();
+
+  const registry2 = createFactoryRegistry({ stateDir });
+  const surface2 = createSurfaceHandlers({ factory: registry2.root, registry: registry2, stateDir, home: dir, daemon: fake.daemon });
+  const leadMail2 = createLeadMailRuntime({
+    factory: registry2.root,
+    registry: registry2,
+    stateDir,
+    daemon: fake.daemon,
+    ensureLead: (i) => surface2.leadEnsure(i),
+    retireLead: (i) => surface2.leadRotate(i),
+  });
+  const q2 = createGateQueue({
+    stateDir,
+    factory: registry2.root,
+    registry: registry2,
+    onSettled: async ({ item, outcome }) => {
+      await settleClaimOutcome({
+        factory: registry2.factoryForProject(item.projectSlug),
+        task: item.task,
+        agent: item.agent,
+        outcome,
+        sha: item.sha,
+        workspace: item.cwd,
+        peerMail: leadMail2.notifyPeer,
+        daemon: fake.daemon,
+        projectSlug: item.projectSlug,
+      });
+    },
+  });
+  t.after(() => {
+    q2.stop();
+    leadMail2.stop();
+    registry2.stop();
+  });
+
+  const boot = await q2.startupRecovery();
+  assert.equal(boot.restartedRed.length, 0);
+  assert.equal(boot.resumedCount, 3);
+  assert.equal(q2.snapshot().paused, true, "paused state persists across restart");
+  assert.equal(q2.snapshot().concurrency, 2, "concurrency persists across restart");
+  assert.equal(q2.snapshot().running.length, 0, "queued items do NOT start on boot while paused");
+  assert.deepEqual(q2.snapshot().queued.map((i) => i.task), ["TA-CANCEL-Q", "TA-RESUME-1", "TB-RESUME-2"]);
+
+  // 4. Owner Cancel on a QUEUED Gate removes it, records gate_finished(red, cancelled-by-owner), and wakes Lead (not Peer).
+  const fA2 = registry2.factoryForProject(regA.slug);
+  const fB2 = registry2.factoryForProject(regB.slug);
+  assert.ok(cQ1.ok && cQ1.queueId);
+  const cancelledQueued = await q2.cancelItem(cQ1.queueId!);
+  assert.equal(cancelledQueued, true);
+  assert.deepEqual(q2.snapshot().queued.map((i) => i.task), ["TA-RESUME-1", "TB-RESUME-2"]);
+  const taGate = fA2.ledger.eventsFor("TA-CANCEL-Q").findLast((e) => e.event === "gate_finished");
+  assert.equal(taGate?.event === "gate_finished" && taGate.verdict, "red");
+  assert.equal(taGate?.event === "gate_finished" && taGate.note, "cancelled-by-owner");
+  assert.ok(fA2.ledger.eventsFor("TA-CANCEL-Q").some((e) => e.event === "report_written"));
+  await until(() => {
+    assert.ok(fake.sent.some((s) => s.agentId === "lead-a" && /TA-CANCEL-Q/.test(s.text) && /cancelled-by-owner/.test(s.text)));
+  });
+  assert.equal(fake.sent.filter((s) => s.agentId === "peer-a1").length, 0, "Owner cancel of queued Gate wakes Lead, not Peer");
+
+  // 5. Resume drains remaining queued items FIFO (concurrency = 2 runs both in parallel!).
+  const resumedSnap = q2.resume();
+  assert.equal(resumedSnap.paused, false);
+  await until(() => {
+    assert.ok(fA2.ledger.eventsFor("TA-RESUME-1").some((e) => e.event === "report_written"));
+    assert.ok(fB2.ledger.eventsFor("TB-RESUME-2").some((e) => e.event === "report_written"));
+  });
+  assert.equal(fA2.ledger.eventsFor("TA-RESUME-1").findLast((e) => e.event === "gate_finished")?.verdict, "green");
+  assert.equal(fB2.ledger.eventsFor("TB-RESUME-2").findLast((e) => e.event === "gate_finished")?.verdict, "green");
+  await until(() => {
+    assert.ok(fake.sent.some((s) => s.agentId === "lead-b" && /Task TB-RESUME-2 attempt 1 ended GREEN/.test(s.text)));
+  });
+  await leadMail2.onLeadTurnEnded({ agentId: "lead-b", outcome: { kind: "completed" }, turnId: null, timeline: [] });
+
+  // 6. Owner Cancel on a RUNNING Gate kills -pgid, frees slot immediately for next item, records cancelled-by-owner, wakes Lead.
+  q2.setConcurrency(1);
+  const childPidFile = join(dir, "owner-cancel-child.pid");
+  const childScript = join(dir, "owner-cancel-sleep.mjs");
+  writeFileSync(
+    childScript,
+    `
+    import { spawn } from "node:child_process";
+    import { writeFileSync } from "node:fs";
+    const child = spawn(${JSON.stringify(process.execPath)}, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+    writeFileSync(${JSON.stringify(childPidFile)}, String(child.pid));
+    setInterval(() => {}, 1000);
+    `,
+  );
+  fB2.setContract({ task: "TB-RUN-CANCEL", workspace: regB.root, gate: `${JSON.stringify(process.execPath)} ${JSON.stringify(childScript)}`, artifact: "README.md", scope: ["s2"] });
+  fA2.setContract({ task: "TA-AFTER-CANCEL", workspace: regA.root, gate: "echo after-cancel", artifact: "README.md", scope: ["s3"] });
+
+  const cRun = await handleSpoolRequest(registry2.root, { id: "c-run", kind: "claim", task: "TB-RUN-CANCEL", sha: shaB, handoff, agent: "peer-b1", projectSlug: regB.slug }, { gateQueue: q2, peerMail: leadMail2.notifyPeer, daemon: fake.daemon }, registry2);
+  const cAfter = await handleSpoolRequest(registry2.root, { id: "c-after", kind: "claim", task: "TA-AFTER-CANCEL", sha: shaA, handoff, agent: "peer-a3", projectSlug: regA.slug }, { gateQueue: q2, peerMail: leadMail2.notifyPeer, daemon: fake.daemon }, registry2);
+  assert.ok(cRun.ok && cRun.queueId && cAfter.ok);
+  await until(() => {
+    assert.equal(q2.snapshot().running[0]?.task, "TB-RUN-CANCEL");
+    assert.ok(existsSync(childPidFile));
+  });
+  const childPid = Number(readFileSync(childPidFile, "utf8").trim());
+  assert.equal(await q2.cancelItem(cRun.queueId!), true);
+
+  let childAlive = true;
+  try { process.kill(childPid, 0); } catch { childAlive = false; }
+  assert.equal(childAlive, false, "running Gate process group (-pgid) reaped on Owner Cancel");
+
+  const tbGate = fB2.ledger.eventsFor("TB-RUN-CANCEL").findLast((e) => e.event === "gate_finished");
+  assert.equal(tbGate?.event === "gate_finished" && tbGate.verdict, "red");
+  assert.equal(tbGate?.event === "gate_finished" && tbGate.note, "cancelled-by-owner");
+  await until(() => {
+    assert.ok(fake.sent.some((s) => s.agentId === "lead-b" && /Task TB-RUN-CANCEL attempt 1 ended RED/.test(s.text) && /cancelled-by-owner/.test(s.text)));
+    assert.ok(fA2.ledger.eventsFor("TA-AFTER-CANCEL").some((e) => e.event === "report_written"));
+  });
+  assert.equal(fake.sent.filter((s) => s.agentId === "peer-b1").length, 0, "Owner cancel of running Gate wakes Lead, not Peer");
+  assert.equal(fA2.ledger.eventsFor("TA-AFTER-CANCEL").findLast((e) => e.event === "gate_finished")?.verdict, "green");
+});
