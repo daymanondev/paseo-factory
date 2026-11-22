@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.3] - 2026-11-23
+
+**Restore lazy plugin `mcp_config.json` delivery for Antigravity (`agy 1.5.14`) while keeping all other Paseo `0.17.1+` features (live role contracts, dual persistence decoding, lane normalization, `antigravity.paseoTools.enabled = false`).**
+
+### Fixed
+
+- **Avoid `agy 1.5.14` per-session eager MCP tool eviction (`plugin/index.server.ts`, `src/roles-contract.ts`):** Even with Paseo's 65-tool `paseo` MCP disabled, `agy 1.5.14` forces per-session ACP `mcpServers` into eager mode with a strict budget (`status=3`) that still evicts and disables `supervisor_dispatch_lead` (1,683 B), `lead_set_contract` (3,279 B), and `agent_claim` (1,544 B). `contribute()` now retains `~/.gemini/config/plugins/paseo-factory/mcp_config.json` (which `agy` loads in lazy `call_mcp_tool` mode with zero eager-tool budget eviction) on Paseo `>=0.17.1` while keeping `liveRoleContract` (`appendSystemPrompt`), dual persistence decoding, catalog-aware lane normalization, and `agents.providers.antigravity.paseoTools.enabled = false` active.
+
 ## [0.20.2] - 2026-11-23
 
 **Prevent `agent.open.before` `paseo_factory` collision on Paseo `0.17.1+` reloads and default `agents.providers.antigravity.paseoTools.enabled = false`.**

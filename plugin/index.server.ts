@@ -46,14 +46,23 @@ import { migrateLegacyExecutionState } from "./server/core/project-settings.ts";
 // migrateLegacyRootState(stateDir, { projects: Array<{ slug, gitRoot? }> }).
 import { migrateLegacyRootState } from "./server/core/ledger-migration.ts";
 
-const SHELL_VERSION = "0.20.2";
+const SHELL_VERSION = "0.20.3";
 
 const log = (message: string) => console.log(`[${PLUGIN_ID}] ${message}`);
 
 export default function contribute(server: PluginServerContext) {
   // Single synchronous capability gate (ADR 0067): Paseo >=0.17.1 exposes
-  // registerWorktreeManager and supports per-session Antigravity mcpServers.
+  // registerWorktreeManager and live role contracts via agent.open.before
+  // appendSystemPrompt.
   const supportsV0171Host = typeof server.registerWorktreeManager === "function";
+  // Antigravity ACP (`agy 1.5.14`) forces per-session ACP `mcpServers` into
+  // EAGER tool mode with a strict eager-tool context budget (`status=3`) that
+  // evicts and disables `supervisor_dispatch_lead` (1,683 B), `lead_set_contract`
+  // (3,279 B), and `agent_claim` (1,544 B) even with `paseoTools` disabled.
+  // Keep `antigravity` on plugin `~/.gemini/config/plugins/paseo-factory/mcp_config.json`
+  // (Lazy mode via `call_mcp_tool`, zero eager-budget eviction) until `agy`
+  // supports lazy loading for per-session ACP MCP servers.
+  const usePerSessionAgyMcp = false;
   const home = resolvePaseoHome(process.env, homedir());
   const stateDir = stateDirFor(home);
   let pluginDir = pluginDirFor(home);
@@ -67,7 +76,7 @@ export default function contribute(server: PluginServerContext) {
         stateDir,
         userHome,
         ...(activePluginDir === undefined ? {} : { pluginDir: activePluginDir }),
-        perSessionMcp: supportsV0171Host,
+        perSessionMcp: usePerSessionAgyMcp,
       });
     } catch (error) {
       log(`antigravity: could not reconcile plugin bundle — ${error instanceof Error ? error.message : String(error)}`);
@@ -374,7 +383,7 @@ export default function contribute(server: PluginServerContext) {
       try { await syncPeerHelpersBeforeCreate(next, stateDir, userHome); }
       catch { log("helpers: pre-spawn MCP sync failed; cached configuration remains available"); }
       const injected = injectRoleOnCreate(next, stateDir, userHome, {
-        perSessionAgyMcp: supportsV0171Host,
+        perSessionAgyMcp: usePerSessionAgyMcp,
         liveRoleContract: supportsV0171Host,
       });
       if (injected !== undefined) {
@@ -827,7 +836,7 @@ export default function contribute(server: PluginServerContext) {
       // The role identity re-applies on every provider launch (v0.0.14): a
       // seat's or worker's shell can always ask which seat it is.
       const withEnv = injectSessionEnv(next, stateDir, homedir(), {
-        perSessionAgyMcp: supportsV0171Host,
+        perSessionAgyMcp: usePerSessionAgyMcp,
         liveRoleContract: supportsV0171Host,
       });
       // The Supervisor auto-bind door (v0.6.1, ADR 0057 §5): every non-history

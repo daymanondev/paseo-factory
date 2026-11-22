@@ -2802,7 +2802,7 @@ test("ADR 0068 role contracts enforce single writable Peer per Project, serial t
 
 test("Supervisor contract cites both ServerName 'paseo_factory' and 'paseo-factory_paseo_factory' in call_mcp_tool examples", () => {
   const contract = renderRoleContract("supervisor");
-  assert.match(contract, /call_mcp_tool.*ServerName: "paseo_factory".*"paseo-factory_paseo_factory"/);
+  assert.match(contract, /call_mcp_tool.*ServerName: "paseo-factory_paseo_factory".*"paseo_factory"/);
 });
 
 test("injectSessionEnv strips paseo from mcpServers across Factory seats and backfills paseo_factory (+ Peer Helper MCPs) for legacy Antigravity opens when perSessionAgyMcp is true", (t) => {

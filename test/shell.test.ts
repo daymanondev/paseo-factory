@@ -533,10 +533,16 @@ test("contribute gates Antigravity per-session MCP and stale mcp_config.json cle
     const stop = contribute(server);
     t.after(() => stop());
 
-    // Ordinary boot cleans stale mcp_config.json while keeping plugin.json and hooks.json
+    // Ordinary boot refreshes plugin.json, hooks.json, and canonical lazy mcp_config.json
+    // on >=0.17.1 too: agy 1.5.14 loads per-session ACP mcpServers eagerly and evicts
+    // supervisor_dispatch_lead / lead_set_contract / agent_claim under its eager tool budget.
     assert.equal(existsSync(join(agyPluginDir, "plugin.json")), true);
     assert.equal(existsSync(join(agyPluginDir, "hooks.json")), true);
-    assert.equal(existsSync(join(agyPluginDir, "mcp_config.json")), false, "boot cleans stale global mcp_config.json on >=0.17.1");
+    assert.equal(existsSync(join(agyPluginDir, "mcp_config.json")), true, "boot restores canonical lazy mcp_config.json on >=0.17.1");
+    const restoredMcp = JSON.parse(readFileSync(join(agyPluginDir, "mcp_config.json"), "utf8")) as {
+      mcpServers?: { paseo_factory?: { args?: string[] } };
+    };
+    assert.ok(restoredMcp.mcpServers?.paseo_factory !== undefined, "restored mcp_config.json defines paseo_factory");
 
     const createHook = hooks.get("agent.create.before")!;
     const supOut = await createHook(
@@ -546,16 +552,11 @@ test("contribute gates Antigravity per-session MCP and stale mcp_config.json cle
       config: { mcpServers?: Record<string, { args?: string[]; env?: Record<string, string> }>; modeId?: string };
       env?: Record<string, string>;
     };
-    assert.ok(supOut?.config.mcpServers?.paseo_factory !== undefined, "Supervisor receives per-session paseo_factory");
-    assert.equal(supOut.config.mcpServers.paseo_factory.env?.ELECTRON_RUN_AS_NODE, "1");
-    assert.ok(supOut.config.mcpServers.paseo_factory.args?.includes(supOut.env!.PASEO_FACTORY_CORRELATION!));
-    assert.ok(supOut.config.mcpServers.paseo_factory.args?.includes("supervisor"));
-    assert.ok(supOut.config.mcpServers.paseo_factory.args?.includes(slug));
-    assert.ok(supOut.config.mcpServers.paseo_factory.args?.includes(repoDir));
-    assert.equal(supOut.config.mcpServers.docs, undefined, "Supervisor never receives Helper MCPs");
+    assert.equal("mcpServers" in supOut.config, false, "Antigravity omits per-session config.mcpServers and uses lazy plugin mcp_config.json");
+    assert.equal(supOut.env?.PASEO_FACTORY_CONTRACT_MODE, "live", "Supervisor still gets live role contracts on >=0.17.1");
     assert.equal("modeId" in supOut.config, false, "Antigravity keeps modeId unset");
 
-    // agent.open.before strips daemon-injected `paseo` MCP from Antigravity Factory seats
+    // agent.open.before strips daemon-injected `paseo` MCP from Antigravity Factory seats without re-injecting eager paseo_factory
     const openHook = hooks.get("agent.open.before")!;
     const supOpened = await openHook(
       {
@@ -574,17 +575,17 @@ test("contribute gates Antigravity per-session MCP and stale mcp_config.json cle
           env: { ...(supOut.env ?? {}) },
           mcpServers: {
             paseo: { type: "http", url: "http://127.0.0.1:4200/mcp" },
-            paseo_factory: supOut.config.mcpServers.paseo_factory,
           },
         },
       },
       {},
-    ) as { mcpServers?: Record<string, unknown> } | undefined;
+    ) as { mcpServers?: Record<string, unknown>; appendSystemPrompt?: string[] } | undefined;
     assert.ok(supOpened !== undefined);
     assert.equal(supOpened.mcpServers?.paseo, undefined, "agent.open.before strips paseo MCP from Factory Supervisor");
-    assert.ok(supOpened.mcpServers?.paseo_factory !== undefined, "agent.open.before preserves paseo_factory");
+    assert.equal(supOpened.mcpServers?.paseo_factory, undefined, "agent.open.before does not attach eager per-session paseo_factory on Antigravity");
+    assert.ok(Array.isArray(supOpened.appendSystemPrompt) && supOpened.appendSystemPrompt.length > 0, "Supervisor receives live role contract on >=0.17.1");
 
-    // Pre-0.17.1 Antigravity seat resumed on >=0.17.1 backfills paseo_factory (+ Peer Helper MCPs) and strips paseo
+    // Pre-0.17.1 Antigravity seat resumed on >=0.17.1 uses lazy plugin mcp_config.json (no eager per-session backfill) and strips paseo
     const legacyPeerWorktree = join(stateDir, "projects", slug, "worktrees", "T-04-LEGACY");
     mkdirSync(legacyPeerWorktree, { recursive: true });
     const legacyPeerOpened = await openHook(
@@ -611,10 +612,7 @@ test("contribute gates Antigravity per-session MCP and stale mcp_config.json cle
     ) as { mcpServers?: Record<string, { args?: string[]; env?: Record<string, string> }> } | undefined;
     assert.ok(legacyPeerOpened !== undefined);
     assert.equal(legacyPeerOpened.mcpServers?.paseo, undefined, "legacy Antigravity Peer strips paseo");
-    assert.ok(legacyPeerOpened.mcpServers?.paseo_factory !== undefined, "legacy Antigravity Peer backfills paseo_factory");
-    assert.equal(legacyPeerOpened.mcpServers?.paseo_factory?.env?.ELECTRON_RUN_AS_NODE, "1");
-    assert.ok(legacyPeerOpened.mcpServers?.paseo_factory?.args?.includes("T-04-LEGACY"));
-    assert.ok(legacyPeerOpened.mcpServers?.docs !== undefined, "legacy Antigravity Peer backfills Helper MCPs");
+    assert.equal(legacyPeerOpened.mcpServers?.paseo_factory, undefined, "Antigravity Peer uses lazy plugin mcp_config.json");
 
     // Unbound personal Antigravity session keeps daemon-injected `paseo` MCP untouched
     const personalDir = makeTempDir("shell-personal-agy-");
@@ -650,16 +648,10 @@ test("contribute gates Antigravity per-session MCP and stale mcp_config.json cle
       config: { mcpServers?: Record<string, { args?: string[]; env?: Record<string, string> }>; modeId?: string };
       env?: Record<string, string>;
     };
-    assert.ok(peerOut?.config.mcpServers?.paseo_factory !== undefined, "Antigravity Peer receives per-session paseo_factory");
-    assert.equal(peerOut.config.mcpServers.paseo_factory.env?.ELECTRON_RUN_AS_NODE, "1");
-    assert.ok(peerOut.config.mcpServers.paseo_factory.args?.includes(peerOut.env!.PASEO_FACTORY_CORRELATION!));
-    assert.ok(peerOut.config.mcpServers.paseo_factory.args?.includes("agent"));
-    assert.ok(peerOut.config.mcpServers.paseo_factory.args?.includes(slug));
-    assert.ok(peerOut.config.mcpServers.paseo_factory.args?.includes(worktreeDir));
-    assert.ok(peerOut.config.mcpServers.paseo_factory.args?.includes("--task") && peerOut.config.mcpServers.paseo_factory.args?.includes("T-03"));
-    assert.ok(peerOut.config.mcpServers.docs !== undefined, "Antigravity Peer receives enabled Helper MCPs");
+    assert.equal("mcpServers" in peerOut.config, false, "Antigravity Peer uses lazy plugin mcp_config.json");
+    assert.equal(peerOut.env?.PASEO_FACTORY_CONTRACT_MODE, "live", "Antigravity Peer still gets live role contracts on >=0.17.1");
     assert.equal("modeId" in peerOut.config, false);
-    assert.equal(existsSync(join(agyPluginDir, "mcp_config.json")), false);
+    assert.equal(existsSync(join(agyPluginDir, "mcp_config.json")), true);
   }
 
   // 2. <0.17.1 host (no registerWorktreeManager): fails closed to global mcp_config.json
