@@ -1129,3 +1129,38 @@ test("W13: pill labels track every active handoff phase, including substitute ha
   const plans = pillPlans(states.map((state, i) => ({ role: "lead", workspaceId: "root", agentId: `agent-${i}`, handoffState: state } as SeatDirectoryEntry)));
   assert.deepEqual(plans.map(plan => plan.label), ["lead · handing off", "lead · handing off", "lead · handing off", "lead · handing off", "lead", "lead", "lead"]);
 });
+
+test("ADR 0068 (Tickets 06–07): all 8 Factory overview & Gate queue E2E hooks are present and RPC hooks stay out of pure presentation components", () => {
+  const entries = read("plugin/client/factory/entries.tsx");
+  const overviewScreen = read("plugin/client/factory/overview-screen.tsx");
+  const projectPanel = read("plugin/client/factory/project-panel.tsx");
+  const shell = read("plugin/client/factory/shell.tsx");
+
+  const combined = `${entries}\n${overviewScreen}\n${projectPanel}`;
+  for (const hook of [
+    "factory-sidebar-overview-entry",
+    "factory-overview-screen",
+    "factory-overview-gate-queue",
+    "factory-overview-projects-list",
+    "factory-overview-onboard-button",
+    "factory-team-gate-queue-pill",
+    "factory-queue-pause-toggle",
+    "factory-queue-cancel-",
+  ]) {
+    assert.ok(combined.includes(hook), `client exposes E2E hook ${hook}`);
+  }
+
+  // Presentational boundary: FactoryOverviewView (before OverviewScreen) and project-panel.tsx never call useRpc
+  const viewOnlySlice = overviewScreen.slice(
+    overviewScreen.indexOf("export function FactoryOverviewView("),
+    overviewScreen.indexOf("/** Live desktop-only"),
+  );
+  assert.ok(!viewOnlySlice.includes("useRpc"), "FactoryOverviewView remains purely presentational");
+  assert.ok(!projectPanel.includes("useRpc"), "project-panel.tsx remains purely presentational");
+
+  // OverviewScreen owns overview + queue write RPCs; FactoryShell owns gateQueueCancel
+  for (const rpc of ["overview", "gateQueuePause", "gateQueueResume", "gateQueueCancel"]) {
+    assert.match(overviewScreen, new RegExp(`useRpc\\(${rpc}\\)`), `OverviewScreen binds useRpc(${rpc})`);
+  }
+  assert.match(shell, /useRpc\(gateQueueCancel\)/, "FactoryShell binds useRpc(gateQueueCancel)");
+});

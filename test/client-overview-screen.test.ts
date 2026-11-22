@@ -370,10 +370,13 @@ test("FactoryOverviewView renders empty Gate queue and green/red latestGate stat
       theme: testTheme,
       view: idleView,
       now: Date.parse("2026-11-22T10:00:43.000Z"),
+      onTogglePause: () => {},
     }),
   );
 
   assert.match(html, /No Gates running or queued\./);
+  assert.ok(html.includes('data-testid="factory-queue-pause-toggle"'), "empty queue still exposes Pause queue toggle");
+  assert.match(html, /Pause queue/);
   assert.match(html, /Gate green · T-1 #1 · 5m ago/);
   assert.match(html, /Gate red · T-2 #3 · 10m ago/);
 });
@@ -730,6 +733,329 @@ test("OverviewScreen mounts under a RN-like window lacking addEventListener and 
       await act(() => root.unmount());
       delete g.__overviewTestRpc;
       delete g.__overviewTestUseSubscription;
+    }
+  });
+});
+
+test("OverviewScreen Pause / Resume queue toggle tracks in-flight pending state, prevents duplicate clicks, updates live queue state, and surfaces/clears inline errors", async () => {
+  const { OverviewScreen } = await loadOverviewModule("plugin/client/factory/overview-screen.tsx", { platformOs: "web" });
+  const { createElement } = await import("react");
+
+  let currentOverview = makeOverviewFixture();
+  const rpcCalls: Array<{ name: string; input: unknown }> = [];
+  let deferredPause: { resolve: (val: unknown) => void; reject: (err: unknown) => void } | null = null;
+  let deferredResume: { resolve: (val: unknown) => void; reject: (err: unknown) => void } | null = null;
+  let nextPauseReply: unknown = null;
+
+  const g = globalThis as Record<string, any>;
+  g.__overviewTestToasts = [];
+  g.__overviewTestUseSubscription = () => ({ status: "live" });
+  g.__overviewTestRpc = async (name: string, input: unknown) => {
+    rpcCalls.push({ name, input });
+    if (name === "factory.overview") return { ok: true, ...structuredClone(currentOverview) };
+    if (name === "factory.gate.queue.pause") {
+      if (deferredPause !== null) {
+        return await new Promise((resolve, reject) => {
+          deferredPause = { resolve, reject };
+        });
+      }
+      if (nextPauseReply !== null) {
+        const reply = nextPauseReply;
+        nextPauseReply = null;
+        if (reply instanceof Error) throw reply;
+        return reply;
+      }
+      currentOverview = {
+        ...currentOverview,
+        gateQueue: { ...currentOverview.gateQueue, paused: true, pausedAt: "2026-11-22T10:02:00.000Z" },
+      };
+      return { ok: true, gateQueue: structuredClone(currentOverview.gateQueue) };
+    }
+    if (name === "factory.gate.queue.resume") {
+      if (deferredResume !== null) {
+        return await new Promise((resolve, reject) => {
+          deferredResume = { resolve, reject };
+        });
+      }
+      currentOverview = {
+        ...currentOverview,
+        gateQueue: { ...currentOverview.gateQueue, paused: false, pausedAt: null },
+      };
+      return { ok: true, gateQueue: structuredClone(currentOverview.gateQueue) };
+    }
+    return { ok: false, code: "unexpected", error: `unexpected ${name}` };
+  };
+
+  await mountDom(async (createRoot, container, act) => {
+    const root = createRoot(container);
+    const pauseBtn = () => container.querySelector('[data-testid="factory-queue-pause-toggle"]') as HTMLButtonElement | null;
+    const queueSection = () => container.querySelector('[data-testid="factory-overview-gate-queue"]') as HTMLElement | null;
+    const queueError = () => container.querySelector('[data-testid="factory-overview-gate-queue-error"]') as HTMLElement | null;
+
+    try {
+      await act(async () => {
+        root.render(
+          createElement(OverviewScreen, {
+            theme: testTheme,
+            host: { id: "host-1", label: "Local" },
+            layout: { compact: false, platform: "web" },
+            params: {},
+          }),
+        );
+        await new Promise<void>((r) => setTimeout(r, 15));
+      });
+
+      assert.ok(pauseBtn(), "renders factory-queue-pause-toggle");
+      assert.equal(pauseBtn()!.textContent, "Pause queue");
+      assert.equal(pauseBtn()!.disabled, false);
+
+      // 1. Pause with deferred RPC: shows Pausing..., disables button, ignores duplicate click
+      let resolvePause!: (val: unknown) => void;
+      deferredPause = { resolve: () => {}, reject: () => {} };
+      const origRpc = g.__overviewTestRpc;
+      g.__overviewTestRpc = async (name: string, input: unknown) => {
+        if (name === "factory.gate.queue.pause" && deferredPause !== null) {
+          rpcCalls.push({ name, input });
+          return await new Promise((resolve) => {
+            resolvePause = resolve;
+          });
+        }
+        return origRpc(name, input);
+      };
+
+      await act(async () => {
+        pauseBtn()!.click();
+      });
+      assert.equal(pauseBtn()!.disabled, true, "disables pause toggle while Pausing is in flight");
+      assert.match(pauseBtn()!.textContent ?? "", /Pausing\.\.\./);
+      await act(async () => {
+        pauseBtn()!.click();
+      });
+      assert.equal(rpcCalls.filter((c) => c.name === "factory.gate.queue.pause").length, 1, "ignores duplicate click while in flight");
+
+      // Confirm pause: updates immediately to paused + triggers overview refresh
+      deferredPause = null;
+      const pausedQueue = { ...currentOverview.gateQueue, paused: true, pausedAt: "2026-11-22T10:02:00.000Z" };
+      currentOverview = { ...currentOverview, gateQueue: pausedQueue };
+      const overviewsBeforeConfirm = rpcCalls.filter((c) => c.name === "factory.overview").length;
+      await act(async () => {
+        resolvePause({ ok: true, gateQueue: pausedQueue });
+        await new Promise<void>((r) => setTimeout(r, 15));
+      });
+
+      assert.equal(pauseBtn()!.disabled, false);
+      assert.equal(pauseBtn()!.textContent, "Resume queue");
+      assert.ok(container.querySelector('[data-testid="factory-overview-gate-queue-paused"]'), "paused badge renders");
+      assert.ok(rpcCalls.filter((c) => c.name === "factory.overview").length > overviewsBeforeConfirm, "triggers overview refresh after pause");
+
+      // 2. Resume with deferred RPC: shows Resuming..., disables button, returns to Pause queue
+      let resolveResume!: (val: unknown) => void;
+      deferredResume = { resolve: () => {}, reject: () => {} };
+      g.__overviewTestRpc = async (name: string, input: unknown) => {
+        if (name === "factory.gate.queue.resume" && deferredResume !== null) {
+          rpcCalls.push({ name, input });
+          return await new Promise((resolve) => {
+            resolveResume = resolve;
+          });
+        }
+        return origRpc(name, input);
+      };
+
+      await act(async () => {
+        pauseBtn()!.click();
+      });
+      assert.equal(pauseBtn()!.disabled, true);
+      assert.match(pauseBtn()!.textContent ?? "", /Resuming\.\.\./);
+
+      deferredResume = null;
+      const resumedQueue = { ...currentOverview.gateQueue, paused: false, pausedAt: null };
+      currentOverview = { ...currentOverview, gateQueue: resumedQueue };
+      await act(async () => {
+        resolveResume({ ok: true, gateQueue: resumedQueue });
+        await new Promise<void>((r) => setTimeout(r, 15));
+      });
+
+      assert.equal(pauseBtn()!.disabled, false);
+      assert.equal(pauseBtn()!.textContent, "Pause queue");
+      assert.equal(container.querySelector('[data-testid="factory-overview-gate-queue-paused"]'), null);
+
+      // 3. Failure ({ ok: false, error }) surfaces inline error in Gate queue section; retry clears it
+      g.__overviewTestRpc = origRpc;
+      nextPauseReply = { ok: false, code: "gate-queue-unavailable", error: "Gate queue is not active on this server" };
+      await act(async () => {
+        pauseBtn()!.click();
+        await new Promise<void>((r) => setTimeout(r, 15));
+      });
+      assert.equal(pauseBtn()!.textContent, "Pause queue");
+      assert.equal(pauseBtn()!.disabled, false);
+      assert.ok(queueError(), "renders inline Gate queue error");
+      assert.match(queueSection()?.textContent ?? "", /Gate queue is not active on this server/);
+
+      // Retry succeeds and clears inline error
+      await act(async () => {
+        pauseBtn()!.click();
+        await new Promise<void>((r) => setTimeout(r, 15));
+      });
+      assert.equal(queueError(), null, "successful retry clears inline error");
+      assert.equal(pauseBtn()!.textContent, "Resume queue");
+
+      // 4. Thrown rejection surfaces error inline cleanly
+      // Reset back to unpaused first via resume
+      await act(async () => {
+        pauseBtn()!.click();
+        await new Promise<void>((r) => setTimeout(r, 15));
+      });
+      assert.equal(pauseBtn()!.textContent, "Pause queue");
+      nextPauseReply = new Error("Daemon unreachable");
+      await act(async () => {
+        pauseBtn()!.click();
+        await new Promise<void>((r) => setTimeout(r, 15));
+      });
+      assert.equal(pauseBtn()!.disabled, false);
+      assert.match(queueError()?.textContent ?? "", /Daemon unreachable/);
+    } finally {
+      await act(() => root.unmount());
+      delete g.__overviewTestToasts;
+      delete g.__overviewTestUseSubscription;
+      delete g.__overviewTestRpc;
+    }
+  });
+});
+
+test("OverviewScreen Cancel buttons on running and queued Gate rows track per-item pending state, update live queue state, and surface/clear inline errors", async () => {
+  const { OverviewScreen } = await loadOverviewModule("plugin/client/factory/overview-screen.tsx", { platformOs: "web" });
+  const { createElement } = await import("react");
+
+  let currentOverview = makeOverviewFixture();
+  const rpcCalls: Array<{ name: string; input: unknown }> = [];
+  let deferredCancel: ((input: unknown) => Promise<unknown>) | null = null;
+  let nextCancelReply: unknown = null;
+
+  const g = globalThis as Record<string, any>;
+  g.__overviewTestToasts = [];
+  g.__overviewTestUseSubscription = () => ({ status: "live" });
+  g.__overviewTestRpc = async (name: string, input: unknown) => {
+    rpcCalls.push({ name, input });
+    if (name === "factory.overview") return { ok: true, ...structuredClone(currentOverview) };
+    if (name === "factory.gate.queue.cancel") {
+      if (deferredCancel !== null) return await deferredCancel(input);
+      if (nextCancelReply !== null) {
+        const reply = nextCancelReply;
+        nextCancelReply = null;
+        if (reply instanceof Error) throw reply;
+        return reply;
+      }
+      const targetId = (input as { queueId?: string; id?: string }).queueId ?? (input as { id?: string }).id;
+      currentOverview = {
+        ...currentOverview,
+        gateQueue: {
+          ...currentOverview.gateQueue,
+          running: currentOverview.gateQueue.running.filter((item) => item.id !== targetId),
+          queued: currentOverview.gateQueue.queued
+            .filter((item) => item.id !== targetId)
+            .map((item, idx) => ({ ...item, position: currentOverview.gateQueue.running.filter((r) => r.id !== targetId).length + idx + 1 })),
+        },
+      };
+      return {
+        ok: true,
+        cancelledCount: 1,
+        cancelledIds: [targetId],
+        gateQueue: structuredClone(currentOverview.gateQueue),
+      };
+    }
+    return { ok: false, code: "unexpected", error: `unexpected ${name}` };
+  };
+
+  await mountDom(async (createRoot, container, act) => {
+    const root = createRoot(container);
+    const cancelBtn = (id: string) =>
+      container.querySelector(`[data-testid="factory-queue-cancel-${id}"]`) as HTMLButtonElement | null;
+    const queueError = () => container.querySelector('[data-testid="factory-overview-gate-queue-error"]') as HTMLElement | null;
+
+    try {
+      await act(async () => {
+        root.render(
+          createElement(OverviewScreen, {
+            theme: testTheme,
+            host: { id: "host-1", label: "Local" },
+            layout: { compact: false, platform: "web" },
+            params: {},
+          }),
+        );
+        await new Promise<void>((r) => setTimeout(r, 15));
+      });
+
+      assert.equal(cancelBtn("gq-run-1")?.textContent, "Cancel");
+      assert.equal(cancelBtn("gq-q-2")?.textContent, "Cancel");
+      assert.equal(cancelBtn("gq-q-3")?.textContent, "Cancel");
+
+      // 1. Cancel running row with deferred RPC: per-item Cancelling... + disabled; queued rows stay enabled
+      let resolveCancel!: (val: unknown) => void;
+      deferredCancel = () => new Promise((resolve) => { resolveCancel = resolve; });
+
+      await act(async () => {
+        cancelBtn("gq-run-1")!.click();
+      });
+      assert.equal(cancelBtn("gq-run-1")!.disabled, true);
+      assert.match(cancelBtn("gq-run-1")!.textContent ?? "", /Cancelling\.\.\./);
+      assert.equal(cancelBtn("gq-q-2")!.disabled, false, "other rows remain interactive");
+      assert.equal(cancelBtn("gq-q-2")!.textContent, "Cancel");
+
+      // Duplicate click while in flight is ignored
+      await act(async () => {
+        cancelBtn("gq-run-1")!.click();
+      });
+      const cancelCalls = rpcCalls.filter((c) => c.name === "factory.gate.queue.cancel");
+      assert.equal(cancelCalls.length, 1);
+      assert.deepEqual(cancelCalls[0]!.input, { queueId: "gq-run-1" });
+
+      deferredCancel = null;
+      const afterRunCancelled = {
+        ...currentOverview.gateQueue,
+        running: [],
+        queued: currentOverview.gateQueue.queued.map((item, idx) => ({ ...item, position: idx + 1 })),
+      };
+      currentOverview = { ...currentOverview, gateQueue: afterRunCancelled };
+      const overviewsBefore = rpcCalls.filter((c) => c.name === "factory.overview").length;
+      await act(async () => {
+        resolveCancel({ ok: true, cancelledCount: 1, cancelledIds: ["gq-run-1"], gateQueue: afterRunCancelled });
+        await new Promise<void>((r) => setTimeout(r, 15));
+      });
+
+      assert.equal(cancelBtn("gq-run-1"), null, "cancelled running row disappears");
+      assert.ok(rpcCalls.filter((c) => c.name === "factory.overview").length > overviewsBefore, "refreshes overview after cancel");
+
+      // 2. Cancel queued row fails ({ ok: false, error }) -> inline error + button re-enabled
+      nextCancelReply = { ok: false, code: "queue-item-not-found", error: "Could not cancel gq-q-2: daemon busy" };
+      await act(async () => {
+        cancelBtn("gq-q-2")!.click();
+        await new Promise<void>((r) => setTimeout(r, 15));
+      });
+      assert.equal(cancelBtn("gq-q-2")!.disabled, false);
+      assert.equal(cancelBtn("gq-q-2")!.textContent, "Cancel");
+      assert.match(queueError()?.textContent ?? "", /Could not cancel gq-q-2: daemon busy/);
+
+      // 3. Retry cancel on queued row succeeds -> removes item and clears error
+      await act(async () => {
+        cancelBtn("gq-q-2")!.click();
+        await new Promise<void>((r) => setTimeout(r, 15));
+      });
+      assert.equal(cancelBtn("gq-q-2"), null);
+      assert.equal(queueError(), null);
+
+      // 4. Thrown rejection on gq-q-3 surfaces inline error
+      nextCancelReply = new Error("Socket closed during cancel");
+      await act(async () => {
+        cancelBtn("gq-q-3")!.click();
+        await new Promise<void>((r) => setTimeout(r, 15));
+      });
+      assert.equal(cancelBtn("gq-q-3")!.disabled, false);
+      assert.match(queueError()?.textContent ?? "", /Socket closed during cancel/);
+    } finally {
+      await act(() => root.unmount());
+      delete g.__overviewTestToasts;
+      delete g.__overviewTestUseSubscription;
+      delete g.__overviewTestRpc;
     }
   });
 });

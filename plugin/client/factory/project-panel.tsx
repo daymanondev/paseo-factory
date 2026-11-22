@@ -57,8 +57,11 @@ export interface ProjectPanelActions {
   resetProjectLanes?(): void;
   resetSkillPacks?(): void;
   manageSkillPacks?(): void;
+  cancelGateQueueItem?(id: string): void;
   busy: boolean;
 }
+
+export type GateQueueCancelError = string | { queueId?: string; message: string };
 
 /**
  * UI-only state a host may seed — what is open and which tab or seat editor is
@@ -354,31 +357,81 @@ function teamGateQueueLabel(entry: PanelGateQueueEntry): string {
 }
 
 /** Contextual Gate queue badge on a Team tab Peer row or unmatched Project queue item. */
-function TeamGateQueuePill({ theme, entry }: { theme: PluginTheme; entry: PanelGateQueueEntry }) {
+function TeamGateQueuePill({
+  theme,
+  entry,
+  onCancel,
+  cancelling = false,
+  error = null,
+}: {
+  theme: PluginTheme;
+  entry: PanelGateQueueEntry;
+  onCancel?: (id: string) => void;
+  cancelling?: boolean;
+  error?: string | null;
+}) {
   const palette = factoryPalette(theme);
   const colour = entry.status === "running" ? palette.ok : palette.wait;
   return (
-    <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[1.5] }}>
-      <ToneBadge
-        theme={theme}
-        testID="factory-team-gate-queue-pill"
-        label={teamGateQueueLabel(entry)}
-        colour={colour}
-        dot
-      />
-      {entry.status === "queued" && entry.paused && entry.aheadLabel !== null ? (
-        <ToneBadge theme={theme} label="Paused" colour={palette.wait} dot={false} />
-      ) : null}
-      {entry.mechanical === "lead_verify" ? (
-        <ToneBadge theme={theme} label="lead_verify" colour={palette.lead} dot={false} pill={false} />
+    <View style={{ gap: SPACING[1] }}>
+      <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[1.5] }}>
+        <ToneBadge
+          theme={theme}
+          testID="factory-team-gate-queue-pill"
+          label={teamGateQueueLabel(entry)}
+          colour={colour}
+          dot
+        />
+        {entry.status === "queued" && entry.paused && entry.aheadLabel !== null ? (
+          <ToneBadge theme={theme} label="Paused" colour={palette.wait} dot={false} />
+        ) : null}
+        {entry.mechanical === "lead_verify" ? (
+          <ToneBadge theme={theme} label="lead_verify" colour={palette.lead} dot={false} pill={false} />
+        ) : null}
+        {onCancel !== undefined ? (
+          <Btn
+            theme={theme}
+            small
+            variant="danger"
+            icon="X"
+            testID={`factory-queue-cancel-${entry.id}`}
+            label={cancelling ? "Cancelling..." : "Cancel"}
+            disabled={cancelling}
+            onPress={() => {
+              if (!cancelling) onCancel(entry.id);
+            }}
+          />
+        ) : null}
+      </View>
+      {error !== null ? (
+        <Text testID="factory-team-gate-queue-error" style={{ ...text(theme, "label"), color: palette.bad }}>
+          {error}
+        </Text>
       ) : null}
     </View>
   );
 }
 
-function PeerRowView({ theme, row, wide, actions }: { theme: PluginTheme; row: PanelPeerRow; wide: boolean; actions: ProjectPanelActions }) {
+function PeerRowView({
+  theme,
+  row,
+  wide,
+  actions,
+  cancellingGateQueueIds = [],
+  gateQueueCancelError = null,
+}: {
+  theme: PluginTheme;
+  row: PanelPeerRow;
+  wide: boolean;
+  actions: ProjectPanelActions;
+  cancellingGateQueueIds?: readonly string[];
+  gateQueueCancelError?: { queueId?: string; message: string } | null;
+}) {
   const handOff = useHandOff(`peer:${row.task}`, actions);
   const canHandOff = row.allowedActions.includes("hand-off-now");
+  const entry = row.gateQueue ?? null;
+  const entryError =
+    entry !== null && gateQueueCancelError?.queueId === entry.id ? gateQueueCancelError.message : null;
   return (
     <View testID={`factory-panel-seat-peer-${row.task}`}><View testID={`factory-seat-peer-${row.task}`} style={seatRowStyle(theme, true)}>
       <SeatLine
@@ -400,7 +453,15 @@ function PeerRowView({ theme, row, wide, actions }: { theme: PluginTheme; row: P
           {row.allowedActions.includes("view-handover") ? <Btn theme={theme} small variant="ghost" testID={`factory-seat-view-handover-peer-${row.task}`} label="View handover" disabled={actions.busy} onPress={() => actions.viewHandover(`peer:${row.task}`)} /> : null}
         </>}
       />
-      {row.gateQueue != null ? <TeamGateQueuePill theme={theme} entry={row.gateQueue} /> : null}
+      {entry !== null ? (
+        <TeamGateQueuePill
+          theme={theme}
+          entry={entry}
+          {...(actions.cancelGateQueueItem === undefined ? {} : { onCancel: actions.cancelGateQueueItem })}
+          cancelling={cancellingGateQueueIds.includes(entry.id)}
+          error={entryError}
+        />
+      ) : null}
       <IdleBackgroundWork theme={theme} seatKey={`peer-${row.task}`} row={row} />
     </View></View>
   );
@@ -450,6 +511,8 @@ function Seats({
   theme,
   seats,
   gateQueue = [],
+  cancellingGateQueueIds = [],
+  gateQueueCancelError = null,
   mobile,
   wide,
   actions,
@@ -457,10 +520,13 @@ function Seats({
   theme: PluginTheme;
   seats: NonNullable<PanelView["seats"]>;
   gateQueue?: readonly PanelGateQueueEntry[];
+  cancellingGateQueueIds?: readonly string[];
+  gateQueueCancelError?: GateQueueCancelError | null;
   mobile: boolean;
   wide: boolean;
   actions: ProjectPanelActions;
 }) {
+  const palette = factoryPalette(theme);
   const [closedOpen, setClosedOpen] = useState(false);
   const live = seats.peers.filter((peer) => !isClosedPeer(peer));
   const closed = seats.peers.filter(isClosedPeer);
@@ -468,17 +534,45 @@ function Seats({
     live.map((peer) => peer.gateQueue?.id).filter((id): id is string => typeof id === "string" && id !== ""),
   );
   const unmatchedQueueEntries = gateQueue.filter((entry) => !shownQueueIds.has(entry.id));
+  const normalizedError =
+    gateQueueCancelError === null
+      ? null
+      : typeof gateQueueCancelError === "string"
+        ? { message: gateQueueCancelError }
+        : gateQueueCancelError;
+  const visibleErrorTargetIds = new Set([
+    ...shownQueueIds,
+    ...unmatchedQueueEntries.map((entry) => entry.id),
+    ...(closedOpen
+      ? closed.map((peer) => peer.gateQueue?.id).filter((id): id is string => typeof id === "string" && id !== "")
+      : []),
+  ]);
+  const showFallbackError =
+    normalizedError !== null &&
+    (normalizedError.queueId === undefined || !visibleErrorTargetIds.has(normalizedError.queueId));
+
   return (
     <View testID="factory-panel-seats">
       <SeatRow theme={theme} name="Supervisor" row={seats.supervisor} mobile={mobile} wide={wide} divider={false} actions={actions} />
       <SeatRow theme={theme} name="Lead" row={seats.lead} mobile={mobile} wide={wide} actions={actions} />
+      {showFallbackError ? (
+        <Text testID="factory-team-gate-queue-error" style={{ ...text(theme, "label"), color: palette.bad, paddingTop: SPACING[2] }}>
+          {normalizedError.message}
+        </Text>
+      ) : null}
       {unmatchedQueueEntries.length > 0 ? (
         <View testID="factory-panel-gate-queue">
           <GroupHeading theme={theme} label="GATE QUEUE" />
           {unmatchedQueueEntries.map((entry) => (
             <View key={entry.id} style={{ ...seatRowStyle(theme, true), flexDirection: "row", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: SPACING[2] }}>
               <Text style={text(theme, "rowTitle")}>{`${entry.task} · Attempt ${entry.attempt}`}</Text>
-              <TeamGateQueuePill theme={theme} entry={entry} />
+              <TeamGateQueuePill
+                theme={theme}
+                entry={entry}
+                {...(actions.cancelGateQueueItem === undefined ? {} : { onCancel: actions.cancelGateQueueItem })}
+                cancelling={cancellingGateQueueIds.includes(entry.id)}
+                error={normalizedError?.queueId === entry.id ? normalizedError.message : null}
+              />
             </View>
           ))}
         </View>
@@ -487,7 +581,15 @@ function Seats({
         <View testID="factory-panel-peers">
           <GroupHeading theme={theme} label="PEERS" />
           {live.map((peer) => (
-            <PeerRowView key={peer.agentId} theme={theme} row={peer} wide={wide} actions={actions} />
+            <PeerRowView
+              key={peer.agentId}
+              theme={theme}
+              row={peer}
+              wide={wide}
+              actions={actions}
+              cancellingGateQueueIds={cancellingGateQueueIds}
+              gateQueueCancelError={normalizedError}
+            />
           ))}
           {closed.length > 0 ? (
             <>
@@ -497,7 +599,15 @@ function Seats({
               {closedOpen ? (
                 <View testID="factory-panel-peers-closed">
                   {closed.map((peer) => (
-                    <PeerRowView key={peer.agentId} theme={theme} row={peer} wide={wide} actions={actions} />
+                    <PeerRowView
+                      key={peer.agentId}
+                      theme={theme}
+                      row={peer}
+                      wide={wide}
+                      actions={actions}
+                      cancellingGateQueueIds={cancellingGateQueueIds}
+                      gateQueueCancelError={normalizedError}
+                    />
                   ))}
                 </View>
               ) : null}
@@ -926,6 +1036,8 @@ export function ProjectPanel({
   storeReleaseBusy = false,
   storeReleaseFeedback = null,
   storeReleaseActions,
+  cancellingGateQueueIds = [],
+  gateQueueCancelError = null,
   onOpenReleaseLab,
   onOpenSettings,
   onTabChange,
@@ -942,6 +1054,8 @@ export function ProjectPanel({
   storeReleaseBusy?: boolean;
   storeReleaseFeedback?: StoreReleaseCardFeedback | null;
   storeReleaseActions?: StoreReleaseActions;
+  cancellingGateQueueIds?: readonly string[];
+  gateQueueCancelError?: GateQueueCancelError | null;
   onOpenReleaseLab?: () => void;
   onOpenSettings?: () => void;
   onTabChange?: (tab: ProjectPanelTab) => void;
@@ -988,7 +1102,19 @@ export function ProjectPanel({
   const needsYouItems = withoutShownHandoffFailures(panel.needsYou, panel.handoffs);
   const needsYou = <NeedsYou theme={theme} items={needsYouItems} mobile={mobile} wide={wide} actions={actions} />;
   const handoff = <HandoffBlock theme={theme} handoffs={panel.handoffs} mobile={mobile} wide={wide} actions={actions} />;
-  const seats = panel.seats === null ? null : <Seats theme={theme} seats={panel.seats} {...(panel.gateQueue === undefined ? {} : { gateQueue: panel.gateQueue })} mobile={mobile} wide={wide} actions={actions} />;
+  const seats =
+    panel.seats === null ? null : (
+      <Seats
+        theme={theme}
+        seats={panel.seats}
+        {...(panel.gateQueue === undefined ? {} : { gateQueue: panel.gateQueue })}
+        cancellingGateQueueIds={cancellingGateQueueIds}
+        gateQueueCancelError={gateQueueCancelError}
+        mobile={mobile}
+        wide={wide}
+        actions={actions}
+      />
+    );
   const models = <ModelsTab theme={theme} panel={panel} mobile={mobile} actions={actions} modelView={modelView} machineLanes={machineLanes} hasProjectLaneOverride={hasProjectLaneOverride} />;
   const packs = <SkillPacks theme={theme} divider={panel.usage != null} packs={skillPacks} explicit={skillPacksExplicit} {...(!mobile ? { onReset: actions.resetSkillPacks, onManage: actions.manageSkillPacks } : {})} initiallyExpanded={initialUi?.expandedSkillPacks ?? []} busy={actions.busy} {...(!mobile && actions.toggleSkillPack !== undefined ? { onToggle: actions.toggleSkillPack } : {})} />;
   const design = panel.openDesign === null ? null : <OpenDesign theme={theme} openDesign={panel.openDesign} now={now} desktopActions={mobile ? null : openDesignActions} />;

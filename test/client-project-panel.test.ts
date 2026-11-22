@@ -2101,3 +2101,384 @@ test("ADR 0068 (Ticket 06): Team tab renders contextual Gate · running and Gate
   const source = readFileSync(join(repoRoot, "plugin/client/factory/project-panel.tsx"), "utf8");
   assert.equal(source.includes("useRpc"), false, "project-panel.tsx remains strictly presentational");
 });
+
+test("ADR 0068 (Ticket 07): Team tab renders interactive Cancel button on Peer and unmatched Gate pills with per-item pending and inline error states", async () => {
+  const cancelCalls: string[] = [];
+  const { ProjectPanel } = await loadPanel();
+  const { createElement, act } = await import("react");
+  const { JSDOM } = await import(["jsdom"].join(""));
+  const dom = new JSDOM("<!doctype html><div id=root></div>");
+  const g = globalThis as Record<string, any>;
+  const saved = { window: g.window, document: g.document, IS_REACT_ACT_ENVIRONMENT: g.IS_REACT_ACT_ENVIRONMENT };
+  g.window = dom.window; g.document = dom.window.document; g.IS_REACT_ACT_ENVIRONMENT = true;
+  const { createRoot } = await import("react-dom/client");
+  const container = dom.window.document.getElementById("root")!;
+  const root = createRoot(container);
+
+  const panelWithQueue = makePanel({
+    seats: {
+      ...healthySeats,
+      peers: [
+        {
+          ...healthySeats.peers[0]!,
+          gateQueue: {
+            id: "gq-run-1",
+            task: "T-08",
+            attempt: 1,
+            status: "running",
+            position: 1,
+            aheadCount: 0,
+            aheadLabel: null,
+            paused: false,
+            queuedAt: "2026-11-22T10:00:00.000Z",
+            startedAt: "2026-11-22T10:00:01.000Z",
+          },
+        },
+      ],
+    },
+    gateQueue: [
+      {
+        id: "gq-run-1",
+        task: "T-08",
+        attempt: 1,
+        status: "running",
+        position: 1,
+        aheadCount: 0,
+        aheadLabel: null,
+        paused: false,
+        queuedAt: "2026-11-22T10:00:00.000Z",
+        startedAt: "2026-11-22T10:00:01.000Z",
+      },
+      {
+        id: "gq-verify-3",
+        task: "T-09",
+        attempt: 1,
+        status: "queued",
+        position: 3,
+        aheadCount: 2,
+        aheadLabel: "Beta · TB-2",
+        paused: false,
+        queuedAt: "2026-11-22T10:00:10.000Z",
+        startedAt: null,
+        mechanical: "lead_verify",
+      },
+    ],
+  });
+
+  const renderPanel = (extra: Record<string, unknown> = {}) =>
+    act(() =>
+      root.render(
+        createElement(ProjectPanel, {
+          theme,
+          panel: panelWithQueue,
+          mobile: false,
+          now: Date.now(),
+          daemonError: null,
+          actions: {
+            ...noopActions(),
+            cancelGateQueueItem: (id: string) => {
+              cancelCalls.push(id);
+            },
+          },
+          ...extra,
+        }),
+      ),
+    );
+
+  const cancelBtn = (id: string) =>
+    container.querySelector(`[data-testid="factory-queue-cancel-${id}"]`) as HTMLButtonElement | null;
+  const errorEl = () =>
+    container.querySelector('[data-testid="factory-team-gate-queue-error"]') as HTMLElement | null;
+
+  try {
+    await renderPanel();
+    assert.equal(cancelBtn("gq-run-1")?.textContent, "Cancel");
+    assert.equal(cancelBtn("gq-verify-3")?.textContent, "Cancel");
+    assert.equal(cancelBtn("gq-run-1")?.disabled, false);
+    assert.equal(cancelBtn("gq-verify-3")?.disabled, false);
+    assert.equal(errorEl(), null);
+
+    await act(() => cancelBtn("gq-run-1")!.click());
+    await act(() => cancelBtn("gq-verify-3")!.click());
+    assert.deepEqual(cancelCalls, ["gq-run-1", "gq-verify-3"]);
+
+    // Per-item pending state
+    await renderPanel({ cancellingGateQueueIds: ["gq-run-1"] });
+    assert.equal(cancelBtn("gq-run-1")?.disabled, true);
+    assert.match(cancelBtn("gq-run-1")?.textContent ?? "", /Cancelling\.\.\./);
+    assert.equal(cancelBtn("gq-verify-3")?.disabled, false);
+    assert.equal(cancelBtn("gq-verify-3")?.textContent, "Cancel");
+    await act(() => cancelBtn("gq-run-1")!.click());
+    assert.deepEqual(cancelCalls, ["gq-run-1", "gq-verify-3"], "disabled pending cancel button does not re-dispatch");
+
+    // Inline error targeting an entry renders inside Team tab
+    await renderPanel({
+      cancellingGateQueueIds: [],
+      gateQueueCancelError: { queueId: "gq-verify-3", message: "Gate already finished" },
+    });
+    assert.ok(errorEl());
+    assert.match(errorEl()!.textContent ?? "", /Gate already finished/);
+
+    // Fallback error when target id is no longer in list still renders once inside Seats
+    await renderPanel({
+      cancellingGateQueueIds: [],
+      gateQueueCancelError: { queueId: "gq-missing", message: "no queued or running Gate found" },
+    });
+    assert.equal(container.querySelectorAll('[data-testid="factory-team-gate-queue-error"]').length, 1);
+    assert.match(errorEl()!.textContent ?? "", /no queued or running Gate found/);
+  } finally {
+    await act(() => root.unmount());
+    Object.assign(g, saved);
+    dom.window.close();
+  }
+});
+
+async function loadShellForPanelTest(): Promise<Exports> {
+  const bundle = await build({
+    entryPoints: [join(repoRoot, "plugin/client/factory/shell.tsx")],
+    bundle: true,
+    write: false,
+    platform: "node",
+    format: "cjs",
+    jsx: "automatic",
+    external: ["react", "react/jsx-runtime"],
+    plugins: [
+      {
+        name: "shell-native-adapter",
+        setup(b) {
+          b.onResolve({ filter: /^(react-native|@getpaseo\/plugin\/client\/ui|@getpaseo\/plugin\/client)$/ }, (args) => ({
+            path: args.path,
+            namespace: "shell-native",
+          }));
+          b.onLoad({ filter: /.*/, namespace: "shell-native" }, () => ({
+            loader: "js",
+            contents: `
+              const React = require('react');
+              const tag = (name) => ({ children, onPress, disabled, testID, style, accessibilityRole, accessibilityState, accessibilityLabel }) =>
+                React.createElement(name, { disabled, onClick: onPress, 'data-testid': testID, 'data-role': accessibilityRole, 'aria-label': accessibilityLabel, 'data-checked': accessibilityState && accessibilityState.checked !== undefined ? String(accessibilityState.checked) : undefined, 'data-selected': accessibilityState && accessibilityState.selected !== undefined ? String(accessibilityState.selected) : undefined }, typeof children === 'function' ? children({ pressed: false }) : children);
+              exports.View = tag('div');
+              exports.ScrollView = tag('div');
+              exports.Text = tag('span');
+              exports.Pressable = tag('button');
+              exports.Icon = () => null;
+              const Modal = ({ children, open }) => open ? React.createElement('div', {}, children) : null;
+              Modal.Content = tag('div');
+              exports.Modal = Modal;
+              exports.TextInput = ({ value, placeholder, testID }) => React.createElement('input', { value: value ?? '', placeholder, readOnly: true, 'data-testid': testID });
+              exports.Platform = { OS: 'web', select: (spec) => (spec.web !== undefined ? spec.web : spec.default) };
+              exports.useRpc = (contract) => (input) => globalThis.__panelShellRpc(contract.name, input);
+              exports.useSubscription = () => ({ status: 'live' });
+              exports.useToast = () => ({ show(msg, opts) { globalThis.__panelShellToasts?.push({ msg, opts }); }, error(msg) { globalThis.__panelShellToasts?.push({ msg, error: true }); } });
+              exports.openExternalUrl = async () => {};
+            `,
+          }));
+        },
+      },
+    ],
+  });
+  const compiled = { exports: {} as Exports };
+  new Function("require", "module", "exports", bundle.outputFiles[0]!.text)(createRequire(import.meta.url), compiled, compiled.exports);
+  return compiled.exports;
+}
+
+test("ADR 0068 (Ticket 07): FactoryShell wires gateQueueCancel for Team tab Gate pills with pending state, live refresh, and inline errors", async () => {
+  const { FactoryShell } = await loadShellForPanelTest();
+  const { createElement, act } = await import("react");
+  const { JSDOM } = await import(["jsdom"].join(""));
+  const dom = new JSDOM("<!doctype html><div id=root></div>");
+  const g = globalThis as Record<string, any>;
+  const saved = {
+    window: g.window,
+    document: g.document,
+    IS_REACT_ACT_ENVIRONMENT: g.IS_REACT_ACT_ENVIRONMENT,
+    __panelShellRpc: g.__panelShellRpc,
+    __panelShellToasts: g.__panelShellToasts,
+  };
+  g.window = dom.window;
+  g.document = dom.window.document;
+  g.IS_REACT_ACT_ENVIRONMENT = true;
+  g.__panelShellToasts = [];
+
+  const peerQueueEntry = {
+    id: "gq-run-1",
+    task: "T-08",
+    attempt: 1,
+    status: "running" as const,
+    position: 1,
+    aheadCount: 0,
+    aheadLabel: null,
+    paused: false,
+    queuedAt: "2026-11-22T10:00:00.000Z",
+    startedAt: "2026-11-22T10:00:01.000Z",
+  };
+  const verifyQueueEntry = {
+    id: "gq-verify-3",
+    task: "T-09",
+    attempt: 1,
+    status: "queued" as const,
+    position: 2,
+    aheadCount: 1,
+    aheadLabel: "Alpha · TA-1",
+    paused: false,
+    queuedAt: "2026-11-22T10:00:10.000Z",
+    startedAt: null,
+    mechanical: "lead_verify" as const,
+  };
+
+  let currentPanel = makePanel({
+    seats: {
+      ...healthySeats,
+      peers: [{ ...healthySeats.peers[0]!, gateQueue: peerQueueEntry }],
+    },
+    gateQueue: [peerQueueEntry, verifyQueueEntry],
+  });
+  const buildSnapshotView = () => ({
+    version: 5,
+    stateDir: "/state",
+    generatedAt: new Date().toISOString(),
+    lanes: { supervisor: "pi/glm-5.3", lead: "pi/glm-5.3", worker: "pi/glm-5.3", watch: "pi/glm-5.3", freshEyes: "eye.json" },
+    machineLanes: { supervisor: "pi/glm-5.3", lead: "pi/glm-5.3", worker: "pi/glm-5.3", watch: "pi/glm-5.3", freshEyes: "eye.json" },
+    kpis: { running: 1, needsHuman: 0, openTasks: 1, greenClaims: 0, redClaims: 0, sessions: 1 },
+    agents: [],
+    providers: [],
+    supervisor: null,
+    lead: null,
+    daemonError: null,
+    project: { root: "/snapshot-project", slug: "my-app", name: "my-app", missingRoot: false },
+    corePlugin: { id: "paseo-factory", title: "Factory Core", status: "running", enabled: true },
+    companions: [],
+    companionTools: [],
+    pluginsCheckedAt: null,
+    vault: { configured: false, ghAuthenticated: false, historyImports: [], hydratedApps: [] },
+    profiles: [],
+    activeProfileId: null,
+    activeProfileModified: false,
+    hasProjectLaneOverride: false,
+    skillHub: { skillPacksExplicit: false, projectPacks: [] },
+    panel: structuredClone(currentPanel),
+  });
+
+  const rpcCalls: Array<{ name: string; input: unknown }> = [];
+  let deferredCancel: ((input: unknown) => Promise<unknown>) | null = null;
+  let nextCancelReply: unknown = null;
+
+  g.__panelShellRpc = async (name: string, input: unknown) => {
+    rpcCalls.push({ name, input });
+    if (name === "factory.snapshot") return { ok: true, view: buildSnapshotView() };
+    if (name === "factory.self.update.status") return { ok: true, current: "0.17.0", latest: "0.17.0", updateAvailable: false };
+    if (name === "factory.gate.queue.cancel") {
+      if (deferredCancel !== null) return await deferredCancel(input);
+      if (nextCancelReply !== null) {
+        const reply = nextCancelReply;
+        nextCancelReply = null;
+        if (reply instanceof Error) throw reply;
+        return reply;
+      }
+      const targetId = (input as { queueId?: string }).queueId;
+      currentPanel = {
+        ...currentPanel,
+        seats: {
+          ...currentPanel.seats!,
+          peers: currentPanel.seats!.peers.map((p) =>
+            p.gateQueue?.id === targetId ? { ...p, gateQueue: null } : p,
+          ),
+        },
+        gateQueue: (currentPanel.gateQueue ?? []).filter((e) => e.id !== targetId),
+      };
+      return {
+        ok: true,
+        cancelledCount: 1,
+        cancelledIds: [targetId],
+        gateQueue: { paused: false, pausedAt: null, concurrency: 1, running: [], queued: [] },
+      };
+    }
+    return { ok: true };
+  };
+
+  const { createRoot } = await import("react-dom/client");
+  const container = dom.window.document.getElementById("root")!;
+  const root = createRoot(container);
+  const cancelBtn = (id: string) =>
+    container.querySelector(`[data-testid="factory-queue-cancel-${id}"]`) as HTMLButtonElement | null;
+  const errorEl = () =>
+    container.querySelector('[data-testid="factory-team-gate-queue-error"]') as HTMLElement | null;
+
+  try {
+    await act(async () => {
+      root.render(createElement(FactoryShell, { theme, dir: "/snapshot-project", layout: { compact: false, platform: "web" } }));
+      await new Promise<void>((r) => setTimeout(r, 15));
+    });
+
+    assert.equal(cancelBtn("gq-run-1")?.textContent, "Cancel");
+    assert.equal(cancelBtn("gq-verify-3")?.textContent, "Cancel");
+
+    // 1. Deferred cancel on gq-run-1 shows per-item pending and ignores duplicate clicks
+    let resolveCancel!: (val: unknown) => void;
+    deferredCancel = () => new Promise((resolve) => { resolveCancel = resolve; });
+
+    await act(async () => {
+      cancelBtn("gq-run-1")!.click();
+    });
+    assert.equal(cancelBtn("gq-run-1")?.disabled, true);
+    assert.match(cancelBtn("gq-run-1")?.textContent ?? "", /Cancelling\.\.\./);
+    assert.equal(cancelBtn("gq-verify-3")?.disabled, false);
+
+    await act(async () => {
+      cancelBtn("gq-run-1")!.click();
+    });
+    const cancelCalls = rpcCalls.filter((c) => c.name === "factory.gate.queue.cancel");
+    assert.equal(cancelCalls.length, 1);
+    assert.deepEqual(cancelCalls[0]!.input, { queueId: "gq-run-1" });
+
+    deferredCancel = null;
+    currentPanel = {
+      ...currentPanel,
+      seats: {
+        ...currentPanel.seats!,
+        peers: currentPanel.seats!.peers.map((p) => ({ ...p, gateQueue: null })),
+      },
+      gateQueue: [verifyQueueEntry],
+    };
+    const snapshotsBefore = rpcCalls.filter((c) => c.name === "factory.snapshot").length;
+    await act(async () => {
+      resolveCancel({
+        ok: true,
+        cancelledCount: 1,
+        cancelledIds: ["gq-run-1"],
+        gateQueue: { paused: false, pausedAt: null, concurrency: 1, running: [], queued: [] },
+      });
+      await new Promise<void>((r) => setTimeout(r, 15));
+    });
+
+    assert.equal(cancelBtn("gq-run-1"), null, "cancelled Peer gate queue pill disappears");
+    assert.ok(rpcCalls.filter((c) => c.name === "factory.snapshot").length > snapshotsBefore, "refreshes snapshot on cancel");
+
+    // 2. Refusal ({ ok: false, error }) surfaces inline error on Team tab
+    nextCancelReply = { ok: false, code: "queue-item-not-found", error: "Gate queue item not found" };
+    await act(async () => {
+      cancelBtn("gq-verify-3")!.click();
+      await new Promise<void>((r) => setTimeout(r, 15));
+    });
+    assert.equal(cancelBtn("gq-verify-3")?.disabled, false);
+    assert.match(errorEl()?.textContent ?? "", /Gate queue item not found/);
+
+    // 3. Thrown rejection surfaces error, then retry succeeds and clears error
+    nextCancelReply = new Error("Daemon disconnected");
+    await act(async () => {
+      cancelBtn("gq-verify-3")!.click();
+      await new Promise<void>((r) => setTimeout(r, 15));
+    });
+    assert.match(errorEl()?.textContent ?? "", /Daemon disconnected/);
+
+    await act(async () => {
+      cancelBtn("gq-verify-3")!.click();
+      await new Promise<void>((r) => setTimeout(r, 15));
+    });
+    assert.equal(cancelBtn("gq-verify-3"), null);
+    assert.equal(errorEl(), null);
+  } finally {
+    await act(() => root.unmount());
+    Object.assign(g, saved);
+    dom.window.close();
+  }
+});
