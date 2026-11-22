@@ -154,6 +154,18 @@ test("a read-only Contract's 200k successor is fenced: the worktree stays clean 
   assert.ok(!successor.prompt!.includes("for the committed HEAD"), "the engineer's committed-HEAD claim instruction never appears");
   assert.match(successor.prompt!, /blocking defects/, "the reviewer disposition's evidence expectation rides the prompt");
   assert.match(successor.prompt!, /agent_claim|factory-claim/, "the claim invocation is still named");
+  assert.doesNotMatch(successor.prompt!, /Run the full cumulative Gate before calling/i);
+});
+
+test("an engineer 200k successor follows serial slice checks and async no-double-gate Claim discipline (ADR 0068)", async t => {
+  const f = fixture(t);
+  await f.runtime.onLeadTurnEnded(ended(f.peer.id));
+  writeFileSync(f.handoff, "# Completed & Verified Slice\nPartial work committed.");
+  await f.runtime.onLeadTurnEnded(ended(f.peer.id));
+  const successor = f.created[0]!;
+  assert.doesNotMatch(successor.prompt!, /Run the full cumulative Gate before calling/i);
+  assert.match(successor.prompt!, /do not pre-run the full cumulative Gate/i);
+  assert.match(successor.prompt!, /end your turn immediately when queued/i);
 });
 
 for (const sensor of ["live", "native transcript"] as const) {
