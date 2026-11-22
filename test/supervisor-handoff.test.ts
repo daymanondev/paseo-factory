@@ -306,3 +306,20 @@ test('Owner cancel is refused once the successor exists, and when no handoff is 
   assert.equal(readProjectRegistration(f.stateDir, f.slug)?.supervisor, 'successor-1');
   assert.notEqual(readHandoffProgress(f.stateDir, f.slug, 'supervisor'), null);
 });
+
+test('Supervisor handoff normalizes legacy effort-suffixed Antigravity lanes against live 0.17.1 catalog without mutating lanes.json (ADR 0067)', async t => {
+  const f = fixture(t);
+  saveLanes(f.stateDir, { supervisor: 'antigravity/gemini-4-argon-high' }, f.slug);
+  const projectLanesFile = join(projectStateDir(f.stateDir, f.slug), 'lanes.json');
+  const lanesBefore = readFileSync(projectLanesFile, 'utf8');
+  f.daemon.providers.listModels = async (provider: string) =>
+    provider === 'antigravity'
+      ? { models: [{ id: 'gemini-4-argon', thinkingOptions: [{ id: 'low' }, { id: 'high' }] }] }
+      : { models: [] };
+
+  const replaced = await f.surface.handoff({ projectRoot: f.root, seat: 'supervisor' }, 'replaceNow');
+  assert.equal(replaced.ok, true);
+  assert.equal(f.created.length, 1);
+  assert.deepEqual(f.created[0], { provider: 'antigravity/gemini-4-argon', thinkingOptionId: 'high' });
+  assert.equal(readFileSync(projectLanesFile, 'utf8'), lanesBefore);
+});

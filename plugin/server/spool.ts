@@ -1480,16 +1480,27 @@ export async function resolvePeerSpawnProvider(
  * lane verbatim (an unreachable catalog never fails a spawn and never strips
  * thinking).
  */
-async function providerCatalogForLane(
+export async function providerCatalogForLane(
   daemon: SurfaceDaemonApi | undefined,
   lane: string,
 ): Promise<readonly LaneThinkingCatalogEntry[] | undefined> {
   const parsed = parseLane(lane);
   if (daemon === undefined || parsed === undefined) return undefined;
   try {
-    const listed = await daemon.providers?.listModels?.(parsed.provider);
+    let catalogProvider = parsed.provider;
+    let listed = await daemon.providers?.listModels?.(catalogProvider);
+    if (!Array.isArray(listed?.models) || listed.models.length === 0) {
+      const alias = parsed.provider === "agy" ? "antigravity" : parsed.provider === "claude-code" ? "claude" : undefined;
+      if (alias !== undefined) {
+        const aliasListed = await daemon.providers?.listModels?.(alias);
+        if (Array.isArray(aliasListed?.models) && aliasListed.models.length > 0) {
+          listed = aliasListed;
+          catalogProvider = alias;
+        }
+      }
+    }
     if (!Array.isArray(listed?.models)) return undefined;
-    return [{ provider: parsed.provider, models: listed.models }];
+    return [{ provider: catalogProvider, models: listed.models }];
   } catch {
     return undefined; // best-effort catalog lookup — the configured lane stands
   }
@@ -1497,10 +1508,10 @@ async function providerCatalogForLane(
 
 /**
  * Resolves the effective Peer launch lane for both initial dispatches and
- * automatic Peer handoffs (ADR 0054 §4, ADR 0062): resolves the Project's
- * `worker` lane via `resolvePeerSpawnProvider`, then adapts `thinking` against
- * the daemon's provider catalog (either `:thinkingOptionId` or same-base
- * sibling model ID).
+ * automatic Peer handoffs (ADR 0054 §4, ADR 0062, ADR 0067): resolves the Project's
+ * `worker` lane via `resolvePeerSpawnProvider`, then normalizes legacy effort-suffixed
+ * lanes and adapts `thinking` against the daemon's provider catalog (either
+ * `:thinkingOptionId` or same-base sibling model ID).
  */
 export async function resolvePeerDispatchLane(input: {
   factory: Factory;
@@ -1510,7 +1521,6 @@ export async function resolvePeerDispatchLane(input: {
   thinking?: PeerThinkingLevel;
 }): Promise<string> {
   const lane = await resolvePeerSpawnProvider(input.factory, input.requestedProvider, input.projectSlug);
-  if (input.thinking === undefined) return lane;
   return resolvePeerThinkingLane(lane, input.thinking, await providerCatalogForLane(input.daemon, lane));
 }
 
@@ -2345,23 +2355,20 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
       // NEVER strips thinking (the sanitizeLane law does not apply here). The
       // plugin-side create (below) launches under it; a promptless (driver)
       // spawn receives it as `resolvedProvider` so its own create does too.
-      let resolvedSpawnProvider: string | undefined;
-      if (request.thinking !== undefined) {
-        resolvedSpawnProvider = await resolvePeerDispatchLane({
-          factory,
-          daemon: resolvedDaemon,
-          requestedProvider: sanitizedProvider,
-          projectSlug: spawnMeta.projectSlug,
-          thinking: request.thinking,
-        });
-      }
+      const basePeerLane = await resolvePeerSpawnProvider(factory, sanitizedProvider, spawnMeta.projectSlug);
+      const resolvedLane = resolvePeerThinkingLane(
+        basePeerLane,
+        request.thinking,
+        await providerCatalogForLane(resolvedDaemon, basePeerLane),
+      );
+      const resolvedSpawnProvider =
+        request.thinking !== undefined || resolvedLane !== basePeerLane ? resolvedLane : undefined;
       let spawnedAgentId: string | undefined;
       if (request.prompt !== undefined && request.prompt !== "" && resolvedDaemon !== undefined) {
         // The Peer spawns under the `factory-peer` role provider when it can
         // (v0.0.27, ADR 0017 §2) — `paseoTools` off, seat env on — falling back
         // to the requested lane verbatim.
-        const peerProvider = resolvedSpawnProvider ??
-          await resolvePeerSpawnProvider(factory, sanitizedProvider, spawnMeta.projectSlug);
+        const peerProvider = resolvedLane;
         const contract = factory.contractFor(request.task);
         let effectivePrompt = request.prompt;
         if (contract !== undefined && effectivePrompt.startsWith(`Execute task ${request.task}:`)) {

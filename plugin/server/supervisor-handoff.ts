@@ -3,7 +3,8 @@ import { z } from 'zod';
 import { readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { atomicJson, readOptionalJson } from './core/json-store.ts';
-import { loadLanes, saveLanes } from './core/lanes.ts';
+import { loadLanes, normalizeLaneWithProviders, parseLane, saveLanes } from './core/lanes.ts';
+import { providerCatalogForLane } from './spool.ts';
 import { projectStateDir, projectNotebookPath, readProjectRegistration, writeProjectRegistration } from './core/project.ts';
 import { readLeadMailbox, requeueLeadMail, deliverLeadMail } from './core/mailbox.ts';
 import { buildSeatKickoffPacket } from './core/preflight.ts';
@@ -75,7 +76,9 @@ export function createSupervisorHandoffRuntime(deps: {
     }
     const agents = await live();
     if (!data.successorId) {
-      const lane = laneValue(current.toLane); const parsed = current.toLane;
+      const rawLane = laneValue(current.toLane);
+      const lane = normalizeLaneWithProviders(rawLane, await providerCatalogForLane(deps.daemon(), rawLane));
+      const parsed = parseLane(lane) ?? current.toLane;
       const config = { provider: `${parsed.provider}/${parsed.model}`, ...(parsed.thinking ? { thinkingOptionId: parsed.thinking } : {}) };
       try {
         const input = { config, title: 'Supervisor', labels: { seat: 'supervisor', project: slug } };

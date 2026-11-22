@@ -20,8 +20,17 @@ import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { FactoryError } from "./errors.ts";
 import { atomicJson } from "./json-store.ts";
-import { LANE_NAMES, laneError, lanesPath, loadLanes, migrateLegacyZcodeLane, projectLanesPath, saveLanes } from "./lanes.ts";
-import type { LaneName, Lanes } from "./lanes.ts";
+import {
+  LANE_NAMES,
+  laneError,
+  lanesPath,
+  loadLanes,
+  migrateLegacyZcodeLane,
+  normalizeLanesWithProviders,
+  projectLanesPath,
+  saveLanes,
+} from "./lanes.ts";
+import type { LaneName, Lanes, LaneThinkingCatalogEntry } from "./lanes.ts";
 
 /** One saved profile — the six lanes whole, an Owner-given name, and the last edit's ISO timestamp. */
 export interface LaneProfile {
@@ -245,12 +254,17 @@ export function applyLaneProfile(
   stateDir: string,
   id: string,
   projectSlug?: string,
+  options?: { providers?: readonly LaneThinkingCatalogEntry[] },
 ): { profile: LaneProfile; lanes: Lanes; path: string } {
   const profile = getLaneProfile(stateDir, id);
   if (profile === undefined) {
     throw new FactoryError("profile-not-found", `no Lane profile "${id}" under ${stateDir} — save one first`);
   }
-  const lanes = validatedProfileLanes(profile.lanes);
+  const validated = validatedProfileLanes(profile.lanes);
+  const lanes =
+    options?.providers !== undefined && options.providers.length > 0
+      ? normalizeLanesWithProviders(validated, options.providers)
+      : validated;
   const slug = projectSlug !== undefined && projectSlug.trim() !== "" ? projectSlug.trim() : undefined;
   // The profile's lanes validated above, so a refusal here is a broken lanes
   // file at the target layer — named, never a guessed default.
