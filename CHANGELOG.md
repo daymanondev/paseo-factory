@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.2] - 2026-11-22
+
+### Added
+
+- **Structured Console handoff guide relay on Store release `Hole` pauses (`plugin/server/store-release.ts`, `src/events.ts`, `src/ledger-validation.ts`, `src/roles-contract.ts`):** Extended `settleStoreReleaseRun` to parse `hole.payload.consoleGuide` and format a bounded, lossless Markdown digest (preserving `consoleGuideVersion`, `CONSOLE_GUIDE.md` and `day0KitPath`, `antiRejectionWarnings`, `completedByApi`, numbered steps with `menuPath`, `url`, `instructions`, `copyFields`, and pre-filled `answers` + `reason`, plus sibling `hole.payload` context such as `readiness`) directly into the `Lead mailbox` wakeup while keeping `store_release_paused` Ledger events compact (`hasConsoleGuide` and non-empty `guidePath` only) and maintaining full backward compatibility for runs without `consoleGuide`. Updated `Lead` and `Supervisor` role contracts to relay the guide verbatim into `Supervisor` chat and instruct the Owner how to confirm to resume the `Hole`.
+
 ## [0.18.1] - 2026-11-21
 
 ### Added
