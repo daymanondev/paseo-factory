@@ -278,6 +278,48 @@ test("the Peer (200k mark) sensor falls back to the antigravity steps store when
   assert.ok(grown.usedTokens! >= PEER_HANDOFF_TOKENS, `a grown store crosses the 200k Peer mark (${grown.usedTokens})`);
 });
 
+test("the Lead (160k mark) sensor falls back to the antigravity native store when persisted with Paseo 0.17.1 ACP data.sessionId", async t => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const userHome = join(dir, "user-home");
+  const stateDir = join(dir, "state");
+  const { DatabaseSync } = await import("node:sqlite");
+  const dbPath = join(userHome, ".gemini", "antigravity-cli", "conversations", "acp-lead-1.db");
+  mkdirSync(join(dbPath, ".."), { recursive: true });
+  const db = new DatabaseSync(dbPath);
+  db.exec("CREATE TABLE steps (idx INTEGER PRIMARY KEY, step_type INTEGER, metadata BLOB)");
+  const varint = (value: number): number[] => {
+    const bytes: number[] = [];
+    let rest = value;
+    while (rest >= 0x80) { bytes.push((rest & 0x7f) | 0x80); rest = Math.floor(rest / 128); }
+    bytes.push(rest);
+    return bytes;
+  };
+  const step = (input: number, output: number, cacheRead: number) => {
+    const fields = [0x08, ...varint(1417), 0x10, ...varint(input), 0x18, ...varint(output), 0x28, ...varint(cacheRead), 0x48, ...varint(0), 0x50, ...varint(0)];
+    return new Uint8Array([0x4a, ...varint(fields.length), ...fields]);
+  };
+  db.prepare("INSERT INTO steps VALUES (?, 15, ?)").run(1, step(100_000, 10_000, 55_000));
+  db.close();
+
+  const leadPluginSession: SurfaceAgentSnapshot = {
+    id: "lead-acp-1", provider: "antigravity/gemini-4-argon", title: "Lead", status: "idle", model: null,
+    labels: { seat: "lead" }, archivedAt: null, requiresAttention: false, attentionReason: null, updatedAt: "", cwd: dir,
+    persistence: { sessionId: `plugin:${JSON.stringify({ version: 1, data: { sessionId: "acp-lead-1" } })}` }, lastUsage: null,
+  };
+  const fromSessionWrapper = readLeadContextTokens(leadPluginSession, { userHome, stateDir });
+  assert.deepEqual(fromSessionWrapper, { usedTokens: 165_000, maxTokens: null, source: "native-store" });
+  assert.ok(fromSessionWrapper.usedTokens! >= LEAD_ROTATE_TOKENS);
+
+  const leadMetadata: SurfaceAgentSnapshot = {
+    ...leadPluginSession,
+    id: "lead-acp-2",
+    persistence: { metadata: { pluginProviderPersistence: { data: { sessionId: "acp-lead-1" } } } },
+  };
+  const fromMetadata = readLeadContextTokens(leadMetadata, { userHome, stateDir });
+  assert.deepEqual(fromMetadata, { usedTokens: 165_000, maxTokens: null, source: "native-store" });
+});
+
 test("Peer handoff at the 200k mark from the antigravity store flushes the outgoing session into usage.json BEFORE archival", async t => {
   const dir = makeTempDir();
   disposeDir(t, dir);
