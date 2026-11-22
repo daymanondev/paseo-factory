@@ -51,7 +51,7 @@ import { FactoryError } from "./core/errors.ts";
 import type { Factory } from "./core/factory.ts";
 import { readLeadMailbox } from "./core/mailbox.ts";
 import { buildSeatKickoffPacket } from "./core/preflight.ts";
-import { LANE_NAMES, laneError, loadLanes, migrateLegacyZcodeLane, parseLane, saveLanes, projectLanesPath, listLaneProfiles, getLaneProfile, readLaneProfilesFile, saveLaneProfile, deleteLaneProfile, applyLaneProfile, saveLanesBatch, resetProjectLanes, validatedProfileLanes } from "./core/lanes.ts";
+import { LANE_NAMES, findCatalogModel, findCatalogProviderEntry, laneError, loadLanes, migrateLegacyZcodeLane, normalizeLaneWithProviders, normalizeLanesWithProviders, parseLane, saveLanes, projectLanesPath, listLaneProfiles, getLaneProfile, readLaneProfilesFile, saveLaneProfile, deleteLaneProfile, applyLaneProfile, saveLanesBatch, resetProjectLanes, validatedProfileLanes } from "./core/lanes.ts";
 import type { LaneProfile } from "./core/lanes.ts";
 import { listProjectRegistrations, projectNotebookPath, projectStateDir, readProjectRegistration, resolveOrBootstrapProject, resolveProject } from "./core/project.ts";
 import type { ProjectResolution } from "./core/project.ts";
@@ -221,25 +221,19 @@ export interface ProviderEntry {
 }
 
 /**
- * Strips any unsupported `:thinking` variant from a `<provider>/<model>[:<thinking>]`
- * lane string when the provider catalog explicitly advertises `thinkingOptions: []`
- * or does not include the requested thinking option (v0.0.24, ADR 0015 §1).
+ * Normalizes legacy `<provider>/<base>-<tier>` lanes against live catalog
+ * `thinkingOptions` (ADR 0067) and strips any unsupported `:thinking` variant
+ * when the provider catalog explicitly advertises `thinkingOptions: []` or
+ * does not include the requested thinking option (v0.0.24, ADR 0015 §1).
  */
 export function sanitizeLaneWithProviders(laneValue: string, providers: readonly ProviderEntry[]): string {
-  const parsed = parseLane(laneValue);
-  if (parsed === undefined) return laneValue;
+  const normalized = normalizeLaneWithProviders(laneValue, providers);
+  const parsed = parseLane(normalized);
+  if (parsed === undefined) return normalized;
   const { provider, model, thinking } = parsed;
-  const entry = providers.find((p) => (p.provider ?? p.id) === provider);
-  if (entry === undefined || !Array.isArray(entry.models)) return laneValue;
-  const strippedModel = model.replace(/^[^/]+\//, "");
-  const meta = entry.models.find(
-    (m) =>
-      m.id === model ||
-      `${provider}/${m.id}` === model ||
-      m.id === `${provider}/${model}` ||
-      m.id === strippedModel ||
-      m.id.replace(/^[^/]+\//, "") === strippedModel,
-  );
+  const found = findCatalogProviderEntry(provider, providers);
+  if (found === undefined || !Array.isArray(found.entry.models)) return normalized;
+  const meta = findCatalogModel(found.catalogProvider, model, found.entry.models);
   if (meta !== undefined && Array.isArray(meta.thinkingOptions)) {
     if (
       meta.thinkingOptions.length === 0 ||
@@ -248,7 +242,7 @@ export function sanitizeLaneWithProviders(laneValue: string, providers: readonly
       return `${provider}/${model}`;
     }
   }
-  return laneValue;
+  return normalized;
 }
 
 /**
@@ -1118,6 +1112,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     task: string | null,
     seatOverride?: "supervisor" | "lead",
     projectSlug = agent.labels.project,
+    providers: readonly ProviderEntry[] = [],
   ): AgentView => {
     const reading = readLeadContextTokens(agent, deps.usagePaths);
     const role = (agent.labels.seat ?? seatOverride) === "supervisor" ? "supervisor" : (agent.labels.seat ?? seatOverride) === "lead" ? "lead" : "peer";
@@ -1125,7 +1120,9 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     const seat = role === "peer" ? taskId === null ? null : `peer:${taskId}` : role;
     const configured = projectSlug ? loadLanes(deps.stateDir, projectSlug) : loadLanes(deps.stateDir);
     const laneName = role === "peer" ? "worker" : role;
-    const configuredLane = configured.ok ? laneRef(configured.lanes[laneName]) : { provider: "", model: "" };
+    const configuredLane = configured.ok
+      ? laneRef(normalizeLaneWithProviders(configured.lanes[laneName], providers))
+      : { provider: "", model: "" };
     let value = agent.provider;
     if ((Object.values(FACTORY_SEAT_PROVIDER_IDS) as string[]).includes(value)) value = `${configuredLane.provider}/${configuredLane.model}`;
     else if (!value.includes("/") && agent.model) value = `${value}/${agent.model}`;
@@ -1282,15 +1279,16 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
   /** True while the first listing is in flight and nothing is cached: an empty `resolveProviders` result then means "not loaded yet". */
   const providersLoadingNow = (): boolean => inFlightProviders !== null && cachedProviderList === null;
 
-  const sanitizeLane = async (laneValue: string, context?: SurfaceCallContext): Promise<string> => {
-    const daemon = resolveDaemon(context);
-    let providers: ProviderEntry[] = [];
+  const bestEffortProviders = async (context?: SurfaceCallContext): Promise<ProviderEntry[]> => {
     try {
-      providers = await resolveProviders(daemon);
+      return await resolveProviders(resolveDaemon(context));
     } catch {
-      // best-effort provider catalog lookup
+      return [];
     }
-    return sanitizeLaneWithProviders(laneValue, providers);
+  };
+
+  const sanitizeLane = async (laneValue: string, context?: SurfaceCallContext): Promise<string> => {
+    return sanitizeLaneWithProviders(laneValue, await bestEffortProviders(context));
   };
 
   // ---- the seat bridges (v0.0.14, ADR 0010 §1–§2) ----------------------------------------
@@ -1828,7 +1826,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
               projectRoot: project.root,
               ledgerEvents: projectLedgerEventsOf(project.slug),
               helperMcps: discoverHelperMcps({ stateDir: deps.stateDir, userHome: resolveSurfaceUserHome() }).servers,
-              lanes: lanes.lanes,
+              lanes: normalizeLanesWithProviders(lanes.lanes, providers),
               stateDir: deps.stateDir,
               omitSystemPromptDuplicates: true,
             })}\n${message}`
@@ -2125,11 +2123,11 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
   // ---- the Lane profile gather + the machine-anchored reconcile (v0.0.38, ADR 0026 §1–§2) -------
 
   /** One core `LaneProfile` → the wire `LaneProfileView` (description normalized to null). */
-  const laneProfileViewOf = (profile: LaneProfile): LaneProfileView => ({
+  const laneProfileViewOf = (profile: LaneProfile, providers: readonly ProviderEntry[] = []): LaneProfileView => ({
     id: profile.id,
     name: profile.name,
     description: profile.description ?? null,
-    lanes: profile.lanes,
+    lanes: normalizeLanesWithProviders(profile.lanes, providers),
     updatedAt: profile.updatedAt,
   });
 
@@ -2143,6 +2141,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
   const laneProfilesGather = (
     scopeSlug: string | undefined,
     lanes: Lanes,
+    providers: readonly ProviderEntry[] = [],
   ): { profiles: LaneProfileView[]; activeProfileId: string | null; activeProfileModified: boolean; hasProjectLaneOverride: boolean } => {
     let library: LaneProfile[] = [];
     let recordedId: string | null = null;
@@ -2153,8 +2152,12 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     } catch {
       // an unreadable profiles.json is not a snapshot failure — the bar renders empty
     }
-    const profiles = library.map(laneProfileViewOf);
-    const lanesMatch = (candidate: Lanes): boolean => LANE_NAMES.every((name) => candidate[name] === lanes[name]);
+    const normalizedLanes = normalizeLanesWithProviders(lanes, providers);
+    const profiles = library.map((profile) => laneProfileViewOf(profile, providers));
+    const lanesMatch = (candidate: Lanes): boolean => {
+      const normalizedCandidate = normalizeLanesWithProviders(candidate, providers);
+      return LANE_NAMES.every((name) => normalizedCandidate[name] === normalizedLanes[name]);
+    };
     // The recorded entry stands only while the profile it names still lives;
     // otherwise a profile whose 6 lanes match the effective table is the
     // active one — neither names one, the bar says none.
@@ -2168,7 +2171,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     }
     const active =
       recordedProfile !== undefined
-        ? laneProfileViewOf(recordedProfile)
+        ? laneProfileViewOf(recordedProfile, providers)
         : (profiles.find((profile) => lanesMatch(profile.lanes)) ?? null);
     let hasProjectLaneOverride = false;
     if (scopeSlug !== undefined) {
@@ -2225,7 +2228,11 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         }
         lanesToReconcile = effective.lanes;
       }
-      const reconciled = reconcilePaseoRoleProviders(deps.home, lanesToReconcile, { reloadDaemon: reloadDaemonConfigViaWs });
+      const reconciled = reconcilePaseoRoleProviders(
+        deps.home,
+        cachedProviderList !== null ? normalizeLanesWithProviders(lanesToReconcile, cachedProviderList) : lanesToReconcile,
+        { reloadDaemon: reloadDaemonConfigViaWs },
+      );
       if (reconciled.ok) {
         if (reconciled.changed) log("role providers: <home>/config.json reconciled — daemon reload requested");
       } else {
@@ -2704,7 +2711,8 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
 
     if (plan.profileId !== undefined) {
       try {
-        applyLaneProfile(deps.stateDir, plan.profileId, registered.slug);
+        const providers = await bestEffortProviders(context);
+        applyLaneProfile(deps.stateDir, plan.profileId, registered.slug, { providers });
       } catch (err) {
         const msg = `${messageOf(err)} — the Project is registered; fix the Lane profile in step 3 and Start again`;
         const code = codeOf(err);
@@ -2862,12 +2870,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         return failure(codeOf(err), messageOf(err));
       }
     }
-    let providers: ProviderEntry[] = [];
-    try {
-      providers = await resolveProviders(resolveDaemon(context));
-    } catch {
-      // best-effort provider catalog lookup
-    }
+    const providers = await bestEffortProviders(context);
     const chosen: Partial<Record<LaneName, string>> = {};
     for (const lane of ["supervisor", "lead", "worker"] as const) {
       const value = input.models?.[lane]?.trim();
@@ -3083,7 +3086,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       const agents: AgentView[] = [];
       for (const agent of relevant) {
         const seatOverride = agent.id === supervisorRaw?.id ? ("supervisor" as const) : agent.id === leadRaw?.id ? ("lead" as const) : undefined;
-        agents.push(agentViewOf(agent, bound.get(agent.id) ?? null, seatOverride, project?.slug));
+        agents.push(agentViewOf(agent, bound.get(agent.id) ?? null, seatOverride, project?.slug, providers));
       }
       const supervisor = supervisorRaw === undefined ? null : (agents.find((agent) => agent.id === supervisorRaw!.id) ?? null);
       const lead = leadRaw === undefined ? null : (agents.find((agent) => agent.id === leadRaw!.id) ?? null);
@@ -3102,7 +3105,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           if (agent.id === supervisorRaw.id || agent.id === leadRaw?.id) continue;
           if (!agentInProjectWorkspace(agent, project)) continue;
           if (!isSupervisorCandidate(agent, { stateDir: deps.stateDir, slug: project.slug })) continue;
-          supervisorCandidates.push(agentViewOf(agent, null, undefined, project?.slug));
+          supervisorCandidates.push(agentViewOf(agent, null, undefined, project?.slug, providers));
         }
       }
 
@@ -3180,11 +3183,13 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       const panelMissingPrerequisites = buildCompanionToolsView()
         .filter((tool) => tool.status !== "running" || tool.error !== null)
         .map((tool) => tool.title);
-      const profileInfo = laneProfilesGather(enrichedProject?.slug, lanes.lanes);
+      const effectiveLanes = normalizeLanesWithProviders(lanes.lanes, providers);
+      const effectiveMachineLanes = normalizeLanesWithProviders(machineLanes.lanes, providers);
+      const profileInfo = laneProfilesGather(enrichedProject?.slug, effectiveLanes, providers);
       const view = foldView({
         stateDir: deps.stateDir,
         generatedAt: new Date().toISOString(),
-        lanes: lanes.lanes,
+        lanes: effectiveLanes,
         events,
         usage: usageFile,
         daemon: { agents, supervisor, lead, providers, providersLoading, daemonError },
@@ -3202,8 +3207,8 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         project: enrichedProject,
         panel: {
           usage: deps.usage === undefined ? undefined : usageFile ?? null,
-          ...handoffPanelFacts(enrichedProject?.slug, foldTasks(events), lanes.lanes),
-          seatLanes: seatLanesOf(enrichedProject?.slug, lanes.lanes),
+          ...handoffPanelFacts(enrichedProject?.slug, foldTasks(events), effectiveLanes),
+          seatLanes: seatLanesOf(enrichedProject?.slug, effectiveLanes),
           profile: { active: profileInfo.profiles.find(p => p.id === profileInfo.activeProfileId) ?? null, list: profileInfo.profiles, modified: profileInfo.activeProfileModified },
           project: enrichedProject,
           registered: panelRegistration !== undefined,
@@ -3229,8 +3234,8 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         ok: true as const,
         view: {
           ...view,
-          machineLanes: machineLanes.lanes,
-          skillHub: inspectSkillHub({ stateDir: deps.stateDir, paseoHome: deps.home, slpLanes: lanes.lanes, userHome: resolveSurfaceUserHome(), projectRoot: enrichedProject?.root, configuredPacks }),
+          machineLanes: effectiveMachineLanes,
+          skillHub: inspectSkillHub({ stateDir: deps.stateDir, paseoHome: deps.home, slpLanes: effectiveLanes, userHome: resolveSurfaceUserHome(), projectRoot: enrichedProject?.root, configuredPacks }),
           companionTools: buildCompanionToolsView(),
           helperMcps: helperMcpRoster(discoverHelperMcps({ stateDir: deps.stateDir, userHome: resolveSurfaceUserHome() }).servers),
           ...profileInfo,
@@ -3252,10 +3257,16 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     async seatsDirectory(_input: {}, context?: SurfaceCallContext) {
       const daemon = resolveDaemon(context);
       let rawAgents: SurfaceAgentSnapshot[] = [];
+      let providers: ProviderEntry[] = cachedProviderList ?? [];
       let daemonError: string | null = null;
       try {
         const page = await daemon.agents.list({ filter: { includeArchived: false, includeBackground: true } });
         rawAgents = page.entries.map((entry) => entry.agent).filter((agent) => agent.archivedAt === null);
+        try {
+          providers = await resolveProviders(daemon);
+        } catch {
+          // best-effort provider catalog lookup
+        }
       } catch (err) {
         daemonError = `daemon unavailable: ${messageOf(err)}`;
       }
@@ -3293,12 +3304,12 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         }
         // The Needs-you count: the same panel projection the workspace panel
         // renders for this Project (the snapshot's own gather, reused).
-        const supervisor = supervisorRaw === undefined ? null : agentViewOf(supervisorRaw, null, "supervisor", registration.slug);
-        const lead = leadRaw === undefined ? null : agentViewOf(leadRaw, null, "lead", registration.slug);
+        const supervisor = supervisorRaw === undefined ? null : agentViewOf(supervisorRaw, null, "supervisor", registration.slug, providers);
+        const lead = leadRaw === undefined ? null : agentViewOf(leadRaw, null, "lead", registration.slug, providers);
         const agents = [
           ...(supervisor === null ? [] : [supervisor]),
           ...(lead === null ? [] : [lead]),
-          ...peers.map((agent) => agentViewOf(agent, bound.get(agent.id) ?? agent.labels.task ?? null, undefined, registration.slug)),
+          ...peers.map((agent) => agentViewOf(agent, bound.get(agent.id) ?? agent.labels.task ?? null, undefined, registration.slug, providers)),
         ];
         let heldSupervisorMailCount = 0;
         try {
@@ -3307,10 +3318,11 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           heldSupervisorMailCount = 0; // an unreadable mailbox is not a failed directory read
         }
         const effective = loadLanes(deps.stateDir, registration.slug);
-        const profiles = effective.ok ? laneProfilesGather(registration.slug, effective.lanes) : { profiles: [], activeProfileId: null, activeProfileModified: false, hasProjectLaneOverride: false };
+        const effectiveLanes = effective.ok ? normalizeLanesWithProviders(effective.lanes, providers) : undefined;
+        const profiles = effectiveLanes !== undefined ? laneProfilesGather(registration.slug, effectiveLanes, providers) : { profiles: [], activeProfileId: null, activeProfileModified: false, hasProjectLaneOverride: false };
         const panel = foldPanel({
-          ...(effective.ok ? handoffPanelFacts(registration.slug, tasks, effective.lanes) : {}),
-          ...(effective.ok ? { seatLanes: seatLanesOf(registration.slug, effective.lanes) } : {}),
+          ...(effectiveLanes !== undefined ? handoffPanelFacts(registration.slug, tasks, effectiveLanes) : {}),
+          ...(effectiveLanes !== undefined ? { seatLanes: seatLanesOf(registration.slug, effectiveLanes) } : {}),
           profile: { active: profiles.profiles.find(p => p.id === profiles.activeProfileId) ?? null, list: profiles.profiles, modified: profiles.activeProfileModified },
           project: { slug: registration.slug, root: registration.root, ...(registration.name !== undefined ? { name: registration.name } : {}) },
           registered: true,
@@ -3366,12 +3378,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         projectRoot = project.root;
       }
       const daemon = resolveDaemon(context);
-      let providers: ProviderEntry[] = [];
-      try {
-        providers = await resolveProviders(daemon);
-      } catch {
-        // best-effort provider catalog lookup
-      }
+      const providers = await bestEffortProviders(context);
       const sanitizedValue = sanitizeLaneWithProviders(input.value.trim(), providers);
       const before = projectSlug !== undefined ? loadLanes(deps.stateDir, projectSlug) : undefined;
       if (projectSlug !== undefined && before !== undefined && !before.ok) return failure("lanes-unreadable", before.reason);
@@ -3467,13 +3474,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         projectSlug = project.slug;
         projectRoot = project.root;
       }
-      const daemon = resolveDaemon(context);
-      let providers: ProviderEntry[] = [];
-      try {
-        providers = await resolveProviders(daemon);
-      } catch {
-        // best-effort provider catalog lookup
-      }
+      const providers = await bestEffortProviders(context);
       const sanitized: Partial<Record<LaneName, string>> = {};
       for (const [lane, value] of Object.entries(input.lanes)) {
         if (value === undefined) continue;
@@ -3553,7 +3554,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
      * `lanes` is omitted (the `+ Save as Profile…` act), validated whole
      * before anything is written.
      */
-    async profilesSave(input: { id?: string; name: string; description?: string; lanes?: Lanes; projectRoot?: string }, _context?: SurfaceCallContext) {
+    async profilesSave(input: { id?: string; name: string; description?: string; lanes?: Lanes; projectRoot?: string }, context?: SurfaceCallContext) {
       let projectSlug: string | undefined;
       if (input.projectRoot !== undefined) {
         const project = projectOrRefusal(input.projectRoot);
@@ -3566,17 +3567,19 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         if (!current.ok) return failure("lanes-unreadable", current.reason);
         lanes = current.lanes;
       }
+      const providers = await bestEffortProviders(context);
+      const normalizedLanes = normalizeLanesWithProviders(lanes, providers);
       try {
         const profile = saveLaneProfile(deps.stateDir, {
           ...(input.id === undefined ? {} : { id: input.id }),
           name: input.name,
           ...(input.description === undefined ? {} : { description: input.description }),
           ...(projectSlug === undefined ? {} : { projectSlug }),
-          lanes,
+          lanes: normalizedLanes,
         });
         const summary = `Saved Lane profile "${profile.name}" (${profile.id}).`;
         log(`profiles: ${summary}`);
-        return { ok: true as const, profile: laneProfileViewOf(profile), summary };
+        return { ok: true as const, profile: laneProfileViewOf(profile, providers), summary };
       } catch (err) {
         return failure(codeOf(err), messageOf(err));
       }
@@ -3600,9 +3603,10 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       const before = projectSlug !== undefined ? loadLanes(deps.stateDir, projectSlug) : loadLanes(deps.stateDir);
       if (!before.ok) return failure("lanes-unreadable", before.reason);
       const beforeByProject = projectSlug === undefined ? captureProjectLanesBeforeMachineWrite() : undefined;
+      const providers = await bestEffortProviders(context);
       let applied: { profile: LaneProfile; lanes: Lanes; path: string };
       try {
-        applied = applyLaneProfile(deps.stateDir, input.profileId, projectSlug);
+        applied = applyLaneProfile(deps.stateDir, input.profileId, projectSlug, { providers });
       } catch (err) {
         return failure(codeOf(err), messageOf(err));
       }

@@ -17,7 +17,7 @@ import type { VaultRunner, VaultRunnerCall } from "../src/vault-transport.ts";
 import { readProjectRegistration, writeProjectRegistration } from "../plugin/server/projects.ts";
 import { createSurfaceHandlers } from "../plugin/server/surface-rpc.ts";
 import type { SurfaceAgentSnapshot, SurfaceDaemonApi } from "../plugin/server/surface-rpc.ts";
-import { handleSpoolRequest, parseSpoolRequest, spoolRootFor, startSpool } from "../plugin/server/spool.ts";
+import { handleSpoolRequest, parseSpoolRequest, resolvePeerDispatchLane, spoolRootFor, startSpool } from "../plugin/server/spool.ts";
 import { parseHandoffFile } from "../plugin/server/handoff-text.ts";
 import { createLeadMailRuntime, LEAD_ROTATE_TOKENS, readLeadContextTokens } from "../plugin/server/lead-mailbox.ts";
 import { deliverLeadMail as coreDeliver, enqueueLeadMail as coreEnqueue } from "../src/index.ts";
@@ -2095,6 +2095,94 @@ test("sibling-effort models (antigravity/agy) switch to the matching same-base s
 
   assert.equal(driverReply.ok, true, JSON.stringify(driverReply));
   assert.equal(driverReply.resolvedProvider, "antigravity/gemini-4-hydrogen-xhigh", "max falls back onto the nearest same-base sibling -xhigh");
+});
+
+test("ADR 0067: legacy effort-suffixed Antigravity worker lane normalizes onto base + thinkingOptions for both non-thinking and thinking-bearing spawns without mutating lanes.json", async (t) => {
+  const surface = makeThinkingSpawnSurface(t, {
+    workerLane: "antigravity/gemini-4-hydrogen-high",
+    provider: "antigravity",
+    thinkingOptions: ["low", "medium", "high"],
+    modelIds: ["gemini-4-hydrogen"],
+  });
+  const lanesFile = join(surface.stateDir, "lanes.json");
+  const lanesBefore = readFileSync(lanesFile, "utf8");
+
+  // 1. Prompted spawn WITHOUT thinking override normalizes legacy -high -> :high
+  surface.factory.setContract({ task: "TH-AGY-1", workspace: surface.projectRoot, gate: "true", artifact: "README.md" });
+  const noOverride = await handleSpoolRequest(
+    surface.factory,
+    {
+      id: "th-agy-1",
+      kind: "spawn",
+      task: "TH-AGY-1",
+      provider: "worker",
+      arity: 1,
+      prompt: "Execute task TH-AGY-1: pass gate `true`, and call agent_claim.",
+      seat: "lead",
+    },
+    { daemon: surface.daemon },
+  );
+  assert.equal(noOverride.ok, true, JSON.stringify(noOverride));
+  assert.deepEqual(surface.created[0]!.config, { provider: "antigravity/gemini-4-hydrogen", thinkingOptionId: "high" });
+
+  // 2. Promptless driver-path spawn WITHOUT thinking override emits normalized resolvedProvider
+  surface.factory.setContract({ task: "TH-AGY-2", workspace: surface.projectRoot, gate: "true", artifact: "README.md" });
+  const driverNoOverride = await handleSpoolRequest(
+    surface.factory,
+    { id: "th-agy-2", kind: "spawn", task: "TH-AGY-2", provider: "worker", arity: 1 },
+    { daemon: surface.daemon },
+  );
+  assert.equal(driverNoOverride.ok, true, JSON.stringify(driverNoOverride));
+  assert.equal(driverNoOverride.resolvedProvider, "antigravity/gemini-4-hydrogen:high");
+
+  // 3. Prompted spawn WITH explicit thinking: "low" maps onto base + "low"
+  surface.factory.setContract({ task: "TH-AGY-3", workspace: surface.projectRoot, gate: "true", artifact: "README.md" });
+  const withLow = await handleSpoolRequest(
+    surface.factory,
+    {
+      id: "th-agy-3",
+      kind: "spawn",
+      task: "TH-AGY-3",
+      provider: "antigravity/gemini-4-hydrogen-high",
+      arity: 1,
+      prompt: "Execute task TH-AGY-3: pass gate `true`, and call agent_claim.",
+      seat: "lead",
+      thinking: "low",
+      thinkingReason: "Routine mechanical update.",
+    },
+    { daemon: surface.daemon },
+  );
+  assert.equal(withLow.ok, true, JSON.stringify(withLow));
+  assert.deepEqual(surface.created[1]!.config, { provider: "antigravity/gemini-4-hydrogen", thinkingOptionId: "low" });
+
+  // 4. Promptless spawn WITH unsupported thinking: "xhigh" resolves nearest supported tier ("high")
+  surface.factory.setContract({ task: "TH-AGY-4", workspace: surface.projectRoot, gate: "true", artifact: "README.md" });
+  const withXhigh = await handleSpoolRequest(
+    surface.factory,
+    {
+      id: "th-agy-4",
+      kind: "spawn",
+      task: "TH-AGY-4",
+      provider: "antigravity/gemini-4-hydrogen-high",
+      arity: 1,
+      thinking: "xhigh",
+      thinkingReason: "Needs deep verification.",
+    },
+    { daemon: surface.daemon },
+  );
+  assert.equal(withXhigh.ok, true, JSON.stringify(withXhigh));
+  assert.equal(withXhigh.resolvedProvider, "antigravity/gemini-4-hydrogen:high");
+
+  // 5. agy/* alias also resolves against antigravity catalog
+  const agyResolved = await resolvePeerDispatchLane({
+    factory: surface.factory,
+    daemon: surface.daemon,
+    requestedProvider: "agy/gemini-4-hydrogen-high",
+    projectSlug: undefined,
+  });
+  assert.equal(agyResolved, "agy/gemini-4-hydrogen:high");
+
+  assert.equal(readFileSync(lanesFile, "utf8"), lanesBefore, "lanes.json on disk stays untouched");
 });
 
 // ---- clean Task retirement (v0.5.0, ADR 0054 §5, ticket 05) -----------------------------------

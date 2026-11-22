@@ -52,6 +52,7 @@ export {
   lanesPath,
   loadLanes,
   migrateLegacyZcodeLane,
+  normalizeLaneWithProviders,
   parseLane,
   projectLanesPath,
   runLaneCli,

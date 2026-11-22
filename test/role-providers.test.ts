@@ -889,6 +889,90 @@ test("ADR 0055: laneProviderConfig migrates zcode/* and pi/zai/glm-* lanes onto 
   });
 });
 
+test("ADR 0067: laneProviderConfig normalizes legacy effort-suffixed Antigravity lanes against live catalog thinkingOptions while preserving exact/fixed-effort/unavailable pass-through", () => {
+  const agy017Catalog = [
+    {
+      id: "antigravity",
+      provider: "antigravity",
+      models: [
+        { id: "gemini-4-argon", thinkingOptions: [{ id: "low" }, { id: "medium" }, { id: "high" }] },
+        { id: "gemini-fixed", thinkingOptions: [] },
+      ],
+    },
+  ];
+
+  assert.deepEqual(laneProviderConfig("antigravity/gemini-4-argon-high", agy017Catalog), {
+    provider: "antigravity",
+    model: "gemini-4-argon",
+    thinkingOptionId: "high",
+  });
+  assert.deepEqual(laneProviderConfig("agy/gemini-4-argon-low", agy017Catalog), {
+    provider: "antigravity",
+    model: "gemini-4-argon",
+    thinkingOptionId: "low",
+  });
+
+  // Missing tier, empty thinkingOptions on base, exact match, and unavailable catalog pass through unchanged.
+  assert.deepEqual(laneProviderConfig("antigravity/gemini-4-argon-max", agy017Catalog), {
+    provider: "antigravity",
+    model: "gemini-4-argon-max",
+  });
+  assert.deepEqual(laneProviderConfig("antigravity/gemini-fixed-high", agy017Catalog), {
+    provider: "antigravity",
+    model: "gemini-fixed-high",
+  });
+  assert.deepEqual(
+    laneProviderConfig("antigravity/gemini-4-argon-high", [
+      { id: "antigravity", provider: "antigravity", models: [{ id: "gemini-4-argon-high", thinkingOptions: [] }] },
+    ]),
+    { provider: "antigravity", model: "gemini-4-argon-high" },
+  );
+  assert.deepEqual(laneProviderConfig("antigravity/gemini-4-argon-high", undefined), {
+    provider: "antigravity",
+    model: "gemini-4-argon-high",
+  });
+});
+
+test("ADR 0067: effectiveLanesForReconcile and reconcilePaseoRoleProviders never mutate lanes.json or profiles.json on disk", (t) => {
+  const dir = makeTempDir("role-providers-no-disk-mutation-");
+  disposeDir(t, dir);
+  const stateDir = join(dir, "state");
+  const home = join(dir, "paseo-home");
+  mkdirSync(stateDir, { recursive: true });
+  mkdirSync(home, { recursive: true });
+
+  const machineRaw = `${JSON.stringify({
+    supervisor: "antigravity/gemini-4-argon-high",
+    lead: "antigravity/gemini-4-argon-medium",
+    worker: "antigravity/gemini-4-argon-low",
+  }, null, 2)}\n`;
+  const profilesRaw = `${JSON.stringify({
+    profiles: {
+      legacy: {
+        name: "Legacy",
+        lanes: {
+          supervisor: "antigravity/gemini-4-argon-high",
+          lead: "antigravity/gemini-4-argon-medium",
+          worker: "antigravity/gemini-4-argon-low",
+          watch: "pi/zcode/glm-5.3",
+          freshEyes: "eye.json",
+        },
+        updatedAt: "2026-11-20T00:00:00.000Z",
+      },
+    },
+  }, null, 2)}\n`;
+  writeFileSync(join(stateDir, "lanes.json"), machineRaw);
+  writeFileSync(join(stateDir, "profiles.json"), profilesRaw);
+
+  const effective = effectiveLanesForReconcile(stateDir);
+  assert.ok(effective.ok);
+  const reconciled = reconcilePaseoRoleProviders(home, effective.lanes);
+  assert.ok(reconciled.ok);
+
+  assert.equal(readFileSync(join(stateDir, "lanes.json"), "utf8"), machineRaw);
+  assert.equal(readFileSync(join(stateDir, "profiles.json"), "utf8"), profilesRaw);
+});
+
 test("ADR 0067: Paseo 0.17.1 ProviderOverridesSchema still rejects extends: 'antigravity' while reconciled role providers pass validation and keep >=0.13.0 floor", async (t) => {
   const { ProviderOverridesSchema } = await import("@getpaseo/protocol/provider-config");
   const manifest = JSON.parse(readFileSync(join(process.cwd(), "plugin", "paseo-plugin.json"), "utf8")) as {
