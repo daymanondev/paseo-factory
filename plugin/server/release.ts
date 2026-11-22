@@ -91,6 +91,10 @@ function hasRunningGateInLedger(events: readonly LedgerEvent[]): boolean {
       started.push({ task: evt.task, attempt: evt.attempt, seq: evt.seq });
     } else if (evt.event === "gate_finished") {
       finished.add(`${evt.task}:${evt.attempt}:${contracts.get(evt.task) ?? 0}`);
+    } else if (evt.event === "task_closed") {
+      for (const s of started) {
+        if (s.task === evt.task) finished.add(`${s.task}:${s.attempt}:${contracts.get(s.task) ?? 0}`);
+      }
     }
   }
   return started.some((s) => {

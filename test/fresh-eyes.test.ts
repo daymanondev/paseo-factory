@@ -610,8 +610,8 @@ test("Lead eligibility ignores legacy review state, but acceptance waits for the
     assert.equal(view.leadEligible, true);
     assert.equal(view.ownerEligible, true);
     assert.equal(view.attempts[0]!.reviewState, "pending");
-    assert.throws(() => factory.setContract({ task: "REVIEW", workspace, gate: "true", artifact, freshEyes: true }), factoryErrorCode("gate-running"));
-    await assert.rejects(factory.accept({ task: "REVIEW", attempt: 1, accepted_by: "lead" }), factoryErrorCode("gate-running"));
+    assert.throws(() => factory.setContract({ task: "REVIEW", workspace, gate: "true", artifact, freshEyes: true }), factoryErrorCode("gate-in-flight"));
+    await assert.rejects(factory.accept({ task: "REVIEW", attempt: 1, accepted_by: "lead" }), factoryErrorCode("gate-in-flight"));
   } finally {
     complete({ code: 0, stdout: "CLEAR\nNothing to add.", stderr: "", timedOut: false });
     await claiming;
@@ -661,7 +661,7 @@ test("Owner acceptance waits for the in-flight report even with GREEN evidence",
   const claiming = factory.claim({ task: "OVERRIDE-EYE", sha: commitFix(workspace, artifact), handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   try {
     await reviewing;
-    await assert.rejects(factory.accept({ task: "OVERRIDE-EYE", attempt: 1, accepted_by: "owner", authority: "owner" }), factoryErrorCode("gate-running"));
+    await assert.rejects(factory.accept({ task: "OVERRIDE-EYE", attempt: 1, accepted_by: "owner", authority: "owner" }), factoryErrorCode("gate-in-flight"));
   } finally {
     complete();
     await claiming;

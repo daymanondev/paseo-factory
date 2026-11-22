@@ -539,6 +539,8 @@ export interface Factory {
    * Paseo workspace archive around this call.
    */
   close(input: CloseInput): Promise<TaskClosed>;
+  /** Validates `close` authority and terminal preconditions without mutating state or killing a queued Gate. */
+  validateClose(input: CloseInput): void;
   /**
    * Judges a driver's spawn request (v0.0.5): the task must be known,
    * unaccepted, unretired (`spawn:closed-task`, v0.5.0 ADR 0054 §5), scoped
@@ -1211,9 +1213,9 @@ export function createFactory(options: FactoryOptions): Factory {
       }
       const epochHistory = epochEventsFor(ledger, task);
       const inFlight = inFlightAttempt(epochHistory);
-      if (inFlight !== undefined) {
+      if (inFlight !== undefined && attemptHasStartedExecution(epochHistory, inFlight)) {
         throw new FactoryError(
-          "gate-running",
+          "gate-in-flight",
           `attempt ${inFlight} of task ${task} is still open — wait for its verdict before re-contracting`,
         );
       }
@@ -1234,6 +1236,17 @@ export function createFactory(options: FactoryOptions): Factory {
             ? `workspace "${workspace}" is the same tree as the live contract of task ${conflict.task}, and their scopes overlap (${conflict.overlapping}) — two Tasks share one Project only behind disjoint scopes`
             : `workspace "${workspace}" ${relationText(conflict.relation)} the live contract of task ${conflict.task} (${conflict.workspace}) — accept or retire that task before contracting this tree`,
         );
+      }
+      if (inFlight !== undefined && priorContract !== undefined) {
+        settleQueuedAttemptRed({
+          ledger,
+          dataDir,
+          task,
+          attempt: inFlight,
+          contract: priorContract,
+          note: "superseded-by-recontract",
+          includeGateStarted: false,
+        });
       }
       return ledger.append({
         event: "contract_set",
@@ -1391,49 +1404,15 @@ export function createFactory(options: FactoryOptions): Factory {
       assertTaskId(task);
       const contract = this.contractFor(task);
       if (!contract) throw new FactoryError("unknown-task", `no contract set for task ${task} — register one first`);
-      const history = epochEventsFor(ledger, task);
-      const events = attemptEvents(history, attempt);
-      const queued = events.findLast((e): e is GateQueued => e.event === "gate_queued");
-      let claimEvt = events.findLast((e): e is ClaimReported => e.event === "claim_reported");
-      if (claimEvt === undefined && queued !== undefined) {
-        claimEvt = ledger.append({
-          event: "claim_reported",
-          task,
-          attempt,
-          sha: queued.sha,
-          ...(queued.handoff === undefined ? {} : { handoff: queued.handoff }),
-          ...(queued.mechanical === undefined ? {} : { mechanical: queued.mechanical }),
-          ...(queued.agent === undefined ? {} : { agent: queued.agent }),
-        });
-      }
-      if (!events.some((e) => e.event === "gate_started")) {
-        ledger.append({ event: "gate_started", task, attempt, cmd: contract.gate });
-      }
-      let gate = events.findLast((e): e is GateFinished => e.event === "gate_finished");
-      if (gate === undefined) {
-        gate = ledger.append({
-          event: "gate_finished",
-          task,
-          attempt,
-          exit: null,
-          verdict: "red",
-          note: "daemon-restarted",
-        });
-      }
-      const existingReport = events.findLast((e) => e.event === "report_written");
-      const reportPath = existingReport?.event === "report_written"
-        ? existingReport.path
-        : writeAttemptReport(task, attempt, ledger, dataDir);
-      const handoff = claimEvt?.handoff ?? queued?.handoff;
-      const mechanical = claimEvt?.mechanical ?? queued?.mechanical;
-      return {
+      return settleQueuedAttemptRed({
+        ledger,
+        dataDir,
+        task,
         attempt,
-        verdict: gate.verdict,
-        gate,
-        reportPath,
-        ...(handoff === undefined ? {} : { handoff }),
-        ...(mechanical === undefined ? {} : { mechanical }),
-      };
+        contract,
+        note: "daemon-restarted",
+        includeGateStarted: true,
+      });
     },
 
     async accept({ task, attempt, accepted_by, authority }) {
@@ -1448,7 +1427,7 @@ export function createFactory(options: FactoryOptions): Factory {
         throw new FactoryError("unknown-task", `no contract set for task ${task} — register one first`);
       }
       if (inFlightAttempt(history) !== undefined) {
-        throw new FactoryError("gate-running", `task ${task} has an in-flight Attempt — wait for its report before accepting`);
+        throw new FactoryError("gate-in-flight", `task ${task} has an in-flight Attempt — wait for its report before accepting`);
       }
       const events = attemptEvents(history, attempt);
       if (events.length === 0) {
@@ -1539,13 +1518,12 @@ export function createFactory(options: FactoryOptions): Factory {
       });
     },
 
-    async close({ task, reason, by, authority }) {
+    validateClose({ task, reason, by, authority }) {
       assertTaskId(task);
       if (reason.trim() === "") {
         throw new FactoryError("invalid-close", "reason must be a non-empty string — the ledger keeps the one sentence that says why the Task retired");
       }
       const fullHistory = ledger.eventsFor(task);
-      const history = epochEventsFor(ledger, task);
       const contract = this.contractFor(task);
       if (contract === undefined) {
         throw new FactoryError("unknown-task", `no contract set for task ${task} — register one first`);
@@ -1560,13 +1538,29 @@ export function createFactory(options: FactoryOptions): Factory {
       if (fullHistory.some((event) => event.event === "task_closed")) {
         throw new FactoryError("already-closed", `task ${task} was already closed; the ledger is append-only`);
       }
-      if (inFlightAttempt(history) !== undefined) {
-        throw new FactoryError("gate-running", `task ${task} has an in-flight Attempt — wait for its report before closing`);
-      }
-      // The acceptance's own seat law (v0.0.14, ADR 0010 §3), mirrored: the
-      // transport's resolved authority decides, a bare `by` only claims.
       const role = authority ?? (by === "lead" ? "lead" : "owner");
       if (role === "agent") throw new FactoryError("agent-cannot-close", "Working Agents cannot close Tasks");
+    },
+
+    async close({ task, reason, by, authority }) {
+      this.validateClose({ task, reason, by, authority });
+      const history = epochEventsFor(ledger, task);
+      const contract = this.contractFor(task)!;
+      const inFlight = inFlightAttempt(history);
+      if (inFlight !== undefined) {
+        if (attemptHasStartedExecution(history, inFlight)) {
+          throw new FactoryError("gate-running", `task ${task} has an in-flight Attempt — wait for its report before closing`);
+        }
+        settleQueuedAttemptRed({
+          ledger,
+          dataDir,
+          task,
+          attempt: inFlight,
+          contract,
+          note: "cancelled-by-task-close",
+          includeGateStarted: false,
+        });
+      }
       // The cleanup precedes the line (the acceptance's async-git law): when
       // the line records, the Task's execution tree is already gone — the
       // managed worktree AND its factory/<task> branch, which a retirement
@@ -2327,6 +2321,76 @@ function maxAttempt(history: readonly LedgerEvent[]): number {
 /** One Attempt's own events — Contracts and choke events belong to the Task, not to any Attempt. */
 function attemptEvents(history: readonly LedgerEvent[], attempt: number): LedgerEvent[] {
   return history.filter((e) => "attempt" in e && e.attempt === attempt);
+}
+
+/** True once a Claim pipeline has moved past `gate_queued` into execution or completion. */
+function attemptHasStartedExecution(history: readonly LedgerEvent[], attempt: number): boolean {
+  return attemptEvents(history, attempt).some(
+    (e) => e.event === "claim_reported" || e.event === "gate_started" || e.event === "gate_finished",
+  );
+}
+
+/**
+ * Settles a queued/interrupted Attempt cleanly as red with a rendered report
+ * (used by daemon-restart recovery, queued re-contract supersession, and
+ * queued task-close cancellation).
+ */
+function settleQueuedAttemptRed(input: {
+  ledger: Ledger;
+  dataDir: string;
+  task: string;
+  attempt: number;
+  contract: ContractSet;
+  note: string;
+  includeGateStarted: boolean;
+}): ClaimOutcome {
+  const { ledger, dataDir, task, attempt, contract, note, includeGateStarted } = input;
+  const history = epochEventsFor(ledger, task);
+  const events = attemptEvents(history, attempt);
+  const queued = events.findLast((e): e is GateQueued => e.event === "gate_queued");
+  let claimEvt = events.findLast((e): e is ClaimReported => e.event === "claim_reported");
+  if (claimEvt === undefined && queued !== undefined) {
+    claimEvt = ledger.append({
+      event: "claim_reported",
+      task,
+      attempt,
+      sha: queued.sha,
+      ...(queued.handoff === undefined ? {} : { handoff: queued.handoff }),
+      ...(queued.mechanical === undefined ? {} : { mechanical: queued.mechanical }),
+      ...(queued.agent === undefined ? {} : { agent: queued.agent }),
+    });
+  }
+  if (includeGateStarted && !events.some((e) => e.event === "gate_started")) {
+    ledger.append({ event: "gate_started", task, attempt, cmd: contract.gate });
+  }
+  let gate = events.findLast((e): e is GateFinished => e.event === "gate_finished");
+  if (gate === undefined) {
+    const sha = claimEvt?.sha ?? queued?.sha;
+    gate = ledger.append({
+      event: "gate_finished",
+      task,
+      attempt,
+      exit: null,
+      verdict: "red",
+      note,
+      ...(sha === undefined ? {} : { sha }),
+    });
+  }
+  const existingReport = events.findLast((e) => e.event === "report_written");
+  const reportPath =
+    existingReport?.event === "report_written"
+      ? existingReport.path
+      : writeAttemptReport(task, attempt, ledger, dataDir);
+  const handoff = claimEvt?.handoff ?? queued?.handoff;
+  const mechanical = claimEvt?.mechanical ?? queued?.mechanical;
+  return {
+    attempt,
+    verdict: gate.verdict,
+    gate,
+    reportPath,
+    ...(handoff === undefined ? {} : { handoff }),
+    ...(mechanical === undefined ? {} : { mechanical }),
+  };
 }
 
 /**
