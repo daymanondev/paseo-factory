@@ -24,6 +24,7 @@ async function compile(source, globalName) {
 
 const targets = [
   ["src/usage-status.ts", "plugin/bin/usage-status.mjs"],
+  ["src/gate-queue-status.ts", "plugin/bin/gate-queue-status.mjs"],
   ["src/agy-transcript.ts", "plugin/bin/agy-transcript.mjs"],
   ["src/open-design/open-design-cli.ts", "plugin/bin/open-design.mjs"],
   ["src/vault.ts", "plugin/bin/vault.mjs"],

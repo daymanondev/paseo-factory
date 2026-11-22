@@ -12,7 +12,7 @@ import { OpenDesignProjectLinkSchema } from "./view.ts";
  */
 import * as paseoPlugin from "@getpaseo/plugin";
 import { z } from "zod";
-import { GitHubPublishPreflightViewSchema, HelperMcpViewSchema, ImportMaterializationSchema, ImportStatusSchema, FactoryViewSchema, LaneNameSchema, LaneProfileViewSchema, LanesSchema, LanesUpdateSchema, ProjectDirectoryEntrySchema, ProjectViewSchema, ReleaseModeSchema, ReleaseSettingsViewSchema, SeatDirectoryEntrySchema, StoreReleaseModeSchema, StoreReleaseViewSchema, VaultStatusViewSchema } from "./view.ts";
+import { FactoryOverviewViewSchema, GateQueueViewSchema, GitHubPublishPreflightViewSchema, HelperMcpViewSchema, ImportMaterializationSchema, ImportStatusSchema, FactoryViewSchema, LaneNameSchema, LaneProfileViewSchema, LanesSchema, LanesUpdateSchema, ProjectDirectoryEntrySchema, ProjectViewSchema, ReleaseModeSchema, ReleaseSettingsViewSchema, SeatDirectoryEntrySchema, StoreReleaseModeSchema, StoreReleaseViewSchema, VaultStatusViewSchema } from "./view.ts";
 
 const { defineRpc } = paseoPlugin;
 
@@ -171,7 +171,70 @@ export const seatsDirectory = defineRpc({
       ok: z.literal(true),
       seats: z.array(SeatDirectoryEntrySchema),
       projects: z.array(ProjectDirectoryEntrySchema),
+      gateQueue: z.object({
+        paused: z.boolean(),
+        concurrency: z.number().int().min(1),
+        runningCount: z.number().int().nonnegative(),
+        queuedCount: z.number().int().nonnegative(),
+      }).optional(),
       daemonError: z.string().nullable(),
+    }),
+    Failure,
+  ]),
+});
+
+/**
+ * Machine-wide Factory overview snapshot (ADR 0068): combines the live
+ * `Gate queue` (`paused`, `concurrency`, `running`, FIFO `queued`) with
+ * compact summary rows for every registered Project. Read-only by construction.
+ */
+export const overview = defineRpc({
+  name: "factory.overview",
+  input: z.object({}),
+  output: z.union([z.object({ ok: z.literal(true) }).merge(FactoryOverviewViewSchema), Failure]),
+});
+
+export const gateQueuePause = defineRpc({
+  name: "factory.gate.queue.pause",
+  input: z.object({}),
+  output: z.union([z.object({ ok: z.literal(true), gateQueue: GateQueueViewSchema }), Failure]),
+});
+
+export const gateQueueResume = defineRpc({
+  name: "factory.gate.queue.resume",
+  input: z.object({}),
+  output: z.union([z.object({ ok: z.literal(true), gateQueue: GateQueueViewSchema }), Failure]),
+});
+
+export const gateQueueConcurrency = defineRpc({
+  name: "factory.gate.queue.concurrency",
+  input: z.object({
+    concurrency: z.number().int().min(1),
+  }),
+  output: z.union([z.object({ ok: z.literal(true), gateQueue: GateQueueViewSchema }), Failure]),
+});
+
+export const gateQueueCancel = defineRpc({
+  name: "factory.gate.queue.cancel",
+  input: z.object({
+    queueId: z.string().min(1).optional(),
+    id: z.string().min(1).optional(),
+    projectSlug: z.string().min(1).optional(),
+    projectRoot: z.string().min(1).optional(),
+    task: z.string().min(1).optional(),
+  }).refine(
+    (value) =>
+      value.queueId !== undefined ||
+      value.id !== undefined ||
+      (value.task !== undefined && (value.projectSlug !== undefined || value.projectRoot !== undefined)),
+    { message: "provide queueId (or id), or task with projectSlug/projectRoot" },
+  ),
+  output: z.union([
+    z.object({
+      ok: z.literal(true),
+      cancelledCount: z.number().int().nonnegative(),
+      cancelledIds: z.array(z.string()),
+      gateQueue: GateQueueViewSchema,
     }),
     Failure,
   ]),

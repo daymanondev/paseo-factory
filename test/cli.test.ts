@@ -1570,3 +1570,48 @@ test("factory-claim async queued ack: returns exit 0 immediately with queue posi
   assert.match(claim.stdout, /position 1/);
   assert.ok(elapsedMs < 2000, `expected immediate queued return, took ${elapsedMs}ms`);
 });
+
+test("factory status prints live Gate queue running + queued items while active via spool, then omits after completion", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const workspace = join(dir, "workspace");
+  copyFixture("sample-workspace", workspace);
+  const sha = gitCommitAll(workspace);
+  const home = join(dir, "paseo-home");
+  const stateDir = join(home, "plugin-state", "paseo-factory");
+  const factory = createFactory({ stateDir, eyeCliProbe: () => false });
+  const spool = startSpool(stateDir, factory, { pollMs: 15 });
+  t.after(() => spool.stop());
+
+  const releaseFlag = join(dir, "release-cli-status");
+  const holdGatePath = join(dir, "hold-cli-status.mjs");
+  writeFileSync(
+    holdGatePath,
+    `import { existsSync } from "node:fs";\nconst iv = setInterval(() => { if (existsSync(${JSON.stringify(releaseFlag)})) { clearInterval(iv); process.exit(0); } }, 20);\n`,
+  );
+  const holdGate = `${JSON.stringify(process.execPath)} ${JSON.stringify(holdGatePath)}`;
+
+  assert.equal((await run(ownerCli, ["contract", "--task", "CLI-Q1", "--workspace", workspace, "--gate", holdGate, "--artifact", "src/format.ts", "--scope", "src"], { PASEO_HOME: home })).status, 0);
+  assert.equal((await run(ownerCli, ["contract", "--task", "CLI-Q2", "--workspace", workspace, "--gate", "true", "--artifact", "src/format.ts", "--scope", "test"], { PASEO_HOME: home })).status, 0);
+
+  const c1 = await run(claimCli, ["--task", "CLI-Q1", "--sha", sha, "--outcome", "complete", "--scope", "src/format.ts", "--verification", "ok", "--unknowns", "none"], { FACTORY_STATE_DIR: stateDir });
+  assert.equal(c1.status, 0, c1.stderr);
+  const c2 = await run(claimCli, ["--task", "CLI-Q2", "--sha", sha, "--outcome", "complete", "--scope", "src/format.ts", "--verification", "ok", "--unknowns", "none"], { FACTORY_STATE_DIR: stateDir });
+  assert.equal(c2.status, 0, c2.stderr);
+
+  const liveStatus = await run(ownerCli, ["status"], { PASEO_HOME: home });
+  assert.equal(liveStatus.status, 0, liveStatus.stderr);
+  assert.match(liveStatus.stdout, /Gate queue/);
+  assert.match(liveStatus.stdout, /#1 \[running\] .*CLI-Q1 attempt #1/);
+  assert.match(liveStatus.stdout, /#2 \[queued\] .*CLI-Q2 attempt #1/);
+
+  writeFileSync(releaseFlag, "go\n");
+  const deadline = Date.now() + 8_000;
+  while (Date.now() < deadline) {
+    if (factory.ledger.eventsFor("CLI-Q2").some((e) => e.event === "report_written")) break;
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  const doneStatus = await run(ownerCli, ["status"], { PASEO_HOME: home });
+  assert.equal(doneStatus.status, 0, doneStatus.stderr);
+  assert.equal(doneStatus.stdout.includes("Gate queue"), false);
+});

@@ -2463,6 +2463,7 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
             cmd: admitted.contract.gate,
             cwd: admitted.executionDir,
             ...(admitted.contract.artifact.trim() === "" ? {} : { artifact: admitted.contract.artifact }),
+            logPath: admitted.logPath,
             timeoutMs: admitted.timeoutMs,
             ...(admitted.agent === undefined ? {} : { agent: admitted.agent }),
             ...(admitted.handoff === undefined ? {} : { handoff: admitted.handoff }),

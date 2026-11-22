@@ -657,3 +657,95 @@ test("taskStatusLines lean mode collapses settled (accepted and closed) tasks in
   const full = taskStatusLines(events);
   assert.equal(full.length, 3, "default/full mode returns every historical row verbatim");
 });
+
+test("Seam 3 (Ticket 05): factory status renders Gate queue summary (paused, concurrency, running, FIFO queued) directly from gate-queue.json and omits when empty/unpaused", async (t) => {
+  const dir = makeTempDir("status-gate-queue-");
+  disposeDir(t, dir);
+  const home = join(dir, "paseo-home");
+  const stateDir = join(home, "plugin-state", "paseo-factory");
+  const env = { PASEO_HOME: home };
+
+  const rootA = join(dir, "proj-a");
+  const rootB = join(dir, "proj-b");
+  mkdirSync(rootA, { recursive: true });
+  mkdirSync(rootB, { recursive: true });
+  writeFileSync(join(rootA, "README.md"), "a\n");
+  writeFileSync(join(rootB, "README.md"), "b\n");
+  gitCommitAll(rootA);
+  gitCommitAll(rootB);
+  const resA = resolveProject(rootA);
+  const resB = resolveProject(rootB);
+  assert.ok(resA.ok && resB.ok);
+  writeProjectRegistration(stateDir, resA.slug, { root: resA.root });
+  writeProjectRegistration(stateDir, resB.slug, { root: resB.root });
+
+  mkdirSync(join(stateDir, "projects", resA.slug), { recursive: true });
+  writeFileSync(
+    join(stateDir, "projects", resA.slug, "ledger.jsonl"),
+    JSON.stringify({ seq: 1, ts, event: "contract_set", task: "T-01", workspace: resA.root, gate: "npm test", artifact: "README.md" }) + "\n",
+  );
+
+  // 1. Empty & unpaused gate-queue.json omits Gate queue section completely.
+  writeFileSync(
+    join(stateDir, "gate-queue.json"),
+    JSON.stringify({ schemaVersion: 1, paused: false, concurrency: 1, items: [] }),
+  );
+  const emptyQueue = await run(ownerCli, ["status"], env);
+  assert.equal(emptyQueue.status, 0, emptyQueue.stderr);
+  assert.equal(emptyQueue.stdout.includes("Gate queue"), false, "idle unpaused queue omits Gate queue section");
+
+  // 2. Paused queue with running + FIFO queued items renders full Gate queue section.
+  const twoMinsAgo = new Date(Date.now() - 125_000).toISOString();
+  const thirtySecsAgo = new Date(Date.now() - 30_000).toISOString();
+  writeFileSync(
+    join(stateDir, "gate-queue.json"),
+    JSON.stringify({
+      schemaVersion: 1,
+      paused: true,
+      pausedAt: twoMinsAgo,
+      concurrency: 2,
+      items: [
+        {
+          id: "gq-run",
+          projectSlug: resA.slug,
+          task: "T-01",
+          attempt: 1,
+          sha: "1111111",
+          cmd: "npm test",
+          cwd: resA.root,
+          timeoutMs: 900_000,
+          enqueuedAt: twoMinsAgo,
+          startedAt: twoMinsAgo,
+          status: "running",
+        },
+        {
+          id: "gq-q2",
+          projectSlug: resB.slug,
+          task: "T-02",
+          attempt: 2,
+          sha: "2222222",
+          cmd: "npm test",
+          cwd: resB.root,
+          timeoutMs: 900_000,
+          enqueuedAt: thirtySecsAgo,
+          status: "queued",
+          mechanical: "lead_verify",
+        },
+      ],
+    }),
+  );
+
+  const populated = await run(ownerCli, ["status"], env);
+  assert.equal(populated.status, 0, populated.stderr);
+  assert.match(populated.stdout, /Gate queue/);
+  assert.match(populated.stdout, /state: paused.*concurrency=2 · running=1 · queued=1/);
+  assert.match(populated.stdout, new RegExp(`#1 \\[running\\] ${resA.slug} · T-01 attempt #1 · elapsed \\d+[ms]`));
+  assert.match(populated.stdout, new RegExp(`#2 \\[queued\\] ${resB.slug} · T-02 attempt #2 · waiting \\d+[ms] \\(lead_verify\\)`));
+
+  // 3. --project with empty ledger still renders Gate queue when queue is paused/non-empty.
+  const scopedEmpty = await run(ownerCli, ["status", "--project", resB.slug], env);
+  assert.equal(scopedEmpty.status, 0, scopedEmpty.stderr);
+  assert.match(scopedEmpty.stdout, /no tasks yet/);
+  assert.match(scopedEmpty.stdout, /Gate queue/);
+  assert.match(scopedEmpty.stdout, /state: paused/);
+});
