@@ -20,7 +20,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -32,6 +32,7 @@ import { startSpool } from "../plugin/server/spool.ts";
 import { projectTask } from "../src/task-state.ts";
 import { foldTasks } from "../plugin/server/view.ts";
 import { FactoryError } from "../plugin/server/core/errors.ts";
+import { contractTimeoutMs, contractTimeoutSeconds } from "../plugin/server/core/constants.ts";
 import type { ContractSet } from "../src/events.ts";
 import { disposeDir, gitCommitAll, gitCommitChanges, makeTempDir } from "./helpers.ts";
 
@@ -614,4 +615,279 @@ test("ticket 02: a read-only Contract with an explicit non-empty gate runs the s
   assert.equal(green.verdict, "green");
   assert.equal(green.gate.exit, 0);
   assert.equal(green.gate.note, "scout-ok", "the note is the shell's output — never the synthetic read-only line");
+});
+
+test("gate-queue ticket 01: setContract validates timeoutSeconds (60..3600 integer), persists/replays it, and defaults omitted or legacy contracts to 900s", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const workspace = makeRepo(dir);
+  const stateDir = join(dir, "state");
+  const factory = createFactory({ stateDir });
+
+  // Boundary values (60, 3600) and mid value (1200) succeed and persist.
+  const minEvt = factory.setContract({ task: "TO-MIN", workspace, gate: "true", timeoutSeconds: 60 });
+  assert.equal(minEvt.timeoutSeconds, 60);
+  const maxEvt = factory.setContract({ task: "TO-MAX", workspace, gate: "true", timeoutSeconds: 3600 });
+  assert.equal(maxEvt.timeoutSeconds, 3600);
+  const defaultEvt = factory.setContract({ task: "TO-DEF", workspace, gate: "true" });
+  assert.equal("timeoutSeconds" in defaultEvt, false);
+  assert.equal(contractTimeoutSeconds(defaultEvt), 900);
+  assert.equal(contractTimeoutMs(defaultEvt), 900_000);
+
+  // Re-contracting from explicit 60s without timeoutSeconds returns to the 900s default.
+  const recontracted = factory.setContract({ task: "TO-MIN", workspace, gate: "true" });
+  assert.equal("timeoutSeconds" in recontracted, false);
+  assert.equal(contractTimeoutSeconds(factory.contractFor("TO-MIN")), 900);
+
+  // Out-of-range and non-integer values fail loudly with invalid-contract and append nothing.
+  const seqBefore = factory.ledger.events.at(-1)!.seq;
+  for (const bad of [59, 0, -60, 3601, 60.5, Number.NaN, Number.POSITIVE_INFINITY, "900" as unknown as number]) {
+    const err = invalidContract(() => factory.setContract({ task: "TO-BAD", workspace, gate: "true", timeoutSeconds: bad }));
+    assert.match(err.message, /timeoutSeconds/);
+    assert.match(err.message, /60.*3600/);
+  }
+  assert.equal(factory.ledger.events.at(-1)!.seq, seqBefore, "invalid timeoutSeconds writes no ledger event");
+
+  // Reopening from disk preserves configured timeoutSeconds across replay.
+  const replayed = createFactory({ stateDir });
+  assert.equal(replayed.contractFor("TO-MAX")?.timeoutSeconds, 3600);
+  assert.equal(contractTimeoutSeconds(replayed.contractFor("TO-MAX")), 3600);
+  assert.equal(replayed.contractFor("TO-DEF")?.timeoutSeconds, undefined);
+  assert.equal(contractTimeoutSeconds(replayed.contractFor("TO-DEF")), 900);
+});
+
+test("gate-queue ticket 01: claim enforces Contract timeoutSeconds (and 900s default on omitted/legacy contracts) by reaping detached -pgid only when exceeded", { skip: process.platform === "win32" }, async (t) => {
+  const handoff = { outcome: "complete", scope: "src/x.ts", verification: "gate run", unknowns: "none" } as const;
+
+  // 1. Fast gate finishing well before timeoutSeconds: 60 returns green cleanly.
+  {
+    const dir = makeTempDir();
+    disposeDir(t, dir);
+    const workspace = makeRepo(dir);
+    const factory = createFactory({ stateDir: join(dir, "state") });
+    factory.setContract({ task: "FAST-60", workspace, gate: "echo fast-ok", timeoutSeconds: 60 });
+    const sha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: workspace, encoding: "utf8" }).trim();
+    const outcome = await factory.claim({ task: "FAST-60", sha, handoff });
+    assert.equal(outcome.verdict, "green");
+    assert.equal(outcome.gate.exit, 0);
+    assert.equal(outcome.gate.note, "fast-ok");
+  }
+
+  const runDetachedTimeoutCase = async (scenario: {
+    name: string;
+    configuredTimeoutSeconds?: number;
+    legacy?: boolean;
+    expectedTimeoutMs: number;
+  }) => {
+    const dir = makeTempDir();
+    const pidDir = makeTempDir();
+    const parentPidPath = join(pidDir, "parent.pid");
+    const pidPath = join(pidDir, "descendant.pid");
+    t.after(() => {
+      for (const file of [pidPath, parentPidPath]) {
+        if (!existsSync(file)) continue;
+        try { process.kill(Number(readFileSync(file, "utf8")), "SIGKILL"); } catch { /* already dead */ }
+      }
+    });
+    disposeDir(t, pidDir);
+    disposeDir(t, dir);
+
+    const workspace = makeRepo(dir);
+    const stateDir = join(dir, "state");
+    // Put helper scripts in pidDir (outside the Git worktree) so the Git tree stays clean!
+    writeFileSync(join(pidDir, "descendant.mjs"), `
+      import { writeFileSync } from "node:fs";
+      process.on("SIGTERM", () => {});
+      setInterval(() => {}, 1000);
+      writeFileSync(${JSON.stringify(pidPath)}, String(process.pid));
+    `);
+    writeFileSync(join(pidDir, "parent.mjs"), `
+      import { spawn } from "node:child_process";
+      import { writeFileSync } from "node:fs";
+      writeFileSync(${JSON.stringify(parentPidPath)}, String(process.pid));
+      spawn(process.execPath, [${JSON.stringify(join(pidDir, "descendant.mjs"))}], { stdio: "ignore" });
+      setInterval(() => {}, 1000);
+    `);
+
+    const cmd = `exec '${process.execPath}' '${join(pidDir, "parent.mjs")}'`;
+    const taskId = `TO-${scenario.name}`;
+    if (scenario.legacy) {
+      mkdirSync(stateDir, { recursive: true });
+      const legacyContract = {
+        seq: 1,
+        ts: "2025-01-01T00:00:00.000Z",
+        event: "contract_set",
+        task: taskId,
+        workspace,
+        gate: cmd,
+        artifact: "",
+      };
+      writeFileSync(join(stateDir, "ledger.jsonl"), `${JSON.stringify(legacyContract)}\n`);
+    } else {
+      const first = createFactory({ stateDir });
+      first.setContract({
+        task: taskId,
+        workspace,
+        gate: cmd,
+        ...(scenario.configuredTimeoutSeconds === undefined ? {} : { timeoutSeconds: scenario.configuredTimeoutSeconds }),
+      });
+    }
+
+    // Reopen from disk to exercise replay + actual claim enforcement without options.timeoutMs override.
+    const factory = createFactory({ stateDir });
+    const sha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: workspace, encoding: "utf8" }).trim();
+
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    let settled = false;
+    let claimPromise: Promise<Awaited<ReturnType<typeof factory.claim>>> | undefined;
+    try {
+      claimPromise = factory.claim({ task: taskId, sha, handoff }).then((res) => {
+        settled = true;
+        return res;
+      });
+
+      const deadline = Date.now() + 5_000;
+      while (!existsSync(pidPath)) {
+        if (Date.now() >= deadline) throw new Error(`${scenario.name}: descendant did not start within 5s`);
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+
+      // Tick right up to expectedTimeoutMs - 1: must NOT time out prematurely (including past old 300s ceiling).
+      t.mock.timers.tick(scenario.expectedTimeoutMs - 1);
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(settled, false, `${scenario.name}: must not time out before ${scenario.expectedTimeoutMs}ms`);
+
+      const pid = Number(readFileSync(pidPath, "utf8"));
+      const aliveStatus = spawnSync("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" }).stdout.trim();
+      assert.ok(aliveStatus !== "" && !aliveStatus.startsWith("Z"), `${scenario.name}: descendant ${pid} still running before timeout`);
+
+      // Crossing expectedTimeoutMs triggers detached -pgid SIGKILL and red timeout Verdict.
+      t.mock.timers.tick(1);
+      const settleDeadline = Date.now() + 2_000;
+      while (!settled && Date.now() < settleDeadline) {
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+      assert.equal(settled, true, `${scenario.name}: claim must settle on timeout after ${scenario.expectedTimeoutMs}ms`);
+      const outcome = await claimPromise;
+      const deadStatus = spawnSync("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" }).stdout.trim();
+
+      assert.equal(outcome.verdict, "red", `${scenario.name}: timeout verdict must be red`);
+      assert.equal(outcome.gate.exit, null, `${scenario.name}: timeout exit must be null`);
+      assert.match(outcome.gate.note, new RegExp(`gate killed after ${scenario.expectedTimeoutMs}ms \\(timeout\\)`));
+      assert.ok(existsSync(outcome.reportPath), `${scenario.name}: report written on timeout`);
+      assert.ok(deadStatus === "" || deadStatus.startsWith("Z"), `${scenario.name}: descendant ${pid} must be reaped (status=${deadStatus})`);
+    } finally {
+      if (!settled) {
+        for (const file of [pidPath, parentPidPath]) {
+          if (!existsSync(file)) continue;
+          try { process.kill(Number(readFileSync(file, "utf8")), "SIGKILL"); } catch { /* already dead */ }
+        }
+        await claimPromise?.catch(() => {});
+      }
+      t.mock.timers.reset();
+    }
+  };
+
+  await runDetachedTimeoutCase({ name: "MIN60", configuredTimeoutSeconds: 60, expectedTimeoutMs: 60_000 });
+  await runDetachedTimeoutCase({ name: "MAX3600", configuredTimeoutSeconds: 3600, expectedTimeoutMs: 3_600_000 });
+  await runDetachedTimeoutCase({ name: "LEGACY900", legacy: true, expectedTimeoutMs: 900_000 });
+});
+
+test("gate-queue ticket 01: lead_set_contract advertises, validates, and forwards timeoutSeconds end-to-end through bridge.mjs JSON-RPC", async (t) => {
+  const homeDir = mkdtempSync(join(tmpdir(), "factory-bridge-timeout-"));
+  const stateDir = join(homeDir, "plugin-state", "paseo-factory");
+  const repoDir = makeRepo(homeDir);
+  t.after(() => {
+    rmSync(homeDir, { recursive: true, force: true });
+  });
+  const factory = createFactory({ stateDir, eyeCliProbe: () => false });
+  const reg = ensureProjectRegistered(stateDir, repoDir);
+  assert.ok(reg.ok);
+  const slug = reg.ok ? reg.slug : "demo";
+  const registry = createFactoryRegistry({ stateDir, root: factory });
+  const fakeDaemon = {
+    agents: {
+      list: async () => ({ entries: [] }),
+      ref: (id: string) => ({ send: async () => ({ messageId: `msg-${id}` }), cancel: async () => {}, archive: async () => {} }),
+    },
+  };
+  const spool = startSpool(stateDir, factory, { registry, pollMs: 10, daemon: fakeDaemon as never, home: homeDir });
+  t.after(() => spool.stop());
+
+  const lead = new CorrelationRegistry(stateDir).issue({ role: "lead", projectSlug: slug, projectRoot: repoDir, agentId: "lead-timeout" });
+  const child = spawn(process.execPath, [BRIDGE_BIN, "--correlation", lead.correlationId, "--state-dir", stateDir], {
+    cwd: repoDir,
+    env: process.env,
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  const requests = [
+    { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} },
+    { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "MCP-TO-OK", gate: "true", timeoutSeconds: 1800, description: FOUR_PART_BRIEF } } },
+    { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "MCP-TO-DEF", gate: "true", description: FOUR_PART_BRIEF } } },
+    { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "MCP-TO-LOW", gate: "true", timeoutSeconds: 59, description: FOUR_PART_BRIEF } } },
+    { jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "MCP-TO-HIGH", gate: "true", timeoutSeconds: 3601, description: FOUR_PART_BRIEF } } },
+    { jsonrpc: "2.0", id: 6, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "MCP-TO-FLOAT", gate: "true", timeoutSeconds: 120.5, description: FOUR_PART_BRIEF } } },
+    { jsonrpc: "2.0", id: 7, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "MCP-TO-STR", gate: "true", timeoutSeconds: "900", description: FOUR_PART_BRIEF } } },
+  ];
+
+  const responses: Array<Record<string, unknown>> = [];
+  let buf = Buffer.alloc(0);
+  let stderr = "";
+  child.stderr.on("data", (c: Buffer) => (stderr += c.toString("utf8")));
+  await new Promise<void>((resolveDone, rejectDone) => {
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      rejectDone(new Error(`bridge session timed out; stderr=${stderr}`));
+    }, 15_000);
+    child.stdout.on("data", (chunk: Buffer) => {
+      buf = Buffer.concat([buf, chunk]);
+      let nl = buf.indexOf("\n");
+      while (nl !== -1) {
+        const line = buf.subarray(0, nl).toString("utf8").trim();
+        buf = buf.subarray(nl + 1);
+        if (line !== "") responses.push(JSON.parse(line) as Record<string, unknown>);
+        nl = buf.indexOf("\n");
+      }
+      if (responses.length >= requests.length) {
+        clearTimeout(timer);
+        child.kill();
+        resolveDone();
+      }
+    });
+    child.on("exit", () => {
+      clearTimeout(timer);
+      resolveDone();
+    });
+    for (const req of requests) child.stdin.write(`${JSON.stringify(req)}\n`);
+  });
+
+  const byId = new Map(responses.map((r) => [r.id, r]));
+  const tools = (byId.get(1)!.result as { tools: Array<{ name: string; inputSchema: { properties: Record<string, unknown> } }> }).tools;
+  const contractTool = tools.find((tool) => tool.name === "lead_set_contract")!;
+  const timeoutProp = contractTool.inputSchema.properties.timeoutSeconds as { type?: string; minimum?: number; maximum?: number } | undefined;
+  assert.equal(timeoutProp?.type, "integer", "lead_set_contract schema advertises timeoutSeconds as integer");
+  assert.equal(timeoutProp?.minimum, 60);
+  assert.equal(timeoutProp?.maximum, 3600);
+  assert.ok(contractTool.inputSchema.properties.mutationMode, "slpCatalog mutationMode extension stays preserved");
+
+  const textOf = (id: number) => byId.get(id)!.result as { isError?: boolean; content: Array<{ text: string }> };
+  const ok = textOf(2);
+  assert.notEqual(ok.isError, true, ok.content[0]?.text);
+  assert.match(ok.content[0]?.text ?? "", /timeout 1800s/);
+
+  const def = textOf(3);
+  assert.notEqual(def.isError, true, def.content[0]?.text);
+
+  const projectFactory = registry.factoryForProject(slug);
+  assert.equal(projectFactory.contractFor("MCP-TO-OK")?.timeoutSeconds, 1800);
+  assert.equal(projectFactory.contractFor("MCP-TO-DEF")?.timeoutSeconds, undefined);
+  assert.equal(contractTimeoutSeconds(projectFactory.contractFor("MCP-TO-DEF")), 900);
+
+  for (const [id, taskId] of [[4, "MCP-TO-LOW"], [5, "MCP-TO-HIGH"], [6, "MCP-TO-FLOAT"], [7, "MCP-TO-STR"]] as const) {
+    const bad = textOf(id);
+    assert.equal(bad.isError, true, `id=${id} (${taskId}) must be refused`);
+    assert.match(bad.content[0]?.text ?? "", /timeoutSeconds/i);
+    assert.match(bad.content[0]?.text ?? "", /60.*3600/);
+    assert.equal(projectFactory.contractFor(taskId), undefined, `${taskId} must not be persisted on ledger`);
+  }
 });

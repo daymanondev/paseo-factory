@@ -36,6 +36,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameS
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { FactoryError } from "./core/errors.ts";
+import { isValidContractTimeoutSeconds } from "./core/constants.ts";
 import { usageIsValid } from "./core/ledger.ts";
 import { needsHumanEvidenceIsValid, NEEDS_HUMAN_REASONS, PEER_DISPOSITIONS, PEER_HANDOFF_OUTCOMES, STORE_RELEASE_ACTIONS } from "./core/events.ts";
 import type { StoreReleaseAction } from "./core/events.ts";
@@ -109,6 +110,11 @@ export interface ContractRequest {
    * the engineer default everywhere the Contract is consumed.
    */
   disposition?: PeerDisposition;
+  /**
+   * Optional per-Contract Gate timeout in seconds (`60..3600`, ADR 0068).
+   * Omitted defaults to `900` seconds.
+   */
+  timeoutSeconds?: number;
   /**
    * Explicit Peer reset (ADR 0053 §1): exactly `true` cancels and archives
    * the live bound Peer before the fresh Contract epoch. Omitted (default):
@@ -810,6 +816,7 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
     // ADR 0053 §1/§3, the watch law's strictness: the disposition is exactly
     // one of the four SLP strings when present, and resetPeer is exactly true.
     if (req.disposition !== undefined && !(PEER_DISPOSITIONS as readonly string[]).includes(req.disposition as string)) return undefined;
+    if (req.timeoutSeconds !== undefined && !isValidContractTimeoutSeconds(req.timeoutSeconds)) return undefined;
     if (req.resetPeer !== undefined && req.resetPeer !== true) return undefined;
     return {
       id: req.id,
@@ -829,6 +836,7 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
       ...(req.exclusions === undefined ? {} : { exclusions: req.exclusions as string }),
       ...(req.verification === undefined ? {} : { verification: req.verification as string }),
       ...(req.disposition === undefined ? {} : { disposition: req.disposition as PeerDisposition }),
+      ...(req.timeoutSeconds === undefined ? {} : { timeoutSeconds: req.timeoutSeconds }),
       ...(req.resetPeer === undefined ? {} : { resetPeer: true }),
       submitter: req.submitter,
       ...seatField,
@@ -2061,6 +2069,7 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
         ...(request.exclusions === undefined ? {} : { exclusions: request.exclusions }),
         ...(request.verification === undefined ? {} : { verification: request.verification }),
         ...(request.disposition === undefined ? {} : { disposition: request.disposition }),
+        ...(request.timeoutSeconds === undefined ? {} : { timeoutSeconds: request.timeoutSeconds }),
         by: request.submitter,
         ...(effectiveSeat === undefined ? {} : { seat: effectiveSeat }),
       });
@@ -2084,6 +2093,7 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
           `contract set for ${request.task}: ${(request.gate ?? "").trim() === "" ? "no shell gate (read-only disposition)" : `\`${request.gate}\``} in ${request.workspace}` +
           `${contractEvt.freshEyes === true ? " · fresh eyes ON" : ""}${request.watch === true ? " · watch ON" : ""}` +
           `${contractEvt.disposition !== undefined ? ` · ${contractEvt.disposition} disposition` : ""}` +
+          `${contractEvt.timeoutSeconds !== undefined ? ` · timeout ${contractEvt.timeoutSeconds}s` : ""}` +
           `${preserveLivePeers ? " · live Peer preserved (resetPeer not requested)" : ""} · by ${request.submitter}`,
       };
     }

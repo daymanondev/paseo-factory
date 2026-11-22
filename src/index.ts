@@ -123,7 +123,13 @@ export {
 } from "./choke.ts";
 export type { ChokeDecision, GitRefusal, WritableRoots, MemoryFence, MemoryFileName } from "./choke.ts";
 export {
+  MIN_CONTRACT_TIMEOUT_SECONDS,
+  MAX_CONTRACT_TIMEOUT_SECONDS,
+  DEFAULT_CONTRACT_TIMEOUT_SECONDS,
   DEFAULT_GATE_TIMEOUT_MS,
+  isValidContractTimeoutSeconds,
+  contractTimeoutSeconds,
+  contractTimeoutMs,
   GATE_OUTPUT_CAP_BYTES,
   REPORT_NOTE_MAX_CHARS,
   EYE_TOTAL_BUDGET_MS,

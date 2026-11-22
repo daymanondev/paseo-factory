@@ -152,9 +152,41 @@ test("parseSpoolRequest accepts exactly the three request shapes and nothing els
     { kind: "claim", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" }, task: "T1", sha: "abc" },
     { id: "r1", kind: "contract", task: "T1", workspace: "/w", gate: "true", artifact: "a", submitter: "owner", freshEyes: "yes" },
     { id: "r1", kind: "contract", task: "T1", workspace: "/w", gate: "true", artifact: "a", submitter: "owner", freshEyes: 1 },
+    { id: "r1", kind: "contract", task: "T1", workspace: "/w", gate: "true", artifact: "a", submitter: "owner", timeoutSeconds: 59 },
+    { id: "r1", kind: "contract", task: "T1", workspace: "/w", gate: "true", artifact: "a", submitter: "owner", timeoutSeconds: 3601 },
+    { id: "r1", kind: "contract", task: "T1", workspace: "/w", gate: "true", artifact: "a", submitter: "owner", timeoutSeconds: 60.5 },
+    { id: "r1", kind: "contract", task: "T1", workspace: "/w", gate: "true", artifact: "a", submitter: "owner", timeoutSeconds: "900" },
+    { id: "r1", kind: "contract", task: "T1", workspace: "/w", gate: "true", artifact: "a", submitter: "owner", timeoutSeconds: null },
   ]) {
     assert.equal(parseSpoolRequest(bad), undefined, `${JSON.stringify(bad)} must be rejected`);
   }
+});
+
+test("parseSpoolRequest and handleSpoolRequest accept and forward contract timeoutSeconds (60..3600)", async (t) => {
+  const valid = { id: "r-to", kind: "contract", task: "T-TO", workspace: "/w", gate: "true", artifact: "a", timeoutSeconds: 1800, submitter: "owner" };
+  assert.deepEqual(parseSpoolRequest(valid), valid);
+
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const workspace = join(dir, "ws");
+  mkdirSync(workspace, { recursive: true });
+  writeFileSync(join(workspace, "README.md"), "# repo\n");
+  gitCommitAll(workspace);
+
+  const factory = createFactory({ stateDir: join(dir, "state") });
+  const reply = await handleSpoolRequest(factory, {
+    id: "r-spool-to",
+    kind: "contract",
+    task: "T-SP-TO",
+    workspace,
+    gate: "true",
+    artifact: "README.md",
+    timeoutSeconds: 1200,
+    submitter: "owner",
+  });
+  assert.equal(reply.ok, true, JSON.stringify(reply));
+  assert.match(reply.summary ?? "", /timeout 1200s/);
+  assert.equal(factory.contractFor("T-SP-TO")?.timeoutSeconds, 1200);
 });
 
 test("lead_rotate rides the injected rotation handler and is refused loudly without one (v0.0.14)", async (t) => {

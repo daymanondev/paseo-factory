@@ -9,6 +9,13 @@ import { isAbsolute, join } from "node:path";
 import { Ledger, usageIsValid } from "./ledger.ts";
 import { MAX_ATTEMPTS, NEEDS_HUMAN_REASONS, isReadOnlyPeerDisposition, needsHumanEvidenceIsValid, PEER_DISPOSITIONS, PEER_HANDOFF_OUTCOMES } from "./events.ts";
 import { runGate } from "./gate.ts";
+import {
+  DEFAULT_CONTRACT_TIMEOUT_SECONDS,
+  MAX_CONTRACT_TIMEOUT_SECONDS,
+  MIN_CONTRACT_TIMEOUT_SECONDS,
+  contractTimeoutMs,
+  isValidContractTimeoutSeconds,
+} from "./constants.ts";
 import { artifactPathProblem } from "./artifact.ts";
 import { renderReport } from "./report.ts";
 import { laneCliAvailable } from "./lanes.ts";
@@ -147,7 +154,7 @@ export interface FactoryOptions {
    * config (`lanes.json`, `eye.json`) stays at the root either way.
    */
   projectSlug?: string;
-  /** Gate timeout override (ms). Defaults to DEFAULT_GATE_TIMEOUT_MS. */
+  /** Gate timeout override (ms). When omitted, uses the Contract's timeoutSeconds (900s default). */
   timeoutMs?: number;
   /** Fresh-eyes total budget override (ms), both tries together. Defaults to EYE_TOTAL_BUDGET_MS. */
   eyeBudgetMs?: number;
@@ -251,6 +258,11 @@ export interface ContractInput {
    * claim/accept without a branch merge (tickets 04/05).
    */
   disposition?: PeerDisposition;
+  /**
+   * Optional per-Contract Gate timeout in seconds (`60..3600`, ADR 0068).
+   * Defaults to `900` seconds when omitted.
+   */
+  timeoutSeconds?: number;
   /**
    * Optional caller seat for attribution; never enables Fresh-eyes (ADR 0030).
    */
@@ -599,7 +611,7 @@ export function createFactory(options: FactoryOptions): Factory {
     stateDir,
     recoveredAttempts,
 
-    setContract({ task, workspace, gate, artifact, base: inputBase, scope, freshEyes, watch, description, skills, by, disposition, seat, outcome, invariants, exclusions, verification }) {
+    setContract({ task, workspace, gate, artifact, base: inputBase, scope, freshEyes, watch, description, skills, by, disposition, timeoutSeconds, seat, outcome, invariants, exclusions, verification }) {
       assertTaskId(task);
       // ADR 0054 §2: the shell Gate is the engineer disposition's law; the
       // read-only three (scout|architect|reviewer) may omit it — an empty gate
@@ -632,6 +644,15 @@ export function createFactory(options: FactoryOptions): Factory {
       }
       if (disposition !== undefined && !(PEER_DISPOSITIONS as readonly string[]).includes(disposition)) {
         throw new FactoryError("invalid-contract", "disposition must be exactly one of engineer|architect|reviewer|scout — omit it for the engineer default");
+      }
+      if (timeoutSeconds !== undefined && !isValidContractTimeoutSeconds(timeoutSeconds)) {
+        const rendered = typeof timeoutSeconds === "number" && !Number.isFinite(timeoutSeconds)
+          ? String(timeoutSeconds)
+          : JSON.stringify(timeoutSeconds);
+        throw new FactoryError(
+          "invalid-contract",
+          `timeoutSeconds must be an integer between ${MIN_CONTRACT_TIMEOUT_SECONDS} and ${MAX_CONTRACT_TIMEOUT_SECONDS} (got ${rendered}) — omit it for the ${DEFAULT_CONTRACT_TIMEOUT_SECONDS}s default`,
+        );
       }
       if (description !== undefined && typeof description !== "string") {
         throw new FactoryError("invalid-contract", "description must be a string — omit it when the task has no assignment text");
@@ -824,6 +845,7 @@ export function createFactory(options: FactoryOptions): Factory {
         ...(skills === undefined || skills.length === 0 ? {} : { skills }),
         ...(by === undefined ? {} : { by }),
         ...(disposition === undefined ? {} : { disposition }),
+        ...(timeoutSeconds === undefined ? {} : { timeoutSeconds }),
       });
     },
 
@@ -1074,7 +1096,7 @@ export function createFactory(options: FactoryOptions): Factory {
           cmd: contract.gate,
           cwd: executionDir,
           ...(contract.artifact.trim() === "" ? {} : { artifact: contract.artifact }),
-          timeoutMs: options.timeoutMs,
+          timeoutMs: options.timeoutMs ?? contractTimeoutMs(contract),
         });
       } catch (err) {
         // A gate that cannot even start is a red fact, not an aborted sequence —

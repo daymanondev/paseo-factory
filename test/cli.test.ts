@@ -1460,3 +1460,52 @@ test("Seam 1: the CLI plumbs --project through the spool router", async (t) => {
   assert.ok(ledgerOf(b.slug).some((event) => event.event === "attempt_accepted"), "the acceptance landed in project-b's ledger");
   assert.ok(!ledgerOf(a.slug).some((event) => event.event === "attempt_accepted"), "project-a's ledger never saw project-b's acceptance");
 });
+
+test("factory contract --timeout-seconds accepts 60..3600 integers, rejects invalid values before spooling, and omits when unset", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const workspace = join(dir, "workspace");
+  copyFixture("sample-workspace", workspace);
+  gitCommitAll(workspace);
+  const home = join(dir, "paseo-home");
+  const stateDir = join(home, "plugin-state", "paseo-factory");
+  const factory = createFactory({ stateDir, eyeCliProbe: () => false });
+  const spool = startSpool(stateDir, factory);
+  t.after(() => spool.stop());
+
+  // Invalid values fail fast client-side (exit 2) without writing spool requests or ledger lines.
+  for (const bad of ["59", "3601", "90.5", "abc", "", "-60", "1e3"]) {
+    const res = await run(ownerCli, [
+      "contract", "--task", "CLI-BAD", "--workspace", workspace, "--gate", "true", "--timeout-seconds", bad,
+    ], { PASEO_HOME: home });
+    assert.equal(res.status, 2, `bad --timeout-seconds=${JSON.stringify(bad)} must exit 2`);
+    assert.match(res.stderr, /--timeout-seconds.*integer.*60.*3600/);
+  }
+  assert.equal(factory.contractFor("CLI-BAD"), undefined);
+
+  // Valid boundary and custom values ride through spool onto contract_set.
+  const ok1200 = await run(ownerCli, [
+    "contract", "--task", "CLI-TO-1200", "--workspace", workspace, "--gate", "true", "--timeout-seconds", "1200",
+  ], { PASEO_HOME: home });
+  assert.equal(ok1200.status, 0, ok1200.stderr);
+  assert.match(ok1200.stdout, /timeout 1200s/);
+  assert.equal(factory.contractFor("CLI-TO-1200")?.timeoutSeconds, 1200);
+
+  const okMin = await run(ownerCli, [
+    "contract", "--task", "CLI-TO-MIN", "--workspace", workspace, "--gate", "true", "--timeout-seconds", "60",
+  ], { PASEO_HOME: home });
+  assert.equal(okMin.status, 0, okMin.stderr);
+  assert.equal(factory.contractFor("CLI-TO-MIN")?.timeoutSeconds, 60);
+
+  const okMax = await run(ownerCli, [
+    "contract", "--task", "CLI-TO-MAX", "--workspace", workspace, "--gate", "true", "--timeout-seconds", "3600",
+  ], { PASEO_HOME: home });
+  assert.equal(okMax.status, 0, okMax.stderr);
+  assert.equal(factory.contractFor("CLI-TO-MAX")?.timeoutSeconds, 3600);
+
+  // Semantic key symmetry includes timeoutSeconds.
+  const reqA = { id: "1", kind: "contract", task: "T", workspace: "/w", gate: "true", timeoutSeconds: 60, submitter: "owner" };
+  const reqB = { id: "2", kind: "contract", task: "T", workspace: "/w", gate: "true", timeoutSeconds: 120, submitter: "owner" };
+  assert.equal(binSemanticKey(reqA), spoolRequestSemanticKey(reqA));
+  assert.notEqual(binSemanticKey(reqA), binSemanticKey(reqB));
+});

@@ -235,6 +235,12 @@ export interface ContractSet extends EventIdentityMetadata {
    * default — pre-0053 Contracts predate the field and are never migrated.
    */
   disposition?: PeerDisposition;
+  /**
+   * Optional per-Contract Gate timeout in seconds (`60..3600`, ADR 0068).
+   * Omitted = `900` seconds (`DEFAULT_CONTRACT_TIMEOUT_SECONDS`); historical
+   * `contract_set` lines predate this field and replay using the default.
+   */
+  timeoutSeconds?: number;
 }
 
 export interface ClaimReported extends EventIdentityMetadata {
