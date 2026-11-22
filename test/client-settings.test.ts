@@ -107,15 +107,16 @@ test("the mobile Settings body is a read-only summary — values, no write contr
   for (const section of SECTION_IDS) assert.doesNotMatch(lines(section), /<button|<input/, `${section} mounts no write control on mobile`);
 });
 
-test("the surface registers the Workspace panel, the Settings screen, the desktop Onboarding screen/footer item, and Command Center actions", () => {
+test("the surface registers the Workspace panel, the Settings screen, the desktop sidebar header item, Overview + Onboarding screens, and Command Center actions", () => {
   const index = read("plugin/index.client.tsx");
   const registrations = [...index.matchAll(/client\.(add[A-Za-z]+)\(/g)].map((m) => m[1]);
   assert.deepEqual([...registrations].sort(), [
     "addCommandCenterItem",
     "addCommandCenterItem",
     "addScreen",
+    "addScreen",
     "addSettingsScreen",
-    "addSidebarFooterItem",
+    "addSidebarHeaderItem",
     "addWorkspacePanel",
   ]);
   assert.match(index, /title: "Open Factory Panel"/);

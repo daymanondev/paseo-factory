@@ -150,8 +150,9 @@ async function mountDom<T>(run: (createRoot: typeof import("react-dom/client").c
   }
 }
 
-test("contribute registers desktop-only sidebar footer, global Command Center item, and onboard screen; mobile registers none of them", async () => {
+test("contribute registers desktop-only global Command Center item and onboard screen without a standalone footer item; mobile registers none of them", async () => {
   const makeMockClient = () => {
+    const sidebarHeaderItems: any[] = [];
     const sidebarFooterItems: any[] = [];
     const screens: any[] = [];
     const commandItems: any[] = [];
@@ -159,6 +160,7 @@ test("contribute registers desktop-only sidebar footer, global Command Center it
     const settingsScreens: any[] = [];
     const openedScreens: any[] = [];
     return {
+      sidebarHeaderItems,
       sidebarFooterItems,
       screens,
       commandItems,
@@ -168,6 +170,7 @@ test("contribute registers desktop-only sidebar footer, global Command Center it
       client: {
         addWorkspacePanel: (c: any) => { workspacePanels.push(c); return () => {}; },
         addSettingsScreen: (c: any) => { settingsScreens.push(c); return () => {}; },
+        addSidebarHeaderItem: (c: any) => { sidebarHeaderItems.push(c); return () => {}; },
         addSidebarFooterItem: (c: any) => { sidebarFooterItems.push(c); return () => {}; },
         addScreen: (c: any) => { screens.push(c); return () => {}; },
         addCommandCenterItem: (c: any) => { commandItems.push(c); return () => {}; },
@@ -183,16 +186,16 @@ test("contribute registers desktop-only sidebar footer, global Command Center it
     };
   };
 
-  // Desktop ("web"): registers global onboarding entry points.
+  // Desktop ("web"): registers single Factory sidebar header item, overview + onboard screens, and global Command Center item.
   const desktop = await loadScreenModule("plugin/index.client.tsx", { platformOs: "web" });
   const webMock = makeMockClient();
   const offWeb = desktop.default(webMock.client);
   try {
-    assert.equal(webMock.sidebarFooterItems.length, 1);
-    assert.equal(webMock.sidebarFooterItems[0].id, "paseo-factory-onboard");
-    assert.equal(webMock.sidebarFooterItems[0].title, "Onboard Project");
-    assert.equal(webMock.screens.length, 1);
-    assert.equal(webMock.screens[0].id, "paseo-factory-onboard");
+    assert.equal(webMock.sidebarFooterItems.length, 0, "standalone Onboard Project footer item is removed");
+    assert.equal(webMock.sidebarHeaderItems.length, 1);
+    assert.equal(webMock.sidebarHeaderItems[0].id, "paseo-factory-overview");
+    assert.equal(webMock.sidebarHeaderItems[0].title, "Factory");
+    assert.deepEqual(webMock.screens.map((s) => s.id).sort(), ["paseo-factory-onboard", "paseo-factory-overview"]);
     const globalCmd = webMock.commandItems.find((c) => c.context === "global");
     assert.ok(globalCmd, "global Command Center item is registered on desktop");
     assert.equal(globalCmd.id, "factory-onboard-project");
@@ -203,14 +206,15 @@ test("contribute registers desktop-only sidebar footer, global Command Center it
     offWeb();
   }
 
-  // Mobile ("ios" and "android"): omits global onboarding registrations.
+  // Mobile ("ios" and "android"): omits global onboarding and overview registrations.
   for (const os of ["ios", "android"] as const) {
     const mobile = await loadScreenModule("plugin/index.client.tsx", { platformOs: os });
     const mobMock = makeMockClient();
     const offMob = mobile.default(mobMock.client);
     try {
+      assert.equal(mobMock.sidebarHeaderItems.length, 0, `${os} does not register sidebar header item`);
       assert.equal(mobMock.sidebarFooterItems.length, 0, `${os} does not register sidebar footer item`);
-      assert.equal(mobMock.screens.length, 0, `${os} does not register onboarding screen`);
+      assert.equal(mobMock.screens.length, 0, `${os} does not register onboarding or overview screens`);
       assert.equal(mobMock.commandItems.filter((c) => c.context === "global").length, 0, `${os} does not register global onboard command`);
     } finally {
       offMob();
@@ -245,7 +249,7 @@ function makeSnapshotView() {
   };
 }
 
-test("FactoryOnboardSidebarItem and FactoryOnboardScreen render on desktop and return null on mobile without calling RPCs", async () => {
+test("FactoryOverviewSidebarItem and FactoryOnboardScreen render on desktop and return null on mobile without calling RPCs", async () => {
   const entries = await loadScreenModule("plugin/client/factory/entries.tsx", { platformOs: "web" });
   const { createElement } = await import("react");
 
@@ -255,7 +259,7 @@ test("FactoryOnboardSidebarItem and FactoryOnboardScreen render on desktop and r
     try {
       await act(() =>
         root.render(
-          createElement(entries.FactoryOnboardSidebarItem, {
+          createElement(entries.FactoryOverviewSidebarItem, {
             theme: testTheme,
             host: { id: "h1", label: "Local" },
             layout: { compact: false, platform: "web" },
@@ -265,16 +269,16 @@ test("FactoryOnboardSidebarItem and FactoryOnboardScreen render on desktop and r
           }),
         ),
       );
-      const row = container.querySelector('[data-testid="sidebar-row"]') as HTMLElement;
-      assert.ok(row, "desktop renders SidebarRow");
-      assert.match(row.textContent!, /Onboard Project/);
+      const row = container.querySelector('[data-testid="factory-sidebar-overview-entry"] button') as HTMLElement;
+      assert.ok(row, "desktop renders SidebarRow inside factory-sidebar-overview-entry");
+      assert.match(row.textContent!, /Factory/);
       await act(() => row.click());
-      assert.deepEqual(opened, [{ screenId: "paseo-factory-onboard" }]);
+      assert.deepEqual(opened, [{ screenId: "paseo-factory-overview" }]);
 
       for (const platform of ["ios", "android"] as const) {
         await act(() =>
           root.render(
-            createElement(entries.FactoryOnboardSidebarItem, {
+            createElement(entries.FactoryOverviewSidebarItem, {
               theme: testTheme,
               host: { id: "h1", label: "Local" },
               layout: { compact: true, platform },

@@ -1,26 +1,27 @@
 /**
- * paseo-factory's client entry (v0.0.13, ADR 0009 §1; v0.6.0 W4, ADR 0056) —
- * the Factory surface. Three contributions, one <FactoryShell />: the
- * workspace panel (explorer + workspace locations), the settings screen, and
- * one Command Center action that opens the panel. The global screen, the
- * sidebar header item and every other palette action are gone.
- * v0.6.1 (W4 spike, ADR 0057 §8/§11) adds the seat-directory starter: a
- * 20-second `factory.seats.directory` poll that registers one header button
- * per Project root workspace and one composer pill per live seat
- * agent — the first app-wide contributions since the slim-down, and the only
- * door through which they register.
+ * paseo-factory's client entry (v0.0.13, ADR 0009 §1; v0.6.0 W4, ADR 0056;
+ * ADR 0068) — the Factory surface:
+ * - workspace panel (explorer + workspace locations)
+ * - Settings screen
+ * - Command Center actions (`Open Factory Panel`, `Factory: Onboard Project` on desktop)
+ * - seat-directory starter (`startSeatDirectory`, header buttons + composer pills + workspace badges)
+ * - desktop-only single `Factory` sidebar header item opening `Factory overview` (`paseo-factory-overview`)
+ *   plus the global `Onboarding` screen route (`paseo-factory-onboard`) reachable from Overview / Command Center.
+ *
  * The daemon discovers this file by filename convention (`index.client.tsx`)
  * — the manifest declares no client entry. The bundle boundary (no node
  * built-ins, no class syntax — Hermes) is enforced by scripts/check-bundle.mjs.
  */
-import type { PluginClientContext } from "@getpaseo/plugin/client";
+import type { PluginClientContext, PluginOpenScreenInput } from "@getpaseo/plugin/client";
 import { Platform } from "react-native";
 import {
   FactoryOnboardScreen,
-  FactoryOnboardSidebarItem,
+  FactoryOverviewScreen,
+  FactoryOverviewSidebarItem,
   FactoryPanel,
   FactorySettings,
   ONBOARD_SCREEN_ID,
+  OVERVIEW_SCREEN_ID,
   PANEL_ID,
 } from "./client/factory/entries.tsx";
 import { createSeatEditorRequests } from "./client/factory/editor-request.ts";
@@ -68,16 +69,33 @@ export default function contribute(client: PluginClientContext) {
     startSeatDirectory(client, editorRequests),
   ];
   if (!mobile) {
-    if (typeof (client as { addSidebarFooterItem?: unknown }).addSidebarFooterItem === "function") {
+    if (typeof (client as { addSidebarHeaderItem?: unknown }).addSidebarHeaderItem === "function") {
       cleanups.push(
-        client.addSidebarFooterItem({
-          id: ONBOARD_SCREEN_ID,
-          title: "Onboard Project",
-          Component: FactoryOnboardSidebarItem,
+        client.addSidebarHeaderItem({
+          id: OVERVIEW_SCREEN_ID,
+          title: "Factory",
+          Component: FactoryOverviewSidebarItem,
         }),
       );
     }
     if (typeof (client as { addScreen?: unknown }).addScreen === "function") {
+      cleanups.push(
+        client.addScreen({
+          id: OVERVIEW_SCREEN_ID,
+          title: "Factory",
+          Component: (props) => (
+            <FactoryOverviewScreen
+              {...props}
+              openPanel={(id, options) => client.openPanel?.(id, options)}
+              openScreen={(input: PluginOpenScreenInput) => {
+                if (typeof (client as { openScreen?: unknown }).openScreen === "function") {
+                  client.openScreen(input);
+                }
+              }}
+            />
+          ),
+        }),
+      );
       cleanups.push(
         client.addScreen({
           id: ONBOARD_SCREEN_ID,

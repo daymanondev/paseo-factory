@@ -370,4 +370,10 @@ test("seatsDirectory projects Gate queue status, position, and paused state from
   assert.equal(entry.gateQueueStatus, "queued");
   assert.equal(entry.gateQueuePosition, 2);
   assert.equal(entry.gateQueuePaused, true);
+  assert.deepEqual(workspaceRowBadgePlan("ws-root", parsed.projects), {
+    label: "Gate #2",
+    tone: "warning",
+    icon: "Clock",
+    accessibilityLabel: "Factory: Gate #2 (paused)",
+  });
 });
