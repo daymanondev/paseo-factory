@@ -48,6 +48,12 @@ export interface GateResult {
   artifactPresent?: boolean;
 }
 
+function resolvedCancelNote(signal: AbortSignal | undefined, cancelNote: string | undefined): string {
+  const reason = signal?.reason;
+  if (typeof reason === "string" && reason.trim() !== "") return reason.trim();
+  return cancelNote ?? "cancelled-by-owner";
+}
+
 /**
  * Runs the contract's gate command and returns the facts: exit code, a capped
  * one-line note from the output tail, and the verdict. The verdict is green
@@ -74,7 +80,7 @@ export function runGate(input: GateInput): Promise<GateResult> {
     return Promise.resolve({
       exit: null,
       verdict: "red",
-      note: cancelNote ?? "cancelled-by-owner",
+      note: resolvedCancelNote(signal, cancelNote),
       timedOut: false,
       cancelled: true,
     });
@@ -196,7 +202,7 @@ export function runGate(input: GateInput): Promise<GateResult> {
         resolve({
           exit: null,
           verdict: "red",
-          note: cancelNote ?? "cancelled-by-owner",
+          note: resolvedCancelNote(signal, cancelNote),
           timedOut: false,
           cancelled: true,
           output: raw,

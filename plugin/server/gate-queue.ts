@@ -1,7 +1,9 @@
-import { join } from "node:path";
+import { realpathSync } from "node:fs";
+import { join, resolve, sep } from "node:path";
 import type { PeerHandoffFields } from "./core/events.ts";
 import type { ClaimOutcome, Factory } from "./core/factory.ts";
 import { atomicJson, readOptionalJson } from "./core/json-store.ts";
+import { projectStateDir } from "./core/project.ts";
 import type { FactoryRegistry } from "./projects.ts";
 
 export const GATE_QUEUE_SCHEMA_VERSION = 1 as const;
@@ -95,6 +97,11 @@ export interface GateQueueOptions {
   log?: (message: string) => void;
 }
 
+export interface GateQueueCancelOptions {
+  note?: string;
+  suppressSettled?: boolean;
+}
+
 export interface GateQueue {
   readonly path: string;
   enqueue(input: GateQueueEnqueueInput): GateQueueEnqueueResult;
@@ -104,8 +111,8 @@ export interface GateQueue {
   pause(): GateQueueSnapshot;
   resume(): GateQueueSnapshot;
   setConcurrency(concurrency: number): GateQueueSnapshot;
-  cancelItem(id: string, note?: string): Promise<boolean>;
-  cancelMatching(predicate: (item: GateQueueItem) => boolean, note?: string): Promise<GateQueueItem[]>;
+  cancelItem(id: string, options?: string | GateQueueCancelOptions): Promise<boolean>;
+  cancelMatching(predicate: (item: GateQueueItem) => boolean, options?: string | GateQueueCancelOptions): Promise<GateQueueItem[]>;
   startupRecovery(): Promise<GateQueueBootRecoveryResult>;
   stop(): void;
 }
@@ -124,6 +131,39 @@ function cloneItem(item: GateQueueItem): GateQueueItem {
 
 function randomQueueId(): string {
   return `gq-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
+}
+
+function realpathSafe(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return resolve(path);
+  }
+}
+
+function isPathInsideDir(targetPath: string, baseDir: string): boolean {
+  const candidates = [resolve(targetPath), realpathSafe(targetPath)];
+  const bases = [resolve(baseDir), realpathSafe(baseDir)];
+  for (const target of candidates) {
+    for (const base of bases) {
+      const normalizedBase = base.endsWith(sep) ? base : `${base}${sep}`;
+      if (target === base || target.startsWith(normalizedBase)) return true;
+    }
+  }
+  return false;
+}
+
+/** True when a queued or running Gate entry belongs to the target Project by slug or checkout path. */
+export function gateItemBelongsToProject(
+  stateDir: string,
+  slug: string,
+  root: string,
+  item: Pick<GateQueueItem, "projectSlug" | "cwd">,
+): boolean {
+  if (item.projectSlug === slug) return true;
+  if (typeof item.cwd !== "string" || item.cwd.trim() === "") return false;
+  const worktreesDir = join(projectStateDir(stateDir, slug), "worktrees");
+  return isPathInsideDir(item.cwd, root) || isPathInsideDir(item.cwd, worktreesDir);
 }
 
 function isValidPersistedItem(raw: unknown): raw is GateQueueItem {
@@ -214,6 +254,7 @@ export function createGateQueue(options: GateQueueOptions): GateQueue {
       item: GateQueueItem;
       controller: AbortController;
       cancelNote?: string;
+      suppressSettled?: boolean;
       completion: Promise<void>;
     }
   >();
@@ -255,6 +296,7 @@ export function createGateQueue(options: GateQueueOptions): GateQueue {
       item: GateQueueItem;
       controller: AbortController;
       cancelNote?: string;
+      suppressSettled?: boolean;
       completion: Promise<void>;
     } = {
       item,
@@ -293,7 +335,9 @@ export function createGateQueue(options: GateQueueOptions): GateQueue {
         if (idx !== -1) state.items.splice(idx, 1);
         persist();
         emitChange();
-        await notifySettled({ item: cloneItem(item), outcome, restarted: false });
+        if (!runEntry.suppressSettled) {
+          await notifySettled({ item: cloneItem(item), outcome, restarted: false });
+        }
       } catch (err) {
         if (stopped) return;
         options.log?.(`gate-queue: execution error on ${item.projectSlug}/${item.task}#${item.attempt}: ${err instanceof Error ? err.message : String(err)}`);
@@ -439,12 +483,14 @@ export function createGateQueue(options: GateQueueOptions): GateQueue {
       return snapshotFromFile(state);
     },
 
-    async cancelItem(id, note = "cancelled") {
-      const removed = await this.cancelMatching((entry) => entry.id === id, note);
+    async cancelItem(id, options = "cancelled-by-owner") {
+      const removed = await this.cancelMatching((entry) => entry.id === id, options);
       return removed.length > 0;
     },
 
-    async cancelMatching(predicate, note = "cancelled") {
+    async cancelMatching(predicate, options = "cancelled-by-owner") {
+      const note = typeof options === "string" ? options : (options.note ?? "cancelled-by-owner");
+      const suppressSettled = typeof options === "object" && options.suppressSettled === true;
       const matching = state.items.filter((entry) => predicate(cloneItem(entry)));
       if (matching.length === 0) return [];
 
@@ -457,7 +503,8 @@ export function createGateQueue(options: GateQueueOptions): GateQueue {
         const active = activeRuns.get(item.id);
         if (active !== undefined) {
           active.cancelNote = note;
-          active.controller.abort();
+          if (suppressSettled) active.suppressSettled = true;
+          active.controller.abort(note);
           activeCompletions.push(active.completion);
         } else {
           toRemoveQueuedIds.add(item.id);

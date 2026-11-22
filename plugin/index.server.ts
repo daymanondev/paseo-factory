@@ -377,6 +377,7 @@ export default function contribute(server: PluginServerContext) {
     clearPluginArchive: (input) => leadMail.clearPluginArchive(input.agentId),
     resetProjectMailbox: (slug) => leadMail.resetProjectMailbox(slug),
     rotateProjectMailbox: (slug) => leadMail.rotateProjectMailbox(slug),
+    gateQueue: () => gateQueue,
     leadDispatch: (request, options) => leadMail.dispatchLead(request, options),
     supervisorReport: (request) => leadMail.reportSupervisor(request),
     // v0.6.1 (ADR 0057 §5): a newly bound Supervisor receives its Seat kickoff
@@ -436,8 +437,11 @@ export default function contribute(server: PluginServerContext) {
         outcome,
         sha: item.sha,
         workspace: item.cwd,
+        ...(item.useRootFactory === true || item.projectSlug === "root" ? {} : { projectSlug: item.projectSlug }),
         usageMeter: (meterInput) => usage.meterTaskBoundary(meterInput),
         peerMail: leadMail.notifyPeer,
+        daemon: () => paseoApi as never,
+        onLog: log,
       });
     },
   });
@@ -703,6 +707,7 @@ export default function contribute(server: PluginServerContext) {
     // The accept path's worktree-record sweep targets the real daemon home —
     // never the PASEO_HOME-env fallback (v0.0.27, ADR 0017 §4).
     home,
+    ...(pluginDir === undefined ? {} : { pluginDir }),
     // The Per-Project Factory registry (v0.0.89, ADR 0045 §1): every
     // Project-scoped command routes onto the target Project's own Factory.
     registry,

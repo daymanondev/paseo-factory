@@ -1903,13 +1903,24 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
    * last terminal outcome clears the predicate and its own hook pumps the
    * whole held batch as one consolidated delivery. Never rejects.
    */
-  const notifyPeer = async (input: { task: string; kind: "verdict" | "needs_human"; text: string }): Promise<void> => {
+  const notifyPeer = async (input: { task: string; kind: "verdict" | "needs_human"; text: string; projectSlug?: string }): Promise<void> => {
     try {
-      // The task-owning stream (v0.0.89): the Contract lives in the OWNING
-      // Project's Factory — the wired Factory first (it may still own the task
-      // itself, the legacy root bridge), then the registry's Projects. The
-      // first owner wins (a colliding Task id notifies one Project, never both).
-      let owning = deps.factory.contractFor(input.task) !== undefined ? deps.factory.ledger.events : undefined;
+      // The task-owning stream (v0.0.89): when an explicit projectSlug is supplied
+      // and owns this task, check it first so identically named Task IDs across
+      // Projects never wake the wrong Project's Lead. Otherwise check the wired
+      // Factory (legacy root bridge) then scan registered Projects.
+      let owning: readonly LedgerEvent[] | undefined;
+      if (input.projectSlug !== undefined) {
+        try {
+          const factory = registry.factoryForProject(input.projectSlug);
+          if (factory.contractFor(input.task) !== undefined) owning = factory.ledger.events;
+        } catch {
+          // fall through to wired Factory / registry scan
+        }
+      }
+      if (owning === undefined && deps.factory.contractFor(input.task) !== undefined) {
+        owning = deps.factory.ledger.events;
+      }
       if (owning === undefined) {
         for (const slug of registry.slugs()) {
           try {

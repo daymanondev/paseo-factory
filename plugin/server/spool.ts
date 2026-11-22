@@ -38,13 +38,14 @@ import { basename, dirname, join, resolve } from "node:path";
 import { FactoryError } from "./core/errors.ts";
 import { isValidContractTimeoutSeconds } from "./core/constants.ts";
 import { usageIsValid } from "./core/ledger.ts";
-import { needsHumanEvidenceIsValid, NEEDS_HUMAN_REASONS, PEER_DISPOSITIONS, PEER_HANDOFF_OUTCOMES, STORE_RELEASE_ACTIONS } from "./core/events.ts";
+import { MAX_ATTEMPTS, needsHumanEvidenceIsValid, NEEDS_HUMAN_REASONS, PEER_DISPOSITIONS, PEER_HANDOFF_OUTCOMES, STORE_RELEASE_ACTIONS } from "./core/events.ts";
 import type { StoreReleaseAction } from "./core/events.ts";
 import { activeContractSnapshot, repokeCompletionFooter } from "./core/disposition-prompt.ts";
 import { handoffLines } from "./core/report.ts";
 import type { ClaimOutcome, Factory } from "./core/factory.ts";
-import type { GateQueue, GateQueueAheadEntry } from "./gate-queue.ts";
-import { createGateQueue } from "./gate-queue.ts";
+import type { GateQueue, GateQueueAheadEntry, GateQueueItem } from "./gate-queue.ts";
+import { createGateQueue, gateItemBelongsToProject } from "./gate-queue.ts";
+import { checkProjectResetRepository } from "./project-reset.ts";
 import type { LedgerEvent, MeterUsage, NeedsHumanEvidence, NeedsHumanReason, PeerDisposition, PeerHandoffFields, Verdict } from "./core/events.ts";
 import { CorrelationRegistry, readCorrelations } from "./core/correlations.ts";
 import { loadLanes, normalizeLanesWithProviders, parseLane, PEER_THINKING_LEVELS, providerCatalogAlias, resolvePeerThinkingLane } from "./core/lanes.ts";
@@ -55,7 +56,7 @@ import { releaseProject } from "./release.ts";
 import { recordStoreNote, storeReleaseProject } from "./store-release.ts";
 import type { StoreReleasePlatformTarget, StoreReleaseRunner } from "./store-release.ts";
 import type { VaultRunner } from "./core/vault.ts";
-import { resolvePaseoHome } from "./paths.ts";
+import { pluginDirFor, resolvePaseoHome } from "./paths.ts";
 import { allocateTaskWorktree } from "./core/mcp/worktrees.ts";
 import { ensureProjectRegistered, isProjectSeat, registerLaneSlug, resolveTargetProject, seatCannotRegisterMessage } from "./projects.ts";
 import type { FactoryRegistry, TargetProjectContext } from "./projects.ts";
@@ -658,7 +659,7 @@ export type SanitizeLaneHandler = (laneValue: string) => Promise<string> | strin
  * in flight and flushed when the wave finishes; never rejects (a notification
  * failure must not break the verdict's own reply).
  */
-export type PeerMailHook = (input: { task: string; kind: "verdict" | "needs_human"; text: string }) => Promise<void>;
+export type PeerMailHook = (input: { task: string; kind: "verdict" | "needs_human"; text: string; projectSlug?: string }) => Promise<void>;
 
 export type SpoolReply =
   | {
@@ -1888,6 +1889,154 @@ export function formatClaimVerdictText(input: {
   );
 }
 
+function resolveClaimingAgentId(factory: Factory, rawAgent: string | undefined): string | undefined {
+  if (rawAgent === undefined) return undefined;
+  const trimmed = rawAgent.trim();
+  if (trimmed === "") return undefined;
+  if (trimmed.startsWith("cor_")) {
+    const resolved = new CorrelationRegistry(factory.stateDir).resolve(trimmed)?.agentId?.trim();
+    return resolved !== undefined && resolved !== "" ? resolved : undefined;
+  }
+  return trimmed;
+}
+
+function gateFailureTail(outcome: ClaimOutcome): string {
+  const outputPath = outcome.gate.outputPath;
+  if (typeof outputPath === "string" && outputPath.trim() !== "") {
+    try {
+      const raw = readFileSync(outputPath, "utf8").trimEnd();
+      if (raw !== "") {
+        const tailLines = raw.split("\n").slice(-40).join("\n").trim();
+        if (tailLines !== "") {
+          return tailLines.length > 2000 ? tailLines.slice(-2000) : tailLines;
+        }
+      }
+    } catch {
+      // fall back to recorded gate note when the log file cannot be read
+    }
+  }
+  return outcome.gate.note;
+}
+
+function formatPeerRetryWakeupText(input: {
+  task: string;
+  outcome: ClaimOutcome;
+  tail: string;
+}): string {
+  const { task, outcome, tail } = input;
+  const remaining = Math.max(0, MAX_ATTEMPTS - outcome.attempt);
+  const lines = [
+    `Gate FAILED for task ${task} on attempt ${outcome.attempt}/${MAX_ATTEMPTS} (${remaining} attempt${remaining === 1 ? "" : "s"} remaining).`,
+    ...(outcome.gate.note === "" ? [] : [`Summary: ${outcome.gate.note}`]),
+    ...(outcome.gate.outputPath ? [`Gate log: ${outcome.gate.outputPath}`] : []),
+    ...(outcome.reportPath ? [`Report: ${outcome.reportPath}`] : []),
+    ...(tail !== "" && tail !== outcome.gate.note ? [`Failure output tail:\n\`\`\`\n${tail}\n\`\`\``] : []),
+    `Fix the failure in your task worktree, commit your changes, and re-run \`agent_claim\` (never notify Lead directly — Lead wakes on GREEN or at attempt ${MAX_ATTEMPTS}).`,
+  ];
+  return lines.join("\n\n");
+}
+
+function peerUnavailabilityReason(peer: SurfaceAgentSnapshot | undefined): string | undefined {
+  if (peer === undefined) return "session missing or archived";
+  if (peer.archivedAt !== null) return "session archived";
+  if (peer.status === "error") return "session status is error";
+  if (peer.requiresAttention === true && peer.attentionReason === "permission") {
+    return "session blocked awaiting permission";
+  }
+  return undefined;
+}
+
+async function wakeLivePeerOnRed(input: {
+  factory: Factory;
+  task: string;
+  projectSlug?: string;
+  resolvedAgentId?: string;
+  daemon?: SurfaceDaemonApi | (() => SurfaceDaemonApi | undefined);
+  outcome: ClaimOutcome;
+}): Promise<{ delivered: true } | { delivered: false; reason: string }> {
+  const { factory, task, projectSlug, resolvedAgentId, daemon, outcome } = input;
+  const resolvedDaemon = resolveDaemonArg(daemon);
+  if (resolvedDaemon?.agents?.list === undefined || resolvedDaemon.agents.ref === undefined) {
+    return { delivered: false, reason: "daemon unavailable" };
+  }
+  let live: SurfaceAgentSnapshot[];
+  try {
+    const listed = await resolvedDaemon.agents.list({
+      filter: { includeArchived: false, includeBackground: true },
+    });
+    live = listed.entries.map((entry) => entry.agent);
+  } catch (err) {
+    return {
+      delivered: false,
+      reason: `agent list failed: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+
+  let targetPeer: SurfaceAgentSnapshot | undefined;
+  if (resolvedAgentId !== undefined) {
+    targetPeer = live.find((entry) => entry.id === resolvedAgentId);
+  } else {
+    const nonArchived = live.filter((entry) => entry.archivedAt === null);
+    const resolvedSlug =
+      projectSlug ??
+      (() => {
+        const ws = factory.contractFor(task)?.workspace;
+        const proj = ws === undefined ? undefined : resolveProject(ws);
+        return proj?.ok ? proj.slug : undefined;
+      })();
+    if (resolvedSlug !== undefined) {
+      const bound = boundTaskPeers({
+        stateDir: factory.stateDir,
+        slug: resolvedSlug,
+        task,
+        events: factory.ledger.events,
+        live: nonArchived,
+      });
+      targetPeer = bound[0];
+    } else {
+      targetPeer = nonArchived.find((entry) => entry.labels?.seat === "agent" && entry.labels?.task === task);
+    }
+  }
+
+  const unavailable = peerUnavailabilityReason(targetPeer);
+  if (unavailable !== undefined || targetPeer === undefined) {
+    return { delivered: false, reason: unavailable ?? "session missing" };
+  }
+
+  const tail = gateFailureTail(outcome);
+  const text = formatPeerRetryWakeupText({ task, outcome, tail });
+  try {
+    await resolvedDaemon.agents.ref(targetPeer.id).send(text);
+    return { delivered: true };
+  } catch (err) {
+    return {
+      delivered: false,
+      reason: `send failed: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+}
+
+function formatLeadVerdictWakeupText(input: {
+  factory: Factory;
+  task: string;
+  outcome: ClaimOutcome;
+  sha?: string;
+  workspace?: string;
+  fallbackReason?: string;
+}): string {
+  const { factory, task, outcome, sha, workspace, fallbackReason } = input;
+  const parts = [formatClaimVerdictText({ factory, task, outcome, sha, workspace })];
+  if (fallbackReason !== undefined) {
+    parts.push(`Peer wakeup fallback: peer-unavailable (${fallbackReason}) — Lead intervention required.`);
+  } else if (outcome.verdict === "red" && outcome.attempt >= MAX_ATTEMPTS) {
+    parts.push(`Attempt ceiling (${MAX_ATTEMPTS}/${MAX_ATTEMPTS}) reached — Lead intervention required.`);
+  }
+  if (outcome.gate.outputPath !== undefined && outcome.gate.outputPath !== "") {
+    parts.push(`Gate log: ${outcome.gate.outputPath}`);
+  }
+  return parts.join("\n");
+}
+
 export async function settleClaimOutcome(input: {
   factory: Factory;
   task: string;
@@ -1895,20 +2044,113 @@ export async function settleClaimOutcome(input: {
   outcome: ClaimOutcome;
   sha?: string;
   workspace?: string;
+  projectSlug?: string;
   usageMeter?: SpoolOptions["usageMeter"];
   peerMail?: PeerMailHook;
+  daemon?: SurfaceDaemonApi | (() => SurfaceDaemonApi | undefined);
+  onLog?: (message: string) => void;
 }): Promise<void> {
-  const { factory, task, agent, outcome, sha, workspace, usageMeter, peerMail } = input;
-  await usageMeter?.({
-    task,
-    ...(agent === undefined ? {} : { agentId: agent }),
-    attempt: outcome.attempt,
-  });
+  const { factory, task, agent, outcome, sha, workspace, projectSlug, usageMeter, peerMail, daemon, onLog } = input;
+  const resolvedAgentId = resolveClaimingAgentId(factory, agent);
+  if (usageMeter !== undefined) {
+    try {
+      await usageMeter({
+        task,
+        ...(resolvedAgentId !== undefined ? { agentId: resolvedAgentId } : agent === undefined ? {} : { agentId: agent }),
+        attempt: outcome.attempt,
+        ...(projectSlug === undefined ? {} : { slug: projectSlug }),
+      });
+    } catch (err) {
+      onLog?.(`usage: task meter failed for ${task}#${outcome.attempt} — ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  let fallbackReason: string | undefined;
+  const shouldWakePeerDirectly =
+    outcome.verdict === "red" &&
+    outcome.attempt < MAX_ATTEMPTS &&
+    outcome.gate.note !== "cancelled-by-owner" &&
+    outcome.mechanical !== "lead_verify";
+  if (shouldWakePeerDirectly) {
+    const peerWake = await wakeLivePeerOnRed({
+      factory,
+      task,
+      ...(projectSlug === undefined ? {} : { projectSlug }),
+      ...(resolvedAgentId === undefined ? {} : { resolvedAgentId }),
+      ...(daemon === undefined ? {} : { daemon }),
+      outcome,
+    });
+    if (peerWake.delivered) return;
+    fallbackReason = peerWake.reason;
+  }
+
   await peerMail?.({
     task,
     kind: "verdict",
-    text: formatClaimVerdictText({ factory, task, outcome, sha, workspace }),
+    ...(projectSlug === undefined ? {} : { projectSlug }),
+    text: formatLeadVerdictWakeupText({
+      factory,
+      task,
+      outcome,
+      sha,
+      workspace,
+      ...(fallbackReason === undefined ? {} : { fallbackReason }),
+    }),
   });
+}
+
+function resolveResetOrDeleteTargetForPreCancel(
+  stateDir: string,
+  request: SpoolResetRequest | SpoolDeleteRequest,
+): { slug: string; root: string } | undefined {
+  const ctx = contextOfSpoolRequest(request);
+  const rawRoot = ctx.workspace?.trim() ?? "";
+  const rawSlug = ctx.project?.trim() ?? "";
+  if (rawRoot !== "") {
+    const resolved = resolveProject(rawRoot);
+    if (resolved.ok) return { slug: resolved.slug, root: resolved.root };
+    const byMatch = listProjectRegistrations(stateDir).find(
+      (reg) => reg.root === rawRoot || reg.slug === rawRoot,
+    );
+    if (byMatch !== undefined) return { slug: byMatch.slug, root: byMatch.root };
+    if (request.kind === "delete" && rawSlug !== "") {
+      const bySlug = readProjectRegistration(stateDir, rawSlug);
+      return bySlug !== undefined ? { slug: bySlug.slug, root: bySlug.root } : { slug: rawSlug, root: rawRoot };
+    }
+    return undefined;
+  }
+  if (rawSlug !== "") {
+    const reg = readProjectRegistration(stateDir, rawSlug);
+    return reg === undefined ? undefined : { slug: reg.slug, root: reg.root };
+  }
+  const regs = listProjectRegistrations(stateDir);
+  return regs.length === 1 ? { slug: regs[0]!.slug, root: regs[0]!.root } : undefined;
+}
+
+async function cancelProjectGatesBeforeMaintenance(
+  rootFactory: Factory,
+  request: SpoolResetRequest | SpoolDeleteRequest,
+  deps: SpoolDeps,
+): Promise<void> {
+  if (deps.gateQueue === undefined) return;
+  const resolvedDaemon = resolveDaemonArg(deps.daemon);
+  const effectiveSeat = await resolveEffectiveSeat(rootFactory, resolvedDaemon, request);
+  if (isProjectSeat(effectiveSeat)) return;
+  const target = resolveResetOrDeleteTargetForPreCancel(rootFactory.stateDir, request);
+  if (target === undefined) return;
+  if (request.kind === "reset" && request.keepSeats !== true) {
+    try {
+      const protectedPluginDir = deps.pluginDir ?? pluginDirFor(resolveSpoolPaseoHome(rootFactory.stateDir, deps.home));
+      checkProjectResetRepository(target.root, protectedPluginDir);
+    } catch {
+      return;
+    }
+  }
+  const note = request.kind === "delete" ? "cancelled-by-project-delete" : "cancelled-by-project-reset";
+  await deps.gateQueue.cancelMatching(
+    (item) => gateItemBelongsToProject(rootFactory.stateDir, target.slug, target.root, item),
+    { note, suppressSettled: true },
+  );
 }
 
 export async function handleSpoolRequest(
@@ -1921,7 +2163,12 @@ export async function handleSpoolRequest(
   if ("reply" in routing) return routing.reply;
   const effective = routing.factory;
   if (request.kind === "upgrade" || request.kind === "history_import" || request.kind === "history_import_status") return handleAdmittedSpoolRequest(effective, request, deps);
-  if (takesExclusiveMaintenance(request.kind) && !effective.history.maintenanceActive) return effective.history.withExclusiveMaintenance(() => handleAdmittedSpoolRequest(effective, request, deps, registry, routing.slug));
+  if (takesExclusiveMaintenance(request.kind) && !effective.history.maintenanceActive) {
+    if (request.kind === "reset" || request.kind === "delete") {
+      await cancelProjectGatesBeforeMaintenance(factory, request, deps);
+    }
+    return effective.history.withExclusiveMaintenance(() => handleAdmittedSpoolRequest(effective, request, deps, registry, routing.slug));
+  }
   const admitted = () => effective.history.runOperation(() => handleAdmittedSpoolRequest(effective, request, deps, registry, routing.slug), { newWork: !["ask", "meter", "repoke", "respawn", "needs_human"].includes(request.kind) });
   const run = () => {
     const workspace = request.kind === "contract"
@@ -2103,7 +2350,29 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
         await resolvedDaemon!.agents.ref(peer.id).archive();
       }
     };
+    const matchesTaskQueueItem = (item: GateQueueItem, workspace?: string): boolean => {
+      if (item.task !== ("task" in request ? request.task : "")) return false;
+      if (routedSlug !== undefined) {
+        return item.projectSlug === routedSlug && item.useRootFactory !== true;
+      }
+      if (registry !== undefined) {
+        return item.useRootFactory === true;
+      }
+      const project = workspace === undefined ? undefined : resolveProject(workspace);
+      return project?.ok ? item.projectSlug === project.slug : true;
+    };
     if (request.kind === "contract") {
+      if (
+        gateQueue !== undefined &&
+        gateQueue.snapshot().running.some((item) => matchesTaskQueueItem(item, request.workspace))
+      ) {
+        return {
+          id: request.id,
+          ok: false,
+          code: "gate-in-flight",
+          message: `task ${request.task} has an actively running Gate — wait for its verdict before re-contracting`,
+        };
+      }
       const previousPeers = await taskPeers(request.task);
       const contractEvt = factory.setContract({
         task: request.task,
@@ -2125,6 +2394,12 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
         by: request.submitter,
         ...(effectiveSeat === undefined ? {} : { seat: effectiveSeat }),
       });
+      if (gateQueue !== undefined) {
+        await gateQueue.cancelMatching(
+          (item) => matchesTaskQueueItem(item, request.workspace),
+          { note: "superseded-by-recontract", suppressSettled: true },
+        );
+      }
       // ADR 0053 §1 — Provisional Briefs: a re-contract on an unaccepted Task
       // updates the Brief/Gate in place and PRESERVES the live bound Peer (its
       // accumulated context window stays in the Task worktree) unless the
@@ -2199,6 +2474,7 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
           ? await withProjectIngressLock(factory.stateDir, project.slug, admitAsync)
           : await admitAsync();
         if (result.status === "executed") {
+          const effectiveSlug = routedSlug ?? (project?.ok ? project.slug : request.projectSlug);
           await settleClaimOutcome({
             factory,
             task: request.task,
@@ -2206,8 +2482,10 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
             outcome: result.outcome,
             sha: request.sha,
             workspace: contract?.workspace,
+            ...(effectiveSlug === undefined ? {} : { projectSlug: effectiveSlug }),
             usageMeter,
             peerMail: peerMailHook,
+            ...(resolvedDaemon === undefined ? {} : { daemon: resolvedDaemon }),
           });
         }
         if (result.status === "replayed" || result.status === "executed") {
@@ -2243,6 +2521,7 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
       const outcome = await admitted.completion;
       const replayed = outcome.gate.seq <= admitted.priorSeq;
       if (!replayed) {
+        const effectiveSlug = routedSlug ?? (project?.ok ? project.slug : request.projectSlug);
         await settleClaimOutcome({
           factory,
           task: request.task,
@@ -2250,8 +2529,10 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
           outcome,
           sha: request.sha,
           workspace: contract?.workspace,
+          ...(effectiveSlug === undefined ? {} : { projectSlug: effectiveSlug }),
           usageMeter,
           peerMail: peerMailHook,
+          ...(resolvedDaemon === undefined ? {} : { daemon: resolvedDaemon }),
         });
       }
       return syncReply(outcome);
@@ -2735,12 +3016,21 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
     // close, so a refusal touches no Peer and no workspace.
     if (request.kind === "close") {
       const closedBy = request.by ?? request.submitter;
+      const authority = effectiveSeat ?? (request.by === "lead" ? "lead" : "owner");
+      factory.validateClose({ task: request.task, reason: request.reason, authority });
+      if (gateQueue !== undefined) {
+        const closeContract = factory.contractFor(request.task);
+        await gateQueue.cancelMatching(
+          (item) => matchesTaskQueueItem(item, closeContract?.workspace),
+          { note: "cancelled-by-task-close", suppressSettled: true },
+        );
+      }
       const peers = await taskPeers(request.task);
       const closed = await factory.close({
         task: request.task,
         reason: request.reason,
         ...(closedBy === undefined ? {} : { by: closedBy }),
-        authority: effectiveSeat ?? (request.by === "lead" ? "lead" : "owner"),
+        authority,
       });
       if (peers.length > 0) await retirePeers(peers);
       await archiveAcceptedTaskWorkspace(factory, resolvedDaemon, request.task, home);
@@ -2943,6 +3233,18 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
     // `--by` seat, when the request claims one, overrides the submitter
     // stamp; the Lead's conditional authority is judged below in the factory.
     if (request.kind !== "accept") return { id: request.id, ok: false, code: "bad-request", message: "unsupported Factory command" };
+    if (gateQueue !== undefined) {
+      const acceptContract = factory.contractFor(request.task);
+      const snap = gateQueue.snapshot();
+      if ([...snap.running, ...snap.queued].some((item) => matchesTaskQueueItem(item, acceptContract?.workspace))) {
+        return {
+          id: request.id,
+          ok: false,
+          code: "gate-in-flight",
+          message: `task ${request.task} has an in-flight or queued Gate — wait for its report before accepting`,
+        };
+      }
+    }
     const acceptedBy = request.by ?? request.submitter;
     const accepted = await executeAcceptance(factory, { task: request.task, attempt: request.attempt, accepted_by: acceptedBy }, { authority: effectiveSeat ?? (request.by === "lead" ? "lead" : "owner"), daemon: resolvedDaemon, home });
     // The acceptance is a terminal Task boundary too (v0.0.87, ADR 0043 §3):
@@ -3048,7 +3350,7 @@ export interface SpoolOptions {
    * flushes the Peer's session AND at most one `meter_written` line lands,
    * with or without `driver.mjs` in the loop.
    */
-  usageMeter?: (input: { task: string; agentId?: string; attempt?: number }) => Promise<void>;
+  usageMeter?: (input: { task: string; agentId?: string; attempt?: number; slug?: string }) => Promise<void>;
   /**
    * The Peer-retirement usage flush (v0.0.87, ADR 0043 §3): called before a
    * task Peer is stopped and archived on re-contracting or replacement.
@@ -3072,6 +3374,8 @@ export interface SpoolOptions {
   storeReleaseNotify?: (input: { slug: string; text: string }) => Promise<void> | void;
   /** Machine-wide FIFO Gate queue (ADR 0068). `startSpool` creates one when omitted. */
   gateQueue?: GateQueue;
+  /** Installed plugin directory protected against repository reset (defaults to `pluginDirFor(home)`). */
+  pluginDir?: string;
 }
 
 export type SpoolDeps = Omit<SpoolOptions, "onLog" | "pollMs">;
@@ -3125,8 +3429,11 @@ export function startSpool(stateDir: string, factory: Factory, options: SpoolOpt
               outcome,
               sha: item.sha,
               workspace: item.cwd,
+              ...(item.useRootFactory === true || item.projectSlug === "root" ? {} : { projectSlug: item.projectSlug }),
               usageMeter: options.usageMeter,
               peerMail: options.peerMail,
+              ...(options.daemon === undefined ? {} : { daemon: options.daemon }),
+              onLog: log,
             });
           },
         })
@@ -3338,6 +3645,7 @@ function writeJsonAtomic(path: string, value: unknown): void {
 
 async function handleRequestFile(id: string, requestPath: string, replyPath: string, processedPath: string, factory: Factory, log: (message: string) => void, deps: SpoolDeps, registry?: FactoryRegistry): Promise<void> {
   let kind = "";
+  let parsedRequest: SpoolRequest | undefined;
   // The admission lane follows the ROUTED Factory (v0.0.89): a reset/delete on
   // one Project takes that Project's own maintenance lane, and ordinary work
   // admits on the Project that owns it — independent Projects never queue
@@ -3347,16 +3655,18 @@ async function handleRequestFile(id: string, requestPath: string, replyPath: str
   try {
     const body = JSON.parse(readFileSync(requestPath, "utf8"));
     kind = String(body.kind);
-    if (registry !== undefined) {
-      const request = parseSpoolRequest(body);
-      if (request !== undefined) {
-        const routing = routeSpoolRequest(factory, request, registry);
-        if (!("reply" in routing)) admitted = routing.factory;
-      }
+    parsedRequest = parseSpoolRequest(body);
+    if (registry !== undefined && parsedRequest !== undefined) {
+      const routing = routeSpoolRequest(factory, parsedRequest, registry);
+      if (!("reply" in routing)) admitted = routing.factory;
     }
   } catch { /* malformed requests still receive a reply */ }
   const work = () => handleAdmittedRequestFile(id, requestPath, replyPath, processedPath, admitted, log, deps, registry);
   if (kind === "upgrade") await work();
-  else if (takesExclusiveMaintenance(kind)) await admitted.history.withExclusiveMaintenance(work);
-  else await admitted.history.runOperation(work, { newWork: !["ask", "meter", "repoke", "respawn", "needs_human", "history_import", "history_import_status", ""].includes(kind) });
+  else if (takesExclusiveMaintenance(kind)) {
+    if (parsedRequest !== undefined && (parsedRequest.kind === "reset" || parsedRequest.kind === "delete")) {
+      await cancelProjectGatesBeforeMaintenance(factory, parsedRequest, deps);
+    }
+    await admitted.history.withExclusiveMaintenance(work);
+  } else await admitted.history.runOperation(work, { newWork: !["ask", "meter", "repoke", "respawn", "needs_human", "history_import", "history_import_status", ""].includes(kind) });
 }

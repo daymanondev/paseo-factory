@@ -18,6 +18,8 @@ import { provisionPiAgentHome } from "./core/pi-home.ts";
 import { expandHome, pluginDirFor } from "./paths.ts";
 import { liveSeatCandidates, seatCandidates } from "./seats.ts";
 import { checkProjectResetRepository, removeProjectStateDirectory, resetProjectRepository } from "./project-reset.ts";
+import { gateItemBelongsToProject } from "./gate-queue.ts";
+import type { GateQueue } from "./gate-queue.ts";
 import { boundTaskPeers } from "./task-peers.ts";
 import { peerHandoffsInProgress, projectPeersInFlight } from "./peer-in-flight.ts";
 import { withProjectIngressLock } from "./core/project-ingress-lock.ts";
@@ -441,6 +443,8 @@ export interface SurfaceDeps {
    * is refused `project-rotate-unavailable`.
    */
   rotateProjectMailbox?: (slug: string) => void;
+  /** Daemon-wide Gate queue whose Project Gates are cancelled before reset/delete enters exclusive maintenance. */
+  gateQueue?: GateQueue | (() => GateQueue | undefined);
   /** Optional hook notified after a non-read surface handler completes. */
   onStateChange?: (event: { handler: string; projectSlug?: string; projectRoot?: string }) => void;
   /** Optional override for the `start-supervisor` watchdog timeout during async onboarding runs (defaults to 120s). */
@@ -617,6 +621,106 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       workspace: input.projectRoot !== undefined && input.projectRoot.trim() !== "" ? input.projectRoot : input.workspace,
     });
     return target.ok ? deps.registry.factoryForProject(target.slug) : deps.factory;
+  };
+
+  const resolveDeleteTarget = (
+    input: { projectRoot?: string; projectSlug?: string; project?: string } = {},
+  ): { ok: true; project: { slug: string; root: string; name: string } } | ReturnType<typeof failure> => {
+    const rawRoot = (input.projectRoot ?? "").trim();
+    const rawSlug = (input.projectSlug ?? input.project ?? "").trim();
+    if (rawRoot !== "") {
+      const resolved = resolveProject(rawRoot);
+      if (resolved.ok) {
+        return { ok: true, project: { slug: resolved.slug, root: resolved.root, name: basename(resolved.root) || resolved.slug } };
+      }
+      const registrations = listProjectRegistrations(deps.stateDir);
+      const byMatch = registrations.find(
+        (reg) => reg.root === rawRoot || realpathSafe(reg.root) === realpathSafe(rawRoot) || reg.slug === rawRoot,
+      );
+      if (byMatch !== undefined) {
+        return { ok: true, project: { slug: byMatch.slug, root: byMatch.root, name: basename(byMatch.root) || byMatch.slug } };
+      }
+      if (rawSlug !== "") {
+        const bySlug = readProjectRegistration(deps.stateDir, rawSlug);
+        if (bySlug !== undefined) {
+          return { ok: true, project: { slug: bySlug.slug, root: bySlug.root, name: basename(bySlug.root) || bySlug.slug } };
+        }
+        return { ok: true, project: { slug: rawSlug, root: rawRoot, name: basename(rawRoot) || rawSlug } };
+      }
+      return failure("unknown-project", `project root ${rawRoot} does not resolve to a registered project or git repository — ${resolved.reason}`);
+    }
+    if (rawSlug !== "") {
+      const reg = readProjectRegistration(deps.stateDir, rawSlug);
+      if (reg !== undefined) {
+        return { ok: true, project: { slug: reg.slug, root: reg.root, name: basename(reg.root) || reg.slug } };
+      }
+      return failure("unknown-project", `project "${rawSlug}" is not registered — pass projectRoot or a known projectSlug`);
+    }
+    const registrations = listProjectRegistrations(deps.stateDir);
+    if (registrations.length === 1) {
+      const only = registrations[0]!;
+      return { ok: true, project: { slug: only.slug, root: only.root, name: basename(only.root) || only.slug } };
+    }
+    if (registrations.length === 0) {
+      return failure("unknown-project", "no project specified and no project is registered");
+    }
+    return failure(
+      "ambiguous-project",
+      `more than one project is registered (${registrations.map((r) => r.slug).join(", ")}) — pass projectRoot or projectSlug to name the one to delete`,
+    );
+  };
+
+  const resolveGateQueue = (): GateQueue | undefined =>
+    typeof deps.gateQueue === "function" ? deps.gateQueue() : deps.gateQueue;
+
+  const cancelProjectGates = async (slug: string, root: string, note: string): Promise<void> => {
+    const queue = resolveGateQueue();
+    if (queue === undefined) return;
+    await queue.cancelMatching(
+      (item) => gateItemBelongsToProject(deps.stateDir, slug, root, item),
+      { note, suppressSettled: true },
+    );
+  };
+
+  const cancelGatesBeforeProjectMaintenance = async (
+    kind: "projectReset" | "projectDelete",
+    rawInput: unknown,
+    rawContext: unknown,
+  ): Promise<void> => {
+    const input = (rawInput !== null && typeof rawInput === "object" ? rawInput : {}) as {
+      projectRoot?: string;
+      projectSlug?: string;
+      project?: string;
+      keepSeats?: boolean;
+      seat?: string;
+    };
+    const context = (rawContext !== null && typeof rawContext === "object" ? rawContext : undefined) as
+      | (SurfaceCallContext & { seat?: string })
+      | undefined;
+    if (kind === "projectDelete") {
+      const callerSeat =
+        typeof input.seat === "string" && input.seat.trim() !== ""
+          ? input.seat.trim()
+          : typeof context?.seat === "string" && context.seat.trim() !== ""
+            ? context.seat.trim()
+            : "";
+      if (isProjectSeat(callerSeat)) return;
+      const target = resolveDeleteTarget(input);
+      if (!target.ok) return;
+      await cancelProjectGates(target.project.slug, target.project.root, "cancelled-by-project-delete");
+      return;
+    }
+    const target = resolveActTarget(input, "reset");
+    if (!target.ok) return;
+    const protectedPluginDir = deps.pluginDir ?? pluginDirFor(deps.home);
+    if (input.keepSeats !== true) {
+      try {
+        checkProjectResetRepository(target.project.root, protectedPluginDir);
+      } catch {
+        return;
+      }
+    }
+    await cancelProjectGates(target.project.slug, target.project.root, "cancelled-by-project-reset");
   };
   let localUpdateSnapshot: { statuses: ReadonlyMap<string, DaemonPluginSourceStatus>; checkedAt: string } | null = null;
   let localToolUpdateSnapshot: Record<"factory-skills-pack", CompanionToolUpdateStatus> | null = null;
@@ -4079,55 +4183,11 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         );
       }
 
-      const rawRoot = (input.projectRoot ?? "").trim();
-      const rawSlug = (input.projectSlug ?? input.project ?? "").trim();
-      let project: { slug: string; root: string; name: string } | undefined;
+      const target = resolveDeleteTarget(input);
+      if (!target.ok) return target;
+      const project = target.project;
 
-      if (rawRoot !== "") {
-        const resolved = resolveProject(rawRoot);
-        if (resolved.ok) {
-          project = { slug: resolved.slug, root: resolved.root, name: basename(resolved.root) || resolved.slug };
-        } else {
-          const registrations = listProjectRegistrations(deps.stateDir);
-          const byMatch = registrations.find(
-            (reg) => reg.root === rawRoot || realpathSafe(reg.root) === realpathSafe(rawRoot) || reg.slug === rawRoot,
-          );
-          if (byMatch !== undefined) {
-            project = { slug: byMatch.slug, root: byMatch.root, name: basename(byMatch.root) || byMatch.slug };
-          } else if (rawSlug !== "") {
-            const bySlug = readProjectRegistration(deps.stateDir, rawSlug);
-            if (bySlug !== undefined) {
-              project = { slug: bySlug.slug, root: bySlug.root, name: basename(bySlug.root) || bySlug.slug };
-            } else {
-              project = { slug: rawSlug, root: rawRoot, name: basename(rawRoot) || rawSlug };
-            }
-          }
-          if (project === undefined) {
-            return failure("unknown-project", `project root ${rawRoot} does not resolve to a registered project or git repository — ${resolved.reason}`);
-          }
-        }
-      } else if (rawSlug !== "") {
-        const reg = readProjectRegistration(deps.stateDir, rawSlug);
-        if (reg !== undefined) {
-          project = { slug: reg.slug, root: reg.root, name: basename(reg.root) || reg.slug };
-        } else {
-          return failure("unknown-project", `project "${rawSlug}" is not registered — pass projectRoot or a known projectSlug`);
-        }
-      } else {
-        const registrations = listProjectRegistrations(deps.stateDir);
-        if (registrations.length === 1) {
-          const only = registrations[0]!;
-          project = { slug: only.slug, root: only.root, name: basename(only.root) || only.slug };
-        } else if (registrations.length === 0) {
-          return failure("unknown-project", "no project specified and no project is registered");
-        } else {
-          return failure(
-            "ambiguous-project",
-            `more than one project is registered (${registrations.map((r) => r.slug).join(", ")}) — pass projectRoot or projectSlug to name the one to delete`,
-          );
-        }
-      }
-
+      await cancelProjectGates(project.slug, project.root, "cancelled-by-project-delete");
       const daemon = resolveDaemon(context);
       const { projectDir, worktreesDir, projectTaskSet, archivedSeats, archivedAgents } =
         await cleanupProjectArtifacts(daemon, project, {
@@ -4231,6 +4291,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         try { checkProjectResetRepository(project.root, protectedPluginDir); }
         catch (err) { return failure("repository-reset-refused", messageOf(err)); }
       }
+      await cancelProjectGates(project.slug, project.root, "cancelled-by-project-reset");
       const daemon = resolveDaemon(context);
       const { projectDir, worktreesDir, projectTaskSet, archivedAgents } =
         await cleanupProjectArtifacts(daemon, project, {
@@ -5267,9 +5328,14 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           : registerSlug !== undefined && deps.registry !== undefined
             ? deps.registry.factoryForProject(registerSlug)
             : deps.factory;
-        const pending = !lane.history.maintenanceActive && EXCLUSIVE_MAINTENANCE_HANDLERS.has(key)
-          ? lane.history.withExclusiveMaintenance(() => value.apply(receiver, args))
-          : lane.history.runOperation(() => value.apply(receiver, args), { newWork: true });
+        const execute = () =>
+          !lane.history.maintenanceActive && EXCLUSIVE_MAINTENANCE_HANDLERS.has(key)
+            ? lane.history.withExclusiveMaintenance(() => value.apply(receiver, args))
+            : lane.history.runOperation(() => value.apply(receiver, args), { newWork: true });
+        const pending =
+          key === "projectReset" || key === "projectDelete"
+            ? cancelGatesBeforeProjectMaintenance(key, args[0], args[1]).then(execute)
+            : execute();
         if (deps.onStateChange === undefined) return pending;
         return pending.then((result) => {
           deps.onStateChange?.({ handler: key, ...surfaceChangeTarget(args[0], result, registerSlug) });

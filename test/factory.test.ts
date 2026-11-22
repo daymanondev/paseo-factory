@@ -156,11 +156,11 @@ test("setContract records the workspace with the criteria, allows re-contracting
   assert.equal(evt2.seq, 2);
   assert.equal(factory.contractFor("T1")?.gate, "true");
 
-  // While an attempt is open in the current epoch, setContract refuses with gate-running.
+  // While an attempt is started/open in the current epoch, setContract refuses with gate-in-flight.
   factory.ledger.append({ event: "claim_reported", task: "T1", attempt: 1, sha });
   assert.throws(
     () => factory.setContract({ task: "T1", workspace, gate: "true", artifact }),
-    factoryErrorCode("gate-running"),
+    factoryErrorCode("gate-in-flight"),
   );
   factory.ledger.append({ event: "gate_finished", task: "T1", attempt: 1, exit: 1, verdict: "red", note: "failed" });
   factory.ledger.append({ event: "report_written", task: "T1", attempt: 1, path: "report-T1-1.md" });
@@ -2127,7 +2127,7 @@ test("accept refuses while another attempt is in flight", async (t) => {
   await factory.claim({ task: "busy", sha, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
   factory.ledger.append({ event: "claim_reported", task: "busy", attempt: 2, sha });
   factory.ledger.append({ event: "gate_started", task: "busy", attempt: 2, cmd: "true" });
-  await assert.rejects(factory.accept({ task: "busy", attempt: 1 }), factoryErrorCode("gate-running"));
+  await assert.rejects(factory.accept({ task: "busy", attempt: 1 }), factoryErrorCode("gate-in-flight"));
 });
 
 test("accepted task projection retains accepted GREEN evidence after a ghost RED attempt", async (t) => {

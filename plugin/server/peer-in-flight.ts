@@ -92,7 +92,13 @@ export function driverWavesInFlight(
   for (const evt of events) {
     if (!("task" in evt) || typeof evt.task !== "string") continue;
     if (evt.event === "spawn_dispatched") openRounds.set(evt.task, evt);
-    else if (evt.event === "contract_set" || evt.event === "gate_finished" || evt.event === "needs_human") {
+    else if (
+      evt.event === "contract_set" ||
+      evt.event === "gate_finished" ||
+      evt.event === "needs_human" ||
+      evt.event === "task_closed" ||
+      (liveness !== "live" && evt.event === "gate_queued")
+    ) {
       openRounds.delete(evt.task);
     }
   }
