@@ -1567,7 +1567,7 @@ var catalog = slpCatalog;
 // src/agy-mcp-schema-heal.ts
 var ALLOWED_ROLES = /* @__PURE__ */ new Set(["supervisor", "lead", "agent"]);
 var AGY_APP_DATA_NAMES = ["antigravity", "antigravity-cli"];
-var AGY_SERVER_DIR_NAME = "paseo-factory_paseo_factory";
+var AGY_SERVER_DIR_NAMES = ["paseo-factory_paseo_factory", "paseo_factory"];
 function resolveHealTarget(targetPath) {
   const raw = typeof targetPath === "string" ? targetPath.trim() : "";
   if (raw === "" || !(0, import_node_path.isAbsolute)(raw) || raw.endsWith("/") || raw.endsWith("\\")) return null;
@@ -1582,9 +1582,11 @@ function resolveHealTarget(targetPath) {
   const toolName = fileName.slice(0, -".json".length);
   if (toolName === "" || toolName.includes("/") || toolName.includes("\\")) return null;
   for (const appName of AGY_APP_DATA_NAMES) {
-    const serverDir = (0, import_node_path.resolve)(resolvedHome, ".gemini", appName, "mcp", AGY_SERVER_DIR_NAME);
-    if (parentDir === serverDir) {
-      return { serverDir, targetFile: resolvedTarget, toolName };
+    for (const serverDirName of AGY_SERVER_DIR_NAMES) {
+      const serverDir = (0, import_node_path.resolve)(resolvedHome, ".gemini", appName, "mcp", serverDirName);
+      if (parentDir === serverDir) {
+        return { serverDir, targetFile: resolvedTarget, toolName };
+      }
     }
   }
   return null;

@@ -365,6 +365,11 @@ export function applyProviderExecutionFence<T extends AgentCreateRequest["config
      * fences like its underlying harness. Defaults to the config's own family.
      */
     providerFamily?: string;
+    /**
+     * Enables Paseo `>=0.17.1` per-session Antigravity MCP delivery (`config.mcpServers`)
+     * and cleans stale global `mcp_config.json`; defaults to `false` (`<0.17.1` mode).
+     */
+    perSessionAgyMcp?: boolean;
   },
 ): T {
   const { role, stateDir, correlationId, projectSlug, task, userHome, agyPluginsDir } = input;
@@ -378,10 +383,13 @@ export function applyProviderExecutionFence<T extends AgentCreateRequest["config
   // Never pass `labels` inside `config` to Paseo's strict `agent.create` validator
   delete nextConfig.labels;
 
-  if (providerFamily === "antigravity") {
+  if (providerFamily === "antigravity" && input.perSessionAgyMcp !== true) {
     delete nextConfig.mcpServers;
     provisionAgyPlugin({ stateDir, userHome, agyPluginsDir });
   } else {
+    if (providerFamily === "antigravity") {
+      provisionAgyPlugin({ stateDir, userHome, agyPluginsDir, perSessionMcp: true });
+    }
     const existingMcp = resolveRoleScopedMcpServers({ stateDir, userHome, role, provider: providerFamily });
     const bridgeServer = {
       type: "stdio" as const,
@@ -553,19 +561,29 @@ export function sanitizeAgentCreateHookResult<R extends { config: unknown; env?:
   };
 }
 
+export interface InjectRoleOnCreateOptions {
+  /**
+   * Enables Paseo `>=0.17.1` per-session Antigravity MCP delivery (`config.mcpServers`)
+   * and cleans stale global `mcp_config.json`; defaults to `false` (`<0.17.1` mode).
+   */
+  perSessionAgyMcp?: boolean;
+  agyPluginsDir?: string;
+}
+
 /**
  * The additive `agent.create` injection (channel 1 + the first-launch env +
  * Layer-1 provider fence + `Correlation token` issuance):
  * a seat-titled create or a managed-worktree create gets its role contract
  * APPENDED to `config.systemPrompt` (idempotent — the footer is the sentinel),
  * a `cor_<uuid>` token issued in `CorrelationRegistry`, `paseo_factory` MCP
- * wired (except on `antigravity`), provider-specific execution fences applied,
+ * wired (except on `<0.17.1` `antigravity`), provider-specific execution fences applied,
  * and its `PASEO_FACTORY_*` env seeded.
  */
 export function injectRoleOnCreate<R extends AgentCreateRequest>(
   request: R,
   stateDir: string,
   userHome?: string,
+  options?: InjectRoleOnCreateOptions,
 ): R | undefined {
   const reqLabels =
     (request as { labels?: Record<string, string> }).labels ??
@@ -624,6 +642,8 @@ export function injectRoleOnCreate<R extends AgentCreateRequest>(
           projectSlug: worktree.slug,
           task: worktree.task,
           userHome,
+          ...(options?.agyPluginsDir !== undefined ? { agyPluginsDir: options.agyPluginsDir } : {}),
+          ...(options?.perSessionAgyMcp !== undefined ? { perSessionAgyMcp: options.perSessionAgyMcp } : {}),
           // A `factory-peer` spawn (ADR 0017 §2) fences under the worker
           // lane's harness — without this, `providerFamilyOf("factory-peer")`
           // matches no family and the Layer-1 agent fence silently no-ops.
@@ -682,6 +702,8 @@ export function injectRoleOnCreate<R extends AgentCreateRequest>(
       correlationId: issued.correlationId,
       projectSlug: projectIdentity.slug,
       userHome,
+      ...(options?.agyPluginsDir !== undefined ? { agyPluginsDir: options.agyPluginsDir } : {}),
+      ...(options?.perSessionAgyMcp !== undefined ? { perSessionAgyMcp: options.perSessionAgyMcp } : {}),
       providerFamily: resolveEffectiveProviderFamily(request.config.provider, role, stateDir, projectIdentity.slug),
     },
   );

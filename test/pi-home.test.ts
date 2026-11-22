@@ -886,6 +886,34 @@ test("Peer provider targets and Vault opt-in update atomically and reprovision P
   assert.equal(readFileSync(token, "utf8"), JSON.stringify({ serverUrl: "https://remote.invalid/mcp", tokens: { accessToken: "test-token" } }));
 });
 
+test("resolveRoleScopedMcpServers delivers enabled Helper MCPs to non-pill providers such as antigravity when targetProviders is non-empty", async (t) => {
+  const { setHelperMcpEnabled, resolveRoleScopedMcpServers, ALL_HELPER_TARGET_PROVIDERS } = await import("../src/helper-mcp-sync.ts");
+  assert.deepEqual(ALL_HELPER_TARGET_PROVIDERS, ["pi", "claude", "codex", "opencode"]);
+  const dir = makeTempDir(); disposeDir(t, dir);
+  const userHome = join(dir, "user"), stateDir = join(dir, "state"), pi = join(userHome, ".pi/agent");
+  mkdirSync(pi, { recursive: true });
+  writeFileSync(join(pi, "mcp.json"), JSON.stringify({ mcpServers: { docs: { command: process.execPath, args: ["--version"] } } }));
+  const options = { stateDir, userHome };
+
+  // Default targets include all 4 pills: antigravity Peer receives docs, coordination seats do not
+  const agyPeer = resolveRoleScopedMcpServers({ ...options, role: "agent", provider: "antigravity" }) as Record<string, { type?: string; command?: string; args?: string[] }>;
+  assert.deepEqual(Object.keys(agyPeer), ["docs"]);
+  assert.equal(agyPeer.docs?.type, "stdio");
+  assert.equal(agyPeer.docs?.command, process.execPath);
+  assert.deepEqual(resolveRoleScopedMcpServers({ ...options, role: "supervisor", provider: "antigravity" }), {});
+  assert.deepEqual(resolveRoleScopedMcpServers({ ...options, role: "lead", provider: "antigravity" }), {});
+
+  // Subset of UI target pills (non-empty) still includes non-pill providers (antigravity, copilot)
+  setHelperMcpEnabled(options, "docs", { targetProviders: ["claude"] });
+  assert.deepEqual(Object.keys(resolveRoleScopedMcpServers({ ...options, role: "agent", provider: "antigravity" })), ["docs"]);
+  assert.deepEqual(Object.keys(resolveRoleScopedMcpServers({ ...options, role: "agent", provider: "copilot" })), ["docs"]);
+  assert.deepEqual(Object.keys(resolveRoleScopedMcpServers({ ...options, role: "agent", provider: "pi" })), []);
+
+  // Disabling all target pills (targetProviders: []) excludes non-pill providers too
+  setHelperMcpEnabled(options, "docs", { targetProviders: [] });
+  assert.deepEqual(resolveRoleScopedMcpServers({ ...options, role: "agent", provider: "antigravity" }), {});
+});
+
 test("Connectivity never refreshes or probes local-only MCPs and leaves host files unchanged", async (t) => {
   const { createServer } = await import("node:http");
   const { syncHelperMcps, setHelperMcpEnabled, helperOAuthPath } = await import("../src/helper-mcp-sync.ts");

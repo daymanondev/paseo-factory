@@ -1,12 +1,12 @@
 /**
- * Antigravity (`agy`) plugin auto-provisioner (v0.0.26, ADR 0016 §3):
- * Because Paseo's `AgentManager.requireExternalMcpSupport` rejects non-empty
- * `config.mcpServers` on `antigravity` sessions, `paseo-factory` omits
- * `config.mcpServers` for `antigravity` / `agy` on `agent.create` and instead
- * provisions `<agyPluginsDir>/paseo-factory/{plugin.json,mcp_config.json,hooks.json}`
- * alongside `<stateDir>/bin/agy-pre-tool-hook.mjs` and `<stateDir>/bin/bridge.mjs`.
+ * Antigravity (`agy`) plugin auto-provisioner (v0.0.26, ADR 0016 §3; ADR 0067):
+ * On Paseo `<0.17.1`, `paseo-factory` omits `config.mcpServers` on `antigravity`
+ * sessions and provisions `<agyPluginsDir>/paseo-factory/{plugin.json,mcp_config.json,hooks.json}`.
+ * On Paseo `>=0.17.1` (`perSessionMcp: true`), `paseo_factory` and Helper MCPs
+ * ride per-session `config.mcpServers`, so `provisionAgyPlugin` keeps `plugin.json`
+ * and `hooks.json` (`PreToolUse` fence) fresh while removing stale `mcp_config.json`.
  */
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { isElectronNodeBinary } from "./pi-home.ts";
@@ -22,6 +22,11 @@ export interface ProvisionAgyPluginOptions {
   userHome?: string;
   nodePath?: string;
   pluginDir?: string;
+  /**
+   * When true (Paseo `>=0.17.1`), `paseo_factory` is attached per-session via
+   * `config.mcpServers`, so `mcp_config.json` is omitted and any stale copy removed.
+   */
+  perSessionMcp?: boolean;
 }
 
 function isTempDirPath(p: string): boolean {
@@ -244,8 +249,13 @@ export function provisionAgyPlugin(options: ProvisionAgyPluginOptions): string {
     },
   };
 
+  const mcpConfigPath = join(pluginDir, "mcp_config.json");
   writeFileSync(join(pluginDir, "plugin.json"), `${JSON.stringify(pluginJson, null, 2)}\n`);
-  writeFileSync(join(pluginDir, "mcp_config.json"), `${JSON.stringify(mcpConfigJson, null, 2)}\n`);
+  if (options.perSessionMcp) {
+    rmSync(mcpConfigPath, { force: true });
+  } else {
+    writeFileSync(mcpConfigPath, `${JSON.stringify(mcpConfigJson, null, 2)}\n`);
+  }
   writeFileSync(join(pluginDir, "hooks.json"), `${JSON.stringify(hooksJson, null, 2)}\n`);
   return pluginDir;
 }

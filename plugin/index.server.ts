@@ -17,7 +17,7 @@ import { SleepInhibitor } from "./server/core/sleep-inhibitor.ts";
 import { join, resolve } from "node:path";
 import type { PluginHookContext, PluginHookEvents, PluginHookRequests, PluginServerContext } from "@getpaseo/plugin/server";
 import { pendingUpgradeFor } from "./server/core/upgrade-state.ts";
-import { ensureFactoryBinScripts } from "./server/core/agy-home.ts";
+import { ensureFactoryBinScripts, provisionAgyPlugin } from "./server/core/agy-home.ts";
 import { PLUGIN_ID, pluginDirFor, resolvePaseoHome, stateDirFor } from "./server/paths.ts";
 import { ensureFactorySkillRootsSafe } from "./server/core/skill.ts";
 import { ensureCompanionPluginSkills } from "./server/core/skill-hub.ts";
@@ -50,9 +50,26 @@ const SHELL_VERSION = "0.18.2";
 const log = (message: string) => console.log(`[${PLUGIN_ID}] ${message}`);
 
 export default function contribute(server: PluginServerContext) {
+  // Single synchronous capability gate (ADR 0067): Paseo >=0.17.1 exposes
+  // registerWorktreeManager and supports per-session Antigravity mcpServers.
+  const supportsV0171Host = typeof server.registerWorktreeManager === "function";
   const home = resolvePaseoHome(process.env, homedir());
   const stateDir = stateDirFor(home);
   let pluginDir = pluginDirFor(home);
+
+  const reconcileAgyPluginForHost = (activePluginDir: string | undefined): void => {
+    if (!supportsV0171Host) return;
+    try {
+      provisionAgyPlugin({
+        stateDir,
+        userHome: homedir(),
+        ...(activePluginDir === undefined ? {} : { pluginDir: activePluginDir }),
+        perSessionMcp: true,
+      });
+    } catch (error) {
+      log(`antigravity: could not reconcile plugin bundle — ${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
 
   const reconcileGlobalFactorySkills = (activePluginDir: string | undefined, logReconciled = false): void => {
     const quoted = (value: string) => (/\s/.test(value) ? `"${value}"` : value);
@@ -73,6 +90,7 @@ export default function contribute(server: PluginServerContext) {
       ensureClaimCli(stateDir, pluginDir, process.execPath);
       ensureGitShim(stateDir, pluginDir, process.execPath);
       ensureFactoryBinScripts(stateDir, pluginDir);
+      reconcileAgyPluginForHost(pluginDir);
       reconcileGlobalFactorySkills(pluginDir, false);
       log(`re-synced plugin checkout -> ${pluginDir}`);
     }
@@ -191,6 +209,7 @@ export default function contribute(server: PluginServerContext) {
       // operator-global and not preconditions the plugin depends on, so an
       // unwritable skills root warns and the boot continues (choke, spool,
       // mailbox runtime) — a skill never kills a boot.
+      reconcileAgyPluginForHost(pluginDir);
       reconcileGlobalFactorySkills(pluginDir, true);
 
       for (const role of ["supervisor", "lead", "agent"] as const) {
@@ -292,9 +311,10 @@ export default function contribute(server: PluginServerContext) {
       // creates and managed-worktree creates carry their role contract in
       // config.systemPrompt (mapped per provider by the daemon) plus their
       // PASEO_FACTORY_* env — nothing under any project root is written.
-      try { await syncPeerHelpersBeforeCreate(next, stateDir); }
+      const userHome = homedir();
+      try { await syncPeerHelpersBeforeCreate(next, stateDir, userHome); }
       catch { log("helpers: pre-spawn MCP sync failed; cached configuration remains available"); }
-      const injected = injectRoleOnCreate(next, stateDir);
+      const injected = injectRoleOnCreate(next, stateDir, userHome, { perSessionAgyMcp: supportsV0171Host });
       if (injected !== undefined) {
         log(`roles: injected the ${injected.env?.PASEO_FACTORY_SEAT ?? "agent"} contract into the agent created in ${next.config.cwd}`);
       }
@@ -697,7 +717,7 @@ export default function contribute(server: PluginServerContext) {
       }
       // The role identity re-applies on every provider launch (v0.0.14): a
       // seat's or worker's shell can always ask which seat it is.
-      const withEnv = injectSessionEnv(next, stateDir);
+      const withEnv = injectSessionEnv(next, stateDir, homedir());
       // The Supervisor auto-bind door (v0.6.1, ADR 0057 §5): every non-history
       // session open hands the surface the agent + cwd, and the FIRST candidate
       // to open a session binds when the bound Supervisor is archived or
