@@ -38,7 +38,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { FactoryError } from "./core/errors.ts";
 import { isValidContractTimeoutSeconds } from "./core/constants.ts";
 import { usageIsValid } from "./core/ledger.ts";
-import { MAX_ATTEMPTS, needsHumanEvidenceIsValid, NEEDS_HUMAN_REASONS, PEER_DISPOSITIONS, PEER_HANDOFF_OUTCOMES, STORE_RELEASE_ACTIONS } from "./core/events.ts";
+import { isReadOnlyPeerDisposition, MAX_ATTEMPTS, needsHumanEvidenceIsValid, NEEDS_HUMAN_REASONS, PEER_DISPOSITIONS, PEER_HANDOFF_OUTCOMES, STORE_RELEASE_ACTIONS } from "./core/events.ts";
 import type { StoreReleaseAction } from "./core/events.ts";
 import { activeContractSnapshot, repokeCompletionFooter } from "./core/disposition-prompt.ts";
 import { handoffLines } from "./core/report.ts";
@@ -63,6 +63,7 @@ import type { FactoryRegistry, TargetProjectContext } from "./projects.ts";
 import { FACTORY_SEAT_PROVIDER_IDS, formatPeerAgentTitle, formatPeerWorkspaceTitle } from "./roles.ts";
 import { acceptanceSummary, archiveAcceptedTaskWorkspace, executeAcceptance } from "./commands.ts";
 import { boundTaskPeers, peerIsRunning } from "./task-peers.ts";
+import { projectPeersInFlight, taskFactoryOf } from "./peer-in-flight.ts";
 import { listDaemonPlugins, stopAgentViaCli } from "./daemon-cli.ts";
 import type { DaemonReply } from "./daemon-cli.ts";
 import { isPaseoWorkspaceArchivedOnDisk, restoreDaemonWorkspaceViaWs } from "./daemon-cli.ts";
@@ -2331,12 +2332,12 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
         message: `Working Agent cannot call factory ${request.kind}; working Agents may only submit claims via 'factory-claim --task <task> --sha <sha>'.`,
       };
     }
-    const taskPeers = async (task: string) => {
+    const taskPeers = async (task: string, liveAgents?: readonly SurfaceAgentSnapshot[]) => {
       const contract = factory.contractFor(task);
       const project = contract === undefined ? undefined : resolveProject(contract.workspace);
       if (resolvedDaemon === undefined || !project?.ok) return [];
-      const page = await resolvedDaemon.agents.list({ filter: { includeArchived: false, includeBackground: true } });
-      return boundTaskPeers({ stateDir: factory.stateDir, slug: project.slug, task, events: factory.ledger.events, live: page.entries.map(entry => entry.agent) });
+      const live = liveAgents ?? (await resolvedDaemon.agents.list({ filter: { includeArchived: false, includeBackground: true } })).entries.map(entry => entry.agent);
+      return boundTaskPeers({ stateDir: factory.stateDir, slug: project.slug, task, events: factory.ledger.events, live });
     };
     const retirePeers = async (peers: Awaited<ReturnType<typeof taskPeers>>) => {
       for (const peer of peers) {
@@ -2665,19 +2666,62 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
     }
 
     if (request.kind === "spawn") {
-      const peers = await taskPeers(request.task);
+      const preSpawnContract = factory.contractFor(request.task);
+      const spawnProject = preSpawnContract === undefined ? undefined : resolveProject(preSpawnContract.workspace);
+      const liveAgents =
+        resolvedDaemon !== undefined && spawnProject?.ok
+          ? (await resolvedDaemon.agents.list({ filter: { includeArchived: false, includeBackground: true } })).entries
+              .map((entry) => entry.agent)
+              .filter((agent) => agent.archivedAt === null)
+          : undefined;
+      const peers = await taskPeers(request.task, liveAgents);
       const running = peers.find(peerIsRunning);
       if (running !== undefined) {
         const message = `Peer ${running.id} is already running in the Task worktree for ${request.task}; wait for its completion mail or call lead_set_contract first to open a new epoch`;
         const event = factory.ledger.append({ event: "spawn_refused", task: request.task, provider: request.provider, arity: request.arity, rule: "spawn:peer-already-running", reason: "peer-already-running" });
         return { id: request.id, ok: false, code: "peer-already-running", message, event };
       }
+      if (
+        preSpawnContract !== undefined &&
+        spawnProject?.ok &&
+        !isReadOnlyPeerDisposition(preSpawnContract.disposition) &&
+        liveAgents !== undefined &&
+        liveAgents.length > 0
+      ) {
+        const projectRoot = readProjectRegistration(factory.stateDir, spawnProject.slug)?.root ?? spawnProject.root;
+        const source = { factory: registry?.root ?? factory, ...(registry === undefined ? {} : { registry }) };
+        const inFlight = projectPeersInFlight({
+          stateDir: factory.stateDir,
+          slug: spawnProject.slug,
+          root: projectRoot,
+          source,
+          live: liveAgents,
+          law: "quiet-point",
+        });
+        const writableConflict = inFlight.find((round) => {
+          if (round.task === request.task) return false;
+          const otherContract = taskFactoryOf(source, spawnProject.slug, round.task).contractFor(round.task);
+          return !isReadOnlyPeerDisposition(otherContract?.disposition);
+        });
+        if (writableConflict !== undefined) {
+          const holders = writableConflict.agentIds.length > 0 ? ` (${writableConflict.agentIds.join(", ")})` : "";
+          const message = `Project ${spawnProject.slug} already has a live unsettled writable Peer${holders} on task ${writableConflict.task}; at most one active writable engineer Peer is allowed per Project at a time (settle, accept, or close ${writableConflict.task} first, or dispatch a read-only disposition: scout | architect | reviewer).`;
+          const event = factory.ledger.append({
+            event: "spawn_refused",
+            task: request.task,
+            provider: request.provider,
+            arity: request.arity,
+            rule: "spawn:single-writable-peer",
+            reason: message,
+          });
+          return { id: request.id, ok: false, code: "writable-peer-in-flight", message, event };
+        }
+      }
       await retirePeers(peers);
       // The driver's arrival (v0.0.5): one ledger line either way, then the
       // reply the driver keys its next move on — create the agent, or report
       // the refusal and carry on with the invocation's other tasks. The
       // worktree (v0.0.14) rides the line so claim/gate/choke bind to it.
-      const preSpawnContract = factory.contractFor(request.task);
       if (preSpawnContract !== undefined) {
         const allEvents = factory.ledger.events;
         const epochTaskEvents = allEvents.filter(

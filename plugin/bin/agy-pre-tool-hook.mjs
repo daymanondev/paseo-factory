@@ -1327,7 +1327,7 @@ var sharedTools = {
   },
   lead_spawn_agent: {
     name: "lead_spawn_agent",
-    description: "Allocate isolated Task worktrees (`<projectStateDir>/worktrees/<task>` on branch `factory/<task>`) and dispatch working Agent(s) for the contracted Task(s). After calling this tool, end your turn immediately and wait for the completion report.",
+    description: "Allocate isolated Task worktrees (`<projectStateDir>/worktrees/<task>` on branch `factory/<task>`) and dispatch working Agent(s) for the contracted Task(s). Enforces at most one active writable `engineer` Peer per Project at a time (read-only `scout` | `architect` | `reviewer` Peers may run concurrently). After calling this tool, end your turn immediately and wait for the completion report.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1517,7 +1517,7 @@ var sharedTools = {
   },
   agent_claim: {
     name: "agent_claim",
-    description: "Submit a Claim for your bound Task in the Task worktree with the mandatory 6-Field Handoff (`outcome`, `scope`, `verification`, `unknowns`, optional `ownership`). Runs the Contract's Gate and returns the Verdict (`GREEN` or `RED`) and report.",
+    description: "Submit a Claim for your bound Task in the Task worktree with the mandatory 6-Field Handoff (`outcome`, `scope`, `verification`, `unknowns`, optional `ownership`). Validates clean tree, commit SHA, and handoff synchronously, enqueues the Contract's Gate in the daemon Gate queue (returning `queued` immediately so you end your turn and sleep live at zero tokens), or returns immediate synthetic `GREEN` for read-only empty gates.",
     inputSchema: {
       type: "object",
       properties: {
