@@ -792,6 +792,8 @@ export interface StoreReleasePaused extends EventIdentityMetadata {
   runId: string;
   holeKind: string;
   phase: string;
+  hasConsoleGuide?: boolean;
+  guidePath?: string;
 }
 
 /** Task-less Project-level Store release completion event (ADR 0066). */
