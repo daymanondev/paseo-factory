@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-11-22
+
+**Paseo 0.17.1 adaptation: Antigravity ACP per-session MCP, dual persistence decoding, catalog-aware lane normalization, and live role contracts (ADR 0067).**
+
+### Added
+
+- **Runtime `0.17.1+` capability gate & per-session Antigravity `Role-scoped MCP bridge` (`plugin/index.server.ts`, `plugin/server/roles.ts`, `src/agy-home.ts`, `src/helper-mcp-sync.ts`):** Added a single synchronous `typeof server.registerWorktreeManager === "function"` capability check at plugin server bootstrap while preserving `requirements.paseo: ">=0.13.0"` and the `Role provider` `extends` fallback (`@getpaseo/plugin` and `@getpaseo/protocol` bumped to `0.17.1`). On `>=0.17.1` hosts, Antigravity `Supervisor`, `Lead`, and `Peer` seats receive per-session `config.mcpServers` (`paseo_factory` with explicit `--correlation`, `--role`, `--project`, `--workspace`, and optional `--task` args plus `Peer`-only `Helper MCP catalog` servers) with `modeId` unset (`full-access`), while global `mcp_config.json` is removed and `plugin.json`/`hooks.json` stay current (`<0.17.1` hosts fail closed to global `mcp_config.json`).
+- **Live role contracts via `agent.open.before` `appendSystemPrompt` (`plugin/index.server.ts`, `plugin/server/roles.ts`):** On `>=0.17.1` hosts, newly created non-Pi seats and `Peer`s (`antigravity`, `claude`, `codex`, `opencode`, `copilot`, `omp`) stamp `PASEO_FACTORY_CONTRACT_MODE=live`, omit baked role contracts and `renderPeerSkillScope` from persisted `config.systemPrompt`, and receive fresh role contracts (plus `Peer` skill scope and `Helper MCP catalog` summary) on interactive `agent.open.before` opens — skipping `history` opens, legacy pre-`0.17.1` sessions, `Pi harness home` (`APPEND_SYSTEM.md`), and `<0.17.1` hosts.
+- **Antigravity `/factory` global skill root & multi-host `focusHost` navigation (`src/skill.ts`, `plugin/client/factory/shell.tsx`, `plugin/client/factory/onboarding-screen.tsx`):** Added `<userHome>/.gemini/config/skills` to `factorySkillRoots` for boot reconciliation, and updated `openAgent` / `openWorkspace` navigation calls to pass `focusHost: true` strictly when `navigation?.supportsFocusHost === true`.
+
+### Changed
+
+- **Catalog-aware Antigravity `Lane config` normalization (`src/lanes.ts`, `src/lane-profiles.ts`, `plugin/server/{provider-lanes,choke,spool,surface-rpc,supervisor-handoff,lead-mailbox,roles}.ts`):** Normalized legacy effort-suffixed `<base>-(low|medium|high|xhigh|max)` lanes to `<provider>/<base>:<tier>` at read/launch time and on explicit Owner lane saves or `Lane profile` applies whenever the live catalog advertises `<base>` with `thinkingOptions`, without rewriting `lanes.json` or `profiles.json` on disk at boot and while preserving ADR 0062 same-base sibling resolution whenever `thinkingOptions` is empty or absent.
+- **Dual-dir Antigravity MCP schema self-heal (`src/agy-mcp-schema-heal.ts`, `plugin/bin/agy-pre-tool-hook.mjs`):** Extended `AGY_SERVER_DIR_NAMES` so the `PreToolUse` hook restores missing role-allowed schemas in both `<appDataDir>/mcp/paseo_factory/<tool>.json` and legacy `<appDataDir>/mcp/paseo-factory_paseo_factory/<tool>.json` across CLI and IDE directories while enforcing role fences, single-segment path safety, atomic additive writes, and fail-open fast paths.
+
+### Fixed
+
+- **Dual Antigravity persistence decoding across `Meter`, `Handoff`, and offline transcripts (`src/usage-extractor.ts`, `src/agy-transcript.ts`, `plugin/bin/agy-transcript.mjs`, `plugin/server/context-tokens.ts`):** Updated `antigravityConversationIdOf` and `conversationFrom` to resolve `data.conversationId` first with fallback to Paseo `0.17.1` ACP `data.sessionId` across structured `pluginProviderPersistence` metadata and `plugin:{...}` encoded session IDs.
+
 ## [0.18.2] - 2026-11-22
 
 ### Added
