@@ -1738,3 +1738,102 @@ test("FactoryShell clears/avoids stale onboardingHoldFolder when factory.onboard
     dom.window.close();
   }
 });
+
+test("FactoryShell onboarding completion forwards focusHost: true only when navigation.supportsFocusHost === true", async () => {
+  const { FactoryShell, PluginRpcProvider } = await loadShellHarness({ withSubscription: true });
+  const { createElement, act } = await import("react");
+  const { createRoot } = await import("react-dom/client");
+  const { JSDOM } = (await import(["jsdom"].join(""))) as { JSDOM: new (html: string) => { window: any } };
+
+  for (const supportsFocusHost of [true, false, undefined] as const) {
+    const dom = new JSDOM("<!doctype html><div id=root></div>");
+    const g = globalThis as Record<string, unknown>;
+    const saved = { window: g.window, document: g.document, IS_REACT_ACT_ENVIRONMENT: g.IS_REACT_ACT_ENVIRONMENT };
+    g.window = dom.window;
+    g.document = dom.window.document;
+    g.IS_REACT_ACT_ENVIRONMENT = true;
+    (g as any).__shellTestToasts = [];
+
+    const openedAgents: Array<Record<string, unknown>> = [];
+    let currentView = makeShellOnboardingView({ isProject: false, folder: "/work/my-app" });
+    let started = false;
+    const succeededRun = {
+      runId: "shell-focus-1",
+      folder: "/work/my-app",
+      status: "succeeded",
+      startedAt: "2026-11-20T12:00:00.000Z",
+      updatedAt: "2026-11-20T12:00:01.000Z",
+      result: { agentId: "sup-onboard-focus", projectRoot: "/work/my-app", slug: "my-app", bootstrapped: false, summary: "Set up my-app; Supervisor running." },
+      error: null,
+      errorCode: null,
+      phases: [
+        { id: "checking", label: "Checking folder & preconditions", status: "done", startedAt: "2026-11-20T12:00:00.000Z", finishedAt: "2026-11-20T12:00:00.100Z", error: null },
+        { id: "register-and-lanes", label: "Registering Project & saving model lanes", status: "done", startedAt: "2026-11-20T12:00:00.100Z", finishedAt: "2026-11-20T12:00:00.500Z", error: null },
+        { id: "start-supervisor", label: "Starting Supervisor", status: "done", startedAt: "2026-11-20T12:00:00.500Z", finishedAt: "2026-11-20T12:00:01.000Z", error: null },
+      ],
+    };
+
+    const invoke = async (method: string) => {
+      if (method === "factory.snapshot") return { ok: true, view: currentView };
+      if (method === "factory.self.update.status") return { ok: true, current: "0.17.1", latest: "0.17.1", updateAvailable: false };
+      if (method === "factory.open_design.status") return { ok: true, link: null, updateAvailable: false, sourceAvailable: false };
+      if (method === "factory.onboarding.inspect") return { ...readyInspection, folder: "/work/my-app" };
+      if (method === "factory.onboarding.status") return { ok: true, run: started ? succeededRun : null };
+      if (method === "factory.onboarding.start") {
+        started = true;
+        currentView = makeShellOnboardingView({ isProject: true, folder: "/work/my-app", supervisorVacant: false });
+        return { ok: true, run: succeededRun };
+      }
+      return { ok: true };
+    };
+    const subscribe = () => Object.assign(() => {}, { ready: Promise.resolve(), release: async () => {} });
+
+    const root = createRoot(dom.window.document.getElementById("root")!);
+    const q = (testId: string) => dom.window.document.querySelector(`[data-testid="${testId}"]`) as HTMLElement | null;
+
+    try {
+      await act(async () => {
+        root.render(
+          createElement(
+            PluginRpcProvider,
+            { invoke, subscribe },
+            createElement(FactoryShell, {
+              theme,
+              dir: "/work/my-app",
+              serverId: "srv-remote",
+              layout: { compact: false, platform: "web" },
+              navigation: {
+                ...(supportsFocusHost === undefined ? {} : { supportsFocusHost }),
+                openAgent: (x: Record<string, unknown>) => openedAgents.push(x),
+              },
+            }),
+          ),
+        );
+      });
+      for (let i = 0; i < 10 && !q("factory-onboarding-next"); i++) {
+        await act(async () => { await new Promise((r) => setTimeout(r, 10)); });
+      }
+      for (let s = 0; s < 3; s++) {
+        await act(async () => { q("factory-onboarding-next")!.click(); });
+      }
+      await act(async () => { q("factory-onboarding-start")!.click(); });
+      for (let i = 0; i < 20 && openedAgents.length === 0; i++) {
+        await act(async () => { await new Promise((r) => setTimeout(r, 10)); });
+      }
+      assert.equal(openedAgents.length, 1);
+      if (supportsFocusHost === true) {
+        assert.deepEqual(openedAgents[0], { agentId: "sup-onboard-focus", serverId: "srv-remote", focusHost: true });
+      } else {
+        assert.deepEqual(openedAgents[0], { agentId: "sup-onboard-focus", serverId: "srv-remote" });
+        assert.equal("focusHost" in openedAgents[0]!, false, `focusHost omitted when supportsFocusHost=${String(supportsFocusHost)}`);
+      }
+    } finally {
+      await act(async () => { root.unmount(); });
+      delete (g as any).__shellTestToasts;
+      g.window = saved.window;
+      g.document = saved.document;
+      g.IS_REACT_ACT_ENVIRONMENT = saved.IS_REACT_ACT_ENVIRONMENT;
+      dom.window.close();
+    }
+  }
+});

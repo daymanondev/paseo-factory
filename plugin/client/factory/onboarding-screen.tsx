@@ -321,9 +321,10 @@ export function OnboardingScreen({
         );
         return { ok: false as const, error: workspaceResult.error ?? "Could not open workspace" };
       }
-      navigation?.openWorkspace({ workspaceId: workspaceResult.workspaceId, serverId: host.id });
+      const focusHostOption = navigation?.supportsFocusHost === true ? { focusHost: true } : {};
+      navigation?.openWorkspace({ workspaceId: workspaceResult.workspaceId, serverId: host.id, ...focusHostOption });
       openPanel?.(FACTORY_PANEL_ID, { workspaceId: workspaceResult.workspaceId, location: "workspace" });
-      navigation?.openAgent({ agentId: result.agentId, serverId: host.id });
+      navigation?.openAgent({ agentId: result.agentId, serverId: host.id, ...focusHostOption });
       if (onCommitted !== undefined && input !== null) {
         await onCommitted({ input, reply: { ok: true, ...result } });
       }
