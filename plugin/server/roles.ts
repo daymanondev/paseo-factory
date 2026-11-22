@@ -370,16 +370,23 @@ export function applyProviderExecutionFence<T extends AgentCreateRequest["config
      * and cleans stale global `mcp_config.json`; defaults to `false` (`<0.17.1` mode).
      */
     perSessionAgyMcp?: boolean;
+    /**
+     * Enables Paseo `>=0.17.1` live role-contract delivery via `agent.open.before`
+     * `appendSystemPrompt` for non-Pi providers, omitting baked contracts and
+     * `renderPeerSkillScope` from persisted `config.systemPrompt`.
+     */
+    liveRoleContract?: boolean;
   },
 ): T {
   const { role, stateDir, correlationId, projectSlug, task, userHome, agyPluginsDir } = input;
   const rawProvider = typeof config.provider === "string" ? config.provider.trim() : "";
   const providerFamily = input.providerFamily ?? providerFamilyOf(rawProvider);
+  const isLiveContract = input.liveRoleContract === true && providerFamily !== "pi";
 
   const { bridgeBinPath } = ensureFactoryBinScripts(stateDir);
   const nextConfig: Record<string, unknown> = { ...config };
   const peerSkills = role === "agent" ? peerSkillContext(stateDir, projectSlug, task, userHome, config.cwd).skills : undefined;
-  if (peerSkills) nextConfig.systemPrompt = `${config.systemPrompt ?? ""}\n\n${renderPeerSkillScope(peerSkills)}`.trim();
+  if (peerSkills && !isLiveContract) nextConfig.systemPrompt = `${config.systemPrompt ?? ""}\n\n${renderPeerSkillScope(peerSkills)}`.trim();
   // Never pass `labels` inside `config` to Paseo's strict `agent.create` validator
   delete nextConfig.labels;
 
@@ -567,7 +574,29 @@ export interface InjectRoleOnCreateOptions {
    * and cleans stale global `mcp_config.json`; defaults to `false` (`<0.17.1` mode).
    */
   perSessionAgyMcp?: boolean;
+  /**
+   * Enables Paseo `>=0.17.1` live role-contract delivery via `agent.open.before`
+   * `appendSystemPrompt` for non-Pi providers; defaults to `false` (`<0.17.1` mode).
+   */
+  liveRoleContract?: boolean;
   agyPluginsDir?: string;
+}
+
+function buildCreateEnv(
+  baseEnv: Record<string, string> | undefined,
+  factoryEnv: Record<string, string>,
+  isLiveContract: boolean,
+): Record<string, string> {
+  const nextEnv: Record<string, string> = {
+    ...(baseEnv ?? {}),
+    ...factoryEnv,
+  };
+  if (isLiveContract) {
+    nextEnv.PASEO_FACTORY_CONTRACT_MODE = "live";
+  } else {
+    delete nextEnv.PASEO_FACTORY_CONTRACT_MODE;
+  }
+  return nextEnv;
 }
 
 /**
@@ -607,9 +636,10 @@ export function injectRoleOnCreate<R extends AgentCreateRequest>(
   const titleSeat = inferRoleSeatFromTitleOrLabels(request.config.title, reqLabels);
   const role: RoleName | undefined = providerSeat ?? envSeat ?? titleSeat;
   const hasPrompt = (request.config.systemPrompt ?? "").includes(FOOTER_MARK);
+  const hasLiveContract = options?.liveRoleContract === true && request.env?.PASEO_FACTORY_CONTRACT_MODE === "live";
   const bound = request.env?.PASEO_FACTORY_CORRELATION ? correlations.resolve(request.env.PASEO_FACTORY_CORRELATION) : undefined;
   const alreadyProvisioned = (projectSlug: string, task?: string) =>
-    hasPrompt && bound !== undefined && bound.role === role && bound.projectSlug === projectSlug &&
+    (hasPrompt || hasLiveContract) && bound !== undefined && bound.role === role && bound.projectSlug === projectSlug &&
     bound.projectSlug === request.env?.PASEO_FACTORY_PROJECT && bound.task === task;
 
 
@@ -627,13 +657,26 @@ export function injectRoleOnCreate<R extends AgentCreateRequest>(
         projectRoot: projectRoot !== "" ? projectRoot : request.config.cwd,
         task: worktree.task,
       });
+      const effectiveFamily = resolveEffectiveProviderFamily(request.config.provider, "agent", stateDir, worktree.slug);
+      const isLiveContract = options?.liveRoleContract === true && effectiveFamily !== "pi";
       const fencedConfig = applyProviderExecutionFence(
         {
           ...request.config,
           // The Agent tab inside the Task worktree Workspace reads `Peer · <Task>`
           // (ADR 0017 §2) — never the bare task id or the raw spawn prompt.
           title: formatPeerAgentTitle(worktree.task),
-          systemPrompt: appendContract(request.config.systemPrompt, buildRoleKickoffPrompt("agent", { task: worktree.task, project: { root: request.config.cwd, slug: worktree.slug }, helperMcps: discoverHelperMcps({ stateDir, userHome }).servers })),
+          ...(isLiveContract
+            ? {}
+            : {
+                systemPrompt: appendContract(
+                  request.config.systemPrompt,
+                  buildRoleKickoffPrompt("agent", {
+                    task: worktree.task,
+                    project: { root: request.config.cwd, slug: worktree.slug },
+                    helperMcps: discoverHelperMcps({ stateDir, userHome }).servers,
+                  }),
+                ),
+              }),
         },
         {
           role: "agent",
@@ -644,19 +687,17 @@ export function injectRoleOnCreate<R extends AgentCreateRequest>(
           userHome,
           ...(options?.agyPluginsDir !== undefined ? { agyPluginsDir: options.agyPluginsDir } : {}),
           ...(options?.perSessionAgyMcp !== undefined ? { perSessionAgyMcp: options.perSessionAgyMcp } : {}),
+          ...(isLiveContract ? { liveRoleContract: true } : {}),
           // A `factory-peer` spawn (ADR 0017 §2) fences under the worker
           // lane's harness — without this, `providerFamilyOf("factory-peer")`
           // matches no family and the Layer-1 agent fence silently no-ops.
-          providerFamily: resolveEffectiveProviderFamily(request.config.provider, "agent", stateDir, worktree.slug),
+          providerFamily: effectiveFamily,
         },
       );
       const taskEnv = factoryEnvFor("agent", { stateDir, project: { root: projectRoot, slug: worktree.slug }, task: worktree.task, correlationId: issued.correlationId, userHome, provider: request.config.provider, environment: request.env });
       return sanitizeAgentCreateHookResult({
         config: fencedConfig,
-        env: {
-          ...(request.env ?? {}),
-          ...taskEnv,
-        },
+        env: buildCreateEnv(request.env, taskEnv, isLiveContract),
       }) as R;
     }
     if (role === undefined) return undefined;
@@ -683,18 +724,26 @@ export function injectRoleOnCreate<R extends AgentCreateRequest>(
     projectSlug: projectIdentity.slug,
     projectRoot: projectIdentity.root,
   });
+  const effectiveFamily = resolveEffectiveProviderFamily(request.config.provider, role, stateDir, projectIdentity.slug);
+  const isLiveContract = options?.liveRoleContract === true && effectiveFamily !== "pi";
   const fencedConfig = applyProviderExecutionFence(
     {
       ...request.config,
       // The Agent tab inside the main Workspace reads the clean seat title
       // (ADR 0017 §2) — `Supervisor` / `Lead`, never the raw first message.
       title: role === "supervisor" || role === "lead" ? SEAT_TITLES[role] : request.config.title,
-      systemPrompt: appendContract(
-        request.config.systemPrompt,
-        role === "agent"
-          ? buildRoleKickoffPrompt("agent", { factoryCmd: "factory", project: projectIdentity, helperMcps: discoverHelperMcps({ stateDir, userHome }).servers })
-          : buildRoleKickoffPrompt(role, { factoryCmd: "factory", project: projectIdentity, helperMcps: discoverHelperMcps({ stateDir, userHome }).servers }),
-      ),
+      ...(isLiveContract
+        ? {}
+        : {
+            systemPrompt: appendContract(
+              request.config.systemPrompt,
+              buildRoleKickoffPrompt(role, {
+                factoryCmd: "factory",
+                project: projectIdentity,
+                helperMcps: discoverHelperMcps({ stateDir, userHome }).servers,
+              }),
+            ),
+          }),
     },
     {
       role,
@@ -704,15 +753,14 @@ export function injectRoleOnCreate<R extends AgentCreateRequest>(
       userHome,
       ...(options?.agyPluginsDir !== undefined ? { agyPluginsDir: options.agyPluginsDir } : {}),
       ...(options?.perSessionAgyMcp !== undefined ? { perSessionAgyMcp: options.perSessionAgyMcp } : {}),
-      providerFamily: resolveEffectiveProviderFamily(request.config.provider, role, stateDir, projectIdentity.slug),
+      ...(isLiveContract ? { liveRoleContract: true } : {}),
+      providerFamily: effectiveFamily,
     },
   );
+  const seatEnv = factoryEnvFor(role, { stateDir, project: projectIdentity, correlationId: issued.correlationId, userHome, provider: request.config.provider, environment: request.env });
   return sanitizeAgentCreateHookResult({
     config: fencedConfig,
-    env: {
-      ...(request.env ?? {}),
-      ...factoryEnvFor(role, { stateDir, project: projectIdentity, correlationId: issued.correlationId, userHome, provider: request.config.provider, environment: request.env }),
-    },
+    env: buildCreateEnv(request.env, seatEnv, isLiveContract),
   }) as R;
 }
 
@@ -769,12 +817,44 @@ function persistSeatWorkspaceId(
   writeProjectRegistration(stateDir, slug, { root, workspaceId });
 }
 
+export interface InjectSessionEnvOptions {
+  /**
+   * Enables Paseo `>=0.17.1` ephemeral `appendSystemPrompt` live role-contract
+   * delivery on interactive opens when `PASEO_FACTORY_CONTRACT_MODE === "live"`;
+   * defaults to `false` (`<0.17.1` fail-closed mode).
+   */
+  liveRoleContract?: boolean;
+}
+
+function renderLiveRoleContract(
+  role: RoleName,
+  input: { stateDir: string; project: ProjectIdentity; task?: string; userHome?: string },
+): string {
+  const helperMcps = discoverHelperMcps({ stateDir: input.stateDir, userHome: input.userHome }).servers;
+  const basePrompt = buildRoleKickoffPrompt(role, {
+    factoryCmd: "factory",
+    project: input.project,
+    ...(input.task !== undefined ? { task: input.task } : {}),
+    helperMcps,
+  });
+  if (role !== "agent") return basePrompt;
+  const peerSkills = peerSkillContext(
+    input.stateDir,
+    input.project.slug,
+    input.task,
+    input.userHome,
+    input.project.root,
+  ).skills;
+  return `${basePrompt}\n\n${renderPeerSkillScope(peerSkills)}`;
+}
+
 /**
  * The `agent.session_open` injection (channel 3): every launch of a seat or
  * working-agent shell re-carries its `PASEO_FACTORY_*` identity, associates
  * the live `agentId` with its `Correlation token` in `<stateDir>/correlations.json`,
- * and — since v0.0.27 (ADR 0017 §2) — binds a provider- or env-recognized
- * `supervisor` / `lead` session to its Project's `project.json`.
+ * binds a provider- or env-recognized `supervisor` / `lead` session to its Project's
+ * `project.json` (ADR 0017 §2), and — on Paseo `>=0.17.1` live-contract sessions —
+ * delivers fresh non-Pi role contracts via ephemeral `appendSystemPrompt` (ADR 0067).
  */
 export function injectSessionEnv<
   R extends {
@@ -791,12 +871,15 @@ export function injectSessionEnv<
     config?: { env?: Record<string, string> };
     /** The Paseo Workspace the session opened in (v0.0.31, ADR 0017 §5) — persisted for seat sessions. */
     workspaceId?: string | null;
+    /** Ephemeral instructions appended on Paseo `>=0.17.1` opens; omitted on `<0.17.1`. */
+    appendSystemPrompt?: string[];
   },
 >(
   request: R,
   stateDir: string,
   userHome?: string,
-): R | undefined {
+  options?: InjectSessionEnvOptions,
+): (R & { appendSystemPrompt?: string[] }) | undefined {
   if (
     typeof request.cwd === "string" &&
     request.cwd.trim() !== "" &&
@@ -819,6 +902,61 @@ export function injectSessionEnv<
   // `project.json` write below runs only on a non-history open.
   const isHistoryOpen = request.purpose === "history";
 
+  const finalizeSessionOpen = (resolved: {
+    role: RoleName;
+    envProject: ProjectIdentity;
+    promptProject: ProjectIdentity;
+    task?: string;
+    correlationId?: string;
+  }): R & { appendSystemPrompt?: string[] } => {
+    const nextEnv: Record<string, string> = {
+      ...restoreLegacyUiEnvironment(request.env ?? {}),
+      ...factoryEnvFor(resolved.role, {
+        stateDir,
+        project: resolved.envProject,
+        ...(resolved.task !== undefined ? { task: resolved.task } : {}),
+        ...(resolved.correlationId !== undefined ? { correlationId: resolved.correlationId } : {}),
+        userHome,
+        provider: request.provider ?? undefined,
+        environment: request.env,
+      }),
+    };
+    const effectiveContractMode =
+      nextEnv.PASEO_FACTORY_CONTRACT_MODE ?? request.config?.env?.PASEO_FACTORY_CONTRACT_MODE;
+    const effectiveFamily = resolveEffectiveProviderFamily(
+      request.provider ?? undefined,
+      resolved.role,
+      stateDir,
+      resolved.promptProject.slug,
+    );
+    if (
+      options?.liveRoleContract !== true ||
+      request.purpose !== "interactive" ||
+      effectiveContractMode !== "live" ||
+      effectiveFamily === "pi"
+    ) {
+      return {
+        ...request,
+        env: nextEnv,
+      };
+    }
+    const liveContract = renderLiveRoleContract(resolved.role, {
+      stateDir,
+      project: resolved.promptProject,
+      ...(resolved.task !== undefined ? { task: resolved.task } : {}),
+      userHome,
+    });
+    const existingAppend = Array.isArray(request.appendSystemPrompt) ? request.appendSystemPrompt : [];
+    const appendSystemPrompt = existingAppend.includes(liveContract)
+      ? existingAppend
+      : [...existingAppend, liveContract];
+    return {
+      ...request,
+      env: nextEnv,
+      appendSystemPrompt,
+    };
+  };
+
   if (typeof existingCorrId === "string" && existingCorrId.trim() !== "") {
     const associated = correlations.associate(existingCorrId.trim(), request.agentId);
     if (associated !== undefined) {
@@ -838,21 +976,15 @@ export function injectSessionEnv<
           }
         }
       }
-      return {
-        ...request,
-        env: {
-          ...restoreLegacyUiEnvironment(request.env ?? {}),
-          ...factoryEnvFor(associated.role, {
-            stateDir,
-            project: { root: associated.projectRoot, slug: associated.projectSlug },
-            ...(associated.task !== undefined ? { task: associated.task } : {}),
-            correlationId: associated.correlationId,
-            userHome,
-            provider: request.provider ?? undefined,
-            environment: request.env,
-          }),
-        },
-      };
+      const promptRoot =
+        associated.projectRoot || readProjectRegistration(stateDir, associated.projectSlug)?.root || request.cwd;
+      return finalizeSessionOpen({
+        role: associated.role,
+        envProject: { root: associated.projectRoot, slug: associated.projectSlug },
+        promptProject: { root: promptRoot, slug: associated.projectSlug },
+        ...(associated.task !== undefined ? { task: associated.task } : {}),
+        correlationId: associated.correlationId,
+      });
     }
   }
 
@@ -889,21 +1021,14 @@ export function injectSessionEnv<
       projectRoot: request.cwd,
       task: worktree.task,
     });
-    return {
-      ...request,
-      env: {
-        ...restoreLegacyUiEnvironment(request.env ?? {}),
-        ...factoryEnvFor("agent", {
-          stateDir,
-          project: { root: "", slug: worktree.slug },
-          task: worktree.task,
-          correlationId: record?.correlationId,
-          userHome,
-          provider: request.provider ?? undefined,
-          environment: request.env,
-        }),
-      },
-    };
+    const promptRoot = readProjectRegistration(stateDir, worktree.slug)?.root ?? request.cwd;
+    return finalizeSessionOpen({
+      role: "agent",
+      envProject: { root: "", slug: worktree.slug },
+      promptProject: { root: promptRoot, slug: worktree.slug },
+      task: worktree.task,
+      ...(record?.correlationId !== undefined ? { correlationId: record.correlationId } : {}),
+    });
   }
 
   for (const registration of listProjectRegistrations(stateDir)) {
@@ -923,20 +1048,12 @@ export function injectSessionEnv<
       projectSlug: registration.slug,
       projectRoot: registration.root,
     });
-    return {
-      ...request,
-      env: {
-        ...restoreLegacyUiEnvironment(request.env ?? {}),
-        ...factoryEnvFor(seat, {
-          stateDir,
-          project: registration,
-          correlationId: record?.correlationId,
-          userHome,
-          provider: request.provider ?? undefined,
-          environment: request.env,
-        }),
-      },
-    };
+    return finalizeSessionOpen({
+      role: seat,
+      envProject: registration,
+      promptProject: registration,
+      ...(record?.correlationId !== undefined ? { correlationId: record.correlationId } : {}),
+    });
   }
 
   // The native role-provider channel (v0.0.27, ADR 0017 §2): a
@@ -973,20 +1090,12 @@ export function injectSessionEnv<
         projectSlug: project.slug,
         projectRoot: project.root,
       });
-      return {
-        ...request,
-        env: {
-          ...restoreLegacyUiEnvironment(request.env ?? {}),
-          ...factoryEnvFor(identitySeat, {
-            stateDir,
-            project,
-            correlationId: record?.correlationId,
-            userHome,
-            provider: request.provider ?? undefined,
-            environment: request.env,
-          }),
-        },
-      };
+      return finalizeSessionOpen({
+        role: identitySeat,
+        envProject: project,
+        promptProject: project,
+        ...(record?.correlationId !== undefined ? { correlationId: record.correlationId } : {}),
+      });
     }
   }
   return undefined;
