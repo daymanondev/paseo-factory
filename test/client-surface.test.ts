@@ -145,7 +145,7 @@ test("v0.0.27 (ADR 0017 §3): FactoryShell drops the ensure/dispatch seat wiring
   assert.ok(!shell.includes("supervisorEnsure"), "the supervisorEnsure RPC import and binding are gone");
   assert.ok(!shell.includes("leadEnsure"), "the leadEnsure RPC import and binding are gone");
   assert.ok(!shell.includes("leadDispatch"), "the leadDispatch RPC import and binding are gone");
-  assert.match(shell, /navigation\?\.openAgent\(\{ agentId, serverId \}\)/, "the Needs-you jump rides navigation.openAgent — no act() and no RPC behind it");
+  assert.match(shell, /navigation\?\.openAgent\(\{ agentId, serverId, \.\.\.\(navigation\?\.supportsFocusHost === true \? \{ focusHost: true \} : \{\}\) \}\)/, "the Needs-you jump rides navigation.openAgent with conditional focusHost — no act() and no RPC behind it");
   assert.ok(!shell.includes("supervisorLive") && !shell.includes("leadLive"), "the dead live-boolean props are deleted, not left dangling");
 });
 

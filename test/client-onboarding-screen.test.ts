@@ -1652,3 +1652,90 @@ test("OnboardingScreen does not steal focus if Owner clicks Change folder while 
   }
 });
 
+test("OnboardingScreen openWorkspace and openAgent forward focusHost: true only when navigation.supportsFocusHost === true", async () => {
+  const { OnboardingScreen } = await loadScreenModule("plugin/client/factory/onboarding-screen.tsx", { platformOs: "web" });
+  const { createElement } = await import("react");
+
+  for (const supportsFocusHost of [true, false, undefined] as const) {
+    const openedWorkspaces: Array<Record<string, unknown>> = [];
+    const openedAgents: Array<Record<string, unknown>> = [];
+
+    (globalThis as any).__onboardScreenTestPaseo = () => ({
+      workspaces: {
+        list: async () => ({
+          entries: [{ id: "ws-focus-1", workspaceDirectory: "/Users/owner/focus-app", workspaceKind: "local_checkout", archivingAt: null }],
+        }),
+        create: async () => ({ id: "ws-unused" }),
+      },
+      projects: { list: async () => ({ projects: [] }), subscribe: () => () => {} },
+    });
+    (globalThis as any).__onboardScreenTestToasts = [];
+    (globalThis as any).__onboardScreenTestRpc = async (name: string, input: any) => {
+      if (name === "factory.seats.directory") return { ok: true, daemonError: null, seats: [], projects: [] };
+      if (name === "factory.snapshot") return { ok: true, view: makeSnapshotView() };
+      if (name === "factory.onboarding.browse") return { ok: true, path: "/Users/owner", parent: "/Users", home: "/Users/owner", entries: [] };
+      if (name === "factory.onboarding.inspect") {
+        return { ok: true, folder: input.folder, gitRepo: true, hasCommits: true, registered: false, existingLead: false, existingSupervisor: false, prerequisites: [], missingPrerequisites: [] };
+      }
+      if (name === "factory.onboarding.status") return { ok: true, run: null };
+      if (name === "factory.onboarding.start") {
+        return {
+          ok: true,
+          run: makeSucceededRun({
+            runId: `run-focus-${String(supportsFocusHost)}`,
+            folder: "/Users/owner/focus-app",
+            agentId: "agent-sup-focus",
+            slug: "focus-app",
+            summary: "Set up focus-app",
+          }),
+        };
+      }
+      return { ok: false, error: `unexpected ${name}` };
+    };
+
+    try {
+      await mountDom(async (createRoot, container, act) => {
+        const root = createRoot(container);
+        try {
+          await act(() =>
+            root.render(
+              createElement(OnboardingScreen, {
+                theme: testTheme,
+                host: { id: "host-remote", label: "Mac Mini" },
+                layout: { compact: false, platform: "web" },
+                params: { folder: "/Users/owner/focus-app" },
+                navigation: {
+                  ...(supportsFocusHost === undefined ? {} : { supportsFocusHost }),
+                  openAgent: (x: Record<string, unknown>) => openedAgents.push(x),
+                  openWorkspace: (x: Record<string, unknown>) => openedWorkspaces.push(x),
+                },
+                openPanel: () => {},
+              }),
+            ),
+          );
+          await act(() => new Promise<void>((r) => setTimeout(r, 10)));
+          await runWizardStepsToCommit(container, act);
+
+          assert.equal(openedWorkspaces.length, 1);
+          assert.equal(openedAgents.length, 1);
+          if (supportsFocusHost === true) {
+            assert.deepEqual(openedWorkspaces[0], { workspaceId: "ws-focus-1", serverId: "host-remote", focusHost: true });
+            assert.deepEqual(openedAgents[0], { agentId: "agent-sup-focus", serverId: "host-remote", focusHost: true });
+          } else {
+            assert.deepEqual(openedWorkspaces[0], { workspaceId: "ws-focus-1", serverId: "host-remote" });
+            assert.deepEqual(openedAgents[0], { agentId: "agent-sup-focus", serverId: "host-remote" });
+            assert.equal("focusHost" in openedWorkspaces[0]!, false, `openWorkspace omits focusHost when supportsFocusHost=${String(supportsFocusHost)}`);
+            assert.equal("focusHost" in openedAgents[0]!, false, `openAgent omits focusHost when supportsFocusHost=${String(supportsFocusHost)}`);
+          }
+        } finally {
+          await act(() => root.unmount());
+        }
+      });
+    } finally {
+      delete (globalThis as any).__onboardScreenTestRpc;
+      delete (globalThis as any).__onboardScreenTestPaseo;
+      delete (globalThis as any).__onboardScreenTestToasts;
+    }
+  }
+});
+
