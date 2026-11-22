@@ -1,3 +1,5 @@
+import { DEFAULT_CONTRACT_TIMEOUT_SECONDS, MAX_CONTRACT_TIMEOUT_SECONDS, MIN_CONTRACT_TIMEOUT_SECONDS } from "../constants.ts";
+
 /** Shared schema fragments; transport and invocation stay in the standalone bridge. */
 export const MCP_TOOL_TIMEOUT_MS = 600_000;
 export interface ToolDefinition {
@@ -65,7 +67,7 @@ export const sharedTools: Record<string, ToolDefinition> = {
   lead_set_contract: {
     name: "lead_set_contract",
     description:
-      "Register a Task's immutable Contract (`gate`, optional `description` or structured 4-Part Brief fields, `artifact`, `skills`, `watch`, `disposition`) before spawning its working Agent. Re-contracting an unaccepted Task updates the Brief/Gate in place and preserves the live Peer unless `resetPeer: true`. The Brief must carry all four canonical sections (1. Bounded Outcome, 2. Contract Boundary & Regression Invariants, 3. Excluded / Deferred, 4. Verification) — via `description` or the structured fields.",
+      "Register a Task's immutable Contract (`gate`, optional `description` or structured 4-Part Brief fields, `artifact`, `skills`, `watch`, `disposition`, `timeoutSeconds`) before spawning its working Agent. Re-contracting an unaccepted Task updates the Brief/Gate in place and preserves the live Peer unless `resetPeer: true`. The Brief must carry all four canonical sections (1. Bounded Outcome, 2. Contract Boundary & Regression Invariants, 3. Excluded / Deferred, 4. Verification) — via `description` or the structured fields.",
     inputSchema: {
       type: "object",
       properties: {
@@ -86,6 +88,12 @@ export const sharedTools: Record<string, ToolDefinition> = {
         exclusions: { type: "string", description: "Structured 4-Part Brief, section 3 (Excluded / Deferred) — synthesized into Contract.description when `description` is omitted (ADR 0054)." },
         verification: { type: "string", description: "Structured 4-Part Brief, section 4 (Verification) — synthesized into Contract.description when `description` is omitted; defaults on a gate-less read-only disposition to the clean-worktree handoff law (ADR 0054)." },
         disposition: { type: "string", enum: ["engineer", "architect", "reviewer", "scout"], description: "The Peer's SLP disposition (ADR 0053; defaults to engineer when omitted)." },
+        timeoutSeconds: {
+          type: "integer",
+          minimum: MIN_CONTRACT_TIMEOUT_SECONDS,
+          maximum: MAX_CONTRACT_TIMEOUT_SECONDS,
+          description: `Optional Gate timeout in seconds (integer ${MIN_CONTRACT_TIMEOUT_SECONDS}..${MAX_CONTRACT_TIMEOUT_SECONDS}, defaults to ${DEFAULT_CONTRACT_TIMEOUT_SECONDS}s). Starts when the Gate begins executing.`,
+        },
         resetPeer: { type: "boolean", description: "Cancel and archive the live bound Peer before the fresh Contract epoch (default false — the Peer keeps its accumulated context)." },
         workspace: { type: "string", description: "Optional Project root path (defaults to current project root)." },
       },

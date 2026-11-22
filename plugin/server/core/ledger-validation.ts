@@ -1,3 +1,4 @@
+import { isValidContractTimeoutSeconds } from "./constants.ts";
 import { eventAllowsUnboundEpoch, LEDGER_REFERENCE_KINDS, EVENT_NAMES, NEEDS_HUMAN_REASONS, needsHumanEvidenceIsValid, PEER_DISPOSITIONS, PEER_HANDOFF_OUTCOMES, STORE_RELEASE_ACTIONS, STORE_RELEASE_FAILURE_CLASSES, STORE_RELEASE_MODES } from "./events.ts";
 import { PEER_THINKING_LEVELS } from "./peer-thinking.ts";
 import type { LedgerEvent } from "./events.ts";
@@ -125,7 +126,9 @@ function shapeIsValid(evt: LedgerEvent): boolean {
   const asRecord = evt as unknown as Record<string, unknown>;
   const taskIsString = typeof asRecord.task === "string";
   if (evt.event === "ledger_schema") return asRecord.schema_version === 2 && asRecord.version === 2 && nonempty(asRecord.ledger_id) && nonempty(asRecord.writer_id) && (asRecord.provenance as Record<string, unknown> | undefined)?.writer_id === asRecord.writer_id;
-  if (evt.event === "contract_set") return taskIsString;
+  if (evt.event === "contract_set") {
+    return taskIsString && (asRecord.timeoutSeconds === undefined || isValidContractTimeoutSeconds(asRecord.timeoutSeconds));
+  }
   if (evt.event === "retro_written") {
     return (
       typeof asRecord.model === "string" &&
@@ -330,7 +333,8 @@ function v2PayloadIsValid(event: Record<string, unknown>): boolean {
     case "contract_set": return string("workspace") && string("gate") && string("artifact") &&
       strings("scope") && strings("skills") && optionalString("base") && optionalString("description") && optionalString("by") &&
       (event.freshEyes === undefined || event.freshEyes === true) && (event.watch === undefined || event.watch === true) &&
-      (event.disposition === undefined || (PEER_DISPOSITIONS as readonly string[]).includes(event.disposition as string));
+      (event.disposition === undefined || (PEER_DISPOSITIONS as readonly string[]).includes(event.disposition as string)) &&
+      (event.timeoutSeconds === undefined || isValidContractTimeoutSeconds(event.timeoutSeconds));
     case "claim_reported": return string("sha") && optionalString("agent") && handoffIsValid(event.handoff) && mechanicalClaimIsValid(event);
     case "gate_started": return string("cmd");
     case "gate_finished": return (event.exit === null || Number.isSafeInteger(event.exit)) &&

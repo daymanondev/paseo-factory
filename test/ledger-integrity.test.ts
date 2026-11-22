@@ -220,7 +220,7 @@ test("identified readers enforce each event's typed payload while legacy records
   const path = join(dir, "ledger.jsonl");
   const base = { seq: 1, ts, event: "contract_set", task: "T", workspace: dir, gate: "true", artifact: "out" };
   const cases: Array<{ row: Record<string, unknown>; required: string[]; invalid?: Record<string, unknown>[] }> = [
-    { row: { ...base, scope: ["src"], freshEyes: true, watch: true, skills: ["tdd"] }, required: ["workspace", "gate", "artifact"], invalid: [{ scope: "src" }, { freshEyes: "true" }, { watch: 1 }, { skills: [5] }, { base: 5 }, { description: null }, { by: [] }, { attempt: 1 }] },
+    { row: { ...base, scope: ["src"], freshEyes: true, watch: true, skills: ["tdd"], timeoutSeconds: 900 }, required: ["workspace", "gate", "artifact"], invalid: [{ scope: "src" }, { freshEyes: "true" }, { watch: 1 }, { skills: [5] }, { base: 5 }, { description: null }, { by: [] }, { attempt: 1 }, { timeoutSeconds: 59 }, { timeoutSeconds: 3601 }, { timeoutSeconds: 60.5 }, { timeoutSeconds: "900" }, { timeoutSeconds: null }, { timeoutSeconds: 0 }, { timeoutSeconds: -60 }, { timeoutSeconds: true }] },
     { row: { event: "claim_reported", attempt: 1, sha: "abc" }, required: ["sha"], invalid: [{ agent: 5 }, { attempt: Number.MAX_SAFE_INTEGER + 1 }] },
     { row: { event: "claim_reported", attempt: 1, sha: "abc", mechanical: "lead_verify" }, required: ["sha"], invalid: [{ mechanical: "reset" }, { mechanical: "lead_verify", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } }] },
     { row: { event: "gate_started", attempt: 1, cmd: "true" }, required: ["cmd"] },
@@ -410,4 +410,32 @@ test("store_release_* task-less events work across Ledger append, identity, migr
   const upgraded = await upgradeFactory(factory, { action: "apply" });
   assert.ok("id" in upgraded && upgraded.status === "applied");
   assert.equal(factory.ledger.events.filter((e) => e.event.startsWith("store_release_")).length, 4);
+});
+
+test("contract_set timeoutSeconds (60..3600 integer) validates across Ledger, CLI, driver, and MCP while historical lines without it remain valid", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const stateDir = join(dir, "plugin-state/paseo-factory");
+  mkdirSync(stateDir, { recursive: true });
+  const path = join(stateDir, "ledger.jsonl");
+
+  // Historical v1 without timeoutSeconds + boundary valid timeoutSeconds (60, 3600)
+  const validRows = [
+    { seq: 1, ts, event: "contract_set", task: "HIST", workspace: dir, gate: "true", artifact: "out" },
+    { seq: 2, ts, event: "contract_set", task: "MIN", workspace: dir, gate: "true", artifact: "out", timeoutSeconds: 60 },
+    { seq: 3, ts, event: "contract_set", task: "MAX", workspace: dir, gate: "true", artifact: "out", timeoutSeconds: 3600 },
+  ];
+  writeFileSync(path, validRows.map((row) => `${JSON.stringify(row)}\n`).join(""));
+  assert.equal(Ledger.open(path).events.length, 3);
+  assert.equal(readDriverLedger(stateDir).length, 3);
+
+  // Invalid timeoutSeconds even on v1 lines is rejected everywhere.
+  for (const badTimeout of [59, 3601, 120.5, "900", null]) {
+    writeFileSync(path, `${JSON.stringify({ seq: 1, ts, event: "contract_set", task: "BAD", workspace: dir, gate: "true", artifact: "out", timeoutSeconds: badTimeout })}\n`);
+    assert.throws(() => Ledger.open(path), factoryErrorCode("corrupted-ledger"), `bad timeoutSeconds=${JSON.stringify(badTimeout)}`);
+    assert.throws(() => readDriverLedger(stateDir), /line 1.*valid ledger event/);
+    assert.match(mcpStatus(stateDir).error?.message ?? "", /line 1.*valid ledger event/);
+    const cli = spawnSync(process.execPath, [join(repoRoot, "plugin/bin/factory.mjs"), "status", "--home", dir], { encoding: "utf8" });
+    assert.equal(cli.status, 2);
+  }
 });

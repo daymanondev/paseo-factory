@@ -108,6 +108,8 @@ commands:
                                      open first (v0.0.14) — the Lead mandates
                                      a method, not just an outcome; the
                                      driver's brief renders them at the top
+             [--timeout-seconds <n>] Gate timeout in seconds (integer 60..3600;
+                                     defaults to 900 seconds when omitted)
 
   accept     Accept one green attempt of a task (the Owner's act)
              accept <task> --attempt <n> [--by owner|supervisor|lead] [--project <slug>]
@@ -642,6 +644,7 @@ if (command === "contract") {
     verification: { type: "string" },
     disposition: { type: "string" },
     "reset-peer": { type: "boolean", default: false },
+    "timeout-seconds": { type: "string" },
     project: { type: "string" },
     "wait-secs": { type: "string" },
   });
@@ -654,6 +657,18 @@ if (command === "contract") {
   }
   if (v.disposition !== undefined && !["engineer", "architect", "reviewer", "scout"].includes(v.disposition)) {
     fail("contract: --disposition must be one of engineer|architect|reviewer|scout — omit it for the engineer default");
+  }
+  let timeoutSeconds;
+  if (v["timeout-seconds"] !== undefined) {
+    const rawTimeout = v["timeout-seconds"].trim();
+    if (!/^\d+$/.test(rawTimeout)) {
+      fail("contract: --timeout-seconds must be an integer between 60 and 3600");
+    }
+    const parsedTimeout = Number(rawTimeout);
+    if (!Number.isSafeInteger(parsedTimeout) || parsedTimeout < 60 || parsedTimeout > 3600) {
+      fail("contract: --timeout-seconds must be an integer between 60 and 3600");
+    }
+    timeoutSeconds = parsedTimeout;
   }
   // ADR 0054 §2: --gate is the engineer disposition's requirement; the
   // read-only three (scout|architect|reviewer) may omit it (default "").
@@ -688,6 +703,7 @@ if (command === "contract") {
     // ADR 0053 §1/§3: the Peer's disposition and the explicit reset — a
     // re-contract preserves the live Peer unless --reset-peer is passed.
     ...(v.disposition === undefined ? {} : { disposition: v.disposition }),
+    ...(timeoutSeconds === undefined ? {} : { timeoutSeconds }),
     ...(v["reset-peer"] ? { resetPeer: true } : {}),
     // v0.0.89 (ADR 0045 §1): the explicit target Project — the router's
     // top-priority context. Usually redundant (the workspace resolves it);

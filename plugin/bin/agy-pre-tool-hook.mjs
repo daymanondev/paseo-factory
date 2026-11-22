@@ -76,6 +76,16 @@ var import_node_path2 = require("node:path");
 // src/ledger-read.ts
 var import_node_fs = require("node:fs");
 
+// src/constants.ts
+var MIN_CONTRACT_TIMEOUT_SECONDS = 60;
+var MAX_CONTRACT_TIMEOUT_SECONDS = 3600;
+var DEFAULT_CONTRACT_TIMEOUT_SECONDS = 900;
+var DEFAULT_GATE_TIMEOUT_MS = DEFAULT_CONTRACT_TIMEOUT_SECONDS * 1e3;
+function isValidContractTimeoutSeconds(value) {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= MIN_CONTRACT_TIMEOUT_SECONDS && value <= MAX_CONTRACT_TIMEOUT_SECONDS;
+}
+var GATE_OUTPUT_CAP_BYTES = 2 * 1024 * 1024;
+
 // src/events.ts
 var EVENT_NAMES = [
   "ledger_schema",
@@ -228,7 +238,9 @@ function shapeIsValid(evt) {
   const asRecord = evt;
   const taskIsString = typeof asRecord.task === "string";
   if (evt.event === "ledger_schema") return asRecord.schema_version === 2 && asRecord.version === 2 && nonempty(asRecord.ledger_id) && nonempty(asRecord.writer_id) && asRecord.provenance?.writer_id === asRecord.writer_id;
-  if (evt.event === "contract_set") return taskIsString;
+  if (evt.event === "contract_set") {
+    return taskIsString && (asRecord.timeoutSeconds === void 0 || isValidContractTimeoutSeconds(asRecord.timeoutSeconds));
+  }
   if (evt.event === "retro_written") {
     return typeof asRecord.model === "string" && (asRecord.outcome === "written" || asRecord.outcome === "failed") && typeof asRecord.durationMs === "number" && Number.isFinite(asRecord.durationMs) && asRecord.durationMs >= 0;
   }
@@ -312,7 +324,7 @@ function v2PayloadIsValid(event) {
     case "ledger_schema":
       return true;
     case "contract_set":
-      return string("workspace") && string("gate") && string("artifact") && strings("scope") && strings("skills") && optionalString("base") && optionalString("description") && optionalString("by") && (event.freshEyes === void 0 || event.freshEyes === true) && (event.watch === void 0 || event.watch === true) && (event.disposition === void 0 || PEER_DISPOSITIONS.includes(event.disposition));
+      return string("workspace") && string("gate") && string("artifact") && strings("scope") && strings("skills") && optionalString("base") && optionalString("description") && optionalString("by") && (event.freshEyes === void 0 || event.freshEyes === true) && (event.watch === void 0 || event.watch === true) && (event.disposition === void 0 || PEER_DISPOSITIONS.includes(event.disposition)) && (event.timeoutSeconds === void 0 || isValidContractTimeoutSeconds(event.timeoutSeconds));
     case "claim_reported":
       return string("sha") && optionalString("agent") && handoffIsValid(event.handoff) && mechanicalClaimIsValid(event);
     case "gate_started":
@@ -1208,6 +1220,13 @@ var import_node_fs = require("node:fs");
 var import_node_os = require("node:os");
 var import_node_path = require("node:path");
 
+// src/constants.ts
+var MIN_CONTRACT_TIMEOUT_SECONDS = 60;
+var MAX_CONTRACT_TIMEOUT_SECONDS = 3600;
+var DEFAULT_CONTRACT_TIMEOUT_SECONDS = 900;
+var DEFAULT_GATE_TIMEOUT_MS = DEFAULT_CONTRACT_TIMEOUT_SECONDS * 1e3;
+var GATE_OUTPUT_CAP_BYTES = 2 * 1024 * 1024;
+
 // src/mcp/shared.ts
 var MCP_TOOL_TIMEOUT_MS = 6e5;
 function extendTool(tool, properties) {
@@ -1266,7 +1285,7 @@ var sharedTools = {
   },
   lead_set_contract: {
     name: "lead_set_contract",
-    description: "Register a Task's immutable Contract (`gate`, optional `description` or structured 4-Part Brief fields, `artifact`, `skills`, `watch`, `disposition`) before spawning its working Agent. Re-contracting an unaccepted Task updates the Brief/Gate in place and preserves the live Peer unless `resetPeer: true`. The Brief must carry all four canonical sections (1. Bounded Outcome, 2. Contract Boundary & Regression Invariants, 3. Excluded / Deferred, 4. Verification) \u2014 via `description` or the structured fields.",
+    description: "Register a Task's immutable Contract (`gate`, optional `description` or structured 4-Part Brief fields, `artifact`, `skills`, `watch`, `disposition`, `timeoutSeconds`) before spawning its working Agent. Re-contracting an unaccepted Task updates the Brief/Gate in place and preserves the live Peer unless `resetPeer: true`. The Brief must carry all four canonical sections (1. Bounded Outcome, 2. Contract Boundary & Regression Invariants, 3. Excluded / Deferred, 4. Verification) \u2014 via `description` or the structured fields.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1287,6 +1306,12 @@ var sharedTools = {
         exclusions: { type: "string", description: "Structured 4-Part Brief, section 3 (Excluded / Deferred) \u2014 synthesized into Contract.description when `description` is omitted (ADR 0054)." },
         verification: { type: "string", description: "Structured 4-Part Brief, section 4 (Verification) \u2014 synthesized into Contract.description when `description` is omitted; defaults on a gate-less read-only disposition to the clean-worktree handoff law (ADR 0054)." },
         disposition: { type: "string", enum: ["engineer", "architect", "reviewer", "scout"], description: "The Peer's SLP disposition (ADR 0053; defaults to engineer when omitted)." },
+        timeoutSeconds: {
+          type: "integer",
+          minimum: MIN_CONTRACT_TIMEOUT_SECONDS,
+          maximum: MAX_CONTRACT_TIMEOUT_SECONDS,
+          description: `Optional Gate timeout in seconds (integer ${MIN_CONTRACT_TIMEOUT_SECONDS}..${MAX_CONTRACT_TIMEOUT_SECONDS}, defaults to ${DEFAULT_CONTRACT_TIMEOUT_SECONDS}s). Starts when the Gate begins executing.`
+        },
         resetPeer: { type: "boolean", description: "Cancel and archive the live bound Peer before the fresh Contract epoch (default false \u2014 the Peer keeps its accumulated context)." },
         workspace: { type: "string", description: "Optional Project root path (defaults to current project root)." }
       },

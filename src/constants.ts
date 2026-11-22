@@ -1,7 +1,27 @@
-/** Shared tuning knobs for the core. v0.0.2 values — revisit after the 0.0.2 live run. */
+/** Shared tuning knobs for the core. */
+
+/** Inclusive Contract Gate timeout bounds in seconds (ADR 0068). */
+export const MIN_CONTRACT_TIMEOUT_SECONDS = 60;
+export const MAX_CONTRACT_TIMEOUT_SECONDS = 3600;
+export const DEFAULT_CONTRACT_TIMEOUT_SECONDS = 900;
 
 /** Default gate timeout: kill the process group and record red after this long. */
-export const DEFAULT_GATE_TIMEOUT_MS = 5 * 60_000;
+export const DEFAULT_GATE_TIMEOUT_MS = DEFAULT_CONTRACT_TIMEOUT_SECONDS * 1000;
+
+/** Validates an optional per-Contract Gate timeout (`60..3600` safe integer seconds). */
+export function isValidContractTimeoutSeconds(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= MIN_CONTRACT_TIMEOUT_SECONDS && value <= MAX_CONTRACT_TIMEOUT_SECONDS;
+}
+
+/** Resolves a Contract's configured `timeoutSeconds` or the 900s default. */
+export function contractTimeoutSeconds(contract?: { timeoutSeconds?: number }): number {
+  return contract?.timeoutSeconds ?? DEFAULT_CONTRACT_TIMEOUT_SECONDS;
+}
+
+/** Resolves a Contract's Gate timeout in milliseconds (defaulting to 900_000ms). */
+export function contractTimeoutMs(contract?: { timeoutSeconds?: number }): number {
+  return contractTimeoutSeconds(contract) * 1000;
+}
 
 /**
  * Keep at most this many bytes of the gate's combined stdout+stderr, measured
