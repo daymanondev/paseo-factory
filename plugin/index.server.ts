@@ -12,12 +12,12 @@
  * `accept`), which is never on an agent PATH.
  */
 import { homedir } from "node:os";
-import { watch, type FSWatcher } from "node:fs";
+import { existsSync, watch, type FSWatcher } from "node:fs";
 import { SleepInhibitor } from "./server/core/sleep-inhibitor.ts";
 import { join, resolve } from "node:path";
 import type { PluginHookContext, PluginHookEvents, PluginHookRequests, PluginServerContext } from "@getpaseo/plugin/server";
 import { pendingUpgradeFor } from "./server/core/upgrade-state.ts";
-import { ensureFactoryBinScripts, provisionAgyPlugin } from "./server/core/agy-home.ts";
+import { ensureFactoryBinScripts, provisionAgyPlugin, resolveAgyPluginsDir } from "./server/core/agy-home.ts";
 import { PLUGIN_ID, pluginDirFor, resolvePaseoHome, stateDirFor } from "./server/paths.ts";
 import { ensureFactorySkillRootsSafe } from "./server/core/skill.ts";
 import { ensureCompanionPluginSkills } from "./server/core/skill-hub.ts";
@@ -58,13 +58,15 @@ export default function contribute(server: PluginServerContext) {
   let pluginDir = pluginDirFor(home);
 
   const reconcileAgyPluginForHost = (activePluginDir: string | undefined): void => {
-    if (!supportsV0171Host) return;
+    const userHome = homedir();
+    const hasExistingAgyPlugin = existsSync(join(resolveAgyPluginsDir({ stateDir, userHome }), "paseo-factory"));
+    if (!supportsV0171Host && !hasExistingAgyPlugin) return;
     try {
       provisionAgyPlugin({
         stateDir,
-        userHome: homedir(),
+        userHome,
         ...(activePluginDir === undefined ? {} : { pluginDir: activePluginDir }),
-        perSessionMcp: true,
+        perSessionMcp: supportsV0171Host,
       });
     } catch (error) {
       log(`antigravity: could not reconcile plugin bundle — ${error instanceof Error ? error.message : String(error)}`);
@@ -774,7 +776,12 @@ export default function contribute(server: PluginServerContext) {
           resumePumpTimer.unref?.();
         }
       }
-      return withEnv === undefined ? (next === request ? undefined : next) : withEnv;
+      if (withEnv !== undefined) return withEnv;
+      if ((!supportsV0171Host || request.purpose === "history") && "appendSystemPrompt" in next) {
+        const { appendSystemPrompt: _ignored, ...rest } = next;
+        return rest;
+      }
+      return next === request ? undefined : next;
     }),
   );
 

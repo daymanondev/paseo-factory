@@ -577,6 +577,7 @@ test("contribute gates Antigravity per-session MCP and stale mcp_config.json cle
   }
 
   // 2. <0.17.1 host (no registerWorktreeManager): fails closed to global mcp_config.json
+  // 2a. Pre-existing paseo-factory dir (e.g. after downgrade from >=0.17.1): refreshes plugin.json, hooks.json, and restores canonical mcp_config.json
   {
     const homeDir = makeTempDir("shell-legacy-");
     disposeDir(t, homeDir);
@@ -591,7 +592,7 @@ test("contribute gates Antigravity per-session MCP and stale mcp_config.json cle
 
     const agyPluginDir = join(homeDir, ".gemini", "config", "plugins", "paseo-factory");
     mkdirSync(agyPluginDir, { recursive: true });
-    writeFileSync(join(agyPluginDir, "mcp_config.json"), JSON.stringify({ legacy: true }));
+    writeFileSync(join(agyPluginDir, "plugin.json"), JSON.stringify({ name: "paseo-factory", version: "stale" }));
 
     const hooks = new Map<string, (payload: unknown, context: unknown) => Promise<unknown>>();
     const server = {
@@ -605,8 +606,16 @@ test("contribute gates Antigravity per-session MCP and stale mcp_config.json cle
     const stop = contribute(server);
     t.after(() => stop());
 
-    // Legacy boot leaves pre-existing mcp_config.json untouched
-    assert.equal(existsSync(join(agyPluginDir, "mcp_config.json")), true);
+    // <0.17.1 boot refreshes plugin.json, hooks.json, and restores canonical mcp_config.json when dir already exists
+    assert.equal(existsSync(join(agyPluginDir, "plugin.json")), true);
+    const refreshedPlugin = JSON.parse(readFileSync(join(agyPluginDir, "plugin.json"), "utf8")) as { version?: string };
+    assert.notEqual(refreshedPlugin.version, "stale", "boot refreshes stale plugin.json on <0.17.1 downgrade");
+    assert.equal(existsSync(join(agyPluginDir, "hooks.json")), true, "boot restores hooks.json on <0.17.1 downgrade");
+    assert.equal(existsSync(join(agyPluginDir, "mcp_config.json")), true, "boot restores canonical mcp_config.json on <0.17.1 downgrade");
+    const canonicalMcp = JSON.parse(readFileSync(join(agyPluginDir, "mcp_config.json"), "utf8")) as {
+      mcpServers?: { paseo_factory?: { args?: string[] } };
+    };
+    assert.ok(canonicalMcp.mcpServers?.paseo_factory !== undefined, "restored mcp_config.json defines paseo_factory");
 
     const createHook = hooks.get("agent.create.before")!;
     const out = await createHook(
@@ -617,6 +626,26 @@ test("contribute gates Antigravity per-session MCP and stale mcp_config.json cle
     assert.equal(existsSync(join(agyPluginDir, "mcp_config.json")), true);
     assert.equal(existsSync(join(agyPluginDir, "plugin.json")), true);
     assert.equal(existsSync(join(agyPluginDir, "hooks.json")), true);
+  }
+
+  // 2b. Non-Antigravity <0.17.1 host (absent paseo-factory dir): boot leaves plugins dir untouched
+  {
+    const homeDir = makeTempDir("shell-legacy-clean-");
+    disposeDir(t, homeDir);
+    const paseoHome = join(homeDir, ".paseo");
+    process.env.HOME = homeDir;
+    process.env.PASEO_HOME = paseoHome;
+
+    const agyPluginDir = join(homeDir, ".gemini", "config", "plugins", "paseo-factory");
+    const server = {
+      addHook: () => () => {},
+      handle: () => () => {},
+    } as unknown as Parameters<typeof contribute>[0];
+
+    const stop = contribute(server);
+    t.after(() => stop());
+
+    assert.equal(existsSync(agyPluginDir), false, "non-Antigravity <0.17.1 boot never creates .gemini/config/plugins/paseo-factory");
   }
 
   // 3. >=0.17.1 boot fails open if ~/.gemini is blocked / unwritable
@@ -774,7 +803,7 @@ test("contribute gates live role contracts via server.registerWorktreeManager an
       assert.equal(supOpen.appendSystemPrompt?.[0], "[other-plugin] keep");
       assert.match(supOpen.appendSystemPrompt?.[1] ?? "", /Supervisor seat of the paseo-factory/);
 
-      // History open never appends or sets appendSystemPrompt
+      // History open never appends or returns appendSystemPrompt (even if pre-populated)
       const supHistory = await openHook(
         {
           request: {
@@ -788,6 +817,7 @@ test("contribute gates live role contracts via server.registerWorktreeManager an
             background: false,
             labels: {},
             metadata: {},
+            appendSystemPrompt: ["[other-plugin] strip-on-history"],
             tools: [],
             env: { ...(supCreated.env ?? {}) },
             mcpServers: {},
@@ -798,6 +828,33 @@ test("contribute gates live role contracts via server.registerWorktreeManager an
       assert.ok(supHistory !== undefined);
       assert.equal("appendSystemPrompt" in supHistory, false, `${provider}: history open omits appendSystemPrompt`);
     }
+
+    // Unbound (withEnv === undefined) history open also strips pre-populated appendSystemPrompt
+    const unboundDir = makeTempDir("shell-unbound-history-");
+    disposeDir(t, unboundDir);
+    const unboundHistory = await openHook(
+      {
+        request: {
+          agentId: "unbound-1",
+          workspaceId: "ws-1",
+          provider: "codex/gpt-5.4",
+          cwd: unboundDir,
+          reason: "resume",
+          purpose: "history",
+          title: "Unbound",
+          background: false,
+          labels: {},
+          metadata: {},
+          appendSystemPrompt: ["[other-plugin] strip-unbound-history"],
+          tools: [],
+          env: {},
+          mcpServers: {},
+        },
+      },
+      {},
+    ) as Record<string, unknown> | undefined;
+    assert.ok(unboundHistory !== undefined);
+    assert.equal("appendSystemPrompt" in unboundHistory, false, "unbound history open strips pre-populated appendSystemPrompt");
 
     // Peer live contract + Helper MCP + Peer skill scope on interactive resume
     const worktreeDir = join(stateDir, "projects", slug, "worktrees", "T-SHELL");
@@ -1006,6 +1063,7 @@ test("contribute gates live role contracts via server.registerWorktreeManager an
           background: false,
           labels: {},
           metadata: {},
+          appendSystemPrompt: ["[other-plugin] strip-on-pre017"],
           tools: [],
           env: { ...(created.env ?? {}) },
           mcpServers: {},
@@ -1015,6 +1073,33 @@ test("contribute gates live role contracts via server.registerWorktreeManager an
     ) as Record<string, unknown> | undefined;
     assert.ok(opened !== undefined);
     assert.equal("appendSystemPrompt" in opened, false, "<0.17.1 host never returns appendSystemPrompt");
+
+    // Unbound (withEnv === undefined) <0.17.1 open also strips pre-populated appendSystemPrompt
+    const unboundPre017Dir = makeTempDir("shell-unbound-pre017-");
+    disposeDir(t, unboundPre017Dir);
+    const unboundPre017 = await openHook(
+      {
+        request: {
+          agentId: "unbound-pre017",
+          workspaceId: "ws-1",
+          provider: "codex/gpt-5.4",
+          cwd: unboundPre017Dir,
+          reason: "create",
+          purpose: "interactive",
+          title: "Unbound",
+          background: false,
+          labels: {},
+          metadata: {},
+          appendSystemPrompt: ["[other-plugin] strip-unbound-pre017"],
+          tools: [],
+          env: {},
+          mcpServers: {},
+        },
+      },
+      {},
+    ) as Record<string, unknown> | undefined;
+    assert.ok(unboundPre017 !== undefined);
+    assert.equal("appendSystemPrompt" in unboundPre017, false, "unbound <0.17.1 open strips pre-populated appendSystemPrompt");
   }
 });
 

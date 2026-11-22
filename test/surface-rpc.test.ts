@@ -7014,6 +7014,26 @@ test("panel: with a live Supervisor the seats view names every Supervisor candid
   const bareSnap = await bare.handlers.snapshot({ projectRoot: bare.project.root });
   assert.ok(bareSnap.ok, bareSnap.ok ? "" : bareSnap.error);
   assert.deepEqual(bareSnap.view.panel.seats?.supervisorCandidates ?? [], [], "no live Supervisor — the next candidate binds itself, no adopt rows");
+
+  // Catalog-normalized Antigravity lane: legacy antigravity/gemini-4-argon-high matches picker chat on gemini-4-argon.
+  const agyCandidates = makePanelSurface(t, (p) => [
+    { id: "agent-sup", labels: seatLabels(p, "supervisor"), cwd: p.root },
+    { id: "agent-lead", labels: seatLabels(p, "lead"), cwd: p.root },
+    { id: "agent-agy-picker", title: "Antigravity chat", provider: "antigravity", model: "gemini-4-argon", cwd: p.root },
+  ], "adopt-agy-normalized");
+  writeLanes(agyCandidates.stateDir, { supervisor: "antigravity/gemini-4-argon-high" });
+  agyCandidates.fake.daemon.providers = {
+    listAvailable: async () => ({ providers: [{ provider: "antigravity", available: true }] }),
+    listModels: async () => ({
+      models: [{ id: "gemini-4-argon", label: "Gemini 4 Argon", thinkingOptions: [{ id: "low" }, { id: "high" }] }],
+    }),
+  };
+  const agySnap = await agyCandidates.handlers.snapshot({ projectRoot: agyCandidates.project.root });
+  assert.ok(agySnap.ok, agySnap.ok ? "" : agySnap.error);
+  assert.deepEqual(
+    agySnap.view.panel.seats?.supervisorCandidates.map((row) => row.agentId),
+    ["agent-agy-picker"],
+  );
 });
 
 test("panel: Needs you lists every kind in the ADR order — needs-human, ceiling, seat, handoff, prerequisites, Open Design", async (t) => {

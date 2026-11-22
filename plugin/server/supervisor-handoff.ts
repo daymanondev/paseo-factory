@@ -4,7 +4,7 @@ import { readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { atomicJson, readOptionalJson } from './core/json-store.ts';
 import { loadLanes, normalizeLaneWithProviders, parseLane, saveLanes } from './core/lanes.ts';
-import { providerCatalogForLane } from './spool.ts';
+import { normalizeLanesWithDaemon, providerCatalogForLane } from './spool.ts';
 import { projectStateDir, projectNotebookPath, readProjectRegistration, writeProjectRegistration } from './core/project.ts';
 import { readLeadMailbox, requeueLeadMail, deliverLeadMail } from './core/mailbox.ts';
 import { buildSeatKickoffPacket } from './core/preflight.ts';
@@ -100,8 +100,9 @@ export function createSupervisorHandoffRuntime(deps: {
         mail = readLeadMailbox(mailboxPath);
       }
       const lanes = loadLanes(deps.stateDir, slug);
+      const normalizedLanes = lanes.ok ? await normalizeLanesWithDaemon(deps.daemon(), lanes.lanes) : undefined;
       const lead = agents.find(a => a.id === reg.lead);
-      data.kickoff ??= `${buildSeatKickoffPacket({ role: 'supervisor', projectSlug: slug, projectRoot: reg.root, ledgerEvents: evidence.events, ...(lanes.ok ? { lanes: lanes.lanes } : {}), stateDir: deps.stateDir, omitSystemPromptDuplicates: true })}\n\n# Supervisor handover\n${data.text}\n\nLive Lead: ${lead?.id ?? '(none)'}\nOpen Tasks:\n${evidence.tasks || '(none)'}\nHeld reports: ${mail.supervisorQueued.length}`;
+      data.kickoff ??= `${buildSeatKickoffPacket({ role: 'supervisor', projectSlug: slug, projectRoot: reg.root, ledgerEvents: evidence.events, ...(normalizedLanes !== undefined ? { lanes: normalizedLanes } : {}), stateDir: deps.stateDir, omitSystemPromptDuplicates: true })}\n\n# Supervisor handover\n${data.text}\n\nLive Lead: ${lead?.id ?? '(none)'}\nOpen Tasks:\n${evidence.tasks || '(none)'}\nHeld reports: ${mail.supervisorQueued.length}`;
       save(slug, data);
       // Send before marking any report delivered. A failed send keeps this exact kickoff durable.
       await deps.daemon().agents.ref(data.successorId).send(data.kickoff + (mail.supervisorQueued.length ? `\n\n${deps.renderMail(mail.supervisorQueued)}` : ''));

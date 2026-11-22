@@ -321,5 +321,7 @@ test('Supervisor handoff normalizes legacy effort-suffixed Antigravity lanes aga
   assert.equal(replaced.ok, true);
   assert.equal(f.created.length, 1);
   assert.deepEqual(f.created[0], { provider: 'antigravity/gemini-4-argon', thinkingOptionId: 'high' });
+  const kickoff = f.sent.find(s => s.id === 'successor-1')?.text ?? '';
+  assert.match(kickoff, /supervisor=antigravity\/gemini-4-argon:high/);
   assert.equal(readFileSync(projectLanesFile, 'utf8'), lanesBefore);
 });

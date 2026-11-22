@@ -306,6 +306,9 @@ export function resolveRoleScopedMcpServers(options: HelperMcpOptions & { role: 
   if (options.role !== "agent") return {};
   const { servers } = discoverHelperMcps(options), bundles = readHelperOAuth(options, servers);
   const provider = options.pi ? "pi" : options.provider;
+  // Providers outside the 4 UI target pills (`antigravity`, `copilot`, `omp`)
+  // have no per-provider target toggle, so fall back to `targetProviders.length > 0`
+  // to deliver enabled Helper MCPs to their Peer sessions.
   const knownTargetProvider = Boolean(provider && ALL_HELPER_TARGET_PROVIDERS.includes(provider as HelperMcpTargetProvider));
   return Object.fromEntries(servers.filter(s => s.enabled && (knownTargetProvider
     ? s.targetProviders.includes(provider as HelperMcpTargetProvider) : s.targetProviders.length > 0)).map(s => [s.name, {

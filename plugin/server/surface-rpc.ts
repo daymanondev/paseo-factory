@@ -1279,11 +1279,15 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
   /** True while the first listing is in flight and nothing is cached: an empty `resolveProviders` result then means "not loaded yet". */
   const providersLoadingNow = (): boolean => inFlightProviders !== null && cachedProviderList === null;
 
-  const bestEffortProviders = async (context?: SurfaceCallContext): Promise<ProviderEntry[]> => {
+  const isDaemonApi = (value: unknown): value is SurfaceDaemonApi =>
+    typeof value === "object" && value !== null && "agents" in value;
+
+  const bestEffortProviders = async (target?: SurfaceDaemonApi | SurfaceCallContext): Promise<ProviderEntry[]> => {
     try {
-      return await resolveProviders(resolveDaemon(context));
+      const daemon = isDaemonApi(target) ? target : resolveDaemon(target);
+      return await resolveProviders(daemon);
     } catch {
-      return [];
+      return cachedProviderList ?? [];
     }
   };
 
@@ -1443,13 +1447,14 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
     }
     if (typeof agent.lastUserMessageAt === "string" && agent.lastUserMessageAt.trim() !== "") return;
     const loadedLanes = loadLanes(deps.stateDir, project.slug);
+    const lanes = loadedLanes.ok ? normalizeLanesWithProviders(loadedLanes.lanes, await bestEffortProviders(daemon)) : undefined;
     const kickoff = buildSeatKickoffPacket({
       role: "supervisor",
       projectSlug: project.slug,
       projectRoot: project.root,
       ledgerEvents: projectLedgerEventsOf(project.slug),
       helperMcps: discoverHelperMcps({ stateDir: deps.stateDir, userHome: resolveSurfaceUserHome() }).servers,
-      ...(loadedLanes.ok ? { lanes: loadedLanes.lanes } : {}),
+      ...(lanes !== undefined ? { lanes } : {}),
       stateDir: deps.stateDir,
       omitSystemPromptDuplicates: true,
     });
@@ -1552,7 +1557,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       return;
     }
     if (agentId === registration?.lead) return; // the Lead never becomes its own Supervisor
-    if (!isSupervisorCandidate(agent, { stateDir: deps.stateDir, slug: resolved.slug })) return;
+    if (!isSupervisorCandidate(agent, { stateDir: deps.stateDir, slug: resolved.slug, providers: await bestEffortProviders(daemon) })) return;
     await bindSupervisorCandidate(daemon, resolved, agent);
   };
 
@@ -3104,7 +3109,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           if (supervisorCandidates.length >= 5) break;
           if (agent.id === supervisorRaw.id || agent.id === leadRaw?.id) continue;
           if (!agentInProjectWorkspace(agent, project)) continue;
-          if (!isSupervisorCandidate(agent, { stateDir: deps.stateDir, slug: project.slug })) continue;
+          if (!isSupervisorCandidate(agent, { stateDir: deps.stateDir, slug: project.slug, providers })) continue;
           supervisorCandidates.push(agentViewOf(agent, null, undefined, project?.slug, providers));
         }
       }
@@ -3262,11 +3267,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       try {
         const page = await daemon.agents.list({ filter: { includeArchived: false, includeBackground: true } });
         rawAgents = page.entries.map((entry) => entry.agent).filter((agent) => agent.archivedAt === null);
-        try {
-          providers = await resolveProviders(daemon);
-        } catch {
-          // best-effort provider catalog lookup
-        }
+        providers = await bestEffortProviders(daemon);
       } catch (err) {
         daemonError = `daemon unavailable: ${messageOf(err)}`;
       }
@@ -3694,7 +3695,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         if ((typeof agent.labels.task === "string" && agent.labels.task !== "") || inferRoleFromProviderId(agent.provider) === "agent") {
           return failure("agent-bound-elsewhere", `agent ${agentId} is a task Peer — a Peer never becomes the Supervisor`);
         }
-        if (!isSupervisorCandidate(agent, { stateDir: deps.stateDir, slug: project.slug })) {
+        if (!isSupervisorCandidate(agent, { stateDir: deps.stateDir, slug: project.slug, providers: await bestEffortProviders(daemon) })) {
           const loaded = loadLanes(deps.stateDir, project.slug);
           return failure(
             "agent-not-candidate",

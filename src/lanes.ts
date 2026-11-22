@@ -197,6 +197,11 @@ const SIBLING_LADDER_BASE: Record<PeerThinkingLevel, readonly PeerThinkingLevel[
   low: ["low", "medium", "high", "xhigh", "max"],
 };
 
+/** Maps legacy lane provider IDs (`claude-code`, `agy`) onto their canonical daemon catalog IDs. */
+export function providerCatalogAlias(provider: string): string | undefined {
+  return provider === "claude-code" ? "claude" : provider === "agy" ? "antigravity" : undefined;
+}
+
 /** Resolves a provider catalog entry, honoring canonical `claude-code`/`agy` aliases when exact entries are absent. */
 export function findCatalogProviderEntry<T extends LaneThinkingCatalogEntry>(
   provider: string,
@@ -205,7 +210,7 @@ export function findCatalogProviderEntry<T extends LaneThinkingCatalogEntry>(
   if (providers === undefined || providers.length === 0) return undefined;
   const exact = providers.find((p) => (p.provider ?? p.id) === provider);
   if (exact !== undefined) return { entry: exact, catalogProvider: provider };
-  const alias = provider === "claude-code" ? "claude" : provider === "agy" ? "antigravity" : undefined;
+  const alias = providerCatalogAlias(provider);
   if (alias === undefined) return undefined;
   const aliased = providers.find((p) => (p.provider ?? p.id) === alias);
   return aliased === undefined ? undefined : { entry: aliased, catalogProvider: alias };
@@ -237,6 +242,20 @@ function splitSuffixBaseModel(model: string): { baseModel: string; tier: PeerThi
   return { baseModel: `${innerPrefix}${match[1]}`, tier: match[2] as PeerThinkingLevel };
 }
 
+function findSuffixedBaseThinkingOptions(
+  catalogProvider: string,
+  model: string,
+  models: readonly LaneThinkingCatalogModel[],
+): { baseModel: string; tier: PeerThinkingLevel; thinkingOptions: readonly { id: string }[] } | undefined {
+  const split = splitSuffixBaseModel(model);
+  if (split === undefined) return undefined;
+  const baseMeta = findCatalogModel(catalogProvider, split.baseModel, models);
+  if (baseMeta === undefined || !Array.isArray(baseMeta.thinkingOptions) || baseMeta.thinkingOptions.length === 0) {
+    return undefined;
+  }
+  return { baseModel: split.baseModel, tier: split.tier, thinkingOptions: baseMeta.thinkingOptions };
+}
+
 /**
  * Normalizes a legacy effort-suffixed lane `<provider>/<base>-<tier>` to
  * `<provider>/<base>:<tier>` when the lane has no `:thinking` suffix, its model
@@ -253,13 +272,9 @@ export function normalizeLaneWithProviders(
   const found = findCatalogProviderEntry(parsed.provider, providers);
   if (found === undefined || !Array.isArray(found.entry.models)) return laneValue;
   if (findCatalogModel(found.catalogProvider, parsed.model, found.entry.models) !== undefined) return laneValue;
-  const split = splitSuffixBaseModel(parsed.model);
-  if (split === undefined) return laneValue;
-  const baseMeta = findCatalogModel(found.catalogProvider, split.baseModel, found.entry.models);
-  if (baseMeta === undefined || !Array.isArray(baseMeta.thinkingOptions)) return laneValue;
-  const options: readonly { id: string }[] = baseMeta.thinkingOptions;
-  if (!options.some((o) => o.id === split.tier)) return laneValue;
-  return `${parsed.provider}/${split.baseModel}:${split.tier}`;
+  const match = findSuffixedBaseThinkingOptions(found.catalogProvider, parsed.model, found.entry.models);
+  if (match === undefined || !match.thinkingOptions.some((o) => o.id === match.tier)) return laneValue;
+  return `${parsed.provider}/${match.baseModel}:${match.tier}`;
 }
 
 /** Projects a whole `Lanes` table through `normalizeLaneWithProviders` without mutating disk files. */
@@ -367,10 +382,9 @@ export function resolvePeerThinkingLane(
   const meta = findCatalogModel(found!.catalogProvider, lane.model, models);
   if (meta === undefined) {
     if (lane.thinking === undefined) {
-      const split = splitSuffixBaseModel(lane.model);
-      const baseMeta = split === undefined ? undefined : findCatalogModel(found!.catalogProvider, split.baseModel, models);
-      if (baseMeta !== undefined && Array.isArray(baseMeta.thinkingOptions) && baseMeta.thinkingOptions.length > 0) {
-        return `${lane.provider}/${split!.baseModel}:${pickSupportedThinkingOption(baseMeta.thinkingOptions, requestedThinking, split!.tier)}`;
+      const match = findSuffixedBaseThinkingOptions(found!.catalogProvider, lane.model, models);
+      if (match !== undefined) {
+        return `${lane.provider}/${match.baseModel}:${pickSupportedThinkingOption(match.thinkingOptions, requestedThinking, match.tier)}`;
       }
     }
     return normalizedLane;
