@@ -36,6 +36,89 @@ function projectTask(events, task) {
   return { currentAttempt, verdict, task, history, contract, epochSeq, epochId, epoch, attempts, acceptance, settled, closed: closure === void 0 ? void 0 : { seq: closure.seq, at: closure.ts, reason: closure.reason, by: closure.closed_by ?? "owner" }, pendingLanding: acceptance?.landing === "pending-conflict", needsHuman, needs: needsHuman ? needs : void 0, status, maxAttempt: numbers.at(-1) ?? 0, inFlightAttempt: attempts.find((attempt) => attempt.open)?.attempt };
 }
 
+// src/constants.ts
+var DEFAULT_CONTRACT_TIMEOUT_SECONDS = 900;
+var DEFAULT_GATE_TIMEOUT_MS = DEFAULT_CONTRACT_TIMEOUT_SECONDS * 1e3;
+var GATE_OUTPUT_CAP_BYTES = 2 * 1024 * 1024;
+
+// src/report.ts
+var ADR0068_GATE_QUEUE_BOILERPLATE = /(?:gate\s*queue|daemon\s+gate(?:\s*queue)?)/i;
+var ADR0068_DEFERRAL_HINT = /(?:defer(?:red|ring|ral)?|async(?:hronous(?:ly)?)?|pending|not\s+pre-?run|on\s+claim|during\s+tdd|skipped\s+(?:local|pre-?claim|full\s+(?:cumulative\s+)?gate)|runs?\s+(?:async|on\s+claim|in\s+daemon))/i;
+var NEGATED_GAP_PHRASE = /\b(?:no|none|nothing|not|without|zero)\s+(?:known\s+|remaining\s+|other\s+)?(?:checks?\s+|tests?\s+)?(?:skipped|failed|blocked|missing|contradictions?)\b/gi;
+var GENUINE_GAP_KEYWORD = /\b(?:cannot|can't|missing|skipped|contradict(?:s|ed|ing|ion)?|out\s+of\s+scope|failed|blocked)\b/i;
+function hasGenuineUnknownGap(unknowns) {
+  const remainingLines = unknowns.split(/\r?\n/).map((line) => line.trim()).filter((line) => line !== "").filter((line) => !(ADR0068_GATE_QUEUE_BOILERPLATE.test(line) && ADR0068_DEFERRAL_HINT.test(line)));
+  if (remainingLines.length === 0) return false;
+  const cleaned = remainingLines.join("\n").replace(NEGATED_GAP_PHRASE, " ");
+  return GENUINE_GAP_KEYWORD.test(cleaned);
+}
+function computeLoopHealth(events) {
+  const contractCounts = /* @__PURE__ */ new Map();
+  const tasksWithPeerAsk = /* @__PURE__ */ new Set();
+  const completeClaimsByAttempt = /* @__PURE__ */ new Map();
+  let peerAskedCount = 0;
+  let redAttempts = 0;
+  for (const event of events) {
+    if (event.event === "contract_set") {
+      contractCounts.set(event.task, (contractCounts.get(event.task) ?? 0) + 1);
+    } else if (event.event === "peer_asked") {
+      peerAskedCount += 1;
+      tasksWithPeerAsk.add(event.task);
+    } else if (event.event === "gate_finished" && event.verdict === "red") {
+      redAttempts += 1;
+    } else if ((event.event === "gate_queued" || event.event === "claim_reported") && event.handoff !== void 0) {
+      const epochIndex = contractCounts.get(event.task) ?? 0;
+      const key = `${event.task}\0${epochIndex}\0${event.attempt}`;
+      if (event.handoff.outcome === "complete") {
+        completeClaimsByAttempt.set(key, event.handoff);
+      } else {
+        completeClaimsByAttempt.delete(key);
+      }
+    }
+  }
+  const contractedTasks = [...contractCounts.keys()];
+  const totalTasks = contractedTasks.length;
+  let contractedTasksWithAsk = 0;
+  let contextCeilingCount = 0;
+  let silentContextCeilingCount = 0;
+  let recontracts = 0;
+  for (const task of contractedTasks) {
+    recontracts += Math.max(0, (contractCounts.get(task) ?? 0) - 1);
+    if (tasksWithPeerAsk.has(task)) contractedTasksWithAsk += 1;
+    const state = projectTask(events, task);
+    if (state.closed !== void 0 && /context[-_ ]?ceiling/i.test(state.closed.reason)) {
+      contextCeilingCount += 1;
+      if (!state.epoch.some((e) => e.event === "peer_asked")) {
+        silentContextCeilingCount += 1;
+      }
+    }
+  }
+  let genuineUnknownGaps = 0;
+  for (const handoff of completeClaimsByAttempt.values()) {
+    if (hasGenuineUnknownGap(handoff.unknowns)) {
+      genuineUnknownGaps += 1;
+    }
+  }
+  return {
+    totalTasks,
+    peerAskedCount,
+    peerAskRate: totalTasks === 0 ? 0 : contractedTasksWithAsk / totalTasks,
+    contextCeilingCount,
+    silentContextCeilingCount,
+    genuineUnknownGaps,
+    redAttempts,
+    recontracts
+  };
+}
+function formatLoopHealthLines(health) {
+  const pct = health.totalTasks === 0 ? "0%" : `${Math.round(health.peerAskRate * 100)}%`;
+  return [
+    "Loop Health:",
+    `- tasks=${health.totalTasks} peer_asked=${health.peerAskedCount} (${pct}) \xB7 recontracts=${health.recontracts} red_attempts=${health.redAttempts}`,
+    `- context_ceiling=${health.contextCeilingCount} (silent=${health.silentContextCeilingCount}) \xB7 genuine_unknown_gaps=${health.genuineUnknownGaps}`
+  ];
+}
+
 // src/task-status.ts
 var LEAN_SETTLED_TAIL = 5;
 function classifySettled(state) {
@@ -94,5 +177,7 @@ function taskStatusLines(events, workspaceFilter, options) {
   return lines;
 }
 export {
+  computeLoopHealth,
+  formatLoopHealthLines,
   taskStatusLines
 };

@@ -1,6 +1,8 @@
 /** Shared read-only Task status, generated for installed CLI and single-file MCP. */
 import type { LedgerEvent } from "./events.ts";
 import { projectTask } from "./task-state.ts";
+export { computeLoopHealth, formatLoopHealthLines } from "./report.ts";
+export type { LoopHealth } from "./report.ts";
 
 export interface TaskStatusOptions {
   /** Collapse settled (`accepted` and `closed`) Tasks into one summary line (Paseo Room `LEAN_HISTORY` discipline). */

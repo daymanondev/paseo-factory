@@ -68,3 +68,17 @@ export function projectTask(events: readonly LedgerEvent[], task: string) {
   const verdict = acceptance === undefined ? currentAttempt?.gate?.verdict : "green";
   return { currentAttempt, verdict, task, history, contract, epochSeq, epochId, epoch, attempts, acceptance, settled, closed: closure === undefined ? undefined : { seq: closure.seq, at: closure.ts, reason: closure.reason, by: closure.closed_by ?? "owner" }, pendingLanding: acceptance?.landing === "pending-conflict", needsHuman, needs: needsHuman ? needs : undefined, status, maxAttempt: numbers.at(-1) ?? 0, inFlightAttempt: attempts.find((attempt) => attempt.open)?.attempt };
 }
+
+/**
+ * Pure check for whether `task` currently has an unanswered `peer_asked` in its
+ * active Contract epoch (latest `peer_asked` has `seq` strictly greater than
+ * the latest `repoke_dispatched` and `contract_set`).
+ */
+export function hasUnansweredPeerAsk(events: readonly LedgerEvent[], task: string): boolean {
+  const state = projectTask(events, task);
+  if (state.contract === undefined) return false;
+  const latestAsk = last(state.epoch, "peer_asked");
+  if (latestAsk === undefined || latestAsk.seq <= state.contract.seq) return false;
+  const latestRepoke = last(state.epoch, "repoke_dispatched");
+  return latestRepoke === undefined || latestAsk.seq > latestRepoke.seq;
+}

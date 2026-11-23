@@ -7,7 +7,20 @@ import type { AcceptanceRole } from "./task-state.ts";
 import { existsSync, readFileSync, renameSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { Ledger, usageIsValid } from "./ledger.ts";
-import { MAX_ATTEMPTS, NEEDS_HUMAN_REASONS, isReadOnlyPeerDisposition, needsHumanEvidenceIsValid, PEER_DISPOSITIONS, PEER_HANDOFF_OUTCOMES } from "./events.ts";
+import {
+  MAX_ATTEMPTS,
+  MAX_REOPEN_CONDITION_CHARS,
+  MAX_REOPEN_CONDITIONS,
+  NEEDS_HUMAN_REASONS,
+  isReadOnlyPeerDisposition,
+  needsHumanEvidenceIsValid,
+  PEER_ASK_KINDS,
+  PEER_ASK_LAYERS,
+  PEER_ASK_SOURCES,
+  PEER_DISPOSITIONS,
+  PEER_HANDOFF_OUTCOMES,
+  REPOKE_MESSAGE_MAX_CHARS,
+} from "./events.ts";
 import { runGate } from "./gate.ts";
 import {
   DEFAULT_CONTRACT_TIMEOUT_SECONDS,
@@ -17,7 +30,7 @@ import {
   isValidContractTimeoutSeconds,
 } from "./constants.ts";
 import { artifactPathProblem } from "./artifact.ts";
-import { renderReport } from "./report.ts";
+import { renderHandbackReport, renderReport } from "./report.ts";
 import { laneCliAvailable } from "./lanes.ts";
 import { EYE_JSON_LANE, PEER_THINKING_LEVELS } from "./lanes.ts";
 import type { LaneCliRunner, PeerThinkingLevel } from "./lanes.ts";
@@ -28,7 +41,7 @@ import { changedFiles, checkCleanAt, deleteTaskWorktreeBranch, headCommitSync, l
 import { MEMORY_FILES } from "./choke.ts";
 import { projectStateDir } from "./project.ts";
 import { FactoryError } from "./errors.ts";
-import type { AttemptAccepted, ClaimReported, ContractSet, GateFinished, GateQueued, GitBlocked, LedgerEvent, MeterWritten, MeterUsage, NeedsHuman, NeedsHumanEvidence, NeedsHumanReason, PeerDisposition, PeerHandoffFields, RepokeDispatched, RepokeRefused, RespawnDispatched, RespawnRefused, SpawnDispatched, SpawnRefused, TaskClosed, Verdict } from "./events.ts";
+import type { AttemptAccepted, ClaimReported, ContractSet, GateFinished, GateQueued, GitBlocked, LedgerEvent, MeterWritten, MeterUsage, NeedsHuman, NeedsHumanEvidence, NeedsHumanReason, PeerAsked, PeerAskKind, PeerAskLayer, PeerAskSource, PeerDisposition, PeerHandoffFields, RepokeDispatched, RepokeRefused, RespawnDispatched, RespawnRefused, SpawnDispatched, SpawnRefused, TaskClosed, Verdict } from "./events.ts";
 import type { GateResult } from "./gate.ts";
 import { LedgerAdmission } from "./history-admission.ts";
 import { GATE_QUEUE_FILENAME, readPersistedGateQueue } from "./gate-queue-status.ts";
@@ -265,9 +278,24 @@ export interface ContractInput {
    */
   timeoutSeconds?: number;
   /**
+   * Optional explicit conditions under which the Peer should pause and ask/reopen
+   * via `agent_ask` instead of forcing an implementation (ADR 0069).
+   */
+  reopenConditions?: string[];
+  /**
    * Optional caller seat for attribution; never enables Fresh-eyes (ADR 0030).
    */
   seat?: "supervisor" | "lead" | "agent";
+}
+
+export interface PeerAskInput {
+  task: string;
+  kind: PeerAskKind;
+  layer?: PeerAskLayer;
+  summary: string;
+  source: PeerAskSource;
+  agent?: string;
+  reportPath?: string;
 }
 
 export interface ClaimInput {
@@ -321,6 +349,13 @@ export interface AdmitClaimInput extends ClaimInput {
 export type AdmitClaimResult =
   | { status: "replayed"; outcome: ClaimOutcome }
   | { status: "executed"; outcome: ClaimOutcome }
+  | {
+      status: "handback";
+      event: PeerAsked;
+      reportPath: string;
+      handoff: PeerHandoffFields;
+      snapshot: { sha?: string; branch: string; dir: string };
+    }
   | {
       status: "queued";
       attempt: number;
@@ -587,6 +622,11 @@ export interface Factory {
    */
   repoke(task: string, agent: string, message?: string): RepokeDecision;
   /**
+   * Records a durable `peer_asked` event for a known, unaccepted, unclosed
+   * Task without opening an Attempt or altering Gate state (ADR 0069).
+   */
+  recordPeerAsk(input: PeerAskInput): PeerAsked;
+  /**
    * Judges the driver's automatic Respawn request after `Substrate death`
    * (v0.0.12, ADR 0008 §3): validates `task`, `provider`, and `died_agent`,
    * refuses unknown, accepted, or attempt-ceiling tasks, and enforces the
@@ -686,6 +726,14 @@ export function createFactory(options: FactoryOptions): Factory {
   type PreparedClaim =
     | { kind: "replayed"; outcome: ClaimOutcome }
     | {
+        kind: "handback";
+        contract: ContractSet;
+        executionDir: string;
+        rawSha: string;
+        admittedHandoff: PeerHandoffFields;
+        agent: string | undefined;
+      }
+    | {
         kind: "ready";
         contract: ContractSet;
         disposition: PeerDisposition;
@@ -757,20 +805,6 @@ export function createFactory(options: FactoryOptions): Factory {
     const admittedHandoff = mechanical === "lead_verify" ? undefined : admitHandoff(handoff);
     const disposition = contract.disposition ?? "engineer";
     const executionDir = self.worktreeFor(task) ?? contract.workspace;
-    let claimedSha = sha.trim();
-    if (claimedSha === "") {
-      if (disposition === "engineer") {
-        throw new FactoryError(
-          "invalid-claim",
-          `the six-field handoff is complete but the claim attests no commit: \`commit\` is mandatory for the ${disposition} disposition — the Claim attests an exact commit (ADR 0053 §4)`,
-        );
-      }
-      const head = headCommitSync(executionDir);
-      if (head === undefined) {
-        throw new FactoryError("invalid-claim", `could not resolve HEAD in ${executionDir} to default the omitted commit for the ${disposition} disposition`);
-      }
-      claimedSha = head;
-    }
 
     const priorAccept = acceptedAttempt(fullHistory);
     if (priorAccept !== undefined) {
@@ -794,6 +828,35 @@ export function createFactory(options: FactoryOptions): Factory {
         "gate-running",
         `attempt ${lastAttempt} of task ${task} is still open — wait for its verdict before claiming again`,
       );
+    }
+
+    // ADR 0069: non-`complete` outcomes (`reopen` / `blocked` / `partial`)
+    // bypass `GateQueue`, never open or consume an Attempt, and never require
+    // an engineer commit SHA on `reopen` / `blocked`.
+    if (admittedHandoff !== undefined && admittedHandoff.outcome !== "complete") {
+      return {
+        kind: "handback",
+        contract,
+        executionDir,
+        rawSha: sha.trim(),
+        admittedHandoff,
+        agent,
+      };
+    }
+
+    let claimedSha = sha.trim();
+    if (claimedSha === "") {
+      if (disposition === "engineer") {
+        throw new FactoryError(
+          "invalid-claim",
+          `the six-field handoff is complete but the claim attests no commit: \`commit\` is mandatory for the ${disposition} disposition — the Claim attests an exact commit (ADR 0053 §4)`,
+        );
+      }
+      const head = headCommitSync(executionDir);
+      if (head === undefined) {
+        throw new FactoryError("invalid-claim", `could not resolve HEAD in ${executionDir} to default the omitted commit for the ${disposition} disposition`);
+      }
+      claimedSha = head;
     }
 
     const replayed = findIdempotentGreenReplay(fullHistory, history, task, claimedSha, mechanical, admittedHandoff, true);
@@ -1044,7 +1107,7 @@ export function createFactory(options: FactoryOptions): Factory {
     stateDir,
     recoveredAttempts,
 
-    setContract({ task, workspace, gate, artifact, base: inputBase, scope, freshEyes, watch, description, skills, by, disposition, timeoutSeconds, seat, outcome, invariants, exclusions, verification }) {
+    setContract({ task, workspace, gate, artifact, base: inputBase, scope, freshEyes, watch, description, skills, by, disposition, timeoutSeconds, reopenConditions, seat, outcome, invariants, exclusions, verification }) {
       assertTaskId(task);
       // ADR 0054 §2: the shell Gate is the engineer disposition's law; the
       // read-only three (scout|architect|reviewer) may omit it — an empty gate
@@ -1145,6 +1208,31 @@ export function createFactory(options: FactoryOptions): Factory {
         if (unusable) {
           throw new FactoryError("invalid-contract", "skills must be an array of non-empty skill names — omit it when the task mandates none");
         }
+      }
+      let normalizedReopenConditions: string[] | undefined;
+      if (reopenConditions !== undefined) {
+        if (!Array.isArray(reopenConditions)) {
+          throw new FactoryError("invalid-contract", "reopenConditions must be an array of non-empty strings");
+        }
+        if (reopenConditions.length > MAX_REOPEN_CONDITIONS) {
+          throw new FactoryError(
+            "invalid-contract",
+            `reopenConditions exceeds the ${MAX_REOPEN_CONDITIONS}-item cap — got ${reopenConditions.length} items`,
+          );
+        }
+        normalizedReopenConditions = reopenConditions.map((item) => {
+          if (typeof item !== "string" || item.trim() === "") {
+            throw new FactoryError("invalid-contract", "reopenConditions entries must be non-empty strings");
+          }
+          const trimmed = item.trim();
+          if (trimmed.length > MAX_REOPEN_CONDITION_CHARS) {
+            throw new FactoryError(
+              "invalid-contract",
+              `reopenConditions entry exceeds the ${MAX_REOPEN_CONDITION_CHARS}-char cap (got ${trimmed.length} chars)`,
+            );
+          }
+          return trimmed;
+        });
       }
       if (!isAbsolute(workspace)) {
         throw new FactoryError("invalid-contract", `workspace "${workspace}" must be an absolute path`);
@@ -1290,12 +1378,21 @@ export function createFactory(options: FactoryOptions): Factory {
         ...(by === undefined ? {} : { by }),
         ...(disposition === undefined ? {} : { disposition }),
         ...(timeoutSeconds === undefined ? {} : { timeoutSeconds }),
+        ...(normalizedReopenConditions === undefined || normalizedReopenConditions.length === 0
+          ? {}
+          : { reopenConditions: normalizedReopenConditions }),
       });
     },
 
     async claim(input) {
       const prepared = await withAdmitLock(input.task, async () => prepareClaim(this, input));
       if (prepared.kind === "replayed") return prepared.outcome;
+      if (prepared.kind === "handback") {
+        throw new FactoryError(
+          "handback-requires-admit-claim",
+          `handoff outcome "${prepared.admittedHandoff.outcome}" bypasses Gate execution — submit via admitClaim()`,
+        );
+      }
       const outcome = await executeClaimPipeline({
         task: input.task,
         attempt: prepared.attempt,
@@ -1315,6 +1412,69 @@ export function createFactory(options: FactoryOptions): Factory {
       return withAdmitLock(input.task, async () => {
         const prepared = prepareClaim(this, input);
         if (prepared.kind === "replayed") return { status: "replayed", outcome: prepared.outcome };
+        if (prepared.kind === "handback") {
+          const { contract, executionDir, rawSha, admittedHandoff, agent } = prepared;
+          let snapshotSha: string | undefined;
+          if (admittedHandoff.outcome === "partial") {
+            if (rawSha !== "") {
+              const resolved = await resolveClaimedCommit(executionDir, rawSha);
+              if (!resolved.ok) {
+                throw new FactoryError("invalid-claim", resolved.reason);
+              }
+              snapshotSha = resolved.full;
+            } else {
+              snapshotSha = headCommitSync(executionDir);
+            }
+          } else {
+            if (rawSha !== "") {
+              const resolved = await resolveClaimedCommit(executionDir, rawSha);
+              snapshotSha = resolved.ok ? resolved.full : headCommitSync(executionDir);
+            } else {
+              snapshotSha = headCommitSync(executionDir);
+            }
+          }
+          const nextSeq = (ledger.events.at(-1)?.seq ?? 0) + 1;
+          const reportPath = join(dataDir, `report-${input.task}-ask-${nextSeq}.md`);
+          const snapshot = {
+            ...(snapshotSha === undefined ? {} : { sha: snapshotSha }),
+            branch: `factory/${input.task}`,
+            dir: executionDir,
+          };
+          const trimmedAgent = agent?.trim();
+          const markdown = renderHandbackReport({
+            task: input.task,
+            seq: nextSeq,
+            ts: new Date().toISOString(),
+            contract,
+            handoff: admittedHandoff,
+            snapshot,
+            ...(trimmedAgent === undefined || trimmedAgent === "" ? {} : { agent: trimmedAgent }),
+          });
+          writeFileSync(reportPath, markdown);
+          const kind: PeerAskKind =
+            admittedHandoff.outcome === "reopen"
+              ? "reopen_premise"
+              : admittedHandoff.outcome === "blocked"
+                ? "blocked"
+                : "partial";
+          const summary = truncateCleanly(`${admittedHandoff.outcome}: ${admittedHandoff.unknowns.trim()}`, 500);
+          const event = ledger.append({
+            event: "peer_asked",
+            task: input.task,
+            kind,
+            summary,
+            source: "agent_claim",
+            ...(trimmedAgent === undefined || trimmedAgent === "" ? {} : { agent: trimmedAgent }),
+            reportPath,
+          });
+          return {
+            status: "handback",
+            event,
+            reportPath,
+            handoff: admittedHandoff,
+            snapshot,
+          };
+        }
         const { contract, disposition, executionDir, claimedSha, attempt, admittedHandoff, mechanical, agent } = prepared;
         // Read-only empty gates bypass the machine-wide Gate queue completely.
         if (isReadOnlyPeerDisposition(contract.disposition) && contract.gate.trim() === "") {
@@ -1764,12 +1924,13 @@ export function createFactory(options: FactoryOptions): Factory {
           `task ${task} was already accepted at attempt ${priorAccept.attempt} — the task is closed`,
         );
       }
-      // ADR 0053 Decision 3: a repoke bearing the Lead's message is a live
-      // reconciliation turn, never the Denial-stall's one spend — the cap
-      // below lifts for it. The message body is delivery-only (it never
-      // rides the dispatch line), and anything but a non-empty string reads
-      // as message-less, so the factory stays the judge of its own law.
-      const messageBearing = typeof message === "string" && message.trim() !== "";
+      // ADR 0053 Decision 3 + ADR 0069: a repoke bearing the Lead's message is
+      // a live reconciliation turn (`kind: "ruling"`), never the Denial-stall's
+      // one spend (`kind: "denial-stall"`). The trimmed message is persisted on
+      // `repoke_dispatched` (truncated cleanly to <= 1,000 chars) so the ruling
+      // survives mailbox resets and closes unanswered `peer_asked` entries.
+      const trimmedMessage = typeof message === "string" ? message.trim() : "";
+      const messageBearing = trimmedMessage !== "";
       const history = epochEventsFor(ledger, task);
       // The structural one-per-task law: the dispatch line IS the spent
       // marker — a second ask names its own refusal, and a driver crash
@@ -1781,7 +1942,64 @@ export function createFactory(options: FactoryOptions): Factory {
           `task ${task} already spent its one re-poke (its repoke_dispatched line) — the stall's named end is needs_human, not a second poke`,
         );
       }
-      return { outcome: "dispatched", event: ledger.append({ event: "repoke_dispatched", task, agent }) };
+      const storedMessage = messageBearing ? truncateCleanly(trimmedMessage, REPOKE_MESSAGE_MAX_CHARS) : undefined;
+      return {
+        outcome: "dispatched",
+        event: ledger.append({
+          event: "repoke_dispatched",
+          task,
+          agent,
+          kind: messageBearing ? "ruling" : "denial-stall",
+          ...(storedMessage === undefined ? {} : { message: storedMessage }),
+        }),
+      };
+    },
+
+    recordPeerAsk({ task, kind, layer, summary, source, agent, reportPath }) {
+      assertTaskId(task);
+      if (!(PEER_ASK_KINDS as readonly string[]).includes(kind)) {
+        throw new FactoryError("invalid-peer-ask", `peer_asked kind must be one of ${PEER_ASK_KINDS.join(" | ")} — got ${JSON.stringify(kind)}`);
+      }
+      if (layer !== undefined && !(PEER_ASK_LAYERS as readonly string[]).includes(layer)) {
+        throw new FactoryError("invalid-peer-ask", `peer_asked layer must be one of ${PEER_ASK_LAYERS.join(" | ")} — got ${JSON.stringify(layer)}`);
+      }
+      if (!(PEER_ASK_SOURCES as readonly string[]).includes(source)) {
+        throw new FactoryError("invalid-peer-ask", `peer_asked source must be one of ${PEER_ASK_SOURCES.join(" | ")} — got ${JSON.stringify(source)}`);
+      }
+      if (typeof summary !== "string" || summary.trim() === "") {
+        throw new FactoryError("invalid-peer-ask", "peer_asked summary must be a non-empty string");
+      }
+      if (agent !== undefined && typeof agent !== "string") {
+        throw new FactoryError("invalid-peer-ask", "peer_asked agent must be a string when present");
+      }
+      if (reportPath !== undefined && typeof reportPath !== "string") {
+        throw new FactoryError("invalid-peer-ask", "peer_asked reportPath must be a string when present");
+      }
+      const contract = this.contractFor(task);
+      if (!contract) {
+        throw new FactoryError("unknown-task", `no contract set for task ${task} — register one first`);
+      }
+      const fullHistory = ledger.eventsFor(task);
+      const priorAccept = acceptedAttempt(fullHistory);
+      if (priorAccept !== undefined) {
+        throw new FactoryError("already-accepted", `task ${task} was already accepted at attempt ${priorAccept.attempt}; the ledger is append-only`);
+      }
+      const closure = closureEvent(fullHistory);
+      if (closure !== undefined) {
+        throw new FactoryError("already-closed", `task ${task} was closed (reason: ${closure.reason}) — the retirement is terminal; the ledger is append-only`);
+      }
+      const trimmedAgent = agent?.trim();
+      const trimmedReportPath = reportPath?.trim();
+      return ledger.append({
+        event: "peer_asked",
+        task,
+        kind,
+        ...(layer === undefined ? {} : { layer }),
+        summary: summary.trim(),
+        source,
+        ...(trimmedAgent === undefined || trimmedAgent === "" ? {} : { agent: trimmedAgent }),
+        ...(trimmedReportPath === undefined || trimmedReportPath === "" ? {} : { reportPath: trimmedReportPath }),
+      });
     },
 
     respawn({ task, provider, died_agent }) {
@@ -2111,7 +2329,7 @@ export function createFactory(options: FactoryOptions): Factory {
 
   };
   const asyncOperations = new Set(["claim", "admitClaim", "executeQueuedClaim", "accept"]);
-  const syncOperations = new Set(["setContract", "requestSpawn", "meter", "repoke", "respawn", "needsHuman", "recordDaemonRestarted", "cancelQueuedClaim", "resetProject"]);
+  const syncOperations = new Set(["setContract", "requestSpawn", "meter", "repoke", "recordPeerAsk", "respawn", "needsHuman", "recordDaemonRestarted", "cancelQueuedClaim", "resetProject"]);
   const wrappers = new Map<PropertyKey, unknown>();
   return new Proxy(factory, {
     get(target, key, receiver) {
@@ -2492,4 +2710,15 @@ function assertTaskId(task: string): void {
       `task id "${task}" is invalid — use letters, digits, ".", "_", "-" (it becomes a report filename)`,
     );
   }
+}
+
+function truncateCleanly(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  if (maxChars <= 0) return "";
+  let cut = text.slice(0, maxChars);
+  const lastCode = cut.charCodeAt(cut.length - 1);
+  if (lastCode >= 0xd800 && lastCode <= 0xdbff) {
+    cut = cut.slice(0, -1);
+  }
+  return cut.trimEnd();
 }
