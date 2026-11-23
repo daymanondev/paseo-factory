@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-11-23
+
+**Epistemic symmetry, topology-blind `agent_ask` / `lead_reply_peer`, Gate-decoupled non-`complete` handbacks, Automated Andon Cord, and Supervisor `Loop Health` (ADR 0069).**
+
+### Added
+
+- **Durable `peer_asked` & ruling persistence (`src/events.ts`, `src/ledger-validation.ts`, `src/task-state.ts`, `src/factory.ts`, `plugin/server/view.ts`, `plugin/server/surface-rpc.ts`):** Added task-scoped v2 Ledger event `peer_asked` (`reopen_premise | gate_mismatch | dependency | clarify | blocked | partial`, optional `layer`, `summary`, `source`, `agent`, `reportPath`), `factory.recordPeerAsk`, pure `hasUnansweredPeerAsk(events, task)`, optional `reopenConditions` (`<= 8` entries, `<= 240` chars each) on `contract_set` (`--reopen-if` on `factory contract`), and optional `kind` (`denial-stall | ruling`) + truncated `message` (`<= 1,000` chars) on `repoke_dispatched`, preserving full backward-compatible v2 replay.
+- **Topology-blind `agent_ask` & `lead_reply_peer` ACI (`src/mcp/shared.ts`, `src/agy-mcp-schema-heal.ts`, `plugin/bin/bridge.mjs`, `plugin/bin/factory.mjs`, `plugin/server/spool.ts`):** Promoted `agent_ask` (zero topology arguments, PACE + CONTRA schema) and `lead_reply_peer` as the primary dialogue MCP tools while keeping `agent_escalate_blocker` and `lead_repoke_agent` as backward-compatible aliases across bridge dispatch, Spool, CLI, and Antigravity schema self-healing. Removed `"immutable Contract"` and `[Blocker on task ...]` framing in favor of neutral `[Peer <KIND>]` headers.
+- **Automated Andon Cord & Supervisor `Loop Health` (`plugin/server/peer-handoff.ts`, `plugin/server/lead-mailbox.ts`, `src/report.ts`, `src/task-status.ts`, `plugin/bin/bridge.mjs`):** Added single-shot `turn_ended` **Andon Checkpoint** (~50% of Peer handoff mark) when no Claim or Ask has occurred in the epoch, choked Peer Auto-Handoff while an unanswered `peer_asked` awaits Lead (keeping Lead `rotation_pending` anti-deadlock behavior intact), gated `200k` Peer-2 auto-handoff strictly on `hasRealWorktreeProgress` (`engineer` commits or non-`.scratch/` diffs only), and added deterministic `computeLoopHealth` / `formatLoopHealthLines` (filtering ADR 0068 `GateQueue` boilerplate) to `supervisor_read_ledger`.
+
+### Changed
+
+- **Gate-decoupled `reopen` / `blocked` / `partial` claims & two-branch `RED` Attempt `1..2` wakeup (`src/factory.ts`, `plugin/server/spool.ts`, `plugin/server/lead-mailbox.ts`):** Non-`complete` `agent_claim` outcomes (`reopen`, `blocked`, `partial`) bypass `GateQueue` (`status: "handback"`) with no shell Gate, no Attempt consumed, and no `lead_merge` eligibility, persisting the 6-Field Handoff to `report-<task>-ask-<seq>.md`, appending `peer_asked`, suppressing idle nudges, and waking Lead cleanly. Updated `formatPeerRedWakeupText` to remove the `"never notify Lead directly"` prohibition and instruct explicit fix-vs-`agent_ask` branching.
+- **Topology-blind Peer prompts & anonymized Devil's Advocate `reviewer` (`src/roles-contract.ts`, `src/disposition-prompt.ts`, `plugin/bin/driver.mjs`, `plugin/server/roles.ts`, `CONTEXT.md`):** Stripped `Owner`, `Supervisor`, `Driver`, `Factory CLI`, and `GateQueue` narration from Peer prompts (preserving legacy `roles.ts` idempotency markers), added `Reopen if:` + `agent_ask` premise-check reminders to Peer turn prompts, and hardened `disposition: "reviewer"` around `Outcome + Spec/Invariants + Diff/Commit` with an evidence-backed Devil's Advocate stance.
+
 ## [0.20.5] - 2026-11-23
 
 **Eliminate per-`Project` Spool/`Lead mailbox` ABBA and 3-way lock deadlocks, add fail-closed Spool replies & `600s` boot-replay TTL, and harden `Store release` detached timeouts, stalled-`Phase` diagnosis, and `caffeinate -i` sleep inhibition (ADR 0066 & ADR 0068 amendments).**
