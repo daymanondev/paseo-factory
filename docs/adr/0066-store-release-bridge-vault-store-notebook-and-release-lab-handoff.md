@@ -1,8 +1,8 @@
 # 0066 — Store Release Server Bridge, Private Vault Store Defaults, and Cross-Project Store Notebook
 
 - **Date:** 2026-11-20
-- **Status:** Accepted — ratified by the Owner over `/grill-with-docs` rounds 1–3 (Q1–Q12).
-- **Grounded in:** `CONTEXT.md` · `docs/adr/0014-private-vault-hydration-and-release-lab-companion.md` · `docs/adr/0061-lead-owned-release-per-project-release-mode-and-one-time-github-publish.md` · `src/roles-contract.ts` · `src/vault-materialization.ts` · `factory-release-lab` `docs/adr/0003-deterministic-agent-free-native-first-store-runner.md`.
+- **Status:** Accepted — ratified by the Owner over `/grill-with-docs` rounds 1–3 (Q1–Q12); amended 2026-11-23 for the two-tier `Store release` timeout contract, detached `-pgid` termination with grace, read-only stalled-`Phase` diagnosis, and active `Store release` sleep inhibition.
+- **Grounded in:** `CONTEXT.md` · `docs/adr/0014-private-vault-hydration-and-release-lab-companion.md` · `docs/adr/0061-lead-owned-release-per-project-release-mode-and-one-time-github-publish.md` · `src/roles-contract.ts` · `src/vault-materialization.ts` · `plugin/server/store-release.ts` · `plugin/index.server.ts` · `factory-release-lab` `docs/adr/0003-deterministic-agent-free-native-first-store-runner.md`.
 - **Amends:** ADR 0061 §2 (adds a sibling typed server-side **Store release** bridge alongside GitHub-only `lead_release`, keeping GitHub `Release` and mobile `Store release` cleanly separated) · ADR 0014 §3–§4 (extends `Private vault` hydration with `APPLE_TEAM_ID`, `store-defaults.json`, Day-0 keystore write-back, and the two-tier `Store notebook`).
 
 ## Context
@@ -48,6 +48,12 @@
      - `apps/<canonical-app>.md` — per-app store card (identifiers, Native Android / Native iOS / Expo shape, live status, submission history, and app-specific rejection/review notes).
    - Updated via a dedicated single-writer command/tool into `Private vault` (never dirtying the app's git working tree) whenever a submission completes or the Owner reports a store rejection in `Supervisor` chat.
 
+6. **Two-tier `Store release` timeout contract, detached `-pgid` termination, read-only stalled-`Phase` diagnosis, and sleep inhibition (amended 2026-11-23).**
+   - **Two-tier timeout split across repos:** `factory-release-lab` enforces inner per-phase budgets — **15 minutes** (`E2E_TIMEOUT_MS`) for Phase 3 E2E and screenshots (`phase-3-e2e-and-screenshots`, classified `app-repo`) and **30 minutes** (`BUILD_TIMEOUT_MS` / `BUILD_POLL_TIMEOUT_MS`) for Phase 5/6 builds, exports, and Apple `PROCESSING → VALID` polling — while `paseo-factory`'s Server Bridge (`plugin/server/store-release.ts`) raises its outer runner ceiling from 35 minutes to **75 minutes** (`DEFAULT_RUNNER_TIMEOUT_MS`) so healthy multi-phase runs never suffer premature outer kills.
+   - **Detached `-pgid` termination with grace:** `builtinStoreReleaseRunner` spawns `release-lab` in its own detached process group (`detached: true` on POSIX, bounded stdout/stderr buffers). On outer timeout, it sets `timedOut: true`, delivers `SIGTERM` to `-pgid` first, and waits a **5-second** grace window (`DEFAULT_RUNNER_GRACE_MS`) so `release-lab` can reap child process groups and persist failure state before escalating to `-pgid` `SIGKILL`.
+   - **Read-only `rel-*.json` stalled-`Phase` diagnosis:** When an asynchronous run (`stage`, `submit`, `resume`) reports `timedOut: true`, `store-release.ts` inspects `<paseoHome>/release-lab/runs/*.json` (`rel-*.json`) strictly read-only for the newest matching run overlapping the run start window (checking `running` phases, with fallback to `failure.phase` or `signal-terminated` phase if `release-lab` caught `SIGTERM` during grace), recording `store_release_failed` and waking `Lead` with `code: "runner-timed-out"`, `failureClass: "tool-bug"`, and the run ID + stalled `Phase`. `factory-release-lab` stays the single writer of `rel-*.json`.
+   - **Active `Store release` sleep inhibition (`caffeinate -i`):** `store-release.ts` tracks active asynchronous `Store release` runs (`hasActiveStoreReleases` / `onStoreReleaseActivityChange` across `stage`, `submit`, `resume`), keeping `SleepInhibitor` (`caffeinate -i -w <pid>` on macOS, never `-d`) active in `plugin/index.server.ts` alongside `Lead mailbox` and `Gate queue` work.
+
 ## Considered Options
 
 - **Fold store APIs into `paseo-factory` core**: Rejected — bloats the thin verification core with volatile Apple/Google API adapters and duplicates `factory-release-lab`'s UI and state files.
@@ -60,3 +66,4 @@
 - `roles-contract.ts` teaches `Supervisor` to relay store-release intents, `Hole` prompts/resolutions, and rejection logs, and teaches `Lead` the deterministic Store release checklist + 2-route failure policy.
 - `factory-release-lab` evolves per its companion ADR 0003 (agent-free deterministic runner, Native Android & Native iOS first-class, cloud-signed iOS upload, Play staging track, structured error taxonomy) while keeping its live Paseo Desktop `Release Lab` UI synced via `<paseoHome>/release-lab/runs/<runId>.json`.
 - `Private vault` becomes the sole home for all personal store keys, `APPLE_TEAM_ID`, `store-defaults.json`, per-app upload keystores, and `Store notebook` history — keeping public repos completely free of personal data.
+- Healthy 40–60 minute mobile store releases run to completion without premature 35-minute outer kills or mid-upload macOS idle sleep, while true runner hangs reap entire subprocess trees and surface `runner-timed-out` / `tool-bug` with the stalled `Phase`.
