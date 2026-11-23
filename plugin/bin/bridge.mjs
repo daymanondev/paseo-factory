@@ -1777,25 +1777,50 @@ return module.exports;
  * Project slug — `factory status`'s aggregate law — falling back to the legacy
  * root ledger only when no per-Project ledger holds events.
  */
+function formatLoopHealthBlock(events) {
+  if (typeof taskStatusPolicy.computeLoopHealth === "function" && typeof taskStatusPolicy.formatLoopHealthLines === "function") {
+    const lines = taskStatusPolicy.formatLoopHealthLines(taskStatusPolicy.computeLoopHealth(events));
+    return Array.isArray(lines) && lines.length > 0 ? lines : [];
+  }
+  return [];
+}
+
 function formatFactoryStatus(stateDir, workspaceFilter, options = {}) {
   const bound = options.projectSlug !== undefined || options.workspace !== undefined;
   const statusOpts = options.lean ? { lean: true } : undefined;
   const scoped = readLedgerEventsList(stateDir, options);
+  const appendLoopHealth = (output, eventsForHealth) => {
+    if (!options.includeLoopHealth) return output;
+    const healthLines = formatLoopHealthBlock(eventsForHealth);
+    return healthLines.length > 0 ? `${output}\n\n${healthLines.join("\n")}` : output;
+  };
   if (bound) {
     if (scoped.length === 0) return `factory: no tasks yet (ledger: ${ledgerProject.resolveProjectLedger(stateDir, options).path})`;
     const lines = taskStatusPolicy.taskStatusLines(scoped, workspaceFilter, statusOpts);
-    return lines.length > 0 ? lines.join("\n") : "factory: no matching tasks";
+    const base = lines.length > 0 ? lines.join("\n") : "factory: no matching tasks";
+    return appendLoopHealth(base, scoped);
   }
   // Unbound: aggregate every registered Project (each row prefixed with its
   // Project slug — `factory status`'s law), falling back to the single
   // resolved stream only when no per-Project ledger holds rows.
   const streams = ledgerProject.projectLedgerStreams(stateDir)
-    .map((stream) => ({ slug: stream.slug, lines: taskStatusPolicy.taskStatusLines(readLedgerEventsList(stateDir, { project: stream.slug }), workspaceFilter, statusOpts) }))
+    .map((stream) => {
+      const events = readLedgerEventsList(stateDir, { project: stream.slug });
+      return {
+        slug: stream.slug,
+        events,
+        lines: taskStatusPolicy.taskStatusLines(events, workspaceFilter, statusOpts),
+      };
+    })
     .filter((stream) => stream.lines.length > 0);
-  if (streams.length > 0) return streams.flatMap((stream) => stream.lines.map((line) => `[${stream.slug}] ${line}`)).join("\n");
+  if (streams.length > 0) {
+    const base = streams.flatMap((stream) => stream.lines.map((line) => `[${stream.slug}] ${line}`)).join("\n");
+    return appendLoopHealth(base, streams.flatMap((stream) => stream.events));
+  }
   if (scoped.length === 0) return `factory: no tasks yet (ledger: ${ledgerProject.resolveProjectLedger(stateDir, options).path})`;
   const lines = taskStatusPolicy.taskStatusLines(scoped, workspaceFilter, statusOpts);
-  return lines.length > 0 ? lines.join("\n") : "factory: no matching tasks";
+  const base = lines.length > 0 ? lines.join("\n") : "factory: no matching tasks";
+  return appendLoopHealth(base, scoped);
 }
 
 
@@ -2246,8 +2271,22 @@ const READ_ONLY_DISPOSITIONS = new Set(["architect", "reviewer", "scout"]);
 const READ_ONLY_DISPOSITION_EVIDENCE = {
   architect:
     "alternatives considered, the strongest counterargument against your recommendation, the conditions that would reverse it, and supporting file:line evidence",
-  reviewer: "a concrete claim plus file:line evidence per finding, separating blocking defects from non-blocking notes",
+  reviewer:
+    "argue the strongest evidence-backed weakness with concrete claim plus file:line evidence before agreeing (never manufacturing objections when evidence holds), separating blocking defects from non-blocking notes",
   scout: "concrete file:line evidence paths, the remaining unknowns, and your confidence (low | medium | high)",
+};
+const PEER_PREMISE_CHECK_REMINDER =
+  "Before writing code, verify the brief's premises and verification command against the actual repository; if reality conflicts with the brief, a prerequisite is missing, or an ambiguity changes behavior, call `agent_ask` immediately rather than guessing.";
+function formatReopenIfBlock(reopenConditions) {
+  if (!Array.isArray(reopenConditions) || reopenConditions.length === 0) return "";
+  const clean = reopenConditions.map((c) => (typeof c === "string" ? c.trim() : "")).filter(Boolean);
+  if (clean.length === 0) return "";
+  if (clean.length === 1) return `Reopen if: ${clean[0]}`;
+  return `Reopen if:\n${clean.map((c) => `- ${c}`).join("\n")}`;
+}
+const LEGACY_ROLE_TOOL_ALIASES = {
+  agent: ["agent_escalate_blocker"],
+  lead: ["lead_repoke_agent"],
 };
 
 let selectedBridge;
@@ -2264,7 +2303,8 @@ function getAllowedToolNames(role) {
 async function handleToolCall(name, rawArgs) {
   const { ctx } = bridgeSession();
   const allowed = getAllowedToolNames(ctx.role);
-  if (!allowed.includes(name)) {
+  const legacyAllowed = (LEGACY_ROLE_TOOL_ALIASES[ctx.role] ?? []).includes(name);
+  if (!allowed.includes(name) && !legacyAllowed) {
     return toolResult(
       `Tool "${name}" is not permitted for role "${ctx.role ?? "unbound"}". Allowed tools for this seat: ${allowed.join(", ")}.`,
       true,
@@ -2323,11 +2363,13 @@ async function handleToolCall(name, rawArgs) {
     // the caller explicitly passes `full: true` (`LEAN_HISTORY` discipline).
     const isSeatRead = calledToolName === "lead_read_ledger" || calledToolName === "supervisor_read_ledger";
     const lean = isSeatRead ? args.full !== true : args.full === false;
+    const includeLoopHealth = calledToolName === "supervisor_read_ledger" || ctx.role === "supervisor";
     return toolResult(
       formatFactoryStatus(ctx.stateDir, ws, {
         ...(ctx.projectSlug !== undefined ? { projectSlug: ctx.projectSlug } : {}),
         ...(ctx.projectSlug === undefined && ws !== undefined ? { workspace: ws } : {}),
         lean,
+        includeLoopHealth,
       }),
     );
   }
@@ -2522,6 +2564,14 @@ async function handleToolCall(name, rawArgs) {
       timeoutSeconds = args.timeoutSeconds;
     }
 
+    let reopenConditions;
+    if (args.reopenConditions !== undefined) {
+      if (!Array.isArray(args.reopenConditions) || args.reopenConditions.some((c) => typeof c !== "string")) {
+        return toolResult("lead_set_contract: `reopenConditions` must be an array of strings.", true);
+      }
+      reopenConditions = args.reopenConditions;
+    }
+
     const reply = await roundTripSpool(ctx, {
       id: randomId(),
       kind: "contract",
@@ -2538,6 +2588,7 @@ async function handleToolCall(name, rawArgs) {
       ...(invariants === undefined ? {} : { invariants }),
       ...(exclusions === undefined ? {} : { exclusions }),
       ...(verification === undefined ? {} : { verification }),
+      ...(reopenConditions === undefined ? {} : { reopenConditions }),
       ...(disposition ? { disposition } : {}),
       ...(timeoutSeconds === undefined ? {} : { timeoutSeconds }),
       ...(args.resetPeer === true ? { resetPeer: true } : {}),
@@ -2807,6 +2858,10 @@ async function handleToolCall(name, rawArgs) {
       if (typeof contract?.description === "string" && contract.description.trim() !== "") {
         promptParts.push(`Task (${task}): ${contract.description.trim()}`);
       }
+      const reopenIfBlock = formatReopenIfBlock(contract?.reopenConditions);
+      if (reopenIfBlock !== "") {
+        promptParts.push(reopenIfBlock);
+      }
       // ADR 0053 §3 — the Peer knows its disposition from turn one; omitted
       // renders nothing (the engineer default needs no header).
       if (typeof contract?.disposition === "string" && contract.disposition !== "engineer") {
@@ -2829,8 +2884,8 @@ async function handleToolCall(name, rawArgs) {
         : undefined;
       promptParts.push(
         readOnlyEvidence === undefined
-          ? `Execute task ${task}: ${artifactClause}run fast slice checks during TDD (never pre-run the full cumulative Gate), commit on branch factory/${task}, call agent_claim (the daemon GateQueue runs the Gate asynchronously), and end your turn immediately once \`queued\`.`
-          : `Execute task ${task}: this session is Read-Only (disposition ${contract.disposition}) — the read-only-disposition-fence forbids file edits and \`git commit\`; never commit, never edit files. Call agent_claim with no commit and no sha, supplying \`outcome\`, \`scope\`, \`verification\`, and \`unknowns\` carrying your ${contract.disposition} evidence: ${readOnlyEvidence}.`,
+          ? `Execute task ${task}: ${artifactClause}run fast slice checks during TDD (never pre-run the full cumulative Gate), commit on branch factory/${task}, call agent_claim (automated verification runs asynchronously), and end your turn immediately once \`queued\`. ${PEER_PREMISE_CHECK_REMINDER}`
+          : `Execute task ${task}: this session is Read-Only (disposition ${contract.disposition}) — the read-only-disposition-fence forbids file edits and \`git commit\`; never commit, never edit files. Call agent_claim with no commit and no sha, supplying \`outcome\`, \`scope\`, \`verification\`, and \`unknowns\` carrying your ${contract.disposition} evidence: ${readOnlyEvidence}. ${PEER_PREMISE_CHECK_REMINDER}`,
       );
       const taskPrompt =
         typeof args.prompt === "string" && args.prompt.trim() !== ""
@@ -2882,9 +2937,13 @@ async function handleToolCall(name, rawArgs) {
     return toolResult(reply.summary);
   }
 
-  if (name === "lead_repoke_agent") {
+  if (name === "lead_reply_peer" || name === "lead_repoke_agent") {
     const task = typeof args.task === "string" ? args.task.trim() : "";
-    if (task === "") return toolResult("lead_repoke_agent requires `task`.", true);
+    if (task === "") return toolResult(`${name} requires \`task\`.`, true);
+    const message = typeof args.message === "string" && args.message.trim() !== "" ? args.message : undefined;
+    if (name === "lead_reply_peer" && message === undefined) {
+      return toolResult("lead_reply_peer requires non-empty `message`.", true);
+    }
     let targetAgent = typeof args.agent === "string" && args.agent.trim() !== "" ? args.agent.trim() : undefined;
     if (!targetAgent) {
       const records = readCorrelationsFile(ctx.stateDir);
@@ -2906,10 +2965,9 @@ async function handleToolCall(name, rawArgs) {
       }
     }
     if (!targetAgent) targetAgent = `agent-${task}`;
-    // ADR 0053 Decision 3: the Lead's ruling rides the repoke when a
-    // non-empty string — omitted (or empty) keeps the fixed Denial-stall
-    // continuation and the one-per-task spend.
-    const message = typeof args.message === "string" && args.message.trim() !== "" ? args.message : undefined;
+    // ADR 0053 Decision 3 / ADR 0069: `lead_reply_peer` and message-bearing
+    // `lead_repoke_agent` deliver the Lead's ruling into the live Peer session;
+    // omitted `message` on legacy `lead_repoke_agent` keeps the Denial-stall spend.
     const reply = await roundTripSpool(ctx, {
       id: randomId(),
       kind: "repoke",
@@ -3048,6 +3106,15 @@ async function handleToolCall(name, rawArgs) {
       ...(ctx.agentId ? { agent: ctx.agentId } : ctx.correlationId ? { agent: ctx.correlationId } : {}),
     });
     if (!reply.ok) return toolResult(`${reply.code}: ${reply.message}`, true);
+    if (reply.status === "handback") {
+      const lines = [
+        `Handback recorded: ${reply.summary}`,
+        `Status: HANDBACK`,
+        ...(reply.reportPath ? [`Report: ${reply.reportPath}`] : []),
+        "Your handback has been sent to Lead without running automated verification or consuming an Attempt. End your turn and wait for Lead's ruling.",
+      ];
+      return toolResult(lines.join("\n"), false);
+    }
     if (reply.status === "queued") {
       const aheadList = Array.isArray(reply.ahead) ? reply.ahead : [];
       const lines = [
@@ -3057,7 +3124,7 @@ async function handleToolCall(name, rawArgs) {
         ...(reply.queueId ? [`Queue ID: ${reply.queueId}`] : []),
         ...(reply.position !== undefined ? [`Position: ${reply.position} (${aheadList.length} ahead)`] : []),
         ...(reply.paused ? [`Queue state: PAUSED`] : []),
-        "Your claim is queued in the daemon Gate queue. End your turn now and wait at zero tokens for outcome notification.",
+        "Your claim is queued for automated verification. End your turn now and wait at zero tokens for outcome notification.",
       ];
       return toolResult(lines.join("\n"), false);
     }
@@ -3071,18 +3138,72 @@ async function handleToolCall(name, rawArgs) {
     return toolResult(lines.join("\n"), reply.verdict === "red");
   }
 
+  if (name === "agent_ask") {
+    for (const forbidden of ["task", "project", "workspace", "recipient"]) {
+      if (forbidden in args) {
+        return toolResult(`agent_ask takes zero topology fields — "${forbidden}" is derived from correlation binding.`, true);
+      }
+    }
+    const VALID_KINDS = ["reopen_premise", "gate_mismatch", "dependency", "clarify", "blocked"];
+    const VALID_LAYERS = ["foundation", "dependency", "lifecycle", "API", "ownership", "verification"];
+    const kind = typeof args.kind === "string" ? args.kind.trim() : "";
+    if (!VALID_KINDS.includes(kind)) {
+      return toolResult(`agent_ask requires \`kind\` (${VALID_KINDS.join(" | ")}).`, true);
+    }
+    const rawLayer = args.layer;
+    let layer;
+    if (rawLayer !== undefined) {
+      if (typeof rawLayer !== "string" || !VALID_LAYERS.includes(rawLayer.trim())) {
+        return toolResult(`agent_ask \`layer\` must be one of ${VALID_LAYERS.join(" | ")}.`, true);
+      }
+      layer = rawLayer.trim();
+    }
+    if (kind === "reopen_premise" && layer === undefined) {
+      return toolResult(`agent_ask requires \`layer\` (${VALID_LAYERS.join(" | ")}) when \`kind\` is "reopen_premise".`, true);
+    }
+    const summary = typeof args.summary === "string" ? args.summary.trim() : "";
+    if (summary === "") return toolResult("agent_ask requires a non-empty `summary`.", true);
+    const evidence = typeof args.evidence === "string" ? args.evidence.trim() : "";
+    if (evidence === "") return toolResult("agent_ask requires a non-empty `evidence`.", true);
+    if (args.proposal !== undefined && typeof args.proposal !== "string") {
+      return toolResult("agent_ask `proposal` must be a string when provided.", true);
+    }
+    const proposal = typeof args.proposal === "string" && args.proposal.trim() !== "" ? args.proposal.trim() : undefined;
+    if (!ctx.task) return toolResult("agent_ask requires a task-bound correlation token.", true);
+    const workspace = ctx.projectRoot ?? ctx.workspace;
+    const reply = await roundTripSpool(ctx, {
+      id: randomId(),
+      kind: "peer_ask",
+      task: ctx.task,
+      ...(workspace ? { workspace } : ctx.projectSlug ? { project: ctx.projectSlug } : {}),
+      peerAskKind: kind,
+      ...(layer === undefined ? {} : { layer }),
+      summary,
+      evidence,
+      ...(proposal === undefined ? {} : { proposal }),
+      source: "agent_ask",
+      ...(ctx.agentId ? { agent: ctx.agentId } : ctx.correlationId ? { agent: ctx.correlationId } : {}),
+      seat: "agent",
+    });
+    if (!reply.ok) return toolResult(`${reply.code}: ${reply.message}`, true);
+    return toolResult(
+      `Ask (${kind}${layer ? `/${layer}` : ""}) sent to Lead (${reply.mailId ?? "queued"}). End your turn and wait for Lead's ruling.`,
+    );
+  }
+
   if (name === "agent_escalate_blocker") {
     const message = typeof args.message === "string" ? args.message.trim() : "";
     if (message === "") return toolResult("agent_escalate_blocker requires a non-empty `message`.", true);
     const workspace = ctx.projectRoot ?? ctx.workspace;
-    const prefix = ctx.task ? `[Blocker on task ${ctx.task}] ` : "[Agent Blocker] ";
     const reply = await roundTripSpool(ctx, {
       id: randomId(),
-      kind: "lead_dispatch",
+      kind: "peer_ask",
       ...(ctx.task ? { task: ctx.task } : {}),
       ...(workspace ? { workspace } : ctx.projectSlug ? { project: ctx.projectSlug } : {}),
-      from: "peer",
-      message: `${prefix}${message}`,
+      peerAskKind: "blocked",
+      summary: message,
+      source: "legacy_blocker",
+      ...(ctx.agentId ? { agent: ctx.agentId } : ctx.correlationId ? { agent: ctx.correlationId } : {}),
       seat: "agent",
     });
     if (!reply.ok) return toolResult(`${reply.code}: ${reply.message}`, true);
