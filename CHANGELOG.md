@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.1] - 2026-11-24
+
+**Harden ADR 0069 handbacks, `peer_ask` atomicity, `Loop Health` aggregation, `ruling` vs. `denial-stall` repoke caps, and prompt/legacy-alias alignment.**
+
+### Fixed
+
+- **`factory-claim` non-`complete` handbacks (`plugin/bin/factory-claim.mjs`):** Handled `reply.status === "handback"` before reading `reply.verdict` (preventing a `TypeError` crash on `reopen`, `blocked`, and `partial` outcomes) and updated CLI `--help` usage text for `--sha` rules.
+- **Atomic `peer_ask` dispatch & handback error handling (`plugin/server/spool.ts`, `plugin/server/lead-mailbox.ts`):** Pre-validated `peer_ask` Task/Contract preconditions before Ledger/mailbox writes and moved `recordPeerAsk` onto a pre-pump hook inside `dispatchLead` (`projectLane`, after `ensureLead` + `stillCurrent` and before `queueMail` + `pumpProjectLead`) so failed dispatches leave zero orphaned `peer_asked` or mail entries; surfaced `leadDispatch` failures in `settleClaimHandback` via `peerMail` fallback or error reply instead of swallowing `!leadReply.ok`.
+- **`ruling` vs. `denial-stall` repoke cap separation (`src/factory.ts`):** Excluded `kind: "ruling"` entries in `factory.repoke` (`e.kind !== "ruling"`) so prior `lead_reply_peer` rulings never consume the Task's single `denial-stall` re-poke allowance, while preserving legacy `kind === undefined` spend markers.
+- **Multi-project `Loop Health`, v0.21.0 deferral boilerplate, & extraction (`src/loop-health.ts`, `src/report.ts`, `src/task-status.ts`, `src/index.ts`, `plugin/bin/bridge.mjs`):** Extracted `computeLoopHealth` / `formatLoopHealthLines` into `src/loop-health.ts`, added `computeLoopHealthForStreams` so unbound multi-Project `supervisor_read_ledger` never collides identical Task IDs across Projects, and updated `hasGenuineUnknownGap` to filter v0.21.0 `"automated verification"` / `"full gate"` deferral boilerplate without suppressing `"automated verification failed"` / `"gate failed"` reports.
+- **Spawn nudge reset, `peer_asked` agent lookups, prompt placement, & legacy aliases (`plugin/server/lead-mailbox.ts`, `plugin/server/spool.ts`, `plugin/bin/bridge.mjs`, `src/roles-contract.ts`):** Restored unclaimed-turn nudges in `answerUnclaimedPeerTurn` when a newer `spawn_dispatched` follows `peer_asked`, included `peer_asked` in `lastTaskAgentForTask` and `agentOfTask`, moved `Reopen if:` to the end of `bridge.mjs` Peer prompts with `PEER_PREMISE_CHECK_REMINDER` enrichment on `spool.ts` spawns (deduplicating repeated blocks), fixed `src/roles-contract.ts` `commit` requirement wording for `engineer` `complete` claims, parsed legacy `REOPEN_REQUEST (<layer>)` / `DEPENDENCY_REQUEST` prefixes in `agent_escalate_blocker`, and cleaned up duplicated Spool/schema-heal shims.
+
+### Added
+
+- **Real subprocess & E2E verification (`test/adr0069-mcp-spool.test.ts`, `test/loop-health.test.ts`, `test/adr0069-ledger-and-claim.test.ts`, `test/adr0069-andon-and-handoff.test.ts`, `test/plugin-spool.test.ts`, `test/bridge-mcp.test.ts`):** Added real `factory-claim.mjs` and JSON-RPC `bridge.mjs` subprocess tests covering `agent_ask`, `agent_claim` handbacks, `lead_reply_peer`, legacy `agent_escalate_blocker` prefix parsing, multi-Project `Loop Health`, `peer_ask` atomicity, and `ruling` vs. `denial-stall` cap separation.
+
 ## [0.21.0] - 2026-11-23
 
 **Epistemic symmetry, topology-blind `agent_ask` / `lead_reply_peer`, Gate-decoupled non-`complete` handbacks, Automated Andon Cord, and Supervisor `Loop Health` (ADR 0069).**
