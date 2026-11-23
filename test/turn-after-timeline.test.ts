@@ -10,7 +10,7 @@ import { prepareTaskWorktree } from "../plugin/server/core/workspace.ts";
 import { createLeadMailRuntime, type LeadTurnEndedInput } from "../plugin/server/lead-mailbox.ts";
 import { createSurfaceHandlers, type SurfaceAgentSnapshot, type SurfaceDaemonApi } from "../plugin/server/surface-rpc.ts";
 import { parseHandoffFile } from "../plugin/server/handoff-text.ts";
-import { disposeDir, gitCommitAll, makeTempDir } from "./helpers.ts";
+import { disposeDir, gitCommitAll, gitCommitChanges, makeTempDir } from "./helpers.ts";
 
 type Refetch = ReturnType<SurfaceDaemonApi["agents"]["ref"]>["timeline"]["refetch"];
 
@@ -24,6 +24,8 @@ function fixture(t: TestContext, seat: "lead" | "supervisor" | "peer") {
   if (seat === "peer") {
     factory.setContract({ task: "T-01", workspace: root, gate: "true", description: "Preserve this work" });
     const tree = prepareTaskWorktree({ stateDir, workspace: root, task: "T-01" }); assert.ok(tree.ok); cwd = tree.path;
+    writeFileSync(join(cwd, "README.md"), "in-progress work\n");
+    gitCommitChanges(cwd, "in-progress slice");
     factory.requestSpawn({ task: "T-01", provider: "pi/model", arity: 1, worktree: cwd });
   }
   const agents: SurfaceAgentSnapshot[] = ["lead", "supervisor", ...(seat === "peer" ? ["peer"] : [])].map(id => ({

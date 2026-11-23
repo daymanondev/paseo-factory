@@ -9,7 +9,8 @@ import {
   healAgyMcpSchemaForCall,
   healAgyMcpSchemasForDirectory,
 } from "../src/agy-mcp-schema-heal.ts";
-import { createFactory } from "../plugin/server/core/factory.ts";
+import { createFactory, type PeerAskInput } from "../plugin/server/core/factory.ts";
+import type { PeerAsked } from "../plugin/server/core/events.ts";
 import { readLeadMailbox } from "../plugin/server/core/mailbox.ts";
 import { resolveProject } from "../plugin/server/core/project.ts";
 import { writeProjectRegistration } from "../plugin/server/projects.ts";
@@ -248,9 +249,9 @@ test("spool peer_ask + parseSpoolRequest validate shape, call factory.recordPeer
     undefined,
   );
 
-  const recordedAsks: Array<Record<string, unknown>> = [];
-  const factoryWithAsk = Object.create(factory) as typeof factory & { recordPeerAsk: (input: Record<string, unknown>) => unknown };
-  factoryWithAsk.recordPeerAsk = (input: Record<string, unknown>) => {
+  const recordedAsks: PeerAskInput[] = [];
+  const factoryWithAsk = Object.create(factory) as typeof factory;
+  factoryWithAsk.recordPeerAsk = (input: PeerAskInput): PeerAsked => {
     recordedAsks.push(input);
     return { seq: 42, ts: new Date().toISOString(), event: "peer_asked", ...input };
   };

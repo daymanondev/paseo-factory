@@ -967,7 +967,7 @@ test("contribute gates live role contracts via server.registerWorktreeManager an
     ) as { appendSystemPrompt?: string[] } | undefined;
     assert.ok(peerOpened !== undefined);
     assert.equal(peerOpened.appendSystemPrompt?.length, 1);
-    assert.match(peerOpened.appendSystemPrompt?.[0] ?? "", /Peer of the paseo-factory verification loop \(task T-SHELL/);
+    assert.match(peerOpened.appendSystemPrompt?.[0] ?? "", /You are an independent engineer \(task T-SHELL/);
     assert.match(peerOpened.appendSystemPrompt?.[0] ?? "", /docs/);
     assert.match(peerOpened.appendSystemPrompt?.[0] ?? "", /shell-live-skill/);
 

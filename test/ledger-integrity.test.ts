@@ -290,11 +290,13 @@ test("CLI and copied-alone MCP status share current-epoch review and acceptance 
     const cli = spawnSync(process.execPath, [join(repoRoot, "plugin/bin/factory.mjs"), "status", "--home", dir], { encoding: "utf8" });
     assert.equal(cli.status, 0, cli.stderr);
     const text = mcpStatus(stateDir, bridge).result.content[0].text;
-    assert.equal(cli.stdout.trim(), text);
-    assert.equal(text.split("\n").length, 1, "schema and unbound global facts cannot create Task rows");
-    assert.match(text, new RegExp(`review=${outcome ?? "pending"}(?: |$)`));
-    assert.match(text, /owner-eligible=1(?: |$)/);
-    assert.match(text, /lead-eligible=1(?: |$)/);
+    const [taskSection, healthSection] = text.split("\n\nLoop Health:\n");
+    assert.equal(cli.stdout.trim(), taskSection);
+    assert.ok(healthSection !== undefined, "supervisor_read_ledger appends the Loop Health block");
+    assert.equal(taskSection.split("\n").length, 1, "schema and unbound global facts cannot create Task rows");
+    assert.match(taskSection, new RegExp(`review=${outcome ?? "pending"}(?: |$)`));
+    assert.match(taskSection, /owner-eligible=1(?: |$)/);
+    assert.match(taskSection, /lead-eligible=1(?: |$)/);
   }
 });
 
