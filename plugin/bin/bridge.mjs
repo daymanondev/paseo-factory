@@ -1954,35 +1954,6 @@ return module.exports;
  * Project slug — `factory status`'s aggregate law — falling back to the legacy
  * root ledger only when no per-Project ledger holds events.
  */
-function aggregateLoopHealth(eventStreams) {
-  const totals = {
-    totalTasks: 0,
-    peerAskedCount: 0,
-    contextCeilingCount: 0,
-    silentContextCeilingCount: 0,
-    genuineUnknownGaps: 0,
-    redAttempts: 0,
-    recontracts: 0,
-  };
-  let tasksWithAsk = 0;
-  for (const events of eventStreams) {
-    if (events.length === 0) continue;
-    const h = taskStatusPolicy.computeLoopHealth(events);
-    totals.totalTasks += h.totalTasks;
-    totals.peerAskedCount += h.peerAskedCount;
-    totals.contextCeilingCount += h.contextCeilingCount;
-    totals.silentContextCeilingCount += h.silentContextCeilingCount;
-    totals.genuineUnknownGaps += h.genuineUnknownGaps;
-    totals.redAttempts += h.redAttempts;
-    totals.recontracts += h.recontracts;
-    tasksWithAsk += Math.round(h.peerAskRate * h.totalTasks);
-  }
-  return {
-    ...totals,
-    peerAskRate: totals.totalTasks === 0 ? 0 : tasksWithAsk / totals.totalTasks,
-  };
-}
-
 function formatLoopHealthBlock(health) {
   const lines = taskStatusPolicy.formatLoopHealthLines(health);
   return Array.isArray(lines) && lines.length > 0 ? lines : [];
@@ -2017,9 +1988,11 @@ function formatFactoryStatus(stateDir, workspaceFilter, options = {}) {
   const streams = allStreams.filter((stream) => stream.lines.length > 0);
   if (streams.length > 0) {
     const base = streams.flatMap((stream) => stream.lines.map((line) => `[${stream.slug}] ${line}`)).join("\n");
+    const streamsForHealth =
+      workspaceFilter === undefined ? allStreams.filter((stream) => stream.events.length > 0) : streams;
     return appendLoopHealth(
       base,
-      aggregateLoopHealth(allStreams.filter((stream) => stream.events.length > 0).map((stream) => stream.events)),
+      taskStatusPolicy.computeLoopHealthForStreams(streamsForHealth.map((stream) => stream.events)),
     );
   }
   if (scoped.length === 0) return `factory: no tasks yet (ledger: ${ledgerProject.resolveProjectLedger(stateDir, options).path})`;
