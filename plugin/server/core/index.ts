@@ -38,8 +38,10 @@ export type {
   WatchQuestion,
   WatchTimelineEntry,
 } from "./watch.ts";
-export { renderReport, renderHandbackReport, computeLoopHealth, formatLoopHealthLines } from "./report.ts";
-export type { HandbackReportInput, LoopHealth } from "./report.ts";
+export { renderReport, renderHandbackReport } from "./report.ts";
+export type { HandbackReportInput } from "./report.ts";
+export { computeLoopHealth, computeLoopHealthForStreams, formatLoopHealthLines } from "./loop-health.ts";
+export type { LoopHealth } from "./loop-health.ts";
 export { FactoryError } from "./errors.ts";
 export {
   DEFAULT_LANE,

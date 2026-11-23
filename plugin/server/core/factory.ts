@@ -1414,25 +1414,11 @@ export function createFactory(options: FactoryOptions): Factory {
         if (prepared.kind === "replayed") return { status: "replayed", outcome: prepared.outcome };
         if (prepared.kind === "handback") {
           const { contract, executionDir, rawSha, admittedHandoff, agent } = prepared;
-          let snapshotSha: string | undefined;
-          if (admittedHandoff.outcome === "partial") {
-            if (rawSha !== "") {
-              const resolved = await resolveClaimedCommit(executionDir, rawSha);
-              if (!resolved.ok) {
-                throw new FactoryError("invalid-claim", resolved.reason);
-              }
-              snapshotSha = resolved.full;
-            } else {
-              snapshotSha = headCommitSync(executionDir);
-            }
-          } else {
-            if (rawSha !== "") {
-              const resolved = await resolveClaimedCommit(executionDir, rawSha);
-              snapshotSha = resolved.ok ? resolved.full : headCommitSync(executionDir);
-            } else {
-              snapshotSha = headCommitSync(executionDir);
-            }
-          }
+          const snapshotSha = await resolveHandbackSnapshotSha(
+            executionDir,
+            rawSha,
+            admittedHandoff.outcome === "partial",
+          );
           const nextSeq = (ledger.events.at(-1)?.seq ?? 0) + 1;
           const reportPath = join(dataDir, `report-${input.task}-ask-${nextSeq}.md`);
           const snapshot = {
@@ -1935,7 +1921,7 @@ export function createFactory(options: FactoryOptions): Factory {
       // The structural one-per-task law: the dispatch line IS the spent
       // marker — a second ask names its own refusal, and a driver crash
       // re-reads this slice rather than trusting any socket.
-      if (!messageBearing && history.some((e) => e.event === "repoke_dispatched")) {
+      if (!messageBearing && history.some((e) => e.event === "repoke_dispatched" && e.kind !== "ruling")) {
         return refuse(
           "already-spent",
           "repoke:already-spent",
@@ -2721,4 +2707,24 @@ function truncateCleanly(text: string, maxChars: number): string {
     cut = cut.slice(0, -1);
   }
   return cut.trimEnd();
+}
+
+/**
+ * Resolves the Snapshot commit SHA for a non-`complete` handback claim:
+ * when `rawSha` is present and valid, uses it; if invalid and `requireValid`
+ * is true (`partial`), refuses with `invalid-claim`; otherwise falls back to
+ * the execution tree's current `HEAD`.
+ */
+async function resolveHandbackSnapshotSha(
+  executionDir: string,
+  rawSha: string,
+  requireValid: boolean,
+): Promise<string | undefined> {
+  const trimmed = rawSha.trim();
+  if (trimmed !== "") {
+    const resolved = await resolveClaimedCommit(executionDir, trimmed);
+    if (resolved.ok) return resolved.full;
+    if (requireValid) throw new FactoryError("invalid-claim", resolved.reason);
+  }
+  return headCommitSync(executionDir);
 }

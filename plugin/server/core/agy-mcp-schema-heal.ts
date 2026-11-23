@@ -3,13 +3,10 @@ import { lstatSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from "nod
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { catalog } from "./mcp/catalog.ts";
+import { LEGACY_ROLE_TOOL_ALIASES } from "./mcp/shared.ts";
 import type { ToolDefinition } from "./mcp/shared.ts";
 
 const ALLOWED_ROLES = new Set(["supervisor", "lead", "agent"]);
-const LEGACY_ROLE_TOOL_ALLOWLIST: Record<string, readonly string[]> = {
-  lead: ["lead_repoke_agent"],
-  agent: ["agent_escalate_blocker"],
-};
 const AGY_APP_DATA_NAMES = ["antigravity", "antigravity-cli"] as const;
 const AGY_SERVER_DIR_NAMES = ["paseo-factory_paseo_factory", "paseo_factory"] as const;
 
@@ -121,7 +118,7 @@ function resolveHealTarget(targetPath: string): HealTarget | null {
 function resolveAllowedToolForSeat(seat: string, toolName: string): ToolDefinition | null {
   if (!ALLOWED_ROLES.has(seat)) return null;
   const allowedTools = catalog.roles[seat];
-  const legacyTools = LEGACY_ROLE_TOOL_ALLOWLIST[seat] ?? [];
+  const legacyTools = LEGACY_ROLE_TOOL_ALIASES[seat] ?? [];
   if ((!Array.isArray(allowedTools) || !allowedTools.includes(toolName)) && !legacyTools.includes(toolName)) {
     return null;
   }

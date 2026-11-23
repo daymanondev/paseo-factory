@@ -422,6 +422,11 @@ export const sharedRoles = {
   agent: ["agent_claim", "agent_ask"],
   unbound: ["factory_dispatch_supervisor", "factory_status"],
 };
+
+export const LEGACY_ROLE_TOOL_ALIASES: Record<string, readonly string[]> = {
+  lead: ["lead_repoke_agent"],
+  agent: ["agent_escalate_blocker"],
+};
 sharedTools.supervisor_read_ledger = { ...sharedTools.factory_status, name: "supervisor_read_ledger" };
 sharedTools.lead_read_ledger = { ...sharedTools.factory_status, name: "lead_read_ledger" };
 sharedTools.lead_record_store_note = { ...sharedTools.supervisor_record_store_note, name: "lead_record_store_note" };

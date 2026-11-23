@@ -1721,6 +1721,7 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 var task_status_exports = {};
 __export(task_status_exports, {
   computeLoopHealth: () => computeLoopHealth,
+  computeLoopHealthForStreams: () => computeLoopHealthForStreams,
   formatLoopHealthLines: () => formatLoopHealthLines,
   taskStatusLines: () => taskStatusLines
 });
@@ -1762,18 +1763,19 @@ function projectTask(events, task) {
   return { currentAttempt, verdict, task, history, contract, epochSeq, epochId, epoch, attempts, acceptance, settled, closed: closure === void 0 ? void 0 : { seq: closure.seq, at: closure.ts, reason: closure.reason, by: closure.closed_by ?? "owner" }, pendingLanding: acceptance?.landing === "pending-conflict", needsHuman, needs: needsHuman ? needs : void 0, status, maxAttempt: numbers.at(-1) ?? 0, inFlightAttempt: attempts.find((attempt) => attempt.open)?.attempt };
 }
 
-// src/constants.ts
-var DEFAULT_CONTRACT_TIMEOUT_SECONDS = 900;
-var DEFAULT_GATE_TIMEOUT_MS = DEFAULT_CONTRACT_TIMEOUT_SECONDS * 1e3;
-var GATE_OUTPUT_CAP_BYTES = 2 * 1024 * 1024;
-
-// src/report.ts
-var ADR0068_GATE_QUEUE_BOILERPLATE = /(?:gate\s*queue|daemon\s+gate(?:\s*queue)?)/i;
-var ADR0068_DEFERRAL_HINT = /(?:defer(?:red|ring|ral)?|async(?:hronous(?:ly)?)?|pending|not\s+pre-?run|on\s+claim|during\s+tdd|skipped\s+(?:local|pre-?claim|full\s+(?:cumulative\s+)?gate)|runs?\s+(?:async|on\s+claim|in\s+daemon))/i;
+// src/loop-health.ts
+var ADR0068_GATE_QUEUE_BOILERPLATE = /(?:gate\s*queue|daemon\s+gate(?:\s*queue)?|automated\s+verification|(?:full\s+(?:cumulative\s+)?|cumulative\s+)gate)/i;
+var ADR0068_DEFERRAL_HINT = /(?:defer(?:red|ring|ral)?|async(?:hronous(?:ly)?)?|pending|not\s+pre-?run|on\s+claim|during\s+tdd|skipped\s+(?:local(?:ly)?|pre-?claim|(?:full\s+(?:cumulative\s+)?|cumulative\s+)gate)|runs?\s+(?:async(?:hronous(?:ly)?)?|on\s+claim|in\s+daemon|after\s+claim))/i;
 var NEGATED_GAP_PHRASE = /\b(?:no|none|nothing|not|without|zero)\s+(?:known\s+|remaining\s+|other\s+)?(?:checks?\s+|tests?\s+)?(?:skipped|failed|blocked|missing|contradictions?)\b/gi;
+var NON_SKIPPED_GAP_KEYWORD = /\b(?:cannot|can't|missing|contradict(?:s|ed|ing|ion)?|out\s+of\s+scope|failed|blocked)\b/i;
 var GENUINE_GAP_KEYWORD = /\b(?:cannot|can't|missing|skipped|contradict(?:s|ed|ing|ion)?|out\s+of\s+scope|failed|blocked)\b/i;
 function hasGenuineUnknownGap(unknowns) {
-  const remainingLines = unknowns.split(/\r?\n/).map((line) => line.trim()).filter((line) => line !== "").filter((line) => !(ADR0068_GATE_QUEUE_BOILERPLATE.test(line) && ADR0068_DEFERRAL_HINT.test(line)));
+  const remainingLines = unknowns.split(/\r?\n/).map((line) => line.trim()).filter((line) => line !== "").filter((line) => {
+    if (!(ADR0068_GATE_QUEUE_BOILERPLATE.test(line) && ADR0068_DEFERRAL_HINT.test(line))) {
+      return true;
+    }
+    return NON_SKIPPED_GAP_KEYWORD.test(line.replace(NEGATED_GAP_PHRASE, " "));
+  });
   if (remainingLines.length === 0) return false;
   const cleaned = remainingLines.join("\n").replace(NEGATED_GAP_PHRASE, " ");
   return GENUINE_GAP_KEYWORD.test(cleaned);
@@ -1824,6 +1826,37 @@ function computeLoopHealth(events) {
     if (hasGenuineUnknownGap(handoff.unknowns)) {
       genuineUnknownGaps += 1;
     }
+  }
+  return {
+    totalTasks,
+    peerAskedCount,
+    peerAskRate: totalTasks === 0 ? 0 : contractedTasksWithAsk / totalTasks,
+    contextCeilingCount,
+    silentContextCeilingCount,
+    genuineUnknownGaps,
+    redAttempts,
+    recontracts
+  };
+}
+function computeLoopHealthForStreams(streams) {
+  let totalTasks = 0;
+  let peerAskedCount = 0;
+  let contractedTasksWithAsk = 0;
+  let contextCeilingCount = 0;
+  let silentContextCeilingCount = 0;
+  let genuineUnknownGaps = 0;
+  let redAttempts = 0;
+  let recontracts = 0;
+  for (const stream of streams) {
+    const health = computeLoopHealth(stream);
+    totalTasks += health.totalTasks;
+    peerAskedCount += health.peerAskedCount;
+    contractedTasksWithAsk += Math.round(health.peerAskRate * health.totalTasks);
+    contextCeilingCount += health.contextCeilingCount;
+    silentContextCeilingCount += health.silentContextCeilingCount;
+    genuineUnknownGaps += health.genuineUnknownGaps;
+    redAttempts += health.redAttempts;
+    recontracts += health.recontracts;
   }
   return {
     totalTasks,
@@ -1905,6 +1938,7 @@ function taskStatusLines(events, workspaceFilter, options) {
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
   computeLoopHealth,
+  computeLoopHealthForStreams,
   formatLoopHealthLines,
   taskStatusLines
 });
