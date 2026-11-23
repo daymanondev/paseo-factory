@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { computeLoopHealth, formatLoopHealthLines } from "../src/index.ts";
+import { computeLoopHealth, computeLoopHealthForStreams, formatLoopHealthLines } from "../src/index.ts";
+import type { LoopHealth } from "../src/index.ts";
+import { computeLoopHealthForStreams as taskStatusComputeLoopHealthForStreams } from "../src/task-status.ts";
 import type { LedgerEvent } from "../src/events.ts";
 
 const ts = "2026-11-23T12:00:00.000Z";
@@ -184,4 +186,109 @@ test("computeLoopHealth: genuineUnknownGaps catches cannot, contradict, out of s
   const health = computeLoopHealth(events);
   assert.equal(health.totalTasks, 5);
   assert.equal(health.genuineUnknownGaps, 4);
+});
+
+test("computeLoopHealth: filters v0.21.0 topology-blind automated verification boilerplate without suppressing real failure reports", () => {
+  const mkClaim = (seq: number, task: string, unknowns: string): LedgerEvent[] => [
+    contract(seq, task),
+    {
+      seq: seq + 1,
+      ts,
+      event: "claim_reported",
+      task,
+      attempt: 1,
+      sha: "e".repeat(40),
+      handoff: { outcome: "complete", scope: "s", verification: "v", unknowns },
+    },
+  ];
+  const events: LedgerEvent[] = [
+    ...mkClaim(1, "B1", "Only fast slice tests ran; automated verification runs asynchronously."),
+    ...mkClaim(3, "B2", "Skipped local full cumulative gate during TDD; deferred."),
+    ...mkClaim(5, "B3", "Full gate not pre-run; automated verification runs asynchronously."),
+    ...mkClaim(7, "B4", "Cumulative gate deferred; no checks failed."),
+    ...mkClaim(9, "F1", "automated verification failed"),
+    ...mkClaim(11, "F2", "gate failed"),
+    ...mkClaim(13, "F3", "automated verification failed while running asynchronously"),
+    ...mkClaim(15, "F4", "full gate failed; deferred to follow-up"),
+  ];
+  const health = computeLoopHealth(events);
+  assert.equal(health.totalTasks, 8);
+  assert.equal(health.genuineUnknownGaps, 4);
+});
+
+test("computeLoopHealthForStreams: aggregates per-project streams without colliding identical task IDs or losing precision", () => {
+  assert.equal(taskStatusComputeLoopHealthForStreams, computeLoopHealthForStreams);
+
+  const empty: LoopHealth = computeLoopHealthForStreams([]);
+  assert.equal(empty.totalTasks, 0);
+  assert.equal(empty.peerAskRate, 0);
+
+  const streamA: LedgerEvent[] = [
+    contract(1, "T-01"),
+    { seq: 2, ts, event: "peer_asked", task: "T-01", kind: "clarify", summary: "clarify API", source: "agent_ask" },
+    {
+      seq: 3,
+      ts,
+      event: "claim_reported",
+      task: "T-01",
+      attempt: 1,
+      sha: "a".repeat(40),
+      handoff: {
+        outcome: "complete",
+        scope: "project A T-01",
+        verification: "slice green",
+        unknowns: "Only fast slice tests ran; automated verification runs asynchronously.",
+      },
+    },
+  ];
+  const streamB: LedgerEvent[] = [
+    contract(1, "T-01"),
+    { seq: 2, ts, event: "gate_finished", task: "T-01", attempt: 1, exit: 1, verdict: "red", note: "failed" },
+    {
+      seq: 3,
+      ts,
+      event: "claim_reported",
+      task: "T-01",
+      attempt: 1,
+      sha: "b".repeat(40),
+      handoff: {
+        outcome: "complete",
+        scope: "project B T-01",
+        verification: "slice green",
+        unknowns: "automated verification failed",
+      },
+    },
+  ];
+
+  const aggregated = computeLoopHealthForStreams([streamA, streamB, []]);
+  assert.deepEqual(aggregated, {
+    totalTasks: 2,
+    peerAskedCount: 1,
+    peerAskRate: 0.5,
+    contextCeilingCount: 0,
+    silentContextCeilingCount: 0,
+    genuineUnknownGaps: 1,
+    redAttempts: 1,
+    recontracts: 0,
+  });
+
+  // Verify precision when aggregating unequal task counts (1/3 and 2/4 -> 3/7)
+  const streamC: LedgerEvent[] = [
+    contract(1, "C1"),
+    { seq: 2, ts, event: "peer_asked", task: "C1", kind: "clarify", summary: "q1", source: "agent_ask" },
+    contract(3, "C2"),
+    contract(4, "C3"),
+  ];
+  const streamD: LedgerEvent[] = [
+    contract(1, "D1"),
+    { seq: 2, ts, event: "peer_asked", task: "D1", kind: "blocked", summary: "q2", source: "agent_ask" },
+    contract(3, "D2"),
+    { seq: 4, ts, event: "peer_asked", task: "D2", kind: "dependency", summary: "q3", source: "agent_ask" },
+    contract(5, "D3"),
+    contract(6, "D4"),
+  ];
+  const weighted = computeLoopHealthForStreams([streamC, streamD]);
+  assert.equal(weighted.totalTasks, 7);
+  assert.equal(weighted.peerAskedCount, 3);
+  assert.equal(weighted.peerAskRate, 3 / 7);
 });
