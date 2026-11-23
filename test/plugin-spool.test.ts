@@ -522,12 +522,20 @@ test("a message-bearing repoke delivers the Lead's ruling into the live Peer ses
     "the ruling turn persists kind=ruling and message on the ledger line",
   );
 
-  // The message-less cap stays verbatim: with the spend marker present, a bare
-  // repoke is refused already-spent (criterion 3).
+  // ADR 0069: message-bearing ruling repokes do NOT spend the 1-shot
+  // denial-stall cap — the first bare repoke succeeds (`kind: "denial-stall"`),
+  // and only the second bare repoke is refused `already-spent`.
   const bare = await handleSpoolRequest(factory, { id: "mrp-4", kind: "repoke", task: "T-RP", agent: "ag-live", seat: "lead" }, deps);
-  assert.equal(bare.ok, false);
-  assert.equal(bare.code, "already-spent");
-  assert.equal(fake.sent.length, 3, "a refused repoke sends nothing");
+  assert.equal(bare.ok, true, JSON.stringify(bare));
+  assert.equal(fake.sent.length, 4, "first bare repoke succeeds after ruling turns");
+  const afterFirstBare = factory.ledger.eventsFor("T-RP").filter((e) => e.event === "repoke_dispatched");
+  assert.equal(afterFirstBare.length, 4);
+  assert.equal(afterFirstBare[3]?.kind, "denial-stall");
+
+  const secondBare = await handleSpoolRequest(factory, { id: "mrp-5", kind: "repoke", task: "T-RP", agent: "ag-live", seat: "lead" }, deps);
+  assert.equal(secondBare.ok, false);
+  assert.equal(secondBare.code, "already-spent");
+  assert.equal(fake.sent.length, 4, "a refused repoke sends nothing");
 });
 
 test("a message-less repoke (omitted or empty) sends today's fixed continuation footer under the Active Contract Snapshot and keeps the one-per-task spend (ticket 02; ticket 03 adds the snapshot)", async (t) => {
@@ -2932,7 +2940,20 @@ test("peer_ask atomicity: validates preconditions first, leaves zero peer_asked 
   assert.equal(failedMail.ok, false);
   assert.equal(factory.ledger.eventsFor("T-FAIL").some((e) => e.event === "peer_asked"), false, "no orphaned peer_asked when peerMail rejects");
 
-  // 6. Real leadMail.dispatchLead records peer_asked inside projectLane BEFORE pumpProjectLead wakes Lead.
+  // 6. If recordPeerAsk throws inside beforePump, mailbox.jsonl stays empty too (runs before queueMail).
+  const throwingFactory = Object.create(factory) as typeof factory;
+  throwingFactory.recordPeerAsk = () => {
+    throw new Error("ledger write failed");
+  };
+  const throwingAsk = await handleSpoolRequest(
+    throwingFactory,
+    { id: "pa-throw", kind: "peer_ask", task: "T-FAIL", peerAskKind: "reopen_premise", layer: "API", summary: "Throws on write", source: "agent_ask", agent: "peer-1", seat: "agent" },
+    { leadDispatch: leadMail.dispatchLead, daemon: fake.daemon },
+  );
+  assert.equal(throwingAsk.ok, false);
+  assert.equal(readMailbox(stateDir, slug).length, 0, "mailbox.jsonl is untouched if recordPeerAsk throws before queueMail");
+
+  // 7. Real leadMail.dispatchLead records peer_asked inside projectLane BEFORE pumpProjectLead wakes Lead.
   let peerAskedPresentAtLeadSend = false;
   const racingDaemon: SurfaceDaemonApi = {
     ...fake.daemon,
@@ -3101,4 +3122,30 @@ test("spawn Execute task enrichment places Reopen if and PEER_PREMISE_CHECK_REMI
   const prompt2 = fake.created[1]?.prompt ?? "";
   assert.ok(prompt2.indexOf("Reopen if: Missing prerequisite") > prompt2.indexOf("Execute task T-ENR-2:"));
   assert.equal(prompt2.includes(PEER_PREMISE_CHECK_REMINDER), false, "does not duplicate reminder when prompt already includes agent_ask");
+
+  // When prompt already includes Reopen if:, it is NOT duplicated either.
+  factory.setContract({
+    task: "T-ENR-3",
+    workspace: projectRoot,
+    gate: "",
+    disposition: "scout",
+    description: "Scout feature Z",
+    reopenConditions: ["Missing prerequisite"],
+  });
+  const r3 = await handleSpoolRequest(
+    factory,
+    {
+      id: "enr-3",
+      kind: "spawn",
+      task: "T-ENR-3",
+      provider: "pi/zai/glm-5.3",
+      arity: 1,
+      prompt: `Execute task T-ENR-3: scout carefully.\n\nReopen if: Missing prerequisite\n\n${PEER_PREMISE_CHECK_REMINDER}`,
+      seat: "lead",
+    },
+    { daemon: fake.daemon },
+  );
+  assert.equal(r3.ok, true, JSON.stringify(r3));
+  const prompt3 = fake.created[2]?.prompt ?? "";
+  assert.equal(prompt3.match(/Reopen if:/g)?.length ?? 0, 1, "does not duplicate Reopen if: when already present in prompt");
 });

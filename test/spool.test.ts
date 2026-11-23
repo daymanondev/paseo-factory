@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createFactory } from "../plugin/server/core/factory.ts";
+import { PEER_PREMISE_CHECK_REMINDER } from "../plugin/server/core/disposition-prompt.ts";
 import { CorrelationRegistry } from "../plugin/server/core/correlations.ts";
 import { resolveProject } from "../plugin/server/core/project.ts";
 import { saveLanes } from "../src/lanes.ts";
@@ -1789,12 +1790,12 @@ test("spawn prepends the Skill discipline hint on a skills-less Contract (expo p
   assert.match(prompts[3]!, /Project Peer skills allowed:/);
   assert.ok(!prompts[3]!.includes("expo-router"), "explicit Off overrides filesystem auto-detection");
 
-  // (3) explicit skills (User Story 9): the unchanged Required-skills line,
-  // and no Skill-discipline hint.
+  // (3) explicit skills (User Story 9): the unchanged Required-skills line
+  // with PEER_PREMISE_CHECK_REMINDER appended at the end, and no Skill-discipline hint.
   assert.equal(
     prompts[2]!.split("\n\nProject Peer skills allowed:")[0],
-    "Required skills to open first: tdd (read ~/.agents/skills/<skill>/SKILL.md or .agents/skills/<skill>/SKILL.md before starting)\n\nExecute task T-HINT-EXPLICIT: make it green.",
-    "explicit contract.skills preserves the Required-skills line unchanged",
+    `Required skills to open first: tdd (read ~/.agents/skills/<skill>/SKILL.md or .agents/skills/<skill>/SKILL.md before starting)\n\nExecute task T-HINT-EXPLICIT: make it green.\n\n${PEER_PREMISE_CHECK_REMINDER}`,
+    "explicit contract.skills preserves the Required-skills line with premise-check reminder appended",
   );
   assert.ok(!prompts[2]!.includes("Skill discipline"), "no hint alongside explicit skills");
 });

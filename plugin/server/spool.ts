@@ -3369,7 +3369,7 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
           }
           enriched.push(effectivePrompt);
           const reopenBlock = formatReopenIfBlock(contract.reopenConditions);
-          if (reopenBlock !== "") {
+          if (reopenBlock !== "" && !effectivePrompt.includes(reopenBlock) && !effectivePrompt.includes("Reopen if:")) {
             enriched.push(reopenBlock);
           }
           if (!effectivePrompt.includes(PEER_PREMISE_CHECK_REMINDER) && !effectivePrompt.includes("agent_ask")) {

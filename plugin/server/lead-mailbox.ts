@@ -1708,6 +1708,9 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
           return { ok: false, code: "project-rotated", error: "the Project's seats were rotated while this dispatch was in flight — send it again" };
         }
         if (!ensured.ok) return ensured;
+        if (beforePump !== undefined) {
+          await beforePump();
+        }
         const from = request.from ?? "owner";
         if (request.release !== undefined && from !== "peer") {
           setReleaseRequest(deps.stateDir, slug, {
@@ -1734,9 +1737,6 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
         // record through `lead_needs_human`).
         const kind = from === "peer" ? "peer_challenge" : "directive";
         const queued = queueMail(slug, { ...(from === "peer" ? { to: "lead" as const } : {}), from, kind, ...(from === "peer" && blockerTask !== undefined ? { task: blockerTask } : {}), text: request.message });
-        if (beforePump !== undefined) {
-          await beforePump();
-        }
         return { ok: true, agentId: ensured.agentId, mailId: queued.mailId };
       },
     );
