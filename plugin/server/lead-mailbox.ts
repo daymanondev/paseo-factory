@@ -78,7 +78,7 @@ import type { Factory } from "./core/factory.ts";
 import { readCorrelations } from "./core/correlations.ts";
 import { MAX_ATTEMPTS } from "./core/events.ts";
 import type { LedgerEvent } from "./core/events.ts";
-import { hasUnansweredPeerAsk } from "./core/task-state.ts";
+import { hasUnansweredPeerAsk, projectTask } from "./core/task-state.ts";
 import { ensureProjectRegistered, listProjectRegistrations, projectStateDir, projectNotebookPath, readProjectRegistration, resolveProject, writeProjectRegistration } from "./core/project.ts";
 import type { LeadRotationState, ProjectRegistration } from "./core/project.ts";
 import { loadLanes, saveLanes } from "./core/lanes.ts";
@@ -99,7 +99,7 @@ import { boundTaskPeers, peerIsRunning } from "./task-peers.ts";
 import { driverWavesInFlight, projectEventsOf as sharedProjectEventsOf, projectFactoryOf, projectPeersInFlight, projectStreamOf as sharedProjectStreamOf, taskFactoryOf as sharedTaskFactoryOf, taskHasSettledPeerOutcome, tasksWithOpenGate } from "./peer-in-flight.ts";
 import { foldTasks, renderLedgerLine } from "./view.ts";
 import type { TaskView } from "../shared/view.ts";
-import { normalizeLanesWithDaemon } from "./spool.ts";
+import { normalizeLanesWithDaemon, readBeforeLeadPumpHook } from "./spool.ts";
 import type {
   SpoolLeadDispatchRequest,
   SpoolReply,
@@ -1591,8 +1591,16 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     // A Peer context handoff owns this turn boundary (its extraction prompt or successor).
     const peerHandoffState = readHandoffProgress(deps.stateDir, slug, `peer:${task}`)?.state;
     if (peerHandoffState !== undefined && peerHandoffState !== "done" && peerHandoffState !== "failed") return false;
-    // ADR 0069 + ADR 0058: preserve quiet hold while an unanswered peer_asked awaits ruling.
-    if (hasUnansweredPeerAsk(events, task)) return false;
+    // ADR 0069 + ADR 0058: preserve quiet hold while an unanswered peer_asked awaits ruling,
+    // unless a newer spawn_dispatched in this epoch dispatched a replacement Peer.
+    if (hasUnansweredPeerAsk(events, task)) {
+      const taskEpoch = projectTask(events, task).epoch;
+      const latestAsk = taskEpoch.findLast((evt) => evt.event === "peer_asked");
+      const hasNewerSpawn =
+        latestAsk !== undefined &&
+        taskEpoch.some((evt) => evt.event === "spawn_dispatched" && evt.seq > latestAsk.seq);
+      if (!hasNewerSpawn) return false;
+    }
     const last = events.findLast((evt) => "task" in evt && evt.task === task);
     if (last === undefined || last.event === "permit_denied" || tasksWithOpenGate(events).has(task)) return false;
     let escalated = false;
@@ -1677,6 +1685,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     if (!target.ok) return target;
     const { root, slug } = target;
     if (request.from !== "peer" && !options?.existingDesignSnapshot) await prepareOpenDesignDispatch({ state: deps.stateDir, slug, root, requestId: request.id, userHome: deps.home ? resolveVaultUserHome(deps.home) : undefined });
+    const beforePump = readBeforeLeadPumpHook(request);
     // The auto-ensure and the queue land as ONE lane job — the single-writer
     // law this module's header claims: two concurrent dispatches serialize,
     // so the second sees the first's Lead and never double-creates the seat,
@@ -1725,6 +1734,9 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
         // record through `lead_needs_human`).
         const kind = from === "peer" ? "peer_challenge" : "directive";
         const queued = queueMail(slug, { ...(from === "peer" ? { to: "lead" as const } : {}), from, kind, ...(from === "peer" && blockerTask !== undefined ? { task: blockerTask } : {}), text: request.message });
+        if (beforePump !== undefined) {
+          await beforePump();
+        }
         return { ok: true, agentId: ensured.agentId, mailId: queued.mailId };
       },
     );
@@ -2470,11 +2482,11 @@ function renderLedgerDigest(events: readonly LedgerEvent[]): string {
  *   2. Correlation token Registry Match: the latest correlation record in
  *      readCorrelations(stateDir) for { role: "agent", projectSlug: slug, task: task.task }
  *      carrying a non-empty agentId within the current Contract epoch.
- *   3. Ledger Event Match: the latest claim_reported, meter_written, or
- *      repoke_dispatched event in the Task's current Contract epoch carrying a
- *      non-empty agent identifier.
+ *   3. Ledger Event Match: the latest gate_queued, claim_reported, peer_asked,
+ *      meter_written, or repoke_dispatched event in the Task's current Contract
+ *      epoch carrying a non-empty agent identifier.
  */
-function agentOfTask(
+export function agentOfTask(
   events: readonly LedgerEvent[],
   context?: {
     stateDir: string;
@@ -2493,7 +2505,7 @@ function agentOfTask(
       contractSetCountByTask.set(evt.task, (contractSetCountByTask.get(evt.task) ?? 0) + 1);
       continue;
     }
-    if (evt.event !== "gate_queued" && evt.event !== "claim_reported" && evt.event !== "meter_written" && evt.event !== "repoke_dispatched") continue;
+    if (evt.event !== "gate_queued" && evt.event !== "claim_reported" && evt.event !== "peer_asked" && evt.event !== "meter_written" && evt.event !== "repoke_dispatched") continue;
     if (typeof evt.agent === "string" && evt.agent !== "") ledgerAgents.set(evt.task, evt.agent);
   }
   if (context === undefined) return ledgerAgents;

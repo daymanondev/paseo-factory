@@ -17,6 +17,8 @@ import type { VaultRunner, VaultRunnerCall } from "../src/vault-transport.ts";
 import { readProjectRegistration, writeProjectRegistration } from "../plugin/server/projects.ts";
 import { createSurfaceHandlers } from "../plugin/server/surface-rpc.ts";
 import type { SurfaceAgentSnapshot, SurfaceDaemonApi } from "../plugin/server/surface-rpc.ts";
+import { createGateQueue } from "../plugin/server/gate-queue.ts";
+import { PEER_PREMISE_CHECK_REMINDER } from "../plugin/server/core/disposition-prompt.ts";
 import { handleSpoolRequest, parseSpoolRequest, resolvePeerDispatchLane, spoolRootFor, startSpool } from "../plugin/server/spool.ts";
 import { parseHandoffFile } from "../plugin/server/handoff-text.ts";
 import { createLeadMailRuntime, LEAD_ROTATE_TOKENS, readLeadContextTokens } from "../plugin/server/lead-mailbox.ts";
@@ -2846,4 +2848,257 @@ test("spool kind release enforces preconditions, seat-memory vs product commits,
   // Reset origin main back to noClSha (strictly behind v2Sha) so push-branch runs and the hook rejects
   execFileSync("git", ["update-ref", "refs/heads/main", noClSha], { cwd: bareOrigin });
   assert.equal(await failCode("0.2.0"), "push-rejected");
+});
+
+// ---- ADR 0069 peer_ask atomicity, settleClaimHandback failures, and Execute task enrichment ----
+
+test("peer_ask atomicity: validates preconditions first, leaves zero peer_asked on dispatch failure, and records peer_asked before waking Lead", async (t) => {
+  const { stateDir, slug, projectRoot, factory, fake, leadMail } = makeSpooledSurface(t, [
+    { id: "lead-atom", status: "idle", labels: { seat: "lead", project: "placeholder" } },
+  ]);
+  fake.agents[0]!.labels = { seat: "lead", project: slug };
+  writeProjectRegistration(stateDir, slug, { root: projectRoot, lead: "lead-atom" });
+
+  let dispatchCalls = 0;
+  const spyDispatch: import("../plugin/server/spool.ts").LeadDispatchHandler = async (req) => {
+    dispatchCalls += 1;
+    return { id: req.id, ok: false, code: "lead-unavailable", message: "lead down" };
+  };
+
+  // 1. Unknown task refuses before touching Ledger or mail.
+  const unknown = await handleSpoolRequest(
+    factory,
+    { id: "pa-unk", kind: "peer_ask", task: "T-MISSING", peerAskKind: "clarify", summary: "Missing?", source: "agent_ask", seat: "agent" },
+    { leadDispatch: spyDispatch },
+  );
+  assert.equal(unknown.ok, false);
+  if (!unknown.ok) assert.equal(unknown.code, "unknown-task");
+  assert.equal(dispatchCalls, 0);
+
+  // 2. Accepted task refuses before touching Ledger or mail.
+  factory.setContract({ task: "T-ACC", workspace: projectRoot, gate: "true", artifact: "README.md" });
+  const head = execSync("git rev-parse HEAD", { cwd: projectRoot, encoding: "utf8" }).trim();
+  factory.ledger.append({ event: "claim_reported", task: "T-ACC", attempt: 1, sha: head });
+  factory.ledger.append({ event: "gate_started", task: "T-ACC", attempt: 1, cmd: "true" });
+  factory.ledger.append({ event: "gate_finished", task: "T-ACC", attempt: 1, exit: 0, verdict: "green", note: "ok", sha: head });
+  factory.ledger.append({ event: "report_written", task: "T-ACC", attempt: 1, path: "report-T-ACC-1.md" });
+  await factory.accept({ task: "T-ACC", attempt: 1, accepted_by: "owner" });
+  const accepted = await handleSpoolRequest(
+    factory,
+    { id: "pa-acc", kind: "peer_ask", task: "T-ACC", peerAskKind: "clarify", summary: "After accept", source: "agent_ask", seat: "agent" },
+    { leadDispatch: spyDispatch },
+  );
+  assert.equal(accepted.ok, false);
+  if (!accepted.ok) assert.equal(accepted.code, "already-accepted");
+  assert.equal(dispatchCalls, 0);
+  assert.equal(factory.ledger.eventsFor("T-ACC").some((e) => e.event === "peer_asked"), false);
+
+  // 3. Closed task refuses before touching Ledger or mail.
+  factory.setContract({ task: "T-CLS", workspace: projectRoot, gate: "true", artifact: "README.md" });
+  await factory.close({ task: "T-CLS", reason: "superseded", by: "owner", authority: "owner" });
+  const closed = await handleSpoolRequest(
+    factory,
+    { id: "pa-cls", kind: "peer_ask", task: "T-CLS", peerAskKind: "clarify", summary: "After close", source: "agent_ask", seat: "agent" },
+    { leadDispatch: spyDispatch },
+  );
+  assert.equal(closed.ok, false);
+  if (!closed.ok) assert.equal(closed.code, "already-closed");
+  assert.equal(dispatchCalls, 0);
+  assert.equal(factory.ledger.eventsFor("T-CLS").some((e) => e.event === "peer_asked"), false);
+
+  // 4. Failing leadDispatch leaves ZERO peer_asked in Ledger and zero mailbox items.
+  factory.setContract({ task: "T-FAIL", workspace: projectRoot, gate: "true", artifact: "README.md" });
+  const failedDispatch = await handleSpoolRequest(
+    factory,
+    { id: "pa-fail", kind: "peer_ask", task: "T-FAIL", peerAskKind: "reopen_premise", layer: "API", summary: "Broken API", source: "agent_ask", agent: "peer-1", seat: "agent" },
+    { leadDispatch: spyDispatch },
+  );
+  assert.equal(failedDispatch.ok, false);
+  if (!failedDispatch.ok) assert.equal(failedDispatch.code, "lead-unavailable");
+  assert.equal(dispatchCalls, 1);
+  assert.equal(factory.ledger.eventsFor("T-FAIL").some((e) => e.event === "peer_asked"), false, "no orphaned peer_asked when leadDispatch fails");
+  assert.equal(readMailbox(stateDir, slug).length, 0);
+
+  // 5. Failing peerMail (when leadDispatch is absent) leaves ZERO peer_asked in Ledger.
+  const failedMail = await handleSpoolRequest(
+    factory,
+    { id: "pa-mail-fail", kind: "peer_ask", task: "T-FAIL", peerAskKind: "clarify", summary: "Question", source: "agent_ask", seat: "agent" },
+    {
+      peerMail: async () => {
+        throw new Error("mailbox write failed");
+      },
+    },
+  );
+  assert.equal(failedMail.ok, false);
+  assert.equal(factory.ledger.eventsFor("T-FAIL").some((e) => e.event === "peer_asked"), false, "no orphaned peer_asked when peerMail rejects");
+
+  // 6. Real leadMail.dispatchLead records peer_asked inside projectLane BEFORE pumpProjectLead wakes Lead.
+  let peerAskedPresentAtLeadSend = false;
+  const racingDaemon: SurfaceDaemonApi = {
+    ...fake.daemon,
+    agents: {
+      ...fake.daemon.agents,
+      ref: (id: string) => ({
+        ...fake.daemon.agents.ref(id),
+        send: async (text: string) => {
+          peerAskedPresentAtLeadSend = factory.ledger.eventsFor("T-FAIL").some((e) => e.event === "peer_asked");
+          await fake.daemon.agents.ref(id).send(text);
+        },
+      }),
+    },
+  };
+  const racingMail = createLeadMailRuntime({
+    factory,
+    stateDir,
+    daemon: racingDaemon,
+    ensureLead: async () => ({ ok: true, agentId: "lead-atom", created: false, projectRoot, slug }),
+    retireLead: async () => ({ ok: true, agentId: "lead-atom" }),
+  });
+  t.after(() => racingMail.stop());
+  const okAsk = await handleSpoolRequest(
+    factory,
+    { id: "pa-ok", kind: "peer_ask", task: "T-FAIL", peerAskKind: "reopen_premise", layer: "API", summary: "Real API gap", source: "agent_ask", agent: "peer-1", seat: "agent" },
+    { leadDispatch: racingMail.dispatchLead, daemon: racingDaemon },
+  );
+  assert.equal(okAsk.ok, true, JSON.stringify(okAsk));
+  assert.equal(peerAskedPresentAtLeadSend, true, "peer_asked must be in Ledger before pumpProjectLead wakes Lead");
+  assert.equal(factory.ledger.eventsFor("T-FAIL").filter((e) => e.event === "peer_asked").length, 1, "recorded exactly once");
+  assert.ok(leadMail);
+});
+
+test("settleClaimHandback logs lead_dispatch failures, falls back to peerMail when provided, or returns failure without peerMail (gateQueue and direct paths)", async (t) => {
+  const { projectRoot, factory } = makeSpooledSurface(t);
+  factory.setContract({ task: "T-HB-FAIL", workspace: projectRoot, gate: "true", artifact: "README.md" });
+  const handoff = {
+    outcome: "reopen" as const,
+    scope: "inspected src/index.ts",
+    verification: "premise invalid",
+    unknowns: "missing export",
+  };
+  const failingDispatch: import("../plugin/server/spool.ts").LeadDispatchHandler = async (req) => ({
+    id: req.id,
+    ok: false,
+    code: "lead-dispatch-down",
+    message: "cannot reach lead",
+  });
+  const gateQueue = createGateQueue({ stateDir: factory.stateDir, factory });
+  t.after(() => gateQueue.stop());
+
+  // 1. gateQueue branch + failing leadDispatch + no peerMail -> logs failure and surfaces ok: false.
+  const logs1: string[] = [];
+  const noFallback = await handleSpoolRequest(
+    factory,
+    { id: "hb-fail-1", kind: "claim", task: "T-HB-FAIL", handoff, agent: "peer-1" },
+    {
+      gateQueue,
+      leadDispatch: failingDispatch,
+      onLog: (msg) => logs1.push(msg),
+    },
+  );
+  assert.equal(noFallback.ok, false);
+  if (!noFallback.ok) {
+    assert.equal(noFallback.code, "lead-dispatch-down");
+    assert.equal(noFallback.message, "cannot reach lead");
+  }
+  assert.ok(logs1.some((m) => m.includes("handback: lead_dispatch failed for T-HB-FAIL")), "logs lead_dispatch failure instead of swallowing");
+
+  // 2. non-gateQueue branch + failing leadDispatch + no peerMail -> identical failure surfacing.
+  const logs2: string[] = [];
+  const directNoFallback = await handleSpoolRequest(
+    factory,
+    { id: "hb-fail-2", kind: "claim", task: "T-HB-FAIL", handoff, agent: "peer-1" },
+    {
+      leadDispatch: failingDispatch,
+      onLog: (msg) => logs2.push(msg),
+    },
+  );
+  assert.equal(directNoFallback.ok, false);
+  if (!directNoFallback.ok) {
+    assert.equal(directNoFallback.code, "lead-dispatch-down");
+  }
+  assert.ok(logs2.some((m) => m.includes("handback: lead_dispatch failed for T-HB-FAIL")));
+
+  // 3. gateQueue branch + failing leadDispatch + peerMail fallback -> logs failure, dispatches peerMail with kind peer_challenge, returns ok: true.
+  const logs3: string[] = [];
+  const fallbackMails: Array<{ task: string; kind: string; text: string }> = [];
+  const withFallback = await handleSpoolRequest(
+    factory,
+    { id: "hb-fallback-1", kind: "claim", task: "T-HB-FAIL", handoff, agent: "peer-1" },
+    {
+      gateQueue,
+      leadDispatch: failingDispatch,
+      peerMail: async (input) => {
+        fallbackMails.push({ task: input.task, kind: input.kind, text: input.text });
+      },
+      onLog: (msg) => logs3.push(msg),
+    },
+  );
+  assert.equal(withFallback.ok, true, JSON.stringify(withFallback));
+  assert.equal(withFallback.status, "handback");
+  assert.ok(logs3.some((m) => m.includes("handback: lead_dispatch failed for T-HB-FAIL")));
+  assert.equal(fallbackMails.length, 1);
+  assert.equal(fallbackMails[0]?.kind, "peer_challenge");
+  assert.match(fallbackMails[0]?.text ?? "", /^\[Peer REOPEN_PREMISE on T-HB-FAIL\]/);
+});
+
+test("spawn Execute task enrichment places Reopen if and PEER_PREMISE_CHECK_REMINDER at the end without duplicating when agent_ask is already present", async (t) => {
+  const { projectRoot, factory, fake } = makeSpooledSurface(t);
+  factory.setContract({
+    task: "T-ENR-1",
+    workspace: projectRoot,
+    gate: "true",
+    artifact: "README.md",
+    description: "Build feature X",
+    scope: ["src/"],
+    skills: ["tdd"],
+    reopenConditions: ["src/foo.ts is missing", "gate fails on clean HEAD"],
+  });
+
+  const r1 = await handleSpoolRequest(
+    factory,
+    {
+      id: "enr-1",
+      kind: "spawn",
+      task: "T-ENR-1",
+      provider: "pi/zai/glm-5.3",
+      arity: 1,
+      prompt: "Execute task T-ENR-1: build feature X and call agent_claim.",
+      seat: "lead",
+    },
+    { daemon: fake.daemon },
+  );
+  assert.equal(r1.ok, true, JSON.stringify(r1));
+  const prompt1 = fake.created[0]?.prompt ?? "";
+  const execIdx1 = prompt1.indexOf("Execute task T-ENR-1:");
+  const reopenIdx1 = prompt1.indexOf("Reopen if:");
+  const reminderIdx1 = prompt1.indexOf(PEER_PREMISE_CHECK_REMINDER);
+  assert.ok(execIdx1 !== -1 && reopenIdx1 > execIdx1, "Reopen if appears after Execute task prompt");
+  assert.ok(reminderIdx1 > reopenIdx1, "PEER_PREMISE_CHECK_REMINDER is appended at the end after Reopen if");
+
+  // When prompt already mentions agent_ask, PEER_PREMISE_CHECK_REMINDER is NOT duplicated.
+  factory.setContract({
+    task: "T-ENR-2",
+    workspace: projectRoot,
+    gate: "",
+    disposition: "scout",
+    description: "Scout feature Y",
+    reopenConditions: ["Missing prerequisite"],
+  });
+  const r2 = await handleSpoolRequest(
+    factory,
+    {
+      id: "enr-2",
+      kind: "spawn",
+      task: "T-ENR-2",
+      provider: "pi/zai/glm-5.3",
+      arity: 1,
+      prompt: "Execute task T-ENR-2: verify first, or call agent_ask if stuck.",
+      seat: "lead",
+    },
+    { daemon: fake.daemon },
+  );
+  assert.equal(r2.ok, true, JSON.stringify(r2));
+  const prompt2 = fake.created[1]?.prompt ?? "";
+  assert.ok(prompt2.indexOf("Reopen if: Missing prerequisite") > prompt2.indexOf("Execute task T-ENR-2:"));
+  assert.equal(prompt2.includes(PEER_PREMISE_CHECK_REMINDER), false, "does not duplicate reminder when prompt already includes agent_ask");
 });

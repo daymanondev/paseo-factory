@@ -6,8 +6,9 @@ import { createFactory, type ContractInput } from "../plugin/server/core/factory
 import { projectStateDir, readProjectRegistration, resolveProject, writeProjectRegistration } from "../plugin/server/core/project.ts";
 import { prepareTaskWorktree } from "../plugin/server/core/workspace.ts";
 import { readLeadMailbox } from "../plugin/server/core/mailbox.ts";
-import { createLeadMailRuntime, LEAD_ROTATE_TOKENS } from "../plugin/server/lead-mailbox.ts";
+import { createLeadMailRuntime, LEAD_ROTATE_TOKENS, agentOfTask } from "../plugin/server/lead-mailbox.ts";
 import { hasRealWorktreeProgress, PEER_HANDOFF_TOKENS } from "../plugin/server/peer-handoff.ts";
+import { handleSpoolRequest, lastTaskAgentForTask } from "../plugin/server/spool.ts";
 import { createSurfaceHandlers, type SurfaceAgentSnapshot, type SurfaceDaemonApi } from "../plugin/server/surface-rpc.ts";
 import { disposeDir, gitCommitAll, gitCommitChanges, makeTempDir } from "./helpers.ts";
 
@@ -172,7 +173,7 @@ test("GP-R24c4 fix: unanswered peer_asked chokes Peer Auto-Handoff and Owner Pee
   if (!ownerHandoff.ok) assert.equal(ownerHandoff.code, "peer-task-ineligible");
 
   // Once Lead answers via repoke_dispatched, auto-handoff eligibility resumes cleanly.
-  f.factory.ledger.append({ event: "repoke_dispatched", task: "T-04", agent: f.peer.id, reason: "ruling" });
+  f.factory.ledger.append({ event: "repoke_dispatched", task: "T-04", agent: f.peer.id, kind: "ruling" });
   await f.runtime.onLeadTurnEnded(ended(f.peer.id));
   await f.runtime.onLeadTurnEnded(ended(f.peer.id, "completed", "# Completed & Verified Slice\nContinuing after Lead ruling."));
   assert.equal(f.created.length, 1, "Peer-2 spawns once Lead answered peer_asked");
@@ -214,7 +215,7 @@ test("Lead Handoff anti-deadlock law preserved: rotation_pending holds while Lea
   await f.runtime.onLeadTurnEnded(ended(successorLead.id));
 
   // After lead_reply_peer (repoke_dispatched), Successor Lead crossing >160k holds rotation_pending while Peer is live!
-  f.factory.ledger.append({ event: "repoke_dispatched", task: "T-04", agent: f.peer.id, reason: "ruling" });
+  f.factory.ledger.append({ event: "repoke_dispatched", task: "T-04", agent: f.peer.id, kind: "ruling" });
   successorLead.status = "running";
   successorLead.lastUsage = { contextWindowUsedTokens: LEAD_ROTATE_TOKENS + 10_000 };
   await f.runtime.pumpAll();
@@ -371,11 +372,73 @@ test("Idle-nudge suppression: answerUnclaimedPeerTurn stays silent whenever hasU
   assert.equal(f.sent.filter(m => m.id === f.peer.id).length, peerSentBefore, "no idle-Peer nudge when hasUnansweredPeerAsk is true");
 
   // Once Lead issues repoke_dispatched, normal unclaimed-turn nudge behavior resumes (with topology-blind agent_ask wording).
-  f.factory.ledger.append({ event: "repoke_dispatched", task: "T-04", agent: f.peer.id, reason: "ruling" });
+  f.factory.ledger.append({ event: "repoke_dispatched", task: "T-04", agent: f.peer.id, kind: "ruling" });
   await f.runtime.onLeadTurnEnded(ended(f.peer.id));
   const nudges = f.sent.filter(m => m.id === f.peer.id).slice(peerSentBefore);
   assert.equal(nudges.length, 1);
   assert.match(nudges[0]!.text, /ended without a Claim/);
   assert.match(nudges[0]!.text, /agent_ask/);
   assert.doesNotMatch(nudges[0]!.text, /agent_escalate_blocker|Factory:|\bLead\b/);
+});
+
+test("spawn_dispatched after peer_asked restores unclaimed-turn nudge for the newly dispatched Peer until a newer peer_asked arrives", async t => {
+  const f = setupFixture(t, { withProgress: true });
+  appendPeerAsked(f.factory, "T-04", f.peer.id);
+  await f.runtime.onLeadTurnEnded(ended(f.peer.id));
+  assert.equal(f.sent.filter(m => m.id === f.peer.id).length, 0, "unanswered peer_asked suppresses nudge for the asking Peer");
+
+  // Lead dispatches a fresh replacement Peer via spawn_dispatched without repoking or re-contracting.
+  f.peer.archivedAt = "archived";
+  const peer2: SurfaceAgentSnapshot = { ...f.peer, id: "peer-2", archivedAt: null };
+  f.agents.unshift(peer2);
+  f.factory.ledger.append({ event: "spawn_dispatched", task: "T-04", provider: "pi/model", arity: 1, worktree: f.cwd });
+
+  await f.runtime.onLeadTurnEnded(ended(peer2.id));
+  const peer2Nudges = f.sent.filter(m => m.id === peer2.id);
+  assert.equal(peer2Nudges.length, 1, "spawn_dispatched newer than peer_asked restores unclaimed-turn nudge");
+  assert.match(peer2Nudges[0]!.text, /ended without a Claim/);
+
+  // If the replacement Peer then files its own newer peer_asked, the nudge suppresses again.
+  appendPeerAsked(f.factory, "T-04", peer2.id);
+  await f.runtime.onLeadTurnEnded(ended(peer2.id));
+  assert.equal(f.sent.filter(m => m.id === peer2.id).length, 1, "newer peer_asked suppresses nudge again");
+});
+
+test("agentOfTask and lastTaskAgentForTask honor peer_asked.agent and reset on new contract_set epoch", async t => {
+  const f = setupFixture(t, { withProgress: false });
+  f.factory.setContract({ task: "T-05", workspace: f.root, gate: "true", description: "Track peer_asked agent" });
+  assert.equal(agentOfTask(f.factory.ledger.events).get("T-05"), undefined);
+  assert.equal(lastTaskAgentForTask(f.factory, "T-05"), undefined);
+
+  appendPeerAsked(f.factory, "T-05", "peer-ask-agent");
+  assert.equal(agentOfTask(f.factory.ledger.events).get("T-05"), "peer-ask-agent");
+  assert.equal(lastTaskAgentForTask(f.factory, "T-05"), "peer-ask-agent");
+
+  // Also verify spool needs_human archives the agent resolved via peer_asked.agent.
+  const spawnEvt = f.factory.ledger.append({ event: "spawn_dispatched", task: "T-05", provider: "pi/model", arity: 1, worktree: f.cwd });
+  const respawnEvt = f.factory.ledger.append({ event: "respawn_dispatched", task: "T-05", provider: "pi/model", died_agent: "peer-dead" });
+  const nhReply = await handleSpoolRequest(
+    f.factory,
+    { id: "nh-ask-agent", kind: "needs_human", task: "T-05", reason: "died-after-respawn", evidence: { spawn: spawnEvt.seq, respawn: respawnEvt.seq } },
+    {
+      daemon: {
+        agents: {
+          list: async () => ({ entries: [] }),
+          ref: (id: string) => ({
+            archive: async () => {
+              f.archived.push(id);
+              return { archivedAt: "archived" };
+            },
+          }),
+        },
+      } as unknown as SurfaceDaemonApi,
+    },
+  );
+  assert.equal(nhReply.ok, true);
+  assert.ok(f.archived.includes("peer-ask-agent"), "needs_human archives the agent identified by peer_asked.agent");
+
+  // A new contract_set clears the prior epoch's agent binding.
+  f.factory.setContract({ task: "T-05", workspace: f.root, gate: "true", description: "New epoch" });
+  assert.equal(agentOfTask(f.factory.ledger.events).get("T-05"), undefined);
+  assert.equal(lastTaskAgentForTask(f.factory, "T-05"), undefined);
 });

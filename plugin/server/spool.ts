@@ -39,19 +39,18 @@ import { basename, dirname, join, resolve } from "node:path";
 import { FactoryError } from "./core/errors.ts";
 import { isValidContractTimeoutSeconds } from "./core/constants.ts";
 import { usageIsValid } from "./core/ledger.ts";
-import { isReadOnlyPeerDisposition, MAX_ATTEMPTS, needsHumanEvidenceIsValid, NEEDS_HUMAN_REASONS, PEER_DISPOSITIONS, PEER_HANDOFF_OUTCOMES, STORE_RELEASE_ACTIONS } from "./core/events.ts";
+import { isReadOnlyPeerDisposition, MAX_ATTEMPTS, needsHumanEvidenceIsValid, NEEDS_HUMAN_REASONS, PEER_ASK_KINDS, PEER_ASK_LAYERS, PEER_ASK_SOURCES, PEER_DISPOSITIONS, PEER_HANDOFF_OUTCOMES, STORE_RELEASE_ACTIONS } from "./core/events.ts";
 import type { StoreReleaseAction } from "./core/events.ts";
-import { activeContractSnapshot, repokeCompletionFooter } from "./core/disposition-prompt.ts";
-import * as dispositionPromptModule from "./core/disposition-prompt.ts";
+import { activeContractSnapshot, formatReopenIfBlock, PEER_PREMISE_CHECK_REMINDER, repokeCompletionFooter } from "./core/disposition-prompt.ts";
+import { projectTask } from "./core/task-state.ts";
 import { handoffLines } from "./core/report.ts";
 import type { ClaimOutcome, Factory } from "./core/factory.ts";
 import type { GateQueue, GateQueueAheadEntry, GateQueueItem, GateQueueSnapshot } from "./gate-queue.ts";
 import { cancelProjectGates, createGateQueue, randomQueueId, resolveGateProjectTarget } from "./gate-queue.ts";
 import { checkProjectResetRepository } from "./project-reset.ts";
-import type { LedgerEvent, MeterUsage, NeedsHumanEvidence, NeedsHumanReason, PeerAskLayer, PeerDisposition, PeerHandoffFields, Verdict } from "./core/events.ts";
+import type { LedgerEvent, MeterUsage, NeedsHumanEvidence, NeedsHumanReason, PeerAsked, PeerAskLayer, PeerDisposition, PeerHandoffFields, Verdict } from "./core/events.ts";
 
 const SPOOL_PEER_ASK_KINDS = ["reopen_premise", "gate_mismatch", "dependency", "clarify", "blocked"] as const;
-const SPOOL_PEER_ASK_LAYERS = ["foundation", "dependency", "lifecycle", "API", "ownership", "verification"] as const;
 const SPOOL_PEER_ASK_SOURCES = ["agent_ask", "legacy_blocker"] as const;
 import { CorrelationRegistry, readCorrelations } from "./core/correlations.ts";
 import { loadLanes, normalizeLanesWithProviders, parseLane, PEER_THINKING_LEVELS, providerCatalogAlias, resolvePeerThinkingLane } from "./core/lanes.ts";
@@ -669,6 +668,23 @@ export type LeadRotateHandler = (request: LeadRotateRequest) => Promise<SpoolRep
 /** Dispatches a directive into a Project's Lead mailbox — the Lead-mailbox runtime's `dispatchLead` is the implementation (v0.0.20). */
 export type LeadDispatchHandler = (request: SpoolLeadDispatchRequest) => Promise<SpoolReply>;
 
+const LEAD_DISPATCH_BEFORE_PUMP = Symbol("leadDispatchBeforePump");
+
+/** Callback invoked inside Lead's dispatch lane after ensureLead+queueMail succeed and before pumpProjectLead wakes Lead. */
+export type BeforeLeadPumpHook = () => Promise<void> | void;
+
+export function attachBeforeLeadPumpHook(request: SpoolLeadDispatchRequest, hook: BeforeLeadPumpHook): void {
+  Object.defineProperty(request, LEAD_DISPATCH_BEFORE_PUMP, {
+    value: hook,
+    enumerable: false,
+    configurable: true,
+  });
+}
+
+export function readBeforeLeadPumpHook(request: SpoolLeadDispatchRequest): BeforeLeadPumpHook | undefined {
+  return (request as unknown as Record<symbol, BeforeLeadPumpHook | undefined>)[LEAD_DISPATCH_BEFORE_PUMP];
+}
+
 /** Dispatches a directive into a Project's Supervisor mailbox (or Lead when called by Supervisor) (v0.0.23, ADR 0015 §5). */
 export type SupervisorDispatchHandler = (request: SpoolSupervisorDispatchRequest) => Promise<SpoolReply>;
 
@@ -699,7 +715,7 @@ export type SanitizeLaneHandler = (laneValue: string) => Promise<string> | strin
  * in flight and flushed when the wave finishes; never rejects (a notification
  * failure must not break the verdict's own reply).
  */
-export type PeerMailHook = (input: { task: string; kind: "verdict" | "needs_human"; text: string; projectSlug?: string }) => Promise<void>;
+export type PeerMailHook = (input: { task: string; kind: "verdict" | "needs_human" | "peer_challenge"; text: string; projectSlug?: string }) => Promise<void>;
 
 export type SpoolReply =
   | {
@@ -1321,7 +1337,7 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
     if (typeof req.peerAskKind !== "string" || !(SPOOL_PEER_ASK_KINDS as readonly string[]).includes(req.peerAskKind)) {
       return undefined;
     }
-    if (req.layer !== undefined && (typeof req.layer !== "string" || !(SPOOL_PEER_ASK_LAYERS as readonly string[]).includes(req.layer))) {
+    if (req.layer !== undefined && (typeof req.layer !== "string" || !(PEER_ASK_LAYERS as readonly string[]).includes(req.layer))) {
       return undefined;
     }
     if (req.peerAskKind === "reopen_premise" && req.layer === undefined) {
@@ -1402,13 +1418,14 @@ async function resolveEffectiveSeat(
   return request.seat;
 }
 
-function lastTaskAgentForTask(factory: Factory, task: string): string | undefined {
+export function lastTaskAgentForTask(factory: Factory, task: string): string | undefined {
   let agentId: string | undefined;
   for (const evt of factory.ledger.events) {
     if ("task" in evt && evt.task === task) {
       if (evt.event === "contract_set") agentId = undefined;
       else if (evt.event === "gate_queued" && typeof evt.agent === "string" && evt.agent !== "") agentId = evt.agent;
       else if (evt.event === "claim_reported" && typeof evt.agent === "string" && evt.agent !== "") agentId = evt.agent;
+      else if (evt.event === "peer_asked" && typeof evt.agent === "string" && evt.agent !== "") agentId = evt.agent;
       else if (evt.event === "repoke_dispatched" && typeof evt.agent === "string" && evt.agent !== "") agentId = evt.agent;
       else if (evt.event === "meter_written" && typeof evt.agent === "string" && evt.agent !== "") agentId = evt.agent;
     }
@@ -2229,6 +2246,63 @@ export async function settleClaimOutcome(input: {
   });
 }
 
+/** Formats `[Peer <KIND> (<layer>) on <task>]` and dispatches to `leadDispatch ?? peerMail`. */
+async function dispatchPeerChallengeMail(input: {
+  requestId: string;
+  task: string;
+  kind: string;
+  layer?: PeerAskLayer;
+  firstLine: string;
+  extraLines: readonly string[];
+  projectSlug?: string;
+  workspace?: string;
+  submitter?: string;
+  leadDispatch?: LeadDispatchHandler;
+  peerMail?: PeerMailHook;
+  fallbackToPeerMailOnFailure: boolean;
+  beforeLeadPump?: BeforeLeadPumpHook;
+  logContext: string;
+  onLog?: (message: string) => void;
+}): Promise<{ ok: true; leadReply?: Extract<SpoolReply, { ok: true }> } | { ok: false; code: string; message: string }> {
+  const kindLabel = input.kind.toUpperCase();
+  const layerPart = input.layer === undefined ? "" : ` (${input.layer})`;
+  const header = `[Peer ${kindLabel}${layerPart} on ${input.task}]`;
+  const mailText = [`${header} ${input.firstLine}`, ...input.extraLines].join("\n");
+  if (input.leadDispatch !== undefined) {
+    const dispatchRequest: SpoolLeadDispatchRequest = {
+      id: input.requestId,
+      kind: "lead_dispatch",
+      task: input.task,
+      ...(input.projectSlug === undefined ? {} : { project: input.projectSlug }),
+      ...(input.workspace === undefined ? {} : { workspace: input.workspace }),
+      from: "peer",
+      message: mailText,
+      ...(input.submitter === undefined ? {} : { submitter: input.submitter }),
+      seat: "agent",
+    };
+    if (input.beforeLeadPump !== undefined) {
+      attachBeforeLeadPumpHook(dispatchRequest, input.beforeLeadPump);
+    }
+    const leadReply = await input.leadDispatch(dispatchRequest);
+    if (leadReply.ok) {
+      return { ok: true, leadReply };
+    }
+    input.onLog?.(`${input.logContext}: lead_dispatch failed for ${input.task} — ${leadReply.code}: ${leadReply.message}`);
+    if (!input.fallbackToPeerMailOnFailure || input.peerMail === undefined) {
+      return { ok: false, code: leadReply.code, message: leadReply.message };
+    }
+  }
+  if (input.peerMail !== undefined) {
+    await input.peerMail({
+      task: input.task,
+      kind: "peer_challenge",
+      text: mailText,
+      ...(input.projectSlug === undefined ? {} : { projectSlug: input.projectSlug }),
+    });
+  }
+  return { ok: true };
+}
+
 async function settleClaimHandback(input: {
   factory: Factory;
   request: ClaimRequest;
@@ -2253,37 +2327,33 @@ async function settleClaimHandback(input: {
       onLog?.(`usage: task meter failed for ${request.task} handback — ${err instanceof Error ? err.message : String(err)}`);
     }
   }
-  const kindLabel = handback.event.kind.toUpperCase();
-  const layerPart = handback.event.layer === undefined ? "" : ` (${handback.event.layer})`;
-  const header = `[Peer ${kindLabel}${layerPart} on ${request.task}]`;
-  const mailText = [
-    `${header} Peer submitted \`outcome: "${handback.handoff.outcome}"\` via \`agent_claim\` (automated verification bypassed; no Attempt consumed).`,
-    `Report: ${handback.reportPath}`,
-    `6-Field Handoff:`,
-    ...handoffLines(handback.handoff, handback.snapshot),
-  ].join("\n");
-  if (leadDispatch !== undefined) {
-    const leadReply = await leadDispatch({
+  const dispatched = await dispatchPeerChallengeMail({
+    requestId: request.id,
+    task: request.task,
+    kind: handback.event.kind,
+    ...(handback.event.layer === undefined ? {} : { layer: handback.event.layer }),
+    firstLine: `Peer submitted \`outcome: "${handback.handoff.outcome}"\` via \`agent_claim\` (automated verification bypassed; no Attempt consumed).`,
+    extraLines: [
+      `Report: ${handback.reportPath}`,
+      `6-Field Handoff:`,
+      ...handoffLines(handback.handoff, handback.snapshot),
+    ],
+    ...(projectSlug === undefined ? {} : { projectSlug }),
+    ...(workspace === undefined ? {} : { workspace }),
+    ...(request.agent === undefined ? {} : { submitter: request.agent }),
+    leadDispatch,
+    peerMail,
+    fallbackToPeerMailOnFailure: true,
+    logContext: "handback",
+    onLog,
+  });
+  if (!dispatched.ok) {
+    return {
       id: request.id,
-      kind: "lead_dispatch",
-      task: request.task,
-      ...(projectSlug === undefined ? {} : { project: projectSlug }),
-      ...(workspace === undefined ? {} : { workspace }),
-      from: "peer",
-      message: mailText,
-      ...(request.agent === undefined ? {} : { submitter: request.agent }),
-      seat: "agent",
-    });
-    if (!leadReply.ok) {
-      onLog?.(`handback: lead_dispatch failed for ${request.task} — ${leadReply.code}: ${leadReply.message}`);
-    }
-  } else if (peerMail !== undefined) {
-    await (peerMail as (input: { task: string; kind: "verdict" | "needs_human" | "peer_challenge"; text: string; projectSlug?: string }) => Promise<void>)({
-      task: request.task,
-      kind: "peer_challenge",
-      text: mailText,
-      ...(projectSlug === undefined ? {} : { projectSlug }),
-    });
+      ok: false,
+      code: dispatched.code,
+      message: dispatched.message,
+    };
   }
   return {
     id: request.id,
@@ -2392,7 +2462,12 @@ export async function handleSpoolRequest(
         ? (request.workspace ?? (request.projectSlug ? readProjectRegistration(effective.stateDir, request.projectSlug)?.root : undefined))
         : (request.kind === "spawn" || request.kind === "respawn")
           ? effective.contractFor(request.task)?.workspace
-          : undefined;
+          : request.kind === "peer_ask"
+            ? (request.workspace ??
+                (request.task !== undefined ? effective.contractFor(request.task)?.workspace : undefined) ??
+                (request.project !== undefined ? readProjectRegistration(effective.stateDir, request.project)?.root : undefined) ??
+                (request.projectSlug !== undefined ? readProjectRegistration(effective.stateDir, request.projectSlug)?.root : undefined))
+            : undefined;
     const project = workspace === undefined ? undefined : resolveProject(workspace);
     const lockSlug = routing.slug ?? (project?.ok ? project.slug : undefined);
     return lockSlug !== undefined ? withProjectIngressLock(effective.stateDir, lockSlug, admitted) : admitted();
@@ -2692,6 +2767,36 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
         note: outcome.gate.note,
       });
 
+      const effectiveSlug = routedSlug ?? (project?.ok ? project.slug : request.projectSlug);
+      const settleHandback = (handback: Extract<Awaited<ReturnType<Factory["admitClaim"]>>, { status: "handback" }>) =>
+        settleClaimHandback({
+          factory,
+          request,
+          handback,
+          ...(effectiveSlug === undefined ? {} : { projectSlug: effectiveSlug }),
+          workspace: (contract ?? factory.contractFor(request.task))?.workspace,
+          usageMeter,
+          leadDispatch: leadDispatchHandler,
+          peerMail: peerMailHook,
+          ...(deps.onLog === undefined ? {} : { onLog: deps.onLog }),
+        });
+
+      if (request.handoff !== undefined && request.handoff.outcome !== "complete") {
+        const admitHandback = () =>
+          factory.admitClaim({
+            task: request.task,
+            sha: request.sha ?? "",
+            ...(request.mechanical === undefined ? { handoff: request.handoff } : { mechanical: request.mechanical }),
+            ...(request.agent === undefined ? {} : { agent: request.agent }),
+          });
+        const admittedHandback = lockSlug !== undefined
+          ? await withProjectIngressLock(factory.stateDir, lockSlug, admitHandback)
+          : await admitHandback();
+        if (admittedHandback.status === "handback") {
+          return await settleHandback(admittedHandback);
+        }
+      }
+
       if (gateQueue !== undefined) {
         const queueId = randomQueueId();
         const admitAsync = async () => {
@@ -2730,24 +2835,9 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
           ? await withProjectIngressLock(factory.stateDir, lockSlug, admitAsync)
           : await admitAsync();
         if (result.status === "handback") {
-          const effectiveSlug = routedSlug ?? (project?.ok ? project.slug : request.projectSlug);
-          return await settleClaimHandback({
-            factory,
-            request,
-            handback: result,
-            ...(effectiveSlug === undefined ? {} : { projectSlug: effectiveSlug }),
-            workspace: (contract ?? factory.contractFor(request.task))?.workspace,
-            usageMeter,
-            leadDispatch: leadDispatchHandler,
-            peerMail: peerMailHook,
-            onLog: (msg) => {
-              // Handled silently on best-effort meter/mail failures
-              void msg;
-            },
-          });
+          return await settleHandback(result);
         }
         if (result.status === "executed") {
-          const effectiveSlug = routedSlug ?? (project?.ok ? project.slug : request.projectSlug);
           await settleClaimOutcome({
             factory,
             task: request.task,
@@ -2759,6 +2849,7 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
             usageMeter,
             peerMail: peerMailHook,
             ...(resolvedDaemon === undefined ? {} : { daemon: resolvedDaemon }),
+            ...(deps.onLog === undefined ? {} : { onLog: deps.onLog }),
           });
         }
         if (result.status === "replayed" || result.status === "executed") {
@@ -2776,32 +2867,6 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
           ahead: queued.ahead,
           paused: queued.paused,
         };
-      }
-
-      if (request.handoff !== undefined && request.handoff.outcome !== "complete") {
-        const admitHandback = () =>
-          factory.admitClaim({
-            task: request.task,
-            sha: request.sha ?? "",
-            handoff: request.handoff,
-            ...(request.agent === undefined ? {} : { agent: request.agent }),
-          });
-        const admittedHandback = lockSlug !== undefined
-          ? await withProjectIngressLock(factory.stateDir, lockSlug, admitHandback)
-          : await admitHandback();
-        if (admittedHandback.status === "handback") {
-          const effectiveSlug = routedSlug ?? (project?.ok ? project.slug : request.projectSlug);
-          return await settleClaimHandback({
-            factory,
-            request,
-            handback: admittedHandback,
-            ...(effectiveSlug === undefined ? {} : { projectSlug: effectiveSlug }),
-            workspace: (contract ?? factory.contractFor(request.task))?.workspace,
-            usageMeter,
-            leadDispatch: leadDispatchHandler,
-            peerMail: peerMailHook,
-          });
-        }
       }
 
       const admit = async () => {
@@ -2824,7 +2889,6 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
       const outcome = await admitted.completion;
       const replayed = outcome.gate.seq <= admitted.priorSeq;
       if (!replayed) {
-        const effectiveSlug = routedSlug ?? (project?.ok ? project.slug : request.projectSlug);
         await settleClaimOutcome({
           factory,
           task: request.task,
@@ -2836,6 +2900,7 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
           usageMeter,
           peerMail: peerMailHook,
           ...(resolvedDaemon === undefined ? {} : { daemon: resolvedDaemon }),
+          ...(deps.onLog === undefined ? {} : { onLog: deps.onLog }),
         });
       }
       return syncReply(outcome);
@@ -2870,6 +2935,56 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
           message: "peer_ask requires a bound task",
         };
       }
+      if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(resolvedTask)) {
+        return {
+          id: request.id,
+          ok: false,
+          code: "invalid-task",
+          message: `task id "${resolvedTask}" is invalid — use letters, digits, ".", "_", "-" (it becomes a report filename)`,
+        };
+      }
+      if (
+        !(PEER_ASK_KINDS as readonly string[]).includes(request.peerAskKind) ||
+        (request.layer !== undefined && !(PEER_ASK_LAYERS as readonly string[]).includes(request.layer)) ||
+        (request.peerAskKind === "reopen_premise" && request.layer === undefined) ||
+        !(PEER_ASK_SOURCES as readonly string[]).includes(request.source) ||
+        typeof request.summary !== "string" ||
+        request.summary.trim() === "" ||
+        (request.agent !== undefined && typeof request.agent !== "string")
+      ) {
+        return {
+          id: request.id,
+          ok: false,
+          code: "invalid-peer-ask",
+          message: "peer_ask fields are invalid or incomplete",
+        };
+      }
+      const contract = factory.contractFor(resolvedTask);
+      if (contract === undefined) {
+        return {
+          id: request.id,
+          ok: false,
+          code: "unknown-task",
+          message: `no contract set for task ${resolvedTask} — register one first`,
+        };
+      }
+      const taskState = projectTask(factory.ledger.eventsFor(resolvedTask), resolvedTask);
+      if (taskState.acceptance !== undefined) {
+        return {
+          id: request.id,
+          ok: false,
+          code: "already-accepted",
+          message: `task ${resolvedTask} was already accepted at attempt ${taskState.acceptance.attempt}; the ledger is append-only`,
+        };
+      }
+      if (taskState.closed !== undefined) {
+        return {
+          id: request.id,
+          ok: false,
+          code: "already-closed",
+          message: `task ${resolvedTask} was closed (reason: ${taskState.closed.reason}) — the retirement is terminal; the ledger is append-only`,
+        };
+      }
       if (leadDispatchHandler === undefined && peerMailHook === undefined) {
         return {
           id: request.id,
@@ -2878,24 +2993,7 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
           message: "this daemon's factory plugin does not dispatch Lead mail — update the plugin to v0.0.20+",
         };
       }
-      const kindLabel = request.peerAskKind.toUpperCase();
-      const layerPart = request.layer === undefined ? "" : ` (${request.layer})`;
-      const header = `[Peer ${kindLabel}${layerPart} on ${resolvedTask}]`;
-      const mailText = [
-        `${header} ${request.summary}`,
-        ...(request.evidence === undefined ? [] : [`Evidence: ${request.evidence}`]),
-        ...(request.proposal === undefined ? [] : [`Proposal: ${request.proposal}`]),
-      ].join("\n");
-      const event = factory.recordPeerAsk({
-        task: resolvedTask,
-        kind: request.peerAskKind,
-        ...(request.layer === undefined ? {} : { layer: request.layer }),
-        summary: request.summary,
-        source: request.source,
-        ...(resolvedAgent === undefined ? {} : { agent: resolvedAgent }),
-      });
-      const contract = factory.contractFor(resolvedTask);
-      const effectiveWorkspace = request.workspace ?? contract?.workspace;
+      const effectiveWorkspace = request.workspace ?? contract.workspace;
       const resolvedProjectSlug =
         request.projectSlug ??
         request.project ??
@@ -2906,27 +3004,52 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
               const p = resolveProject(effectiveWorkspace);
               return p.ok ? p.slug : undefined;
             })());
-      if (leadDispatchHandler !== undefined) {
-        const leadReply = await leadDispatchHandler({
-          id: request.id,
-          kind: "lead_dispatch",
+      let recordedEvent: PeerAsked | undefined;
+      const commitPeerAsk = (): PeerAsked => {
+        recordedEvent ??= factory.recordPeerAsk({
           task: resolvedTask,
-          ...(resolvedProjectSlug === undefined ? {} : { project: resolvedProjectSlug }),
-          ...(effectiveWorkspace === undefined ? {} : { workspace: effectiveWorkspace }),
-          from: "peer",
-          message: mailText,
-          ...(request.submitter === undefined ? {} : { submitter: request.submitter }),
-          seat: "agent",
+          kind: request.peerAskKind,
+          ...(request.layer === undefined ? {} : { layer: request.layer }),
+          summary: request.summary,
+          source: request.source,
+          ...(resolvedAgent === undefined ? {} : { agent: resolvedAgent }),
         });
-        if (!leadReply.ok) return leadReply;
-        return { ...leadReply, event };
-      }
-      await (peerMailHook! as (input: { task: string; kind: "verdict" | "needs_human" | "peer_challenge"; text: string; projectSlug?: string }) => Promise<void>)({
+        return recordedEvent;
+      };
+      const dispatched = await dispatchPeerChallengeMail({
+        requestId: request.id,
         task: resolvedTask,
-        kind: "peer_challenge",
-        text: mailText,
+        kind: request.peerAskKind,
+        ...(request.layer === undefined ? {} : { layer: request.layer }),
+        firstLine: request.summary,
+        extraLines: [
+          ...(request.evidence === undefined ? [] : [`Evidence: ${request.evidence}`]),
+          ...(request.proposal === undefined ? [] : [`Proposal: ${request.proposal}`]),
+        ],
         ...(resolvedProjectSlug === undefined ? {} : { projectSlug: resolvedProjectSlug }),
+        ...(effectiveWorkspace === undefined ? {} : { workspace: effectiveWorkspace }),
+        ...(request.submitter === undefined ? {} : { submitter: request.submitter }),
+        leadDispatch: leadDispatchHandler,
+        peerMail: peerMailHook,
+        fallbackToPeerMailOnFailure: false,
+        beforeLeadPump: () => {
+          commitPeerAsk();
+        },
+        logContext: "peer_ask",
+        onLog: deps.onLog,
       });
+      if (!dispatched.ok) {
+        return {
+          id: request.id,
+          ok: false,
+          code: dispatched.code,
+          message: dispatched.message,
+        };
+      }
+      const event = commitPeerAsk();
+      if (dispatched.leadReply !== undefined) {
+        return { ...dispatched.leadReply, event };
+      }
       return {
         id: request.id,
         ok: true,
@@ -3241,23 +3364,17 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
           if (contract.description !== undefined && contract.description.trim() !== "") {
             enriched.push(`Task (${request.task}): ${contract.description.trim()}`);
           }
-          const formatReopenIf = (dispositionPromptModule as { formatReopenIfBlock?: (c?: readonly string[]) => string }).formatReopenIfBlock;
-          const reopenConditions = (contract as { reopenConditions?: readonly string[] }).reopenConditions;
-          const reopenBlock =
-            typeof formatReopenIf === "function"
-              ? formatReopenIf(reopenConditions)
-              : Array.isArray(reopenConditions) && reopenConditions.length > 0
-                ? reopenConditions.length === 1
-                  ? `Reopen if: ${reopenConditions[0]}`
-                  : `Reopen if:\n${reopenConditions.map((c) => `- ${c}`).join("\n")}`
-                : "";
-          if (reopenBlock !== "") {
-            enriched.push(reopenBlock);
-          }
           if (contract.scope !== undefined && contract.scope.length > 0) {
             enriched.push(`Allowed scope: ${contract.scope.join(", ")}`);
           }
           enriched.push(effectivePrompt);
+          const reopenBlock = formatReopenIfBlock(contract.reopenConditions);
+          if (reopenBlock !== "") {
+            enriched.push(reopenBlock);
+          }
+          if (!effectivePrompt.includes(PEER_PREMISE_CHECK_REMINDER) && !effectivePrompt.includes("agent_ask")) {
+            enriched.push(PEER_PREMISE_CHECK_REMINDER);
+          }
           effectivePrompt = enriched.join("\n\n");
         }
         spawnedAgentId = await createTaskPeer({ factory, daemon: resolvedDaemon, task: request.task,
@@ -3848,7 +3965,7 @@ export interface SpoolOptions {
   now?: () => number;
 }
 
-export type SpoolDeps = Omit<SpoolOptions, "onLog" | "pollMs">;
+export type SpoolDeps = Omit<SpoolOptions, "pollMs">;
 
 export interface Spool {
   stop(): void;
@@ -4129,7 +4246,7 @@ async function handleAdmittedRequestFile(
     reply = { id, ok: false, code: "bad-request", message: `request file ${requestPath} is not a valid spool request` };
     log(`request ${id}: REJECTED — malformed`);
   } else {
-    reply = await handleSpoolRequest(factory, request, deps, registry);
+    reply = await handleSpoolRequest(factory, request, deps.onLog === undefined ? { ...deps, onLog: log } : deps, registry);
 
     // The v0.0.9 stamps make the two Owner acts attributable in the log too —
     // the same visibility the claim line always had.
