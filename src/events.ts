@@ -89,6 +89,7 @@ export const EVENT_NAMES = [
   "repoke_refused",
   "respawn_dispatched",
   "respawn_refused",
+  "peer_asked",
   "needs_human",
   "retro_written",
   "task_closed",
@@ -117,6 +118,27 @@ export type PeerDisposition = (typeof PEER_DISPOSITIONS)[number];
  */
 export const PEER_HANDOFF_OUTCOMES = ["complete", "partial", "blocked", "reopen"] as const;
 export type PeerHandoffOutcome = (typeof PEER_HANDOFF_OUTCOMES)[number];
+
+/** Bounded reopening conditions attached to a Contract (ADR 0069). */
+export const MAX_REOPEN_CONDITIONS = 8;
+export const MAX_REOPEN_CONDITION_CHARS = 240;
+
+/** Peer feedback / challenge kinds recorded by `peer_asked` (ADR 0069). */
+export const PEER_ASK_KINDS = ["reopen_premise", "gate_mismatch", "dependency", "clarify", "blocked", "partial"] as const;
+export type PeerAskKind = (typeof PEER_ASK_KINDS)[number];
+
+/** Architectural layers for `peer_asked` (ADR 0069). */
+export const PEER_ASK_LAYERS = ["foundation", "dependency", "lifecycle", "API", "ownership", "verification"] as const;
+export type PeerAskLayer = (typeof PEER_ASK_LAYERS)[number];
+
+/** Admission sources for `peer_asked` (ADR 0069). */
+export const PEER_ASK_SOURCES = ["agent_ask", "agent_claim", "legacy_blocker"] as const;
+export type PeerAskSource = (typeof PEER_ASK_SOURCES)[number];
+
+/** Repoke dispatch kinds (ADR 0069). */
+export const REPOKE_KINDS = ["denial-stall", "ruling"] as const;
+export type RepokeKind = (typeof REPOKE_KINDS)[number];
+export const REPOKE_MESSAGE_MAX_CHARS = 1000;
 
 /**
  * The Peer-authored half of the six-field handoff (ADR 0053 §4, spec lines
@@ -242,6 +264,11 @@ export interface ContractSet extends EventIdentityMetadata {
    * `contract_set` lines predate this field and replay using the default.
    */
   timeoutSeconds?: number;
+  /**
+   * Optional explicit conditions under which the Peer should pause and ask/reopen
+   * via `agent_ask` instead of forcing an implementation (ADR 0069).
+   */
+  reopenConditions?: string[];
 }
 
 export interface GateQueued extends EventIdentityMetadata {
@@ -593,6 +620,27 @@ export interface RepokeDispatched extends EventIdentityMetadata {
   task: string;
   /** The stalled agent the re-poke text went to — the act names its target. */
   agent: string;
+  /** Whether this repoke was a denial-stall nudge or a Lead ruling (ADR 0069). */
+  kind?: RepokeKind;
+  /** Trimmed Lead ruling message, truncated cleanly to <= 1,000 chars (ADR 0069). */
+  message?: string;
+}
+
+/**
+ * Durable record of a Peer's `agent_ask`, non-`complete` `agent_claim` handback,
+ * or legacy blocker escalation within the current Contract epoch (ADR 0069).
+ */
+export interface PeerAsked extends EventIdentityMetadata {
+  seq: number;
+  ts: Timestamp;
+  event: "peer_asked";
+  task: string;
+  kind: PeerAskKind;
+  layer?: PeerAskLayer;
+  summary: string;
+  source: PeerAskSource;
+  agent?: string;
+  reportPath?: string;
 }
 
 /**
@@ -862,6 +910,7 @@ export type LedgerEvent =
   | RepokeRefused
   | RespawnDispatched
   | RespawnRefused
+  | PeerAsked
   | NeedsHuman
   | RetroWritten
   | TaskClosed

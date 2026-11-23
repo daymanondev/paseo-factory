@@ -67,7 +67,7 @@ export const sharedTools: Record<string, ToolDefinition> = {
   lead_set_contract: {
     name: "lead_set_contract",
     description:
-      "Register a Task's immutable Contract (`gate`, optional `description` or structured 4-Part Brief fields, `artifact`, `skills`, `watch`, `disposition`, `timeoutSeconds`) before spawning its working Agent. Re-contracting an unaccepted Task updates the Brief/Gate in place and preserves the live Peer unless `resetPeer: true`. The Brief must carry all four canonical sections (1. Bounded Outcome, 2. Contract Boundary & Regression Invariants, 3. Excluded / Deferred, 4. Verification) — via `description` or the structured fields.",
+      "Register a Task's provisional Contract (`gate`, optional `description` or structured 4-Part Brief fields, `reopenConditions`, `artifact`, `skills`, `watch`, `disposition`, `timeoutSeconds`) before spawning its working Agent. Re-contracting an unaccepted Task updates the Brief/Gate in place and preserves the live Peer unless `resetPeer: true`. The Brief must carry all four canonical sections (1. Bounded Outcome, 2. Contract Boundary & Regression Invariants, 3. Excluded / Deferred, 4. Verification) — via `description` or the structured fields.",
     inputSchema: {
       type: "object",
       properties: {
@@ -87,6 +87,12 @@ export const sharedTools: Record<string, ToolDefinition> = {
         invariants: { type: "string", description: "Structured 4-Part Brief, section 2 (Contract Boundary & Regression Invariants) — synthesized into Contract.description when `description` is omitted (ADR 0054)." },
         exclusions: { type: "string", description: "Structured 4-Part Brief, section 3 (Excluded / Deferred) — synthesized into Contract.description when `description` is omitted (ADR 0054)." },
         verification: { type: "string", description: "Structured 4-Part Brief, section 4 (Verification) — synthesized into Contract.description when `description` is omitted; defaults on a gate-less read-only disposition to the clean-worktree handoff law (ADR 0054)." },
+        reopenConditions: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Optional list of concrete premise/scope conditions under which the Peer should challenge or reopen this Contract via `agent_ask` (rendered prominently as `Reopen if:` in the Peer brief; max 8 items, <= 240 chars each).",
+        },
         disposition: { type: "string", enum: ["engineer", "architect", "reviewer", "scout"], description: "The Peer's SLP disposition (ADR 0053; defaults to engineer when omitted)." },
         timeoutSeconds: {
           type: "integer",
@@ -143,6 +149,25 @@ export const sharedTools: Record<string, ToolDefinition> = {
         workspace: { type: "string", description: "Optional Project root path." },
       },
       required: ["task", "attempt"],
+    },
+  },
+  lead_reply_peer: {
+    name: "lead_reply_peer",
+    description:
+      "Deliver a Lead ruling directly into the live Peer session (answer, reconciled boundary decision, or re-contract follow-up) prefixed with the task/disposition context and the refreshed Active Contract Snapshot. Message-bearing reconciliation turns are never capped by the one-per-task Denial-stall limit.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        task: { type: "string", description: "Task ID to reply to." },
+        message: {
+          type: "string",
+          description:
+            "Non-empty Lead ruling text (answer, reconciled boundary decision) delivered verbatim into the live Peer session, prefixed with the task/disposition context and the updated Brief.",
+        },
+        agent: { type: "string", description: "Optional target Agent ID (resolved automatically from task when omitted)." },
+        workspace: { type: "string", description: "Optional Project root path." },
+      },
+      required: ["task", "message"],
     },
   },
   lead_repoke_agent: {
@@ -305,7 +330,7 @@ export const sharedTools: Record<string, ToolDefinition> = {
   agent_claim: {
     name: "agent_claim",
     description:
-      "Submit a Claim for your bound Task in the Task worktree with the mandatory 6-Field Handoff (`outcome`, `scope`, `verification`, `unknowns`, optional `ownership`). Validates clean tree, commit SHA, and handoff synchronously, enqueues the Contract's Gate in the daemon Gate queue (returning `queued` immediately so you end your turn and sleep live at zero tokens), or returns immediate synthetic `GREEN` for read-only empty gates.",
+      "Submit a Claim for your bound Task in the Task worktree with the mandatory 6-Field Handoff (`outcome`, `scope`, `verification`, `unknowns`, optional `ownership`). For `outcome: \"complete\"`, validates clean tree, commit SHA, and handoff synchronously, queues automated Gate verification asynchronously (returning `queued` immediately so you end your turn and wait), or returns immediate synthetic `GREEN` for read-only empty gates. For `reopen`, `blocked`, or `partial`, delivers your handback directly without running the Gate or burning an Attempt.",
     inputSchema: {
       type: "object",
       properties: {
@@ -318,6 +343,39 @@ export const sharedTools: Record<string, ToolDefinition> = {
         ownership: { type: "string", description: "6-Field Handoff: optional ownership note (defaults to \"lease returned\")." },
       },
       required: ["outcome", "scope", "verification", "unknowns"],
+    },
+  },
+  agent_ask: {
+    name: "agent_ask",
+    description:
+      "Challenge a Brief premise, Gate mismatch, missing dependency, behavior-changing ambiguity, or external blocker. CONTRA selectivity: use ONLY when repository code or spec contradicts the Brief or Gate, an unowned prerequisite is missing, or an ambiguity changes observable code behavior — never for routine implementation details you can decide independently. Keeps your session alive and paused for a ruling without burning an Attempt.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        kind: {
+          type: "string",
+          enum: ["reopen_premise", "gate_mismatch", "dependency", "clarify", "blocked"],
+          description: "Challenge or question category.",
+        },
+        layer: {
+          type: "string",
+          enum: ["foundation", "dependency", "lifecycle", "API", "ownership", "verification"],
+          description: "Reopened contract layer — required when `kind` is `reopen_premise`.",
+        },
+        summary: {
+          type: "string",
+          description: "Concise statement of the contradiction, mismatch, missing dependency, or blocker.",
+        },
+        evidence: {
+          type: "string",
+          description: "Concrete repository evidence (`file:line`, failing command/output, or spec quote).",
+        },
+        proposal: {
+          type: "string",
+          description: "Optional suggested direction or narrowed Contract option.",
+        },
+      },
+      required: ["kind", "summary", "evidence"],
     },
   },
   agent_escalate_blocker: {
@@ -360,8 +418,8 @@ export const sharedTools: Record<string, ToolDefinition> = {
 
 export const sharedRoles = {
   supervisor: ["supervisor_accept_task", "supervisor_dispatch_lead", "supervisor_read_ledger", "supervisor_record_store_note", "supervisor_end_cycle", "lead_close_task", "lead_retire_task"],
-  lead: ["lead_repoke_agent", "lead_needs_human", "lead_create_worktree", "lead_set_contract", "lead_dispatch_agent", "lead_verify", "lead_merge", "lead_remove_worktree", "lead_release", "lead_store_release", "lead_record_store_note", "lead_report_to_supervisor", "lead_close_task", "lead_retire_task", "lead_update_notebook", "lead_read_ledger"],
-  agent: ["agent_claim", "agent_escalate_blocker"],
+  lead: ["lead_reply_peer", "lead_needs_human", "lead_create_worktree", "lead_set_contract", "lead_dispatch_agent", "lead_verify", "lead_merge", "lead_remove_worktree", "lead_release", "lead_store_release", "lead_record_store_note", "lead_report_to_supervisor", "lead_close_task", "lead_retire_task", "lead_update_notebook", "lead_read_ledger"],
+  agent: ["agent_claim", "agent_ask"],
   unbound: ["factory_dispatch_supervisor", "factory_status"],
 };
 sharedTools.supervisor_read_ledger = { ...sharedTools.factory_status, name: "supervisor_read_ledger" };

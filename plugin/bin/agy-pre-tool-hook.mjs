@@ -108,6 +108,7 @@ var EVENT_NAMES = [
   "repoke_refused",
   "respawn_dispatched",
   "respawn_refused",
+  "peer_asked",
   "needs_human",
   "retro_written",
   "task_closed",
@@ -120,6 +121,13 @@ var EVENT_NAMES = [
 ];
 var PEER_DISPOSITIONS = ["engineer", "architect", "reviewer", "scout"];
 var PEER_HANDOFF_OUTCOMES = ["complete", "partial", "blocked", "reopen"];
+var MAX_REOPEN_CONDITIONS = 8;
+var MAX_REOPEN_CONDITION_CHARS = 240;
+var PEER_ASK_KINDS = ["reopen_premise", "gate_mismatch", "dependency", "clarify", "blocked", "partial"];
+var PEER_ASK_LAYERS = ["foundation", "dependency", "lifecycle", "API", "ownership", "verification"];
+var PEER_ASK_SOURCES = ["agent_ask", "agent_claim", "legacy_blocker"];
+var REPOKE_KINDS = ["denial-stall", "ruling"];
+var REPOKE_MESSAGE_MAX_CHARS = 1e3;
 var LEDGER_REFERENCE_KINDS = { denial: "permit_denied", repoke: "repoke_dispatched", gate: "gate_finished", spawn: "spawn_dispatched", respawn: "respawn_dispatched" };
 function eventAllowsUnboundEpoch(kind) {
   return kind === "spawn_refused" || kind === "respawn_refused" || kind === "repoke_refused";
@@ -240,7 +248,7 @@ function shapeIsValid(evt) {
   const taskIsString = typeof asRecord.task === "string";
   if (evt.event === "ledger_schema") return asRecord.schema_version === 2 && asRecord.version === 2 && nonempty(asRecord.ledger_id) && nonempty(asRecord.writer_id) && asRecord.provenance?.writer_id === asRecord.writer_id;
   if (evt.event === "contract_set") {
-    return taskIsString && (asRecord.timeoutSeconds === void 0 || isValidContractTimeoutSeconds(asRecord.timeoutSeconds));
+    return taskIsString && (asRecord.timeoutSeconds === void 0 || isValidContractTimeoutSeconds(asRecord.timeoutSeconds)) && reopenConditionsAreValid(asRecord.reopenConditions);
   }
   if (evt.event === "gate_queued") {
     const attempt2 = asRecord.attempt;
@@ -262,7 +270,10 @@ function shapeIsValid(evt) {
     return taskIsString && typeof asRecord.provider === "string" && (asRecord.agent === void 0 || typeof asRecord.agent === "string") && usageIsValid(asRecord.usage);
   }
   if (evt.event === "repoke_dispatched" || evt.event === "repoke_refused") {
-    return taskIsString && typeof asRecord.agent === "string" && (evt.event === "repoke_dispatched" || typeof asRecord.rule === "string" && typeof asRecord.reason === "string");
+    return taskIsString && typeof asRecord.agent === "string" && (evt.event === "repoke_dispatched" ? repokeMetadataIsValid(asRecord.kind, asRecord.message) : typeof asRecord.rule === "string" && typeof asRecord.reason === "string");
+  }
+  if (evt.event === "peer_asked") {
+    return peerAskedShapeIsValid(asRecord);
   }
   if (evt.event === "respawn_dispatched" || evt.event === "respawn_refused") {
     return taskIsString && typeof asRecord.provider === "string" && typeof asRecord.died_agent === "string" && (evt.event === "respawn_dispatched" || typeof asRecord.rule === "string" && typeof asRecord.reason === "string");
@@ -293,6 +304,19 @@ function shapeIsValid(evt) {
   }
   const attempt = asRecord.attempt;
   return taskIsString && typeof attempt === "number" && Number.isInteger(attempt) && attempt >= 1;
+}
+function reopenConditionsAreValid(value) {
+  if (value === void 0) return true;
+  if (!Array.isArray(value) || value.length > MAX_REOPEN_CONDITIONS) return false;
+  return value.every((item) => typeof item === "string" && item.trim() !== "" && item.length <= MAX_REOPEN_CONDITION_CHARS);
+}
+function repokeMetadataIsValid(kind, message) {
+  if (kind !== void 0 && (typeof kind !== "string" || !REPOKE_KINDS.includes(kind))) return false;
+  if (message !== void 0 && (typeof message !== "string" || message.length > REPOKE_MESSAGE_MAX_CHARS)) return false;
+  return true;
+}
+function peerAskedShapeIsValid(event) {
+  return nonempty(event.task) && typeof event.kind === "string" && PEER_ASK_KINDS.includes(event.kind) && (event.layer === void 0 || typeof event.layer === "string" && PEER_ASK_LAYERS.includes(event.layer)) && nonempty(event.summary) && typeof event.source === "string" && PEER_ASK_SOURCES.includes(event.source) && (event.agent === void 0 || typeof event.agent === "string") && (event.reportPath === void 0 || typeof event.reportPath === "string");
 }
 function usageIsValid(usage) {
   if (typeof usage !== "object" || usage === null || Array.isArray(usage)) return false;
@@ -329,7 +353,7 @@ function v2PayloadIsValid(event) {
     case "ledger_schema":
       return true;
     case "contract_set":
-      return string("workspace") && string("gate") && string("artifact") && strings("scope") && strings("skills") && optionalString("base") && optionalString("description") && optionalString("by") && (event.freshEyes === void 0 || event.freshEyes === true) && (event.watch === void 0 || event.watch === true) && (event.disposition === void 0 || PEER_DISPOSITIONS.includes(event.disposition)) && (event.timeoutSeconds === void 0 || isValidContractTimeoutSeconds(event.timeoutSeconds));
+      return string("workspace") && string("gate") && string("artifact") && strings("scope") && strings("skills") && optionalString("base") && optionalString("description") && optionalString("by") && (event.freshEyes === void 0 || event.freshEyes === true) && (event.watch === void 0 || event.watch === true) && (event.disposition === void 0 || PEER_DISPOSITIONS.includes(event.disposition)) && (event.timeoutSeconds === void 0 || isValidContractTimeoutSeconds(event.timeoutSeconds)) && reopenConditionsAreValid(event.reopenConditions);
     case "gate_queued":
       return string("sha") && (event.id === void 0 || nonempty(event.id)) && optionalString("agent") && handoffIsValid(event.handoff) && mechanicalClaimIsValid(event);
     case "claim_reported":
@@ -373,6 +397,10 @@ function v2PayloadIsValid(event) {
       return nonempty(event.runId) && typeof event.action === "string" && STORE_RELEASE_ACTIONS.includes(event.action) && Array.isArray(event.platforms) && event.platforms.every((item) => nonempty(item)) && string("summary");
     case "store_release_failed":
       return nonempty(event.runId) && typeof event.action === "string" && STORE_RELEASE_ACTIONS.includes(event.action) && typeof event.failureClass === "string" && STORE_RELEASE_FAILURE_CLASSES.includes(event.failureClass) && nonempty(event.code) && string("detail") && optionalString("upstreamIssuePath");
+    case "repoke_dispatched":
+      return string("agent") && repokeMetadataIsValid(event.kind, event.message);
+    case "peer_asked":
+      return peerAskedShapeIsValid(event);
     default:
       return true;
   }
@@ -1313,7 +1341,7 @@ var sharedTools = {
   },
   lead_set_contract: {
     name: "lead_set_contract",
-    description: "Register a Task's immutable Contract (`gate`, optional `description` or structured 4-Part Brief fields, `artifact`, `skills`, `watch`, `disposition`, `timeoutSeconds`) before spawning its working Agent. Re-contracting an unaccepted Task updates the Brief/Gate in place and preserves the live Peer unless `resetPeer: true`. The Brief must carry all four canonical sections (1. Bounded Outcome, 2. Contract Boundary & Regression Invariants, 3. Excluded / Deferred, 4. Verification) \u2014 via `description` or the structured fields.",
+    description: "Register a Task's provisional Contract (`gate`, optional `description` or structured 4-Part Brief fields, `reopenConditions`, `artifact`, `skills`, `watch`, `disposition`, `timeoutSeconds`) before spawning its working Agent. Re-contracting an unaccepted Task updates the Brief/Gate in place and preserves the live Peer unless `resetPeer: true`. The Brief must carry all four canonical sections (1. Bounded Outcome, 2. Contract Boundary & Regression Invariants, 3. Excluded / Deferred, 4. Verification) \u2014 via `description` or the structured fields.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1333,6 +1361,11 @@ var sharedTools = {
         invariants: { type: "string", description: "Structured 4-Part Brief, section 2 (Contract Boundary & Regression Invariants) \u2014 synthesized into Contract.description when `description` is omitted (ADR 0054)." },
         exclusions: { type: "string", description: "Structured 4-Part Brief, section 3 (Excluded / Deferred) \u2014 synthesized into Contract.description when `description` is omitted (ADR 0054)." },
         verification: { type: "string", description: "Structured 4-Part Brief, section 4 (Verification) \u2014 synthesized into Contract.description when `description` is omitted; defaults on a gate-less read-only disposition to the clean-worktree handoff law (ADR 0054)." },
+        reopenConditions: {
+          type: "array",
+          items: { type: "string" },
+          description: "Optional list of concrete premise/scope conditions under which the Peer should challenge or reopen this Contract via `agent_ask` (rendered prominently as `Reopen if:` in the Peer brief; max 8 items, <= 240 chars each)."
+        },
         disposition: { type: "string", enum: ["engineer", "architect", "reviewer", "scout"], description: "The Peer's SLP disposition (ADR 0053; defaults to engineer when omitted)." },
         timeoutSeconds: {
           type: "integer",
@@ -1386,6 +1419,23 @@ var sharedTools = {
         workspace: { type: "string", description: "Optional Project root path." }
       },
       required: ["task", "attempt"]
+    }
+  },
+  lead_reply_peer: {
+    name: "lead_reply_peer",
+    description: "Deliver a Lead ruling directly into the live Peer session (answer, reconciled boundary decision, or re-contract follow-up) prefixed with the task/disposition context and the refreshed Active Contract Snapshot. Message-bearing reconciliation turns are never capped by the one-per-task Denial-stall limit.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        task: { type: "string", description: "Task ID to reply to." },
+        message: {
+          type: "string",
+          description: "Non-empty Lead ruling text (answer, reconciled boundary decision) delivered verbatim into the live Peer session, prefixed with the task/disposition context and the updated Brief."
+        },
+        agent: { type: "string", description: "Optional target Agent ID (resolved automatically from task when omitted)." },
+        workspace: { type: "string", description: "Optional Project root path." }
+      },
+      required: ["task", "message"]
     }
   },
   lead_repoke_agent: {
@@ -1538,7 +1588,7 @@ var sharedTools = {
   },
   agent_claim: {
     name: "agent_claim",
-    description: "Submit a Claim for your bound Task in the Task worktree with the mandatory 6-Field Handoff (`outcome`, `scope`, `verification`, `unknowns`, optional `ownership`). Validates clean tree, commit SHA, and handoff synchronously, enqueues the Contract's Gate in the daemon Gate queue (returning `queued` immediately so you end your turn and sleep live at zero tokens), or returns immediate synthetic `GREEN` for read-only empty gates.",
+    description: 'Submit a Claim for your bound Task in the Task worktree with the mandatory 6-Field Handoff (`outcome`, `scope`, `verification`, `unknowns`, optional `ownership`). For `outcome: "complete"`, validates clean tree, commit SHA, and handoff synchronously, queues automated Gate verification asynchronously (returning `queued` immediately so you end your turn and wait), or returns immediate synthetic `GREEN` for read-only empty gates. For `reopen`, `blocked`, or `partial`, delivers your handback directly without running the Gate or burning an Attempt.',
     inputSchema: {
       type: "object",
       properties: {
@@ -1551,6 +1601,38 @@ var sharedTools = {
         ownership: { type: "string", description: '6-Field Handoff: optional ownership note (defaults to "lease returned").' }
       },
       required: ["outcome", "scope", "verification", "unknowns"]
+    }
+  },
+  agent_ask: {
+    name: "agent_ask",
+    description: "Challenge a Brief premise, Gate mismatch, missing dependency, behavior-changing ambiguity, or external blocker. CONTRA selectivity: use ONLY when repository code or spec contradicts the Brief or Gate, an unowned prerequisite is missing, or an ambiguity changes observable code behavior \u2014 never for routine implementation details you can decide independently. Keeps your session alive and paused for a ruling without burning an Attempt.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        kind: {
+          type: "string",
+          enum: ["reopen_premise", "gate_mismatch", "dependency", "clarify", "blocked"],
+          description: "Challenge or question category."
+        },
+        layer: {
+          type: "string",
+          enum: ["foundation", "dependency", "lifecycle", "API", "ownership", "verification"],
+          description: "Reopened contract layer \u2014 required when `kind` is `reopen_premise`."
+        },
+        summary: {
+          type: "string",
+          description: "Concise statement of the contradiction, mismatch, missing dependency, or blocker."
+        },
+        evidence: {
+          type: "string",
+          description: "Concrete repository evidence (`file:line`, failing command/output, or spec quote)."
+        },
+        proposal: {
+          type: "string",
+          description: "Optional suggested direction or narrowed Contract option."
+        }
+      },
+      required: ["kind", "summary", "evidence"]
     }
   },
   agent_escalate_blocker: {
@@ -1590,8 +1672,8 @@ var sharedTools = {
 };
 var sharedRoles = {
   supervisor: ["supervisor_accept_task", "supervisor_dispatch_lead", "supervisor_read_ledger", "supervisor_record_store_note", "supervisor_end_cycle", "lead_close_task", "lead_retire_task"],
-  lead: ["lead_repoke_agent", "lead_needs_human", "lead_create_worktree", "lead_set_contract", "lead_dispatch_agent", "lead_verify", "lead_merge", "lead_remove_worktree", "lead_release", "lead_store_release", "lead_record_store_note", "lead_report_to_supervisor", "lead_close_task", "lead_retire_task", "lead_update_notebook", "lead_read_ledger"],
-  agent: ["agent_claim", "agent_escalate_blocker"],
+  lead: ["lead_reply_peer", "lead_needs_human", "lead_create_worktree", "lead_set_contract", "lead_dispatch_agent", "lead_verify", "lead_merge", "lead_remove_worktree", "lead_release", "lead_store_release", "lead_record_store_note", "lead_report_to_supervisor", "lead_close_task", "lead_retire_task", "lead_update_notebook", "lead_read_ledger"],
+  agent: ["agent_claim", "agent_ask"],
   unbound: ["factory_dispatch_supervisor", "factory_status"]
 };
 sharedTools.supervisor_read_ledger = { ...sharedTools.factory_status, name: "supervisor_read_ledger" };
@@ -1619,6 +1701,10 @@ var catalog = slpCatalog;
 
 // src/agy-mcp-schema-heal.ts
 var ALLOWED_ROLES = /* @__PURE__ */ new Set(["supervisor", "lead", "agent"]);
+var LEGACY_ROLE_TOOL_ALLOWLIST = {
+  lead: ["lead_repoke_agent"],
+  agent: ["agent_escalate_blocker"]
+};
 var AGY_APP_DATA_NAMES = ["antigravity", "antigravity-cli"];
 var AGY_SERVER_DIR_NAMES = ["paseo-factory_paseo_factory", "paseo_factory"];
 function resolveEffectiveHome() {
@@ -1692,7 +1778,10 @@ function resolveHealTarget(targetPath) {
 function resolveAllowedToolForSeat(seat, toolName) {
   if (!ALLOWED_ROLES.has(seat)) return null;
   const allowedTools = catalog.roles[seat];
-  if (!Array.isArray(allowedTools) || !allowedTools.includes(toolName)) return null;
+  const legacyTools = LEGACY_ROLE_TOOL_ALLOWLIST[seat] ?? [];
+  if ((!Array.isArray(allowedTools) || !allowedTools.includes(toolName)) && !legacyTools.includes(toolName)) {
+    return null;
+  }
   return catalog.tools[toolName] ?? null;
 }
 function serializeAgyMcpSchema(tool) {

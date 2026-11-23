@@ -63,6 +63,7 @@ function eventPeerAgentId(evt: AnyEvent): string | null {
     evt.event === "claim_reported" ||
     evt.event === "meter_written" ||
     evt.event === "repoke_dispatched" ||
+    evt.event === "peer_asked" ||
     evt.event === "permit_allowed" ||
     evt.event === "permit_denied" ||
     evt.event === "git_blocked"
@@ -330,6 +331,8 @@ export function renderLedgerLine(evt: AnyEvent): string {
       return `respawn ${evt.provider}`;
     case "respawn_refused":
       return `respawn refused ${evt.rule}`;
+    case "peer_asked":
+      return `peer asked (${evt.kind}${evt.layer === undefined ? "" : `/${evt.layer}`}) — ${evt.summary}`;
     case "needs_human":
       return `needs human — ${evt.reason}`;
     case "retro_written":

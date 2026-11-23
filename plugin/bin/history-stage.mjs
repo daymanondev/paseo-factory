@@ -44,6 +44,7 @@ var EVENT_NAMES = [
   "repoke_refused",
   "respawn_dispatched",
   "respawn_refused",
+  "peer_asked",
   "needs_human",
   "retro_written",
   "task_closed",
@@ -56,6 +57,13 @@ var EVENT_NAMES = [
 ];
 var PEER_DISPOSITIONS = ["engineer", "architect", "reviewer", "scout"];
 var PEER_HANDOFF_OUTCOMES = ["complete", "partial", "blocked", "reopen"];
+var MAX_REOPEN_CONDITIONS = 8;
+var MAX_REOPEN_CONDITION_CHARS = 240;
+var PEER_ASK_KINDS = ["reopen_premise", "gate_mismatch", "dependency", "clarify", "blocked", "partial"];
+var PEER_ASK_LAYERS = ["foundation", "dependency", "lifecycle", "API", "ownership", "verification"];
+var PEER_ASK_SOURCES = ["agent_ask", "agent_claim", "legacy_blocker"];
+var REPOKE_KINDS = ["denial-stall", "ruling"];
+var REPOKE_MESSAGE_MAX_CHARS = 1e3;
 var LEDGER_REFERENCE_KINDS = { denial: "permit_denied", repoke: "repoke_dispatched", gate: "gate_finished", spawn: "spawn_dispatched", respawn: "respawn_dispatched" };
 function eventAllowsUnboundEpoch(kind) {
   return kind === "spawn_refused" || kind === "respawn_refused" || kind === "repoke_refused";
@@ -186,7 +194,7 @@ function shapeIsValid(evt) {
   const taskIsString = typeof asRecord.task === "string";
   if (evt.event === "ledger_schema") return asRecord.schema_version === 2 && asRecord.version === 2 && nonempty(asRecord.ledger_id) && nonempty(asRecord.writer_id) && asRecord.provenance?.writer_id === asRecord.writer_id;
   if (evt.event === "contract_set") {
-    return taskIsString && (asRecord.timeoutSeconds === void 0 || isValidContractTimeoutSeconds(asRecord.timeoutSeconds));
+    return taskIsString && (asRecord.timeoutSeconds === void 0 || isValidContractTimeoutSeconds(asRecord.timeoutSeconds)) && reopenConditionsAreValid(asRecord.reopenConditions);
   }
   if (evt.event === "gate_queued") {
     const attempt2 = asRecord.attempt;
@@ -208,7 +216,10 @@ function shapeIsValid(evt) {
     return taskIsString && typeof asRecord.provider === "string" && (asRecord.agent === void 0 || typeof asRecord.agent === "string") && usageIsValid(asRecord.usage);
   }
   if (evt.event === "repoke_dispatched" || evt.event === "repoke_refused") {
-    return taskIsString && typeof asRecord.agent === "string" && (evt.event === "repoke_dispatched" || typeof asRecord.rule === "string" && typeof asRecord.reason === "string");
+    return taskIsString && typeof asRecord.agent === "string" && (evt.event === "repoke_dispatched" ? repokeMetadataIsValid(asRecord.kind, asRecord.message) : typeof asRecord.rule === "string" && typeof asRecord.reason === "string");
+  }
+  if (evt.event === "peer_asked") {
+    return peerAskedShapeIsValid(asRecord);
   }
   if (evt.event === "respawn_dispatched" || evt.event === "respawn_refused") {
     return taskIsString && typeof asRecord.provider === "string" && typeof asRecord.died_agent === "string" && (evt.event === "respawn_dispatched" || typeof asRecord.rule === "string" && typeof asRecord.reason === "string");
@@ -239,6 +250,19 @@ function shapeIsValid(evt) {
   }
   const attempt = asRecord.attempt;
   return taskIsString && typeof attempt === "number" && Number.isInteger(attempt) && attempt >= 1;
+}
+function reopenConditionsAreValid(value) {
+  if (value === void 0) return true;
+  if (!Array.isArray(value) || value.length > MAX_REOPEN_CONDITIONS) return false;
+  return value.every((item) => typeof item === "string" && item.trim() !== "" && item.length <= MAX_REOPEN_CONDITION_CHARS);
+}
+function repokeMetadataIsValid(kind, message) {
+  if (kind !== void 0 && (typeof kind !== "string" || !REPOKE_KINDS.includes(kind))) return false;
+  if (message !== void 0 && (typeof message !== "string" || message.length > REPOKE_MESSAGE_MAX_CHARS)) return false;
+  return true;
+}
+function peerAskedShapeIsValid(event) {
+  return nonempty(event.task) && typeof event.kind === "string" && PEER_ASK_KINDS.includes(event.kind) && (event.layer === void 0 || typeof event.layer === "string" && PEER_ASK_LAYERS.includes(event.layer)) && nonempty(event.summary) && typeof event.source === "string" && PEER_ASK_SOURCES.includes(event.source) && (event.agent === void 0 || typeof event.agent === "string") && (event.reportPath === void 0 || typeof event.reportPath === "string");
 }
 function usageIsValid(usage) {
   if (typeof usage !== "object" || usage === null || Array.isArray(usage)) return false;
@@ -275,7 +299,7 @@ function v2PayloadIsValid(event) {
     case "ledger_schema":
       return true;
     case "contract_set":
-      return string("workspace") && string("gate") && string("artifact") && strings("scope") && strings("skills") && optionalString("base") && optionalString("description") && optionalString("by") && (event.freshEyes === void 0 || event.freshEyes === true) && (event.watch === void 0 || event.watch === true) && (event.disposition === void 0 || PEER_DISPOSITIONS.includes(event.disposition)) && (event.timeoutSeconds === void 0 || isValidContractTimeoutSeconds(event.timeoutSeconds));
+      return string("workspace") && string("gate") && string("artifact") && strings("scope") && strings("skills") && optionalString("base") && optionalString("description") && optionalString("by") && (event.freshEyes === void 0 || event.freshEyes === true) && (event.watch === void 0 || event.watch === true) && (event.disposition === void 0 || PEER_DISPOSITIONS.includes(event.disposition)) && (event.timeoutSeconds === void 0 || isValidContractTimeoutSeconds(event.timeoutSeconds)) && reopenConditionsAreValid(event.reopenConditions);
     case "gate_queued":
       return string("sha") && (event.id === void 0 || nonempty(event.id)) && optionalString("agent") && handoffIsValid(event.handoff) && mechanicalClaimIsValid(event);
     case "claim_reported":
@@ -319,6 +343,10 @@ function v2PayloadIsValid(event) {
       return nonempty(event.runId) && typeof event.action === "string" && STORE_RELEASE_ACTIONS.includes(event.action) && Array.isArray(event.platforms) && event.platforms.every((item) => nonempty(item)) && string("summary");
     case "store_release_failed":
       return nonempty(event.runId) && typeof event.action === "string" && STORE_RELEASE_ACTIONS.includes(event.action) && typeof event.failureClass === "string" && STORE_RELEASE_FAILURE_CLASSES.includes(event.failureClass) && nonempty(event.code) && string("detail") && optionalString("upstreamIssuePath");
+    case "repoke_dispatched":
+      return string("agent") && repokeMetadataIsValid(event.kind, event.message);
+    case "peer_asked":
+      return peerAskedShapeIsValid(event);
     default:
       return true;
   }

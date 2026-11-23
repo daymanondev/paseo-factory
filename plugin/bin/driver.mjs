@@ -113,7 +113,7 @@ const TASK_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 // No description and no skills, no headers — the brief is byte-identical to
 // v0.0.5's.
 const BRIEF_TEMPLATE = `Do the assigned work on branch \`<branch>\`. Use fast slice checks during TDD (never pre-run the full cumulative Gate); when done: commit, run
-\`git rev-parse HEAD\`, then \`factory-claim --task <task-id> --sha <sha>\`, and end your turn immediately once \`queued\` (the daemon GateQueue runs the Gate asynchronously).
+\`git rev-parse HEAD\`, then \`factory-claim --task <task-id> --sha <sha>\`, and end your turn immediately once \`queued\` (automated verification runs asynchronously).
 If the result is RED: read the note line, fix, make a NEW commit, claim
 again with the new sha. Never edit tests just to make them green.
 
@@ -125,15 +125,27 @@ PATH="<path>" first.`;
 // the commit law above (v0.5.0 ticket 03, ADR 0054 §3).
 const READ_ONLY_DISPOSITIONS = new Set(["architect", "reviewer", "scout"]);
 
-// The disposition's own Paseo Room evidence expectations (ADR 0054 §2) —
-// what the handoff fields must carry for the Lead to receive actionable
-// findings. A plain-JS mirror of src/disposition-prompt.ts's map.
+// The disposition's own Paseo Room evidence expectations (ADR 0054 §2, ADR 0069) —
+// what the handoff fields must carry for actionable findings. A plain-JS mirror
+// of src/disposition-prompt.ts's map.
 const READ_ONLY_DISPOSITION_EVIDENCE = {
   architect:
     "alternatives considered, the strongest counterargument against your recommendation, the conditions that would reverse it, and supporting file:line evidence",
-  reviewer: "a concrete claim plus file:line evidence per finding, separating blocking defects from non-blocking notes",
+  reviewer:
+    "argue the strongest evidence-backed weakness with concrete claim plus file:line evidence before agreeing (never manufacturing objections when evidence holds), separating blocking defects from non-blocking notes",
   scout: "concrete file:line evidence paths, the remaining unknowns, and your confidence (low | medium | high)",
 };
+
+const PEER_PREMISE_CHECK_REMINDER =
+  "Before writing code, verify the brief's premises and verification command against the actual repository; if reality conflicts with the brief, a prerequisite is missing, or an ambiguity changes behavior, call `agent_ask` immediately rather than guessing.";
+
+function formatReopenIfBlock(reopenConditions) {
+  if (!Array.isArray(reopenConditions)) return "";
+  const items = reopenConditions.map((item) => (typeof item === "string" ? item.trim() : "")).filter((item) => item !== "");
+  if (items.length === 0) return "";
+  if (items.length === 1) return `Reopen if: ${items[0]}`;
+  return ["Reopen if:", ...items.map((item) => `- ${item}`)].join("\n");
+}
 
 /**
  * The read-only brief body (v0.5.0 ticket 03, ADR 0054 §3): the session is
@@ -170,7 +182,7 @@ PATH="${pathValue}" first.`;
  * fixed body itself for the fenced no-commit brief: the read-only Peer is
  * never handed the commit + `--sha` instructions.
  */
-export function renderBrief(task, pathValue, description, skills, branch = task, disposition) {
+export function renderBrief(task, pathValue, description, skills, branch = task, disposition, reopenConditions) {
   const body = READ_ONLY_DISPOSITIONS.has(disposition)
     ? readOnlyBriefBody(task, pathValue, disposition)
     : BRIEF_TEMPLATE.replaceAll("<branch>", branch)
@@ -182,7 +194,9 @@ export function renderBrief(task, pathValue, description, skills, branch = task,
     brief = `Disposition: ${disposition}\n\n${brief}`;
   if (Array.isArray(skills) && skills.length > 0)
     brief = `Required skills to open first: ${skills.join(", ")} (read ~/.agents/skills/<skill>/SKILL.md or .agents/skills/<skill>/SKILL.md before starting)\n\n${brief}`;
-  return brief;
+  const reopenIf = formatReopenIfBlock(reopenConditions);
+  if (reopenIf !== "") brief = `${brief}\n\n${reopenIf}`;
+  return `${brief}\n\n${PEER_PREMISE_CHECK_REMINDER}`;
 }
 
 /**
@@ -1116,7 +1130,7 @@ export async function observeTasks(
         const contract = contractFromLedger(events, entry.task);
         const workspace = entry.workspace ?? contract?.workspace;
         cleanWorkspaceForRespawn(workspace); // the TASK WORKTREE on the worktree path — never <project-root>
-        const brief = entry.brief ?? renderBrief(entry.task, process.env.PATH ?? "", contract?.description, contract?.skills, entry.branch, contract?.disposition);
+        const brief = entry.brief ?? renderBrief(entry.task, process.env.PATH ?? "", contract?.description, contract?.skills, entry.branch, contract?.disposition, contract?.reopenConditions);
         const { provider: providerId, model, thinking } = splitProvider(provider);
         const respawnSeq = reply.event?.seq;
         const idempotencyKey = respawnSeq !== undefined ? `${entry.task}-respawn-${respawnSeq}` : `${entry.task}-respawn`;
@@ -1582,7 +1596,7 @@ export async function runDriver({ home, stateDir, spoolRoot, tasks, provider, th
       // the branch it is already on — `factory/<task>`, never the bare task
       // id the legacy shared-checkout path used.
       const branch = prep?.branch ?? task;
-      const brief = renderBrief(task, process.env.PATH ?? "", contract.description, contract.skills, branch, contract.disposition);
+      const brief = renderBrief(task, process.env.PATH ?? "", contract.description, contract.skills, branch, contract.disposition, contract.reopenConditions);
       const spawnSeq = reply.event?.seq;
       const idempotencyKey = spawnSeq !== undefined ? `${task}-spawn-${spawnSeq}` : task;
       // The create's lane: the spool's thinking-resolved provider when a tier

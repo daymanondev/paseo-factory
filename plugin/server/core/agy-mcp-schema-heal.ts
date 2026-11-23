@@ -6,6 +6,10 @@ import { catalog } from "./mcp/catalog.ts";
 import type { ToolDefinition } from "./mcp/shared.ts";
 
 const ALLOWED_ROLES = new Set(["supervisor", "lead", "agent"]);
+const LEGACY_ROLE_TOOL_ALLOWLIST: Record<string, readonly string[]> = {
+  lead: ["lead_repoke_agent"],
+  agent: ["agent_escalate_blocker"],
+};
 const AGY_APP_DATA_NAMES = ["antigravity", "antigravity-cli"] as const;
 const AGY_SERVER_DIR_NAMES = ["paseo-factory_paseo_factory", "paseo_factory"] as const;
 
@@ -113,11 +117,14 @@ function resolveHealTarget(targetPath: string): HealTarget | null {
   return null;
 }
 
-/** Look up an MCP tool definition only if it belongs to the calling seat's role allowlist. */
+/** Look up an MCP tool definition only if it belongs to the calling seat's role allowlist (including legacy aliases). */
 function resolveAllowedToolForSeat(seat: string, toolName: string): ToolDefinition | null {
   if (!ALLOWED_ROLES.has(seat)) return null;
   const allowedTools = catalog.roles[seat];
-  if (!Array.isArray(allowedTools) || !allowedTools.includes(toolName)) return null;
+  const legacyTools = LEGACY_ROLE_TOOL_ALLOWLIST[seat] ?? [];
+  if ((!Array.isArray(allowedTools) || !allowedTools.includes(toolName)) && !legacyTools.includes(toolName)) {
+    return null;
+  }
   return catalog.tools[toolName] ?? null;
 }
 

@@ -78,6 +78,7 @@ import type { Factory } from "./core/factory.ts";
 import { readCorrelations } from "./core/correlations.ts";
 import { MAX_ATTEMPTS } from "./core/events.ts";
 import type { LedgerEvent } from "./core/events.ts";
+import { hasUnansweredPeerAsk } from "./core/task-state.ts";
 import { ensureProjectRegistered, listProjectRegistrations, projectStateDir, projectNotebookPath, readProjectRegistration, resolveProject, writeProjectRegistration } from "./core/project.ts";
 import type { LeadRotationState, ProjectRegistration } from "./core/project.ts";
 import { loadLanes, saveLanes } from "./core/lanes.ts";
@@ -265,7 +266,7 @@ export interface LeadMailRuntime {
   dispatchLead(request: SpoolLeadDispatchRequest, options?: { existingDesignSnapshot: true }): Promise<SpoolReply>;
   dispatchSupervisor(request: SpoolSupervisorDispatchRequest): Promise<SpoolReply>;
   reportSupervisor(request: SpoolSupervisorReportRequest): Promise<SpoolReply>;
-  notifyPeer(input: { task: string; kind: "verdict" | "needs_human"; text: string }): Promise<void>;
+  notifyPeer(input: { task: string; kind: "verdict" | "needs_human" | "peer_challenge"; text: string; projectSlug?: string }): Promise<void>;
   enqueueLeadMail(
     slug: string,
     mail: { to?: MailRecipient; from: LeadMailFrom; kind: LeadMailKind; task?: string; text: string },
@@ -969,8 +970,12 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
   const observePeers = async (project: { slug: string; root: string }, input?: LeadTurnEndedInput): Promise<void> => {
     await projectLane(project.slug, async () => {
       try {
-        await peerHandoff.observeProject(project.slug, project.root, input);
-        if (input !== undefined && (await answerUnclaimedPeerTurn(project.slug, project.root, input))) {
+        const observed = await peerHandoff.observeProject(project.slug, project.root, input);
+        if (
+          input !== undefined &&
+          !observed.notifiedAgentIds.has(input.agentId) &&
+          (await answerUnclaimedPeerTurn(project.slug, project.root, input))
+        ) {
           await drainLeadMailbox(project.slug);
         }
         if (await tryBeginPendingHandoff(project.slug)) {
@@ -1586,6 +1591,8 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     // A Peer context handoff owns this turn boundary (its extraction prompt or successor).
     const peerHandoffState = readHandoffProgress(deps.stateDir, slug, `peer:${task}`)?.state;
     if (peerHandoffState !== undefined && peerHandoffState !== "done" && peerHandoffState !== "failed") return false;
+    // ADR 0069 + ADR 0058: preserve quiet hold while an unanswered peer_asked awaits ruling.
+    if (hasUnansweredPeerAsk(events, task)) return false;
     const last = events.findLast((evt) => "task" in evt && evt.task === task);
     if (last === undefined || last.event === "permit_denied" || tasksWithOpenGate(events).has(task)) return false;
     let escalated = false;
@@ -1601,11 +1608,11 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     if (!nudgedPeerTurns.has(key)) {
       nudgedPeerTurns.add(key);
       const text = [
-        `Factory: your turn on task ${task} ended without a Claim, and the task is still yours.`,
+        `Your turn on task ${task} ended without a Claim, and the task is still yours.`,
         last.event === "gate_finished" && last.verdict === "red"
           ? "Your last gate was red — fix what it reported, then finish with `agent_claim`."
           : "Continue the work and finish with `agent_claim`.",
-        "If you cannot finish, call `agent_escalate_blocker` and say what you need from the Lead.",
+        "If the brief, verification command, or task scope conflicts with reality, call `agent_ask` before continuing.",
       ].join(" ");
       try {
         await resolveDaemon().agents.ref(input.agentId).send(text);
@@ -1888,7 +1895,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
    * last terminal outcome clears the predicate and its own hook pumps the
    * whole held batch as one consolidated delivery. Never rejects.
    */
-  const notifyPeer = async (input: { task: string; kind: "verdict" | "needs_human"; text: string; projectSlug?: string }): Promise<void> => {
+  const notifyPeer = async (input: { task: string; kind: "verdict" | "needs_human" | "peer_challenge"; text: string; projectSlug?: string }): Promise<void> => {
     try {
       // The task-owning stream (v0.0.89): when an explicit projectSlug is supplied
       // and owns this task, check it first so identically named Task IDs across

@@ -6,7 +6,7 @@
  * forever (`research/03-hands-on/04-andrew-room.md` §12).
  */
 export { createFactory } from "./factory.ts";
-export type { Factory, FactoryOptions, ContractInput, ClaimInput, AdmitClaimInput, AdmitClaimResult, ExecuteQueuedClaimInput, ClaimOutcome, AcceptInput, CloseInput, SpawnInput, SpawnDecision, RespawnInput, RespawnDecision, MeterInput } from "./factory.ts";
+export type { Factory, FactoryOptions, ContractInput, PeerAskInput, ClaimInput, AdmitClaimInput, AdmitClaimResult, ExecuteQueuedClaimInput, ClaimOutcome, AcceptInput, CloseInput, SpawnInput, SpawnDecision, RespawnInput, RespawnDecision, MeterInput } from "./factory.ts";
 export { resolveProject, resolveOrBootstrapProject, ensureGitRepository, projectStateDir, projectNotebookPath, readProjectNotebook, writeProjectNotebook, syncLegacyScratchNotebook, PROJECT_NOTEBOOK_FILENAME, PROJECT_NOTEBOOK_MAX_LINES, PROJECT_NOTEBOOK_MAX_BYTES, PROJECT_NOTEBOOK_MAX_GUARD_ROWS, readProjectRegistration, writeProjectRegistration, ensureProjectRegistered, listProjectRegistrations, discoverProjects } from "./project.ts";
 export type { ProjectResolution, BootstrapProjectOptions, BootstrapProjectResolution, DiscoveredProject, ProjectRegistration, LegacyNotebookSync } from "./project.ts";
 export { resolveClaimedCommit, checkCleanAt, diffBetween, changedFiles, scopeCoversFile, headCommitSync, changesOutsideScope, landTaskWorktree, commitSeatMemoryOnRoot, reapWorktreeProcesses, taskWorktreePath, parseTaskWorktreePath, taskWorktreeBranch, prepareTaskWorktree, deleteTaskWorktreeBranch } from "./workspace.ts";
@@ -38,7 +38,8 @@ export type {
   WatchQuestion,
   WatchTimelineEntry,
 } from "./watch.ts";
-export { renderReport } from "./report.ts";
+export { renderReport, renderHandbackReport, computeLoopHealth, formatLoopHealthLines } from "./report.ts";
+export type { HandbackReportInput, LoopHealth } from "./report.ts";
 export { FactoryError } from "./errors.ts";
 export {
   DEFAULT_LANE,
@@ -164,21 +165,36 @@ export type {
   SpawnRefused,
   RespawnDispatched,
   RespawnRefused,
+  RepokeDispatched,
+  RepokeRefused,
+  PeerAsked,
   MeterWritten,
   MeterUsage,
   RetroWritten,
   TaskClosed,
 } from "./events.ts";
-export { EVENT_NAMES, MAX_ATTEMPTS, PEER_DISPOSITIONS, PEER_HANDOFF_OUTCOMES } from "./events.ts";
+export {
+  EVENT_NAMES,
+  MAX_ATTEMPTS,
+  MAX_REOPEN_CONDITION_CHARS,
+  MAX_REOPEN_CONDITIONS,
+  PEER_ASK_KINDS,
+  PEER_ASK_LAYERS,
+  PEER_ASK_SOURCES,
+  PEER_DISPOSITIONS,
+  PEER_HANDOFF_OUTCOMES,
+  REPOKE_KINDS,
+  REPOKE_MESSAGE_MAX_CHARS,
+} from "./events.ts";
 
-export { projectTask } from "./task-state.ts";
+export { projectTask, hasUnansweredPeerAsk } from "./task-state.ts";
 export { taskStatusLines } from "./task-status.ts";
 export type { TaskStatusOptions } from "./task-status.ts";
 export type { AcceptanceRole, AttemptState, ReviewState, TaskClosure } from "./task-state.ts";
 
 export { legacyIdentityMappingIsValid, planLegacyIdentity, resolveLedgerReference, remapLedgerReferences, classifyEventIdentities, semanticEventContent, canonicalHistoryJson, historyHash } from "./history-identity.ts";
 export type { IdentityMappingEntry, LegacyIdentityMapping, IdentityPlan, ReferenceResolution } from "./history-identity.ts";
-export type { EventIdentityMetadata, LedgerSchema, LedgerReferenceField, PeerDisposition, PeerHandoffFields, PeerHandoffOutcome } from "./events.ts";
+export type { EventIdentityMetadata, LedgerSchema, LedgerReferenceField, PeerAskKind, PeerAskLayer, PeerAskSource, PeerDisposition, PeerHandoffFields, PeerHandoffOutcome, RepokeKind } from "./events.ts";
 
 export { planHistoryImport, validateHistoryCausality, reconcileHistory, HistoryImportError } from "./history-import.ts";
 export type { HistoryImportInput, HistoryImportSource, HistoryImportPlan, ImportSourcePlan, ImportConflict, VerifiedImportBinding, VerifiedImportFile, HistoryArtifact } from "./history-import.ts";

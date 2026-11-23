@@ -10,7 +10,25 @@ export {
   MAX_CONTRACT_TIMEOUT_SECONDS,
   MIN_CONTRACT_TIMEOUT_SECONDS,
 };
-import { eventAllowsUnboundEpoch, LEDGER_REFERENCE_KINDS, EVENT_NAMES, NEEDS_HUMAN_REASONS, needsHumanEvidenceIsValid, PEER_DISPOSITIONS, PEER_HANDOFF_OUTCOMES, STORE_RELEASE_ACTIONS, STORE_RELEASE_FAILURE_CLASSES, STORE_RELEASE_MODES } from "./events.ts";
+import {
+  eventAllowsUnboundEpoch,
+  LEDGER_REFERENCE_KINDS,
+  EVENT_NAMES,
+  MAX_REOPEN_CONDITION_CHARS,
+  MAX_REOPEN_CONDITIONS,
+  NEEDS_HUMAN_REASONS,
+  needsHumanEvidenceIsValid,
+  PEER_ASK_KINDS,
+  PEER_ASK_LAYERS,
+  PEER_ASK_SOURCES,
+  PEER_DISPOSITIONS,
+  PEER_HANDOFF_OUTCOMES,
+  REPOKE_KINDS,
+  REPOKE_MESSAGE_MAX_CHARS,
+  STORE_RELEASE_ACTIONS,
+  STORE_RELEASE_FAILURE_CLASSES,
+  STORE_RELEASE_MODES,
+} from "./events.ts";
 import { PEER_THINKING_LEVELS } from "./peer-thinking.ts";
 import type { LedgerEvent } from "./events.ts";
 
@@ -138,7 +156,11 @@ function shapeIsValid(evt: LedgerEvent): boolean {
   const taskIsString = typeof asRecord.task === "string";
   if (evt.event === "ledger_schema") return asRecord.schema_version === 2 && asRecord.version === 2 && nonempty(asRecord.ledger_id) && nonempty(asRecord.writer_id) && (asRecord.provenance as Record<string, unknown> | undefined)?.writer_id === asRecord.writer_id;
   if (evt.event === "contract_set") {
-    return taskIsString && (asRecord.timeoutSeconds === undefined || isValidContractTimeoutSeconds(asRecord.timeoutSeconds));
+    return (
+      taskIsString &&
+      (asRecord.timeoutSeconds === undefined || isValidContractTimeoutSeconds(asRecord.timeoutSeconds)) &&
+      reopenConditionsAreValid(asRecord.reopenConditions)
+    );
   }
   if (evt.event === "gate_queued") {
     const attempt = asRecord.attempt;
@@ -195,8 +217,13 @@ function shapeIsValid(evt: LedgerEvent): boolean {
     return (
       taskIsString &&
       typeof asRecord.agent === "string" &&
-      (evt.event === "repoke_dispatched" || (typeof asRecord.rule === "string" && typeof asRecord.reason === "string"))
+      (evt.event === "repoke_dispatched"
+        ? repokeMetadataIsValid(asRecord.kind, asRecord.message)
+        : typeof asRecord.rule === "string" && typeof asRecord.reason === "string")
     );
+  }
+  if (evt.event === "peer_asked") {
+    return peerAskedShapeIsValid(asRecord);
   }
   if (evt.event === "respawn_dispatched" || evt.event === "respawn_refused") {
     return (
@@ -297,6 +324,32 @@ function shapeIsValid(evt: LedgerEvent): boolean {
   return taskIsString && typeof attempt === "number" && Number.isInteger(attempt) && attempt >= 1;
 }
 
+function reopenConditionsAreValid(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!Array.isArray(value) || value.length > MAX_REOPEN_CONDITIONS) return false;
+  return value.every((item) => typeof item === "string" && item.trim() !== "" && item.length <= MAX_REOPEN_CONDITION_CHARS);
+}
+
+function repokeMetadataIsValid(kind: unknown, message: unknown): boolean {
+  if (kind !== undefined && (typeof kind !== "string" || !(REPOKE_KINDS as readonly string[]).includes(kind))) return false;
+  if (message !== undefined && (typeof message !== "string" || message.length > REPOKE_MESSAGE_MAX_CHARS)) return false;
+  return true;
+}
+
+function peerAskedShapeIsValid(event: Record<string, unknown>): boolean {
+  return (
+    nonempty(event.task) &&
+    typeof event.kind === "string" &&
+    (PEER_ASK_KINDS as readonly string[]).includes(event.kind) &&
+    (event.layer === undefined || (typeof event.layer === "string" && (PEER_ASK_LAYERS as readonly string[]).includes(event.layer))) &&
+    nonempty(event.summary) &&
+    typeof event.source === "string" &&
+    (PEER_ASK_SOURCES as readonly string[]).includes(event.source) &&
+    (event.agent === undefined || typeof event.agent === "string") &&
+    (event.reportPath === undefined || typeof event.reportPath === "string")
+  );
+}
+
 /**
  * The Meter's usage slot (v0.0.8): an object (possibly empty — the honest
  * "the lane reported nothing") whose keys are exactly the daemon's four
@@ -356,7 +409,8 @@ function v2PayloadIsValid(event: Record<string, unknown>): boolean {
       strings("scope") && strings("skills") && optionalString("base") && optionalString("description") && optionalString("by") &&
       (event.freshEyes === undefined || event.freshEyes === true) && (event.watch === undefined || event.watch === true) &&
       (event.disposition === undefined || (PEER_DISPOSITIONS as readonly string[]).includes(event.disposition as string)) &&
-      (event.timeoutSeconds === undefined || isValidContractTimeoutSeconds(event.timeoutSeconds));
+      (event.timeoutSeconds === undefined || isValidContractTimeoutSeconds(event.timeoutSeconds)) &&
+      reopenConditionsAreValid(event.reopenConditions);
     case "gate_queued": return string("sha") && (event.id === undefined || nonempty(event.id)) && optionalString("agent") && handoffIsValid(event.handoff) && mechanicalClaimIsValid(event);
     case "claim_reported": return string("sha") && optionalString("agent") && handoffIsValid(event.handoff) && mechanicalClaimIsValid(event);
     case "gate_started": return string("cmd");
@@ -434,6 +488,8 @@ function v2PayloadIsValid(event: Record<string, unknown>): boolean {
         string("detail") &&
         optionalString("upstreamIssuePath")
       );
+    case "repoke_dispatched": return string("agent") && repokeMetadataIsValid(event.kind, event.message);
+    case "peer_asked": return peerAskedShapeIsValid(event);
     default: return true; // Remaining required fields are checked by the historical shape predicate.
   }
 }

@@ -104,6 +104,9 @@ commands:
                                      after EVERY verdict)
              [--description <text>]  the task's assignment in the Owner's words —
                                      the driver's brief carries it (v0.0.6)
+             [--reopen-if <text>]    repeatable condition under which the Peer
+                                     should challenge or reopen the Contract
+                                     (max 8 items, <= 240 chars each)
              [--skills <s1,s2,...>]  SKILL.md workflows the working agent must
                                      open first (v0.0.14) — the Lead mandates
                                      a method, not just an outcome; the
@@ -649,6 +652,7 @@ if (command === "contract") {
     invariants: { type: "string" },
     exclusions: { type: "string" },
     verification: { type: "string" },
+    "reopen-if": { type: "string", multiple: true },
     disposition: { type: "string" },
     "reset-peer": { type: "boolean", default: false },
     "timeout-seconds": { type: "string" },
@@ -661,6 +665,14 @@ if (command === "contract") {
   if (v["fresh-eyes"] && v["no-fresh-eyes"]) fail("contract: pass either --fresh-eyes or --no-fresh-eyes, not both");
   if (typeof v.description === "string" && v.description.trim() === "") {
     fail("contract: --description must be a non-empty text — omit it when the task has no assignment text");
+  }
+  let reopenConditions;
+  if (Array.isArray(v["reopen-if"]) && v["reopen-if"].length > 0) {
+    reopenConditions = v["reopen-if"].map((item) => {
+      const trimmed = typeof item === "string" ? item.trim() : "";
+      if (trimmed === "") fail("contract: --reopen-if must be a non-empty text");
+      return trimmed;
+    });
   }
   if (v.disposition !== undefined && !["engineer", "architect", "reviewer", "scout"].includes(v.disposition)) {
     fail("contract: --disposition must be one of engineer|architect|reviewer|scout — omit it for the engineer default");
@@ -707,6 +719,7 @@ if (command === "contract") {
     ...(typeof v.invariants === "string" && v.invariants.trim() !== "" ? { invariants: v.invariants } : {}),
     ...(typeof v.exclusions === "string" && v.exclusions.trim() !== "" ? { exclusions: v.exclusions } : {}),
     ...(typeof v.verification === "string" && v.verification.trim() !== "" ? { verification: v.verification } : {}),
+    ...(reopenConditions === undefined ? {} : { reopenConditions }),
     // ADR 0053 §1/§3: the Peer's disposition and the explicit reset — a
     // re-contract preserves the live Peer unless --reset-peer is passed.
     ...(v.disposition === undefined ? {} : { disposition: v.disposition }),

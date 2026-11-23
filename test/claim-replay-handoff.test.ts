@@ -106,7 +106,7 @@ for (const disposition of ["scout", "architect", "reviewer", "engineer"] as cons
 }
 
 for (const [field, value] of [
-  ["outcome", "partial"], ["scope", "Read src/factory.ts and src/report.ts"],
+  ["scope", "Read src/factory.ts and src/report.ts"],
   ["unknowns", "Live daemon unverified"], ["ownership", "Lead owns review"],
   ["verification", " Claim behavior checked "],
 ] as const) {
@@ -122,6 +122,21 @@ for (const [field, value] of [
     assert.ok(f.mail[1]!.text.includes(value));
   });
 }
+
+test("changing outcome to partial never replays Attempt 1 GREEN and routes through Gate-decoupled handback (ADR 0069)", { timeout: 10_000 }, async (t) => {
+  const f = fixture(t, "scout");
+  await f.claim();
+  const next = await f.claim({ handoff: { ...handoff, outcome: "partial" } });
+  assert.equal(next.attempt, undefined);
+  assert.equal(f.factory.ledger.eventsFor("REPLAY").filter((e) => e.event === "claim_reported").length, 1);
+  const asked = f.factory.ledger.eventsFor("REPLAY").findLast((event) => event.event === "peer_asked");
+  assert.equal(asked?.kind, "partial");
+  assert.equal(asked?.source, "agent_claim");
+  assert.ok(readFileSync(next.reportPath!, "utf8").includes("- Outcome: partial"));
+  assert.equal(f.mail.length, 2);
+  assert.equal(f.mail[1]!.kind, "peer_challenge");
+  assert.ok(f.mail[1]!.text.includes("- Outcome: partial"));
+});
 
 test("mechanical marker changes open normal Attempts; identical mechanical retries replay", { timeout: 10_000 }, async (t) => {
   const f = fixture(t);
