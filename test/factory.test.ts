@@ -1054,7 +1054,7 @@ test("repoke dispatches once per task and refuses the second ask with one repoke
   const first = factory.repoke("LEAD1", "ag-lead1");
   assert.equal(first.outcome, "dispatched");
   const { ts, ...rest } = first.outcome === "dispatched" ? first.event : { ts: "", event: undefined };
-  assert.deepEqual(rest, { seq: 2, event: "repoke_dispatched", task: "LEAD1", agent: "ag-lead1" }, "the dispatch line IS the spent marker — task and its target, nothing else");
+  assert.deepEqual(rest, { seq: 2, event: "repoke_dispatched", task: "LEAD1", agent: "ag-lead1", kind: "denial-stall" }, "the dispatch line IS the spent marker with its denial-stall kind");
 
   // The one-per-task law lives plugin-side: a second ask names its own refusal.
   const second = factory.repoke("LEAD1", "ag-lead1");
