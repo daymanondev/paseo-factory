@@ -137,14 +137,14 @@ test("the successor's second crossing survives restart and escalates to the Lead
   assert.equal(f.created.length, 2, f.logs.join("\n"));
 });
 
-test("a read-only Contract's 200k successor is fenced: the worktree stays clean at HEAD, no commit, claim without --sha with the disposition's evidence (ticket 03, ADR 0054 §3)", async t => {
+test("a read-only Contract's automatic 200k crossing halts without Peer-2, while an Owner handoff successor stays fenced (ADR 0054 §3 + ADR 0069)", async t => {
   const f = fixture(t);
-  // The epoch moves onto a read-only disposition before the crossing — the
-  // successor continues the same Task under the reviewer's fence.
+  // Owner-requested handoff on a read-only disposition still creates a fenced successor.
   f.factory.setContract({ task: "T-04", workspace: f.root, gate: "", disposition: "reviewer", description: "Audit the slice" });
-  await f.runtime.onLeadTurnEnded(ended(f.peer.id));
+  const ownerStarted = await f.surface.handoff({ projectRoot: f.root, seat: "peer:T-04" }, "start");
+  assert.equal(ownerStarted.ok, true);
   writeFileSync(f.handoff, "# Completed & Verified Slice\nPartial findings; the retry policy is unverified.");
-  await f.runtime.onLeadTurnEnded(ended(f.peer.id));
+  await f.runtime.onLeadTurnEnded(ended(f.peer.id, "# Completed & Verified Slice\nPartial findings; the retry policy is unverified."));
   const successor = f.created[0]!;
   assert.match(successor.prompt!, /Disposition: reviewer|disposition reviewer/, "the successor prompt names the disposition");
   assert.match(successor.prompt!, /Read-Only/, "the successor prompt states the session is Read-Only");
@@ -155,6 +155,16 @@ test("a read-only Contract's 200k successor is fenced: the worktree stays clean 
   assert.match(successor.prompt!, /blocking defects/, "the reviewer disposition's evidence expectation rides the prompt");
   assert.match(successor.prompt!, /agent_claim|factory-claim/, "the claim invocation is still named");
   assert.doesNotMatch(successor.prompt!, /Run the full cumulative Gate before calling/i);
+
+  // Automatic 200k context-mark on a read-only disposition halts immediately without spawning Peer 2 (ADR 0069 Ticket 05).
+  await f.runtime.onLeadTurnEnded(ended("lead"));
+  f.agents.find(a => a.id === "successor-1")!.archivedAt = "retired";
+  f.factory.setContract({ task: "T-04", workspace: f.root, gate: "", disposition: "reviewer", description: "Audit the slice in new epoch" });
+  const roPeer = { ...f.peer, id: "ro-ceiling-peer", archivedAt: null, status: "idle" as const, lastUsage: { contextWindowUsedTokens: PEER_HANDOFF_TOKENS + 1_000 } };
+  f.agents.unshift(roPeer);
+  await f.runtime.onLeadTurnEnded(ended(roPeer.id));
+  assert.equal(f.created.length, 1, "automatic 200k crossing on read-only disposition skips Peer-2 spawn");
+  assert.ok(f.sent.some(message => message.id === "lead" && message.text.includes("BLOCKED (context-ceiling)")), "Lead receives BLOCKED (context-ceiling) immediately");
 });
 
 test("an engineer 200k successor follows serial slice checks and async no-double-gate Claim discipline (ADR 0068)", async t => {
@@ -669,9 +679,13 @@ test("a smaller Peer window clips the handoff mark to eighty percent", async t =
   const f = fixture(t);
   f.peer.lastUsage = { contextWindowUsedTokens: 102_399, contextWindowMaxTokens: 128_000 };
   await f.runtime.onLeadTurnEnded(ended(f.peer.id));
-  // v0.8.5: an unclaimed completed turn below the mark earns the one no-Claim nudge — not an extraction.
-  const extractions = () => f.sent.filter(s => !/ended without a Claim/.test(s.text));
+  // 102,399 >= 51,200 (50% of clipped 102,400 mark) fires the single Andon Checkpoint, not an extraction.
+  const extractions = () => f.sent.filter(s => s.id === f.peer.id && /# Peer handoff extraction/.test(s.text));
+  const checkpoints = () => f.sent.filter(s => s.id === f.peer.id && /Andon Checkpoint/.test(s.text));
+  assert.equal(checkpoints().length, 1, "above 50% of the clipped mark fires one Andon Checkpoint");
   assert.equal(extractions().length, 0, "below the clipped mark the Peer continues");
+  await f.runtime.onLeadTurnEnded(ended(f.peer.id));
+  assert.equal(checkpoints().length, 1, "Andon Checkpoint never repeats in the same Contract epoch");
   f.peer.lastUsage.contextWindowUsedTokens = 102_400;
   await f.runtime.onLeadTurnEnded(ended(f.peer.id));
   assert.equal(extractions().length, 1, "the clipped mark starts extraction before the 200k mark");
