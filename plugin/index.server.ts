@@ -45,10 +45,102 @@ import { migrateLegacyExecutionState } from "./server/core/project-settings.ts";
 // the binding signature is
 // migrateLegacyRootState(stateDir, { projects: Array<{ slug, gitRoot? }> }).
 import { migrateLegacyRootState } from "./server/core/ledger-migration.ts";
+import { hasActiveStoreReleases, onStoreReleaseActivityChange } from "./server/store-release.ts";
 
 const SHELL_VERSION = "0.20.4";
 
 const log = (message: string) => console.log(`[${PLUGIN_ID}] ${message}`);
+
+export interface SleepInhibitionMonitorDeps {
+  stateDir: string;
+  leadMail: { hasActiveWork(): Promise<boolean> };
+  gateQueue: { hasRunning(): boolean; hasQueued(): boolean };
+  hasActiveStoreReleases?: () => boolean;
+  onStoreReleaseActivityChange?: (listener: () => void) => () => void;
+  sleepInhibitor?: Pick<SleepInhibitor, "poke" | "stop">;
+  platform?: NodeJS.Platform;
+  watchStateDir?: boolean;
+  sweepIntervalMs?: number;
+  log?: (message: string) => void;
+}
+
+/** Coordinates macOS `SleepInhibitor` (`caffeinate -i`) across active seats, gates, and Store releases. */
+export function createSleepInhibitionMonitor(deps: SleepInhibitionMonitorDeps): {
+  refresh: () => Promise<void>;
+  stop: () => void;
+} {
+  const platform = deps.platform ?? process.platform;
+  const logError = deps.log ?? log;
+  const sleepInhibitor =
+    deps.sleepInhibitor ?? new SleepInhibitor({ onError: (error) => logError(`sleep inhibition unavailable: ${String(error)}`) });
+  const checkActiveStoreReleases = deps.hasActiveStoreReleases ?? hasActiveStoreReleases;
+  const subscribeStoreRelease = deps.onStoreReleaseActivityChange ?? onStoreReleaseActivityChange;
+
+  let sleepCheckInFlight = false;
+  let sleepCheckPending = false;
+  let sleepStopped = false;
+
+  const refresh = async (): Promise<void> => {
+    if (platform !== "darwin" || sleepStopped) return;
+    if (sleepCheckInFlight) {
+      sleepCheckPending = true;
+      return;
+    }
+    sleepCheckInFlight = true;
+    try {
+      const active =
+        checkActiveStoreReleases() ||
+        deps.gateQueue.hasRunning() ||
+        deps.gateQueue.hasQueued() ||
+        (await deps.leadMail.hasActiveWork());
+      if (!sleepStopped) sleepInhibitor.poke(active);
+    } catch (error) {
+      logError(`sleep activity check deferred: ${String(error)}`);
+    } finally {
+      sleepCheckInFlight = false;
+      if (sleepCheckPending && !sleepStopped) {
+        sleepCheckPending = false;
+        void refresh();
+      }
+    }
+  };
+
+  // Ledger, mailbox, spool writes, and Store release callbacks cover active
+  // work transitions; the sweep also observes daemon-only state changes.
+  let activityWatcher: FSWatcher | undefined;
+  if (platform === "darwin" && deps.watchStateDir !== false) {
+    try {
+      activityWatcher = watch(deps.stateDir, { recursive: true, persistent: false }, (_event, file) => {
+        if (file && /(?:ledger\.jsonl|mailbox\.jsonl|gate-queue\.json|project\.json|spool[/\\])/.test(String(file))) {
+          void refresh();
+        }
+      });
+      activityWatcher.on("error", (error) => logError(`sleep activity watch unavailable: ${String(error)}`));
+    } catch (error) {
+      logError(`sleep activity watch unavailable: ${String(error)}`);
+    }
+  }
+
+  const offStoreRelease = subscribeStoreRelease(() => {
+    void refresh();
+  });
+  const sleepSweepTimer = setInterval(() => {
+    void refresh();
+  }, deps.sweepIntervalMs ?? 5_000);
+  sleepSweepTimer.unref?.();
+  void refresh();
+
+  return {
+    refresh,
+    stop: () => {
+      sleepStopped = true;
+      offStoreRelease();
+      activityWatcher?.close();
+      clearInterval(sleepSweepTimer);
+      sleepInhibitor.stop();
+    },
+  };
+}
 
 export default function contribute(server: PluginServerContext) {
   // Single synchronous capability gate (ADR 0067): Paseo >=0.17.1 exposes
@@ -482,6 +574,7 @@ export default function contribute(server: PluginServerContext) {
     },
     onLog: log,
   });
+  let sleepMonitor: ReturnType<typeof createSleepInhibitionMonitor> | undefined;
   const gateQueue = createGateQueue({
     stateDir,
     factory,
@@ -489,7 +582,7 @@ export default function contribute(server: PluginServerContext) {
     log,
     onStateChange: () => {
       stateHub.emit("gate.queue");
-      void refreshSleepInhibition();
+      void sleepMonitor?.refresh();
     },
     onSettled: createGateQueueSettler({
       rootFactory: factory,
@@ -500,32 +593,14 @@ export default function contribute(server: PluginServerContext) {
       onLog: log,
     }),
   });
-  const sleepInhibitor = new SleepInhibitor({ onError: error => log(`sleep inhibition unavailable: ${String(error)}`) });
-  let sleepCheckInFlight = false;
-  let sleepCheckPending = false;
-  let sleepStopped = false;
-  const refreshSleepInhibition = async (): Promise<void> => {
-    if (process.platform !== "darwin" || sleepStopped) return;
-    if (sleepCheckInFlight) { sleepCheckPending = true; return; }
-    sleepCheckInFlight = true;
-    try { sleepInhibitor.poke((await leadMail.hasActiveWork()) || gateQueue.hasRunning() || gateQueue.hasQueued()); }
-    catch (error) { log(`sleep activity check deferred: ${String(error)}`); }
-    finally {
-      sleepCheckInFlight = false;
-      if (sleepCheckPending && !sleepStopped) { sleepCheckPending = false; void refreshSleepInhibition(); }
-    }
-  };
-  // Ledger, mailbox and spool writes cover Gate/Peer/seat transitions from
-  // both RPC and CLI doors; the sweep also observes daemon-only state changes.
-  let activityWatcher: FSWatcher | undefined;
-  if (process.platform === "darwin") {
-    try {
-      activityWatcher = watch(stateDir, { recursive: true, persistent: false }, (_event, file) => {
-        if (file && /(?:ledger\.jsonl|mailbox\.jsonl|gate-queue\.json|project\.json|spool[/\\])/.test(String(file))) void refreshSleepInhibition();
-      });
-      activityWatcher.on("error", error => log(`sleep activity watch unavailable: ${String(error)}`));
-    } catch (error) { log(`sleep activity watch unavailable: ${String(error)}`); }
-  }
+  sleepMonitor = createSleepInhibitionMonitor({
+    stateDir,
+    leadMail,
+    gateQueue,
+    hasActiveStoreReleases,
+    onStoreReleaseActivityChange,
+    log,
+  });
   const startStateDirWatcher = (): FSWatcher | undefined => {
     const onFsEvent = (_event: string, file: string | Buffer | null): void => {
       const rel = file === null ? "" : String(file).replace(/\\/g, "/");
@@ -550,9 +625,6 @@ export default function contribute(server: PluginServerContext) {
     }
   };
   const stateWatcher = startStateDirWatcher();
-  const sleepSweepTimer = setInterval(() => { void refreshSleepInhibition(); }, 5_000);
-  sleepSweepTimer.unref?.();
-  void refreshSleepInhibition();
   let mailRecovered = false;
   let gateQueueRecovered = false;
   let gateQueueRecoveryPromise: Promise<void> | undefined;
@@ -901,13 +973,10 @@ export default function contribute(server: PluginServerContext) {
   return () => {
     stopped = true;
     notifyPaseoWaiters();
-    sleepStopped = true;
     offHandoffProgress();
     stateWatcher?.close();
     stateHub.stop();
-    activityWatcher?.close();
-    clearInterval(sleepSweepTimer);
-    sleepInhibitor.stop();
+    sleepMonitor.stop();
     clearTimeout(postReadySyncTimer);
     clearInterval(recoveryTimer);
     clearInterval(peerSweepTimer);
