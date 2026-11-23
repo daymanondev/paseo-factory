@@ -1227,14 +1227,11 @@ test("roles: the seat contracts carry the role law and the 1-line skill trigger 
   const agent = renderAgentContract("T1", "repo-abc123");
   assert.match(agent, /task T1, project repo-abc123/);
   assert.match(agent, /never modify AGENTS\.md, CLAUDE\.md, or CONTEXT\.md/);
-  // The withholding boundary, stated honestly (US17 partial): the mechanical
-  // guarantee that exists today is PATH + brief — the daemon exposes
-  // paseoTools to every agent, so the contract must both name the mechanism
-  // and forbid the visible surface.
-  assert.match(agent, /withheld from you by PATH and by this brief/);
-  assert.match(agent, /factory-claim and the git shim/);
-  assert.match(agent, /paseoTools.*every agent/);
-  assert.match(agent, /never call it/);
+  // Topology-blind reporting boundary (ADR 0069): names only the Peer's own
+  // reporting tools and forbids external lifecycle/orchestration calls without
+  // leaking Owner/Supervisor/Driver/Factory CLI narration.
+  assert.match(agent, /Use only your assigned reporting tools \(`agent_ask` and `agent_claim` \/ `factory-claim`\) inside this worktree/);
+  assert.match(agent, /never invoke external lifecycle or orchestration tools/);
   assert.match(agent, /paseo-factory role skills: tdd, diagnosing-bugs, codebase-design$/);
 });
 

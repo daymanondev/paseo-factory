@@ -1509,7 +1509,7 @@ test("the primary lead_set_contract example drops skills curation while the skil
     assert.match(surface, /\[--skills <s1,s2>\]/);
   }
   for (const surface of [renderRoleContract("lead"), renderSeatContract("lead", project), ROLE_PROMPTS.lead]) {
-    assert.match(surface, /set each Contract \(gate, description, optional artifact, skills\)/, "the Contract schema still names skills as an optional field");
+    assert.match(surface, /set each Contract \(gate, description, optional artifact, skills, reopenConditions\)/, "the Contract schema still names skills as an optional field");
   }
 });
 
@@ -1794,27 +1794,26 @@ test("Supervisor outcome boundary presents Tier-2/Tier-3 proposals as the 4-Line
   }
 });
 
-test("Peer contract carries the independent-colleague stance, Contract Before Test, and the 6-Field Handoff — escalation is never gated behind a third failed fix (ADR 0053 §2/§4–§5, User Stories 5 and 16)", () => {
+test("Peer contract carries the independent-engineer stance, Contract Before Test, and the 6-Field Handoff — escalation is never gated behind a third failed fix (ADR 0053 §2/§4–§5, ADR 0069)", () => {
   for (const surface of [renderRoleContract("agent"), renderRoleAppendSystem("agent"), ROLE_PROMPTS.agent, renderAgentContract("T-06", "repo")]) {
-    // Independent colleague with its own judgment — the obedience framing is gone.
-    assert.match(surface, /independent technical colleague/i);
+    // Independent engineer with its own judgment — topology-blind, no obedience framing.
+    assert.match(surface, /independent engineer/i);
     assert.match(surface, /provisional map for this one turn/);
     assert.match(surface, /data to reconcile, not disobedience/);
     assert.doesNotMatch(surface, /Strict Wave Boundary/);
     // Contract Before Test: the premise challenge fires immediately, before any
-    // test or code, through the real escalation surfaces — never after 3 failures.
+    // test or code, through agent_ask — never after 3 failures.
     assert.match(surface, /Contract Before Test/);
     assert.match(surface, /challenge immediately, BEFORE writing tests or code/);
-    assert.match(surface, /REOPEN_REQUEST \(<layer>: one of foundation \| dependency \| lifecycle \| API \| ownership \| verification/);
-    assert.match(surface, /DEPENDENCY_REQUEST/);
-    assert.match(surface, /at least one alternative direction/);
-    assert.match(surface, /current commit SHA/);
-    assert.match(surface, /session stays alive and paused for the Lead's ruling/);
+    assert.match(surface, /`agent_ask`/);
+    assert.match(surface, /`reopen_premise` \| `gate_mismatch` \| `dependency` \| `clarify` \| `blocked`/);
+    assert.match(surface, /`foundation` \| `dependency` \| `lifecycle` \| `API` \| `ownership` \| `verification`/);
+    assert.match(surface, /session stays alive and paused for a ruling/);
     assert.doesNotMatch(surface, /Before escalating/);
     assert.doesNotMatch(surface, /third.*fail.*before.*escalat/i);
     // The false-RED law: a RED test explores implementation, never invents a contract.
     assert.match(surface, /RED test may explore implementation, but must never invent an undecided contract/);
-    assert.match(surface, /loosening an assertion to force GREEN/);
+    assert.match(surface, /loosening or skipping an assertion to force GREEN/);
     // The 6-Field Handoff obligation and the read-only disposition handoff law.
     assert.match(surface, /Six-Field Handoff/);
     assert.match(surface, /`outcome` \(complete \| partial \| blocked \| reopen\)/);
@@ -1849,9 +1848,10 @@ test("Lead contract carries the canonical LEAD.md laws — neutral Briefs, Spec-
     for (const disposition of ["scout", "architect", "engineer", "reviewer"]) {
       assert.ok(surface.includes(`\`${disposition}\``), `the Lead vocabulary names the ${disposition} disposition`);
     }
-    // Live, in-place challenge reconciliation (ticket 02 surfaces).
+    // Live, in-place challenge reconciliation (ticket 02 surfaces, ADR 0069).
     assert.match(surface, /data to reconcile, not disobedience/);
-    assert.match(surface, /`lead_repoke_agent`'s `message` parameter/);
+    assert.match(surface, /`lead_reply_peer`'s `message` parameter/);
+    assert.match(surface, /`lead_repoke_agent`/);
     assert.match(surface, /preserved by default \(`resetPeer: false`\)/);
     assert.match(surface, /`resetPeer: true`\) only when its context is truly misaligned/);
     // Acceptance reads the 6-Field Handoff plus the attested diff before accepting.
@@ -1926,8 +1926,8 @@ test("role surfaces teach bounded serial waves, closure, and structured challeng
   for (const surface of [renderRoleContract("agent"), renderRoleAppendSystem("agent")]) {
     for (const law of [/Excluded \/ Deferred to Later Waves/, /third fix attempt.*same symptom/,
       /stop local patching.*underlying mechanism/, /commit any independent completed work/,
-      /REOPEN_REQUEST/, /foundation.*dependency.*lifecycle.*API.*ownership.*verification/,
-      /DEPENDENCY_REQUEST/, /BLOCKED/, /agent_escalate_blocker/, /current commit SHA/]) assert.match(surface, law);
+      /reopen_premise/, /foundation.*dependency.*lifecycle.*API.*ownership.*verification/,
+      /`dependency`/, /`blocked`/, /agent_ask/]) assert.match(surface, law);
   }
 });
 
@@ -1987,7 +1987,7 @@ test("Peer create refreshes selected OAuth before provider fencing; coordination
     if (role === "supervisor" && provider === "opencode") assert.equal((result as any).providerOptions.permission.skill["*"], "allow");
   }
   assert.ok(catalog.roles.supervisor.includes("supervisor_accept_task"));
-  assert.ok(catalog.roles.lead.includes("lead_repoke_agent"));
+  assert.ok(catalog.roles.lead.includes("lead_reply_peer"));
   assert.ok(catalog.roles.lead.includes("lead_needs_human"));
 });
 
@@ -2621,7 +2621,7 @@ test("injectSessionEnv delivers fresh live role contracts and Peer skill scope v
   );
   assert.ok(peerOpen !== undefined);
   assert.equal(peerOpen.appendSystemPrompt?.length, 1);
-  assert.match(peerOpen.appendSystemPrompt?.[0] ?? "", /Peer of the paseo-factory verification loop \(task T-OPEN, project /);
+  assert.match(peerOpen.appendSystemPrompt?.[0] ?? "", /You are an independent engineer \(task T-OPEN, project /);
   assert.match(peerOpen.appendSystemPrompt?.[0] ?? "", /Project Peer skills allowed:.*initial-skill/);
   assert.match(peerOpen.appendSystemPrompt?.[0] ?? "", /docs/);
 
