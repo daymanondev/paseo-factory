@@ -15,7 +15,14 @@ import {
 import { saveVaultConfig } from "../plugin/server/core/vault-config.ts";
 import { releaseProject } from "../plugin/server/release.ts";
 import { handleSpoolRequest } from "../plugin/server/spool.ts";
-import { recordStoreNote, storeReleaseProject } from "../plugin/server/store-release.ts";
+import {
+  builtinStoreReleaseRunner,
+  DEFAULT_RUNNER_GRACE_MS,
+  DEFAULT_RUNNER_TIMEOUT_MS,
+  hasActiveStoreReleases,
+  recordStoreNote,
+  storeReleaseProject,
+} from "../plugin/server/store-release.ts";
 import { disposeDir, gitCommitAll, makeTempDir } from "./helpers.ts";
 
 function makeMobileRepo(dir: string, platforms: ("android" | "ios")[] = ["android", "ios"]): string {
@@ -1485,4 +1492,273 @@ test("paused-hole with oversized consoleGuide bounds digest cleanly on a line bo
     .join("\n");
   assert.ok(digestNoPath.length <= 16000, `expected digest <= 16000 chars, got ${digestNoPath.length}`);
   assert.match(digestNoPath, /truncated.*CONSOLE_GUIDE\.md/i);
+});
+
+async function assertPidDeadEsrch(pid: number, label: string): Promise<void> {
+  const deadline = Date.now() + 1_000;
+  let lastCode: string | undefined;
+  while (Date.now() < deadline) {
+    try {
+      process.kill(pid, 0);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === "ESRCH") return;
+      lastCode = code;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assert.throws(
+    () => process.kill(pid, 0),
+    (err: NodeJS.ErrnoException) => err.code === "ESRCH",
+    `${label} (pid=${pid}, lastCode=${lastCode ?? "alive"}) must be dead (ESRCH)`,
+  );
+}
+
+test("Store release default outer timeout is 75 minutes and grace window is 5 seconds", () => {
+  assert.equal(DEFAULT_RUNNER_TIMEOUT_MS, 75 * 60 * 1000);
+  assert.equal(DEFAULT_RUNNER_GRACE_MS, 5_000);
+});
+
+test("builtinStoreReleaseRunner kills detached runner and sleeping grandchild via -pgid SIGKILL after SIGTERM grace", { skip: process.platform === "win32" }, async (t) => {
+  const dir = makeTempDir("store-release-pgid-kill-");
+  const pidsPath = join(dir, "pids.json");
+  const sigtermMarkerPath = join(dir, "sigterm.marker");
+  t.after(() => {
+    if (!existsSync(pidsPath)) return;
+    try {
+      const parsed = JSON.parse(readFileSync(pidsPath, "utf8")) as { runnerPid?: number; grandchildPid?: number };
+      if (typeof parsed.grandchildPid === "number") {
+        try { process.kill(parsed.grandchildPid, "SIGKILL"); } catch { /* already dead */ }
+      }
+      if (typeof parsed.runnerPid === "number") {
+        try { process.kill(parsed.runnerPid, "SIGKILL"); } catch { /* already dead */ }
+      }
+    } catch { /* ignore */ }
+  });
+  disposeDir(t, dir);
+
+  const scriptPath = join(dir, "stubborn-runner.mjs");
+  const grandchildScriptPath = join(dir, "grandchild.mjs");
+  writeFileSync(
+    grandchildScriptPath,
+    `process.on("SIGTERM", () => {});
+setInterval(() => {}, 60000);
+`,
+  );
+  writeFileSync(
+    scriptPath,
+    `import { spawn } from "node:child_process";
+import { renameSync, writeFileSync } from "node:fs";
+process.on("SIGTERM", () => {
+  writeFileSync(${JSON.stringify(sigtermMarkerPath)}, String(Date.now()));
+});
+const grandchild = spawn(process.execPath, [${JSON.stringify(grandchildScriptPath)}], { stdio: "inherit" });
+const tmpPath = ${JSON.stringify(`${pidsPath}.tmp`)};
+writeFileSync(tmpPath, JSON.stringify({ runnerPid: process.pid, grandchildPid: grandchild.pid }));
+renameSync(tmpPath, ${JSON.stringify(pidsPath)});
+setInterval(() => {}, 60000);
+`,
+  );
+
+  const timeoutMs = 450;
+  const graceMs = 250;
+  const startedAt = Date.now();
+  const out = await builtinStoreReleaseRunner({
+    binPath: scriptPath,
+    args: [],
+    cwd: dir,
+    env: {},
+    timeoutMs,
+    graceMs,
+  });
+  const elapsedMs = Date.now() - startedAt;
+
+  assert.equal(out.timedOut, true);
+  assert.ok(existsSync(pidsPath), "runner spawned grandchild and wrote pids");
+  assert.ok(existsSync(sigtermMarkerPath), "runner received SIGTERM before SIGKILL escalation");
+  assert.ok(elapsedMs >= timeoutMs + graceMs - 50, `expected grace wait before SIGKILL (elapsed=${elapsedMs}ms)`);
+
+  const { runnerPid, grandchildPid } = JSON.parse(readFileSync(pidsPath, "utf8")) as {
+    runnerPid: number;
+    grandchildPid: number;
+  };
+  await assertPidDeadEsrch(runnerPid, "runner");
+  await assertPidDeadEsrch(grandchildPid, "grandchild");
+});
+
+test("builtinStoreReleaseRunner allows clean SIGTERM exit within grace without requiring SIGKILL", { skip: process.platform === "win32" }, async (t) => {
+  const dir = makeTempDir("store-release-sigterm-grace-");
+  const pidPath = join(dir, "runner.pid");
+  t.after(() => {
+    if (!existsSync(pidPath)) return;
+    try { process.kill(Number(readFileSync(pidPath, "utf8")), "SIGKILL"); } catch { /* already dead */ }
+  });
+  disposeDir(t, dir);
+
+  const markerPath = join(dir, "clean-exit.marker");
+  const scriptPath = join(dir, "graceful-runner.mjs");
+  writeFileSync(
+    scriptPath,
+    `import { writeFileSync } from "node:fs";
+writeFileSync(${JSON.stringify(pidPath)}, String(process.pid));
+process.on("SIGTERM", () => {
+  writeFileSync(${JSON.stringify(markerPath)}, "cleaned-up");
+  process.exit(42);
+});
+setInterval(() => {}, 60000);
+`,
+  );
+
+  const timeoutMs = 250;
+  const graceMs = 4_000;
+  const startedAt = Date.now();
+  const out = await builtinStoreReleaseRunner({
+    binPath: scriptPath,
+    args: [],
+    cwd: dir,
+    env: {},
+    timeoutMs,
+    graceMs,
+  });
+  const elapsedMs = Date.now() - startedAt;
+
+  assert.equal(out.timedOut, true);
+  assert.equal(out.exitCode, 42, "runner exited cleanly via its SIGTERM handler without SIGKILL");
+  assert.equal(readFileSync(markerPath, "utf8"), "cleaned-up");
+  assert.ok(elapsedMs < timeoutMs + graceMs - 1_000, `expected clean exit before grace expiry (elapsed=${elapsedMs}ms)`);
+});
+
+test("storeReleaseProject records runner-timed-out tool-bug with read-only Phase diagnosis and byte-identical Release run file", { skip: process.platform === "win32" }, async (t) => {
+  const dir = makeTempDir("store-release-timeout-e2e-");
+  const runnerPidPath = join(dir, "runner.pid");
+  t.after(() => {
+    if (!existsSync(runnerPidPath)) return;
+    try { process.kill(Number(readFileSync(runnerPidPath, "utf8")), "SIGKILL"); } catch { /* already dead */ }
+  });
+  disposeDir(t, dir);
+
+  const paseoHome = join(dir, "paseo-home");
+  const stateDir = join(paseoHome, "plugin-state", "paseo-factory");
+  const repoDir = makeMobileRepo(dir, ["ios"]);
+  const otherRepoDir = join(dir, "other-app");
+  mkdirSync(otherRepoDir, { recursive: true });
+  const project = ensureProjectRegistered(stateDir, repoDir);
+  assert.ok(project.ok);
+  const factory = createFactory({ stateDir: join(stateDir, "projects", project.slug) });
+  t.after(() => factory.history.stop());
+
+  acceptCommitOnRepo(factory, repoDir, "T-TIMEOUT");
+  await factory.accept({ task: "T-TIMEOUT", attempt: 1, accepted_by: "lead" });
+
+  const binPath = installFakeRunnerPlugin(paseoHome);
+  writeFileSync(
+    binPath,
+    `import { writeFileSync } from "node:fs";
+writeFileSync(${JSON.stringify(runnerPidPath)}, String(process.pid));
+console.error("still waiting on xcrun");
+setInterval(() => {}, 60000);
+`,
+  );
+  chmodSync(binPath, 0o755);
+
+  writeVaultStoreEnv(paseoHome, {
+    ASC_KEY_PATH: "/tmp/synth-asc.p8",
+    ASC_KEY_ID: "SYNTHKEY",
+    ASC_ISSUER: "00000000-0000-0000-0000-000000000001",
+    APPLE_TEAM_ID: "SYNTHTEAM",
+  });
+  setProjectStoreReleaseSettings(stateDir, project.slug, { mode: "auto-staging" });
+
+  const runsDir = join(paseoHome, "release-lab", "runs");
+  mkdirSync(runsDir, { recursive: true });
+  const now = Date.now();
+  // Stale prior run (must be ignored because it falls outside the start window)
+  writeFileSync(
+    join(runsDir, "rel-stale.json"),
+    JSON.stringify({
+      id: "rel-stale",
+      playbook: "stage-release",
+      projectSlug: project.slug,
+      projectRoot: repoDir,
+      status: "running",
+      createdAt: now - 120_000,
+      updatedAt: now - 120_000,
+      phases: [{ id: "phase-1-preflight", state: "running" }],
+    }),
+  );
+  // Active run for a different project (must be ignored)
+  writeFileSync(
+    join(runsDir, "rel-other.json"),
+    JSON.stringify({
+      id: "rel-other",
+      playbook: "stage-release",
+      projectSlug: "other-app",
+      projectRoot: otherRepoDir,
+      status: "running",
+      createdAt: now,
+      updatedAt: now,
+      phases: [{ id: "phase-5-release-build", state: "running" }],
+    }),
+  );
+  // Current matching active run
+  const currentRunPath = join(runsDir, "rel-current-timeout.json");
+  const currentRunContent = `${JSON.stringify(
+    {
+      id: "rel-current-timeout",
+      playbook: "stage-release",
+      projectSlug: project.slug,
+      projectRoot: repoDir,
+      status: "running",
+      createdAt: now,
+      updatedAt: now,
+      phases: [
+        { id: "phase-1-preflight", state: "green" },
+        { id: "phase-3-e2e-and-screenshots", state: "running" },
+        { id: "phase-5-release-build", state: "pending" },
+      ],
+    },
+    null,
+    2,
+  )}\n`;
+  writeFileSync(currentRunPath, currentRunContent);
+  const beforeBytes = readFileSync(currentRunPath);
+
+  const notifications: Array<{ slug: string; text: string }> = [];
+  const res = await storeReleaseProject({
+    factory,
+    stateDir,
+    paseoHome,
+    projectSlug: project.slug,
+    projectRoot: repoDir,
+    action: "stage",
+    timeoutMs: 300,
+    graceMs: 120,
+    listPlugins: async () => ({ ok: false as const, reason: "offline" }),
+    notifyLead: (n) => { notifications.push(n); },
+  });
+
+  assert.equal(res.ok, true);
+  assert.equal(hasActiveStoreReleases(), true, "active Store release counter stays > 0 until settlement");
+  if (res.ok && "settled" in res) {
+    await res.settled;
+  }
+  assert.equal(hasActiveStoreReleases(), false, "active Store release counter returns to 0 after timeout settles");
+
+  const failedEvent = factory.ledger.events.find((e) => e.event === "store_release_failed");
+  assert.ok(failedEvent !== undefined && failedEvent.event === "store_release_failed");
+  assert.equal(failedEvent.code, "runner-timed-out");
+  assert.equal(failedEvent.failureClass, "tool-bug");
+  assert.equal(
+    failedEvent.detail,
+    "release-lab stage timed out after 300ms (run rel-current-timeout, phase phase-3-e2e-and-screenshots)",
+  );
+
+  assert.equal(notifications.length, 1);
+  assert.match(notifications[0]!.text, /failureClass=tool-bug/);
+  assert.match(notifications[0]!.text, /code=runner-timed-out/);
+  assert.match(notifications[0]!.text, /rel-current-timeout/);
+  assert.match(notifications[0]!.text, /phase-3-e2e-and-screenshots/);
+
+  const afterBytes = readFileSync(currentRunPath);
+  assert.equal(Buffer.compare(afterBytes, beforeBytes), 0, "Release lab run file must remain byte-identical");
 });
