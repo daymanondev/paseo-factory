@@ -1242,19 +1242,32 @@ test("lead_repoke_agent with message delivers the Lead's ruling into the live Pe
   assert.equal(repokeLines.length, 2, "each reconciliation turn landed a repoke_dispatched line");
   assert.ok(repokeLines.every((e) => e.kind === "ruling" && typeof e.message === "string" && e.message.length > 0), "each ruling turn persists kind=ruling and message");
 
-  // 4. The message-less cap stays verbatim (AC 3): with the spend marker
-  //    present, a bare repoke is refused already-spent.
+  // 4. Ruling repokes do NOT spend the one-shot denial-stall cap (ADR 0069):
+  //    the 1st bare repoke succeeds (`kind: "denial-stall"`), and only a 2nd
+  //    bare repoke is refused `already-spent`.
   const bareResponses = await runMcpSession({
     args: mcpArgs,
     cwd: repoDir,
     requests: [
       { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_repoke_agent", arguments: { task: "RULING-1", agent: "peer-created-1" } } },
+      { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "lead_repoke_agent", arguments: { task: "RULING-1", agent: "peer-created-1" } } },
     ],
   });
-  const bare = (bareResponses[0].result as { isError?: boolean; content: Array<{ text: string }> });
-  assert.equal(bare.isError, true);
-  assert.match(bare.content[0].text, /already-spent/);
-  assert.equal(sentPrompts.filter((p) => p.id === "peer-created-1").length, 2, "a refused repoke sends nothing");
+  const bareFirst = bareResponses[0].result as { isError?: boolean; content: Array<{ text: string }> };
+  assert.notEqual(bareFirst.isError, true, bareFirst.content[0].text);
+  assert.equal(sentPrompts.filter((p) => p.id === "peer-created-1").length, 3, "the 1st bare repoke after rulings dispatches to the Peer");
+  const repokeLinesAfterBare = readFileSync(join(stateDir, "projects", slug, "ledger.jsonl"), "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line))
+    .filter((e) => e.event === "repoke_dispatched" && e.task === "RULING-1");
+  assert.equal(repokeLinesAfterBare.length, 3);
+  assert.equal(repokeLinesAfterBare[2]?.kind, "denial-stall");
+
+  const bareSecond = bareResponses[1].result as { isError?: boolean; content: Array<{ text: string }> };
+  assert.equal(bareSecond.isError, true);
+  assert.match(bareSecond.content[0].text, /already-spent/);
+  assert.equal(sentPrompts.filter((p) => p.id === "peer-created-1").length, 3, "a refused 2nd bare repoke sends nothing");
 });
 
 test("the MCP fallback spawn prompt branches on the disposition (ticket 03, ADR 0054 §3): a read-only Peer is fenced with its own evidence and a no-commit claim; the engineer keeps gate + commit + agent_claim", async (t) => {

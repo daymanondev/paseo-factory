@@ -479,3 +479,47 @@ test("Ticket 03 core: admitClaim bypasses GateQueue for reopen, blocked, and par
     factoryErrorCode("handback-requires-admit-claim"),
   );
 });
+
+test("ADR 0069: ruling repokes do not spend the one-shot denial-stall cap, while legacy kind=undefined still counts as spent", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const stateDir = join(dir, "state");
+  const { workspace } = makeWorkspace(dir);
+  const factory = createFactory({ stateDir });
+
+  factory.setContract({ task: "CAP-1", workspace, gate: "true" });
+
+  // Multiple ruling repokes in the same epoch never consume the denial-stall cap
+  const r1 = factory.repoke("CAP-1", "peer-a", "Ruling 1: use REST endpoint");
+  const r2 = factory.repoke("CAP-1", "peer-a", "Ruling 2: keep field optional");
+  assert.equal(r1.outcome, "dispatched");
+  assert.equal(r1.event.kind, "ruling");
+  assert.equal(r2.outcome, "dispatched");
+  assert.equal(r2.event.kind, "ruling");
+
+  // First message-less denial-stall repoke succeeds in the same epoch
+  const stall1 = factory.repoke("CAP-1", "peer-a");
+  assert.equal(stall1.outcome, "dispatched");
+  assert.equal(stall1.event.kind, "denial-stall");
+
+  // Second message-less denial-stall repoke is refused as already-spent
+  const stall2 = factory.repoke("CAP-1", "peer-a");
+  assert.equal(stall2.outcome, "refused");
+  assert.equal(stall2.code, "already-spent");
+
+  // Ruling repokes remain uncapped even after the denial-stall cap is spent
+  const r3 = factory.repoke("CAP-1", "peer-a", "Ruling 3: still uncapped");
+  assert.equal(r3.outcome, "dispatched");
+  assert.equal(r3.event.kind, "ruling");
+
+  // Legacy repoke_dispatched line with kind === undefined still counts as spent
+  factory.setContract({ task: "LEGACY-CAP", workspace, gate: "true" });
+  factory.ledger.append({ event: "repoke_dispatched", task: "LEGACY-CAP", agent: "peer-a" });
+  const legacyStall = factory.repoke("LEGACY-CAP", "peer-a");
+  assert.equal(legacyStall.outcome, "refused");
+  assert.equal(legacyStall.code, "already-spent");
+
+  const legacyRuling = factory.repoke("LEGACY-CAP", "peer-a", "Ruling after legacy stall");
+  assert.equal(legacyRuling.outcome, "dispatched");
+  assert.equal(legacyRuling.event.kind, "ruling");
+});

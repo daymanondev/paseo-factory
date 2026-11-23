@@ -23,13 +23,15 @@ const usage = `usage: factory-claim --task <id> --outcome <complete|partial|bloc
               --verification <text> --unknowns <text> [--ownership <text>] \\
               [--sha <commit-sha>] [--wait-secs <n>]
 
-Claim that the task is finished, carrying the mandatory 6-Field Handoff
-(ADR 0053 §4): outcome, scope, verification, unknowns, and optional ownership
-(defaults to "lease returned"; the Snapshot is synthesized from the commit,
-branch, and worktree). --sha is optional only for read-only dispositions
-(scout | architect | reviewer), where it defaults to the worktree's HEAD;
-engineer claims must attest an exact commit. The factory does not trust the
-claim: it runs the contract's gate and records the verdict.`;
+Claim that the task is finished or hand back mid-task, carrying the mandatory
+6-Field Handoff (ADR 0053 §4): outcome, scope, verification, unknowns, and
+optional ownership (defaults to "lease returned"; the Snapshot is synthesized
+from the commit, branch, and worktree). --sha is required for engineer
+complete claims and optional for read-only dispositions (scout | architect |
+reviewer) or reopen/blocked handbacks (defaults to HEAD; partial validates
+--sha when supplied). Non-complete outcomes (reopen | blocked | partial) hand
+back to Lead without running the contract's gate; complete claims run the
+contract's gate and record the verdict.`;
 
 const DEFAULT_WAIT_SECS = 600; // gate timeout default is 300s — leave headroom
 
@@ -133,6 +135,21 @@ if (reply.status === "queued") {
     `factory-claim: task ${args.values.task} attempt ${reply.attempt} — QUEUED (position ${reply.position ?? "?"}, ${ahead} ahead${reply.paused ? ", queue paused" : ""})`,
   );
   console.log("factory-claim: Gate queued in daemon — end your turn now and wait at zero tokens for outcome notification.");
+  process.exit(0);
+}
+
+if (reply.status === "handback") {
+  const summary =
+    typeof reply.summary === "string" && reply.summary.trim() !== ""
+      ? reply.summary
+      : `task ${args.values.task} handback (${args.values.outcome})`;
+  console.log(`factory-claim: ${summary} — HANDBACK`);
+  if (reply.reportPath !== undefined && reply.reportPath !== "") {
+    console.log(`report: ${reply.reportPath}`);
+  }
+  console.log(
+    "factory-claim: Handback sent to Lead without running the Gate — end your turn now and wait for Lead's ruling.",
+  );
   process.exit(0);
 }
 

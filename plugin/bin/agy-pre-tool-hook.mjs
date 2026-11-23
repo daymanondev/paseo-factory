@@ -1676,6 +1676,10 @@ var sharedRoles = {
   agent: ["agent_claim", "agent_ask"],
   unbound: ["factory_dispatch_supervisor", "factory_status"]
 };
+var LEGACY_ROLE_TOOL_ALIASES = {
+  lead: ["lead_repoke_agent"],
+  agent: ["agent_escalate_blocker"]
+};
 sharedTools.supervisor_read_ledger = { ...sharedTools.factory_status, name: "supervisor_read_ledger" };
 sharedTools.lead_read_ledger = { ...sharedTools.factory_status, name: "lead_read_ledger" };
 sharedTools.lead_record_store_note = { ...sharedTools.supervisor_record_store_note, name: "lead_record_store_note" };
@@ -1701,10 +1705,6 @@ var catalog = slpCatalog;
 
 // src/agy-mcp-schema-heal.ts
 var ALLOWED_ROLES = /* @__PURE__ */ new Set(["supervisor", "lead", "agent"]);
-var LEGACY_ROLE_TOOL_ALLOWLIST = {
-  lead: ["lead_repoke_agent"],
-  agent: ["agent_escalate_blocker"]
-};
 var AGY_APP_DATA_NAMES = ["antigravity", "antigravity-cli"];
 var AGY_SERVER_DIR_NAMES = ["paseo-factory_paseo_factory", "paseo_factory"];
 function resolveEffectiveHome() {
@@ -1778,7 +1778,7 @@ function resolveHealTarget(targetPath) {
 function resolveAllowedToolForSeat(seat, toolName) {
   if (!ALLOWED_ROLES.has(seat)) return null;
   const allowedTools = catalog.roles[seat];
-  const legacyTools = LEGACY_ROLE_TOOL_ALLOWLIST[seat] ?? [];
+  const legacyTools = LEGACY_ROLE_TOOL_ALIASES[seat] ?? [];
   if ((!Array.isArray(allowedTools) || !allowedTools.includes(toolName)) && !legacyTools.includes(toolName)) {
     return null;
   }

@@ -263,7 +263,7 @@ export function createPeerHandoffRuntime(deps: PeerHandoffDeps) {
       // `Reopen if:` whenever `contract.reopenConditions` is non-empty.
       const disposition = contract.disposition ?? "engineer";
       const readOnlyEvidence = readOnlyDispositionEvidence(contract.disposition);
-      const reopenBlock = formatReopenIfBlock((contract as ContractSet & { reopenConditions?: readonly string[] }).reopenConditions);
+      const reopenBlock = formatReopenIfBlock(contract.reopenConditions);
       const prompt = [
           `# Peer handoff — Task ${task}`, "You are the fresh successor Peer at 0% context. Continue from the existing Task worktree state; preserve completed work and uncommitted edits.",
           "## Active Contract Brief",

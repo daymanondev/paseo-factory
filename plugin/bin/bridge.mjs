@@ -1721,6 +1721,7 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 var task_status_exports = {};
 __export(task_status_exports, {
   computeLoopHealth: () => computeLoopHealth,
+  computeLoopHealthForStreams: () => computeLoopHealthForStreams,
   formatLoopHealthLines: () => formatLoopHealthLines,
   taskStatusLines: () => taskStatusLines
 });
@@ -1762,18 +1763,19 @@ function projectTask(events, task) {
   return { currentAttempt, verdict, task, history, contract, epochSeq, epochId, epoch, attempts, acceptance, settled, closed: closure === void 0 ? void 0 : { seq: closure.seq, at: closure.ts, reason: closure.reason, by: closure.closed_by ?? "owner" }, pendingLanding: acceptance?.landing === "pending-conflict", needsHuman, needs: needsHuman ? needs : void 0, status, maxAttempt: numbers.at(-1) ?? 0, inFlightAttempt: attempts.find((attempt) => attempt.open)?.attempt };
 }
 
-// src/constants.ts
-var DEFAULT_CONTRACT_TIMEOUT_SECONDS = 900;
-var DEFAULT_GATE_TIMEOUT_MS = DEFAULT_CONTRACT_TIMEOUT_SECONDS * 1e3;
-var GATE_OUTPUT_CAP_BYTES = 2 * 1024 * 1024;
-
-// src/report.ts
-var ADR0068_GATE_QUEUE_BOILERPLATE = /(?:gate\s*queue|daemon\s+gate(?:\s*queue)?)/i;
-var ADR0068_DEFERRAL_HINT = /(?:defer(?:red|ring|ral)?|async(?:hronous(?:ly)?)?|pending|not\s+pre-?run|on\s+claim|during\s+tdd|skipped\s+(?:local|pre-?claim|full\s+(?:cumulative\s+)?gate)|runs?\s+(?:async|on\s+claim|in\s+daemon))/i;
+// src/loop-health.ts
+var ADR0068_GATE_QUEUE_BOILERPLATE = /(?:gate\s*queue|daemon\s+gate(?:\s*queue)?|automated\s+verification|(?:full\s+(?:cumulative\s+)?|cumulative\s+)gate)/i;
+var ADR0068_DEFERRAL_HINT = /(?:defer(?:red|ring|ral)?|async(?:hronous(?:ly)?)?|pending|not\s+pre-?run|on\s+claim|during\s+tdd|skipped\s+(?:local(?:ly)?|pre-?claim|(?:full\s+(?:cumulative\s+)?|cumulative\s+)gate)|runs?\s+(?:async(?:hronous(?:ly)?)?|on\s+claim|in\s+daemon|after\s+claim))/i;
 var NEGATED_GAP_PHRASE = /\b(?:no|none|nothing|not|without|zero)\s+(?:known\s+|remaining\s+|other\s+)?(?:checks?\s+|tests?\s+)?(?:skipped|failed|blocked|missing|contradictions?)\b/gi;
+var NON_SKIPPED_GAP_KEYWORD = /\b(?:cannot|can't|missing|contradict(?:s|ed|ing|ion)?|out\s+of\s+scope|failed|blocked)\b/i;
 var GENUINE_GAP_KEYWORD = /\b(?:cannot|can't|missing|skipped|contradict(?:s|ed|ing|ion)?|out\s+of\s+scope|failed|blocked)\b/i;
 function hasGenuineUnknownGap(unknowns) {
-  const remainingLines = unknowns.split(/\r?\n/).map((line) => line.trim()).filter((line) => line !== "").filter((line) => !(ADR0068_GATE_QUEUE_BOILERPLATE.test(line) && ADR0068_DEFERRAL_HINT.test(line)));
+  const remainingLines = unknowns.split(/\r?\n/).map((line) => line.trim()).filter((line) => line !== "").filter((line) => {
+    if (!(ADR0068_GATE_QUEUE_BOILERPLATE.test(line) && ADR0068_DEFERRAL_HINT.test(line))) {
+      return true;
+    }
+    return NON_SKIPPED_GAP_KEYWORD.test(line.replace(NEGATED_GAP_PHRASE, " "));
+  });
   if (remainingLines.length === 0) return false;
   const cleaned = remainingLines.join("\n").replace(NEGATED_GAP_PHRASE, " ");
   return GENUINE_GAP_KEYWORD.test(cleaned);
@@ -1824,6 +1826,37 @@ function computeLoopHealth(events) {
     if (hasGenuineUnknownGap(handoff.unknowns)) {
       genuineUnknownGaps += 1;
     }
+  }
+  return {
+    totalTasks,
+    peerAskedCount,
+    peerAskRate: totalTasks === 0 ? 0 : contractedTasksWithAsk / totalTasks,
+    contextCeilingCount,
+    silentContextCeilingCount,
+    genuineUnknownGaps,
+    redAttempts,
+    recontracts
+  };
+}
+function computeLoopHealthForStreams(streams) {
+  let totalTasks = 0;
+  let peerAskedCount = 0;
+  let contractedTasksWithAsk = 0;
+  let contextCeilingCount = 0;
+  let silentContextCeilingCount = 0;
+  let genuineUnknownGaps = 0;
+  let redAttempts = 0;
+  let recontracts = 0;
+  for (const stream of streams) {
+    const health = computeLoopHealth(stream);
+    totalTasks += health.totalTasks;
+    peerAskedCount += health.peerAskedCount;
+    contractedTasksWithAsk += Math.round(health.peerAskRate * health.totalTasks);
+    contextCeilingCount += health.contextCeilingCount;
+    silentContextCeilingCount += health.silentContextCeilingCount;
+    genuineUnknownGaps += health.genuineUnknownGaps;
+    redAttempts += health.redAttempts;
+    recontracts += health.recontracts;
   }
   return {
     totalTasks,
@@ -1905,6 +1938,7 @@ function taskStatusLines(events, workspaceFilter, options) {
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
   computeLoopHealth,
+  computeLoopHealthForStreams,
   formatLoopHealthLines,
   taskStatusLines
 });
@@ -1920,50 +1954,51 @@ return module.exports;
  * Project slug — `factory status`'s aggregate law — falling back to the legacy
  * root ledger only when no per-Project ledger holds events.
  */
-function formatLoopHealthBlock(events) {
-  if (typeof taskStatusPolicy.computeLoopHealth === "function" && typeof taskStatusPolicy.formatLoopHealthLines === "function") {
-    const lines = taskStatusPolicy.formatLoopHealthLines(taskStatusPolicy.computeLoopHealth(events));
-    return Array.isArray(lines) && lines.length > 0 ? lines : [];
-  }
-  return [];
+function formatLoopHealthBlock(health) {
+  const lines = taskStatusPolicy.formatLoopHealthLines(health);
+  return Array.isArray(lines) && lines.length > 0 ? lines : [];
 }
 
 function formatFactoryStatus(stateDir, workspaceFilter, options = {}) {
   const bound = options.projectSlug !== undefined || options.workspace !== undefined;
   const statusOpts = options.lean ? { lean: true } : undefined;
   const scoped = readLedgerEventsList(stateDir, options);
-  const appendLoopHealth = (output, eventsForHealth) => {
+  const appendLoopHealth = (output, health) => {
     if (!options.includeLoopHealth) return output;
-    const healthLines = formatLoopHealthBlock(eventsForHealth);
+    const healthLines = formatLoopHealthBlock(health);
     return healthLines.length > 0 ? `${output}\n\n${healthLines.join("\n")}` : output;
   };
   if (bound) {
     if (scoped.length === 0) return `factory: no tasks yet (ledger: ${ledgerProject.resolveProjectLedger(stateDir, options).path})`;
     const lines = taskStatusPolicy.taskStatusLines(scoped, workspaceFilter, statusOpts);
     const base = lines.length > 0 ? lines.join("\n") : "factory: no matching tasks";
-    return appendLoopHealth(base, scoped);
+    return appendLoopHealth(base, taskStatusPolicy.computeLoopHealth(scoped));
   }
   // Unbound: aggregate every registered Project (each row prefixed with its
   // Project slug — `factory status`'s law), falling back to the single
   // resolved stream only when no per-Project ledger holds rows.
-  const streams = ledgerProject.projectLedgerStreams(stateDir)
-    .map((stream) => {
-      const events = readLedgerEventsList(stateDir, { project: stream.slug });
-      return {
-        slug: stream.slug,
-        events,
-        lines: taskStatusPolicy.taskStatusLines(events, workspaceFilter, statusOpts),
-      };
-    })
-    .filter((stream) => stream.lines.length > 0);
+  const allStreams = ledgerProject.projectLedgerStreams(stateDir).map((stream) => {
+    const events = readLedgerEventsList(stateDir, { project: stream.slug });
+    return {
+      slug: stream.slug,
+      events,
+      lines: taskStatusPolicy.taskStatusLines(events, workspaceFilter, statusOpts),
+    };
+  });
+  const streams = allStreams.filter((stream) => stream.lines.length > 0);
   if (streams.length > 0) {
     const base = streams.flatMap((stream) => stream.lines.map((line) => `[${stream.slug}] ${line}`)).join("\n");
-    return appendLoopHealth(base, streams.flatMap((stream) => stream.events));
+    const streamsForHealth =
+      workspaceFilter === undefined ? allStreams.filter((stream) => stream.events.length > 0) : streams;
+    return appendLoopHealth(
+      base,
+      taskStatusPolicy.computeLoopHealthForStreams(streamsForHealth.map((stream) => stream.events)),
+    );
   }
   if (scoped.length === 0) return `factory: no tasks yet (ledger: ${ledgerProject.resolveProjectLedger(stateDir, options).path})`;
   const lines = taskStatusPolicy.taskStatusLines(scoped, workspaceFilter, statusOpts);
   const base = lines.length > 0 ? lines.join("\n") : "factory: no matching tasks";
-  return appendLoopHealth(base, scoped);
+  return appendLoopHealth(base, taskStatusPolicy.computeLoopHealth(scoped));
 }
 
 
@@ -2485,6 +2520,28 @@ const LEGACY_ROLE_TOOL_ALIASES = {
   agent: ["agent_escalate_blocker"],
   lead: ["lead_repoke_agent"],
 };
+const VALID_KINDS = ["reopen_premise", "gate_mismatch", "dependency", "clarify", "blocked"];
+const VALID_LAYERS = ["foundation", "dependency", "lifecycle", "API", "ownership", "verification"];
+const LAYER_BY_LOWER = new Map(VALID_LAYERS.map((layer) => [layer.toLowerCase(), layer]));
+
+/**
+ * Parses legacy `agent_escalate_blocker` prefixes (`REOPEN_REQUEST (<layer>)`,
+ * `DEPENDENCY_REQUEST`) into canonical `peer_ask` metadata while keeping the
+ * original message as `summary`.
+ */
+function parseLegacyBlockerAsk(message) {
+  const trimmed = message.trim();
+  const reopenMatch = /^(?:\[[^\]]+\]\s*)?REOPEN_REQUEST\b(?:\s*\(\s*([^)]+?)\s*\))?/i.exec(trimmed);
+  if (reopenMatch) {
+    const rawLayer = reopenMatch[1]?.trim().toLowerCase();
+    const layer = (rawLayer ? LAYER_BY_LOWER.get(rawLayer) : undefined) ?? "verification";
+    return { peerAskKind: "reopen_premise", layer };
+  }
+  if (/^(?:\[[^\]]+\]\s*)?DEPENDENCY_REQUEST\b/i.test(trimmed)) {
+    return { peerAskKind: "dependency" };
+  }
+  return { peerAskKind: "blocked" };
+}
 
 let selectedBridge;
 function bridgeSession() {
@@ -3055,10 +3112,6 @@ async function handleToolCall(name, rawArgs) {
       if (typeof contract?.description === "string" && contract.description.trim() !== "") {
         promptParts.push(`Task (${task}): ${contract.description.trim()}`);
       }
-      const reopenIfBlock = formatReopenIfBlock(contract?.reopenConditions);
-      if (reopenIfBlock !== "") {
-        promptParts.push(reopenIfBlock);
-      }
       // ADR 0053 §3 — the Peer knows its disposition from turn one; omitted
       // renders nothing (the engineer default needs no header).
       if (typeof contract?.disposition === "string" && contract.disposition !== "engineer") {
@@ -3081,9 +3134,14 @@ async function handleToolCall(name, rawArgs) {
         : undefined;
       promptParts.push(
         readOnlyEvidence === undefined
-          ? `Execute task ${task}: ${artifactClause}run fast slice checks during TDD (never pre-run the full cumulative Gate), commit on branch factory/${task}, call agent_claim (automated verification runs asynchronously), and end your turn immediately once \`queued\`. ${PEER_PREMISE_CHECK_REMINDER}`
-          : `Execute task ${task}: this session is Read-Only (disposition ${contract.disposition}) — the read-only-disposition-fence forbids file edits and \`git commit\`; never commit, never edit files. Call agent_claim with no commit and no sha, supplying \`outcome\`, \`scope\`, \`verification\`, and \`unknowns\` carrying your ${contract.disposition} evidence: ${readOnlyEvidence}. ${PEER_PREMISE_CHECK_REMINDER}`,
+          ? `Execute task ${task}: ${artifactClause}run fast slice checks during TDD (never pre-run the full cumulative Gate), commit on branch factory/${task}, call agent_claim (automated verification runs asynchronously), and end your turn immediately once \`queued\`.`
+          : `Execute task ${task}: this session is Read-Only (disposition ${contract.disposition}) — the read-only-disposition-fence forbids file edits and \`git commit\`; never commit, never edit files. Call agent_claim with no commit and no sha, supplying \`outcome\`, \`scope\`, \`verification\`, and \`unknowns\` carrying your ${contract.disposition} evidence: ${readOnlyEvidence}.`,
       );
+      const reopenIfBlock = formatReopenIfBlock(contract?.reopenConditions);
+      if (reopenIfBlock !== "") {
+        promptParts.push(reopenIfBlock);
+      }
+      promptParts.push(PEER_PREMISE_CHECK_REMINDER);
       const taskPrompt =
         typeof args.prompt === "string" && args.prompt.trim() !== ""
           ? args.prompt.trim()
@@ -3341,8 +3399,6 @@ async function handleToolCall(name, rawArgs) {
         return toolResult(`agent_ask takes zero topology fields — "${forbidden}" is derived from correlation binding.`, true);
       }
     }
-    const VALID_KINDS = ["reopen_premise", "gate_mismatch", "dependency", "clarify", "blocked"];
-    const VALID_LAYERS = ["foundation", "dependency", "lifecycle", "API", "ownership", "verification"];
     const kind = typeof args.kind === "string" ? args.kind.trim() : "";
     if (!VALID_KINDS.includes(kind)) {
       return toolResult(`agent_ask requires \`kind\` (${VALID_KINDS.join(" | ")}).`, true);
@@ -3397,7 +3453,7 @@ async function handleToolCall(name, rawArgs) {
       kind: "peer_ask",
       ...(ctx.task ? { task: ctx.task } : {}),
       ...(workspace ? { workspace } : ctx.projectSlug ? { project: ctx.projectSlug } : {}),
-      peerAskKind: "blocked",
+      ...parseLegacyBlockerAsk(message),
       summary: message,
       source: "legacy_blocker",
       ...(ctx.agentId ? { agent: ctx.agentId } : ctx.correlationId ? { agent: ctx.correlationId } : {}),
