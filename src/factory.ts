@@ -2120,7 +2120,7 @@ export function createFactory(options: FactoryOptions): Factory {
       if (!wrappers.has(key)) wrappers.set(key, (...args: unknown[]) => {
         if (key === "resetProject" && history.activeOperations > 0 && !history.maintenanceActive) throw new FactoryError("history-maintenance-busy", "reset requires settled operations; use the asynchronous Owner reset entrance");
         return asyncOperations.has(key)
-          ? history.runOperation(() => value.apply(receiver, args), { newWork: true })
+          ? history.runOperation(() => value.apply(receiver, args), { newWork: key !== "executeQueuedClaim" })
           : history.runSync(() => value.apply(receiver, args));
       });
       return wrappers.get(key);

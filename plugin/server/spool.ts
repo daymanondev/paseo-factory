@@ -32,7 +32,8 @@ import type { UpgradeInput, UpgradeResult, UpgradePreflight } from "./core/histo
  * request is processed again on boot, opening the next Attempt honestly.
  */
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { MCP_TOOL_TIMEOUT_MS } from "./core/mcp/shared.ts";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { FactoryError } from "./core/errors.ts";
@@ -2215,6 +2216,8 @@ async function cancelProjectGatesBeforeMaintenance(
   });
 }
 
+export const DEFAULT_SPOOL_REPLAY_TTL_MS = MCP_TOOL_TIMEOUT_MS;
+
 export async function handleSpoolRequest(
   factory: Factory,
   request: SpoolRequest,
@@ -2225,14 +2228,19 @@ export async function handleSpoolRequest(
   if ("reply" in routing) return routing.reply;
   const effective = routing.factory;
   if (request.kind === "upgrade" || request.kind === "history_import" || request.kind === "history_import_status") return handleAdmittedSpoolRequest(effective, request, deps);
-  if (takesExclusiveMaintenance(request.kind) && !effective.history.maintenanceActive) {
-    if (request.kind === "reset" || request.kind === "delete") {
-      await cancelProjectGatesBeforeMaintenance(factory, request, deps);
+  if (takesExclusiveMaintenance(request.kind)) {
+    if (!effective.history.maintenanceActive) {
+      if (request.kind === "reset" || request.kind === "delete") {
+        await cancelProjectGatesBeforeMaintenance(factory, request, deps);
+      }
+      return effective.history.withExclusiveMaintenance(() => handleAdmittedSpoolRequest(effective, request, deps, registry, routing.slug));
     }
-    return effective.history.withExclusiveMaintenance(() => handleAdmittedSpoolRequest(effective, request, deps, registry, routing.slug));
+    return handleAdmittedSpoolRequest(effective, request, deps, registry, routing.slug);
   }
   const admitted = () => effective.history.runOperation(() => handleAdmittedSpoolRequest(effective, request, deps, registry, routing.slug), { newWork: !["ask", "meter", "repoke", "respawn", "needs_human"].includes(request.kind) });
+  const acquiresOuterIngressLock = !["claim", "needs_human", "close"].includes(request.kind);
   const run = () => {
+    if (!acquiresOuterIngressLock) return admitted();
     const workspace = request.kind === "contract"
       ? request.workspace
       : (request.kind === "release" || request.kind === "store-release")
@@ -2527,6 +2535,7 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
     if (request.kind === "claim") {
       const contract = factory.contractFor(request.task);
       const project = contract === undefined ? undefined : resolveProject(contract.workspace);
+      const lockSlug = routedSlug ?? (project?.ok ? project.slug : undefined);
       const syncReply = (outcome: ClaimOutcome): SpoolReply => ({
         id: request.id,
         ok: true,
@@ -2571,8 +2580,8 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
           });
           return { status: "enqueued" as const, attempt: admitted.attempt, queued };
         };
-        const result = project?.ok
-          ? await withProjectIngressLock(factory.stateDir, project.slug, admitAsync)
+        const result = lockSlug !== undefined
+          ? await withProjectIngressLock(factory.stateDir, lockSlug, admitAsync)
           : await admitAsync();
         if (result.status === "executed") {
           const effectiveSlug = routedSlug ?? (project?.ok ? project.slug : request.projectSlug);
@@ -2582,7 +2591,7 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
             agent: request.agent,
             outcome: result.outcome,
             sha: request.sha,
-            workspace: contract?.workspace,
+            workspace: (contract ?? factory.contractFor(request.task))?.workspace,
             ...(effectiveSlug === undefined ? {} : { projectSlug: effectiveSlug }),
             usageMeter,
             peerMail: peerMailHook,
@@ -2606,19 +2615,23 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
         };
       }
 
-      const admit = async () => ({
-        priorSeq: factory.ledger.events.at(-1)?.seq ?? 0,
-        completion: factory.claim({
+      const admit = async () => {
+        const completion = factory.claim({
           task: request.task,
           sha: request.sha ?? "",
           ...(request.mechanical === undefined ? { handoff: request.handoff } : { mechanical: request.mechanical }),
           ...(request.agent === undefined ? {} : { agent: request.agent }),
-        }),
-      });
+        });
+        completion.catch(() => {});
+        return {
+          priorSeq: factory.ledger.events.at(-1)?.seq ?? 0,
+          completion,
+        };
+      };
       // Claim admission synchronously records gate_started under the same
       // lifecycle lane as handoff. Release the lane before awaiting the Gate:
       // permits, mailbox delivery, and context observation remain available.
-      const admitted = project?.ok ? await withProjectIngressLock(factory.stateDir, project.slug, admit) : await admit();
+      const admitted = lockSlug !== undefined ? await withProjectIngressLock(factory.stateDir, lockSlug, admit) : await admit();
       const outcome = await admitted.completion;
       const replayed = outcome.gate.seq <= admitted.priorSeq;
       if (!replayed) {
@@ -2629,7 +2642,7 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
           agent: request.agent,
           outcome,
           sha: request.sha,
-          workspace: contract?.workspace,
+          workspace: (contract ?? factory.contractFor(request.task))?.workspace,
           ...(effectiveSlug === undefined ? {} : { projectSlug: effectiveSlug }),
           usageMeter,
           peerMail: peerMailHook,
@@ -3107,35 +3120,45 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
       // The stall's or ceiling's named end (v0.0.10 / v0.0.12): one line,
       // evidence pair attached. The meter's law — a refused submission throws,
       // no line, and the reply carries the code so the driver can report it.
-      let effectiveEvidence = request.evidence;
-      if (effectiveSeat === "lead") {
-        const contract = factory.contractFor(request.task);
-        if (contract !== undefined) {
-          const epochHistory = factory.ledger.eventsFor(request.task).filter((e) => e.seq >= contract.seq);
-          if (request.reason === "attempt-ceiling") {
-            const gate3 = epochHistory.findLast(
-              (e) => e.event === "gate_finished" && e.attempt === 3 && e.verdict === "red",
-            );
-            if (gate3 !== undefined) {
-              effectiveEvidence = { attempt: 3, gate: gate3.seq };
-            }
-          } else if (request.reason === "denied-again" || request.reason === "silent-after-repoke") {
-            const denial = epochHistory.findLast((e) => e.event === "permit_denied");
-            const repoke = epochHistory.findLast((e) => e.event === "repoke_dispatched");
-            if (denial !== undefined && repoke !== undefined) {
-              effectiveEvidence = { denial: denial.seq, repoke: repoke.seq };
-            }
-          } else if (request.reason === "died-after-respawn") {
-            const spawnEvt = epochHistory.findLast((e) => e.event === "spawn_dispatched");
-            const respawnEvt = epochHistory.findLast((e) => e.event === "respawn_dispatched");
-            if (spawnEvt !== undefined && respawnEvt !== undefined && respawnEvt.seq > spawnEvt.seq) {
-              effectiveEvidence = { spawn: spawnEvt.seq, respawn: respawnEvt.seq };
+      const contract = factory.contractFor(request.task);
+      const project = contract === undefined ? undefined : resolveProject(contract.workspace);
+      const lockSlug = routedSlug ?? (project?.ok ? project.slug : undefined);
+      const recordNeedsHuman = async () => {
+        let effectiveEvidence = request.evidence;
+        if (effectiveSeat === "lead") {
+          const currentContract = factory.contractFor(request.task);
+          if (currentContract !== undefined) {
+            const epochHistory = factory.ledger.eventsFor(request.task).filter((e) => e.seq >= currentContract.seq);
+            if (request.reason === "attempt-ceiling") {
+              const gate3 = epochHistory.findLast(
+                (e) => e.event === "gate_finished" && e.attempt === 3 && e.verdict === "red",
+              );
+              if (gate3 !== undefined) {
+                effectiveEvidence = { attempt: 3, gate: gate3.seq };
+              }
+            } else if (request.reason === "denied-again" || request.reason === "silent-after-repoke") {
+              const denial = epochHistory.findLast((e) => e.event === "permit_denied");
+              const repoke = epochHistory.findLast((e) => e.event === "repoke_dispatched");
+              if (denial !== undefined && repoke !== undefined) {
+                effectiveEvidence = { denial: denial.seq, repoke: repoke.seq };
+              }
+            } else if (request.reason === "died-after-respawn") {
+              const spawnEvt = epochHistory.findLast((e) => e.event === "spawn_dispatched");
+              const respawnEvt = epochHistory.findLast((e) => e.event === "respawn_dispatched");
+              if (spawnEvt !== undefined && respawnEvt !== undefined && respawnEvt.seq > spawnEvt.seq) {
+                effectiveEvidence = { spawn: spawnEvt.seq, respawn: respawnEvt.seq };
+              }
             }
           }
         }
-      }
-      const event = factory.needsHuman({ task: request.task, reason: request.reason, evidence: effectiveEvidence });
-      await archiveTaskAgentBestEffort(resolvedDaemon, lastTaskAgentForTask(factory, request.task));
+        const event = factory.needsHuman({ task: request.task, reason: request.reason, evidence: effectiveEvidence });
+        const agentToArchive = lastTaskAgentForTask(factory, request.task);
+        return { event, agentToArchive };
+      };
+      const { event, agentToArchive } = lockSlug !== undefined
+        ? await withProjectIngressLock(factory.stateDir, lockSlug, recordNeedsHuman)
+        : await recordNeedsHuman();
+      await archiveTaskAgentBestEffort(resolvedDaemon, agentToArchive);
       const detail =
         "denial" in event.evidence
           ? `denial seq ${event.evidence.denial}, repoke seq ${event.evidence.repoke}`
@@ -3146,9 +3169,11 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
       // state the Project's Lead must hear — same lane, same hold law as the
       // verdict hook above. Skip when Lead itself invoked `lead_needs_human`.
       if (effectiveSeat !== "lead") {
+        const effectiveSlug = routedSlug ?? (project?.ok ? project.slug : request.projectSlug);
         await peerMailHook?.({
           task: request.task,
           kind: "needs_human",
+          ...(effectiveSlug === undefined ? {} : { projectSlug: effectiveSlug }),
           text: `Task ${request.task} needs a human: ${event.reason} (${detail})`,
         });
       }
@@ -3169,28 +3194,33 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
       const closedBy = request.by ?? request.submitter;
       const authority = effectiveSeat ?? (request.by === "lead" ? "lead" : "owner");
       factory.validateClose({ task: request.task, reason: request.reason, authority });
+      const closeContract = factory.contractFor(request.task);
       if (gateQueue !== undefined) {
-        const closeContract = factory.contractFor(request.task);
         await gateQueue.cancelMatching(
           (item) => matchesTaskQueueItem(item, closeContract?.workspace),
           { note: "cancelled-by-task-close", suppressSettled: true },
         );
       }
-      const peers = await taskPeers(request.task);
-      const closed = await factory.close({
-        task: request.task,
-        reason: request.reason,
-        ...(closedBy === undefined ? {} : { by: closedBy }),
-        authority,
-      });
-      if (peers.length > 0) await retirePeers(peers);
-      await archiveAcceptedTaskWorkspace(factory, resolvedDaemon, request.task, home);
-      return {
-        id: request.id,
-        ok: true,
-        summary: `task ${request.task} closed by ${closedBy} (reason: ${request.reason}) — bound Peer retired, Task worktree and branch factory/${request.task} removed`,
-        event: closed,
+      const closeProject = closeContract === undefined ? undefined : resolveProject(closeContract.workspace);
+      const lockSlug = routedSlug ?? (closeProject?.ok ? closeProject.slug : undefined);
+      const finalizeClose = async (): Promise<SpoolReply> => {
+        const peers = await taskPeers(request.task);
+        const closed = await factory.close({
+          task: request.task,
+          reason: request.reason,
+          ...(closedBy === undefined ? {} : { by: closedBy }),
+          authority,
+        });
+        if (peers.length > 0) await retirePeers(peers);
+        await archiveAcceptedTaskWorkspace(factory, resolvedDaemon, request.task, home);
+        return {
+          id: request.id,
+          ok: true,
+          summary: `task ${request.task} closed by ${closedBy} (reason: ${request.reason}) — bound Peer retired, Task worktree and branch factory/${request.task} removed`,
+          event: closed,
+        };
       };
+      return lockSlug !== undefined ? await withProjectIngressLock(factory.stateDir, lockSlug, finalizeClose) : await finalizeClose();
     }
     if (request.kind === "notebook") {
       // The plugin's single-writer notebook persist (v0.5.0, ADR 0052
@@ -3527,6 +3557,10 @@ export interface SpoolOptions {
   gateQueue?: GateQueue;
   /** Installed plugin directory protected against repository reset (defaults to `pluginDirFor(home)`). */
   pluginDir?: string;
+  /** Boot-replay TTL (ms) for leftover non-`upgrade` requests after startup. Default 600,000ms. */
+  replayTtlMs?: number;
+  /** Clock override (ms since epoch) for deterministic Spool TTL checks. Defaults to `Date.now`. */
+  now?: () => number;
 }
 
 export type SpoolDeps = Omit<SpoolOptions, "onLog" | "pollMs">;
@@ -3561,6 +3595,8 @@ export function startSpool(stateDir: string, factory: Factory, options: SpoolOpt
   if (pendingUpgradeFor(stateDir) === undefined) ensureDirectories();
 
   const log = options.onLog ?? (() => {});
+  const now = options.now ?? Date.now;
+  const replayTtlMs = options.replayTtlMs ?? DEFAULT_SPOOL_REPLAY_TTL_MS;
   const ownedGateQueue =
     options.gateQueue === undefined
       ? createGateQueue({
@@ -3629,6 +3665,19 @@ export function startSpool(stateDir: string, factory: Factory, options: SpoolOpt
     }
   };
 
+  /** Atomically writes a failure reply (when absent) and archives the request into `processed/`. */
+  const failClosedRequest = (
+    requestPath: string,
+    replyPath: string,
+    processedPath: string,
+    reply: Extract<SpoolReply, { ok: false }>,
+  ): void => {
+    mkdirSync(repliesDir, { recursive: true });
+    mkdirSync(processedDir, { recursive: true });
+    if (!existsSync(replyPath)) writeJsonAtomic(replyPath, reply);
+    if (existsSync(requestPath)) renameSync(requestPath, processedPath);
+  };
+
   const drain = (): void => {
     if (factory.history.maintenanceActive) return;
     const recovering = pendingUpgradeFor(stateDir) !== undefined || options.ordinaryReady?.() === false;
@@ -3647,25 +3696,56 @@ export function startSpool(stateDir: string, factory: Factory, options: SpoolOpt
       const id = name.slice(0, -".json".length);
       if (inFlight.has(id)) continue;
       const requestPath = join(requestsDir, name);
+      const processedPath = join(processedDir, name);
+      let rawBody: unknown;
+      let requestKind: unknown;
+      try {
+        rawBody = JSON.parse(readFileSync(requestPath, "utf8"));
+        requestKind =
+          rawBody !== null && typeof rawBody === "object" && !Array.isArray(rawBody)
+            ? (rawBody as Record<string, unknown>).kind
+            : undefined;
+      } catch {
+        rawBody = undefined;
+      }
       // Recovery controls remain reachable; unrelated queued work keeps its
       // exact request/reply/processed state until ordinary admission resumes.
-      if (recovering) {
-        try { if (JSON.parse(readFileSync(requestPath, "utf8")).kind !== "upgrade") continue; }
-        catch { continue; }
-      }
+      if (recovering && requestKind !== "upgrade") continue;
+
       const replyPath = join(repliesDir, name);
       if (existsSync(replyPath)) {
         // Already answered (retried or replayed request): pass it along, run nothing.
-        renameSync(requestPath, join(processedDir, name));
+        renameSync(requestPath, processedPath);
         log(`request ${id}: reply already existed — skipped (no second gate)`);
         continue;
       }
-      let semanticKey: string | undefined;
-      try {
-        semanticKey = spoolRequestSemanticKey(JSON.parse(readFileSync(requestPath, "utf8")));
-      } catch {
-        semanticKey = undefined; // unreadable body — no dedup, handled as its own request
+      if (!recovering && requestKind !== "upgrade") {
+        let ageMs: number | undefined;
+        try {
+          ageMs = now() - statSync(requestPath).mtimeMs;
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException)?.code === "ENOENT") continue;
+        }
+        if (ageMs !== undefined && ageMs > replayTtlMs) {
+          const ageSec = Math.round(ageMs / 1000);
+          const ttlSec = Math.round(replayTtlMs / 1000);
+          const kindLabel = typeof requestKind === "string" && requestKind.trim() !== "" ? requestKind : "unknown";
+          const message = `request ${id} (${kindLabel}) expired after ${ageSec}s (> ${ttlSec}s boot-replay TTL) before restart recovery; caller already timed out`;
+          try {
+            failClosedRequest(requestPath, replyPath, processedPath, {
+              id,
+              ok: false,
+              code: "request-expired-after-restart",
+              message,
+            });
+            log(`request ${id}: EXPIRED after restart (${kindLabel}, age ${ageSec}s > ${ttlSec}s TTL) — moved to processed/`);
+          } catch (err) {
+            log(`request ${id}: failed to expire stale request — ${err instanceof Error ? err.message : String(err)}`);
+          }
+          continue;
+        }
       }
+      const semanticKey = rawBody !== undefined ? spoolRequestSemanticKey(rawBody) : undefined;
       if (semanticKey !== undefined) {
         const primaryId = inFlightSemanticKeys.get(semanticKey);
         if (primaryId !== undefined && primaryId !== id) {
@@ -3676,7 +3756,7 @@ export function startSpool(stateDir: string, factory: Factory, options: SpoolOpt
             dupId: id,
             dupRequestPath: requestPath,
             dupReplyPath: replyPath,
-            dupProcessedPath: join(processedDir, name),
+            dupProcessedPath: processedPath,
           };
           const queue = duplicatesByPrimaryId.get(primaryId);
           if (queue === undefined) duplicatesByPrimaryId.set(primaryId, [mirror]);
@@ -3691,13 +3771,26 @@ export function startSpool(stateDir: string, factory: Factory, options: SpoolOpt
         id,
         requestPath,
         replyPath,
-        join(processedDir, name),
+        processedPath,
         factory,
         log,
         effectiveOptions,
         options.registry,
       )
-        .catch(() => {})
+        .catch((err) => {
+          const message = err instanceof Error ? err.message : String(err);
+          log(`request ${id}: FAILED unexpectedly — ${message}`);
+          try {
+            failClosedRequest(requestPath, replyPath, processedPath, {
+              id,
+              ok: false,
+              code: "spool-internal-error",
+              message,
+            });
+          } catch (settleErr) {
+            log(`request ${id}: fail-closed settlement error — ${settleErr instanceof Error ? settleErr.message : String(settleErr)}`);
+          }
+        })
         .finally(async () => {
           inFlight.delete(id);
           if (semanticKey !== undefined && inFlightSemanticKeys.get(semanticKey) === id) {

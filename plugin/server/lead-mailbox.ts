@@ -12,10 +12,11 @@ import { commitSeatMemoryOnRoot } from "./core/workspace.ts";
  * pure fold and the append helpers live in `./core/mailbox.ts` (ticket 05's
  * core); this module owns everything around them:
  *
- *   - the serialized per-Project async lane `projectLane(slug)` — one promise
- *     chain per slug, so every read-then-append against a Project's mailbox
- *     and every seat act on that Project run in submission order (the
- *     single-writer law ADR 0004 names);
+ *   - the serialized per-Project async lane `projectLane(slug)` — backed by the
+ *     re-entrant `withProjectIngressLock`, so every read-then-append against a
+ *     Project's mailbox and every seat act on that Project run in submission
+ *     order without a second per-Project queue (the single-writer law ADR
+ *     0004 names);
  *   - `enqueueLeadMail` — append `mail_queued` through the core, on the lane;
  *   - `drainLeadMailbox` — when the Project's Lead is idle (no pending
  *     permissions), `rotationState === "normal"`, nothing is in flight, and mail
@@ -363,10 +364,6 @@ export interface LeadTurnEndedInput {
 }
 
 export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntime {
-  // One promise chain per slug: every lane job starts only after the prior
-  // job for the SAME Project settles (either way — a failed job never poisons
-  // the chain), so read-then-append against one mailbox is atomic in practice.
-  const lanes = new Map<string, Promise<unknown>>();
   const handingOverBySlug = new Set<string>();
   const handoffTimers = new Map<string, ReturnType<typeof setTimeout>>();
   /**
@@ -527,22 +524,10 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     if (!retired.ok && retired.code !== "no-lead") log(`lead-mailbox: could not retire the superseded Lead of ${slug} (${retired.code}: ${retired.error})`);
   };
 
-  const projectLane = <T>(slug: string, run: () => Promise<T>): Promise<T> => {
-    const prior = lanes.get(slug) ?? Promise.resolve();
-    const admitted = () =>
-      withProjectIngressLock(deps.stateDir, slug, () =>
-        deps.factory.history.runOperation(() => laneEpochs.run({ slug, epoch: seatEpochOf(slug) }, run)),
-      );
-    const job = prior.then(admitted, admitted);
-    lanes.set(
-      slug,
-      job.then(
-        () => undefined,
-        () => undefined,
-      ),
+  const projectLane = <T>(slug: string, run: () => Promise<T>): Promise<T> =>
+    withProjectIngressLock(deps.stateDir, slug, () =>
+      deps.factory.history.runOperation(() => laneEpochs.run({ slug, epoch: seatEpochOf(slug) }, run)),
     );
-    return job;
-  };
 
   const supervisorHandoff = createSupervisorHandoffRuntime({
     stateDir: deps.stateDir, daemon: resolveDaemon, timeoutMs: deps.ownerHandoffTimeoutMs ?? 90_000,
