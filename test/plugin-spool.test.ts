@@ -516,8 +516,8 @@ test("a message-bearing repoke delivers the Lead's ruling into the live Peer ses
   const dispatched = factory.ledger.eventsFor("T-RP").filter((e) => e.event === "repoke_dispatched");
   assert.equal(dispatched.length, 3, "each turn lands its own repoke_dispatched line");
   assert.ok(
-    dispatched.every((e) => !("message" in e)),
-    "the message body is delivery-only — never persisted on the ledger line",
+    dispatched.every((e) => e.kind === "ruling" && typeof e.message === "string" && e.message.length > 0),
+    "the ruling turn persists kind=ruling and message on the ledger line",
   );
 
   // The message-less cap stays verbatim: with the spend marker present, a bare
@@ -546,11 +546,13 @@ test("a message-less repoke (omitted or empty) sends today's fixed continuation 
   assert.ok(nudge.includes("Scope: (unrestricted)"), "an omitted scope reads as unrestricted");
   assert.ok(nudge.includes("(no description on this Contract)"), "a Contract without a description says so plainly");
   assert.ok(
-    nudge.endsWith(
-      "Continue inside your Task worktree on branch factory/T-STALL, run fast slice checks during TDD (never pre-run the full cumulative Gate), commit your changes, call `paseo-factory_agent_claim` (or `agent_claim`), and end your turn immediately once `queued`; the daemon GateQueue runs `npm test` asynchronously.",
+    nudge.includes(
+      "Continue inside your Task worktree on branch factory/T-STALL, run fast slice checks during TDD (never pre-run the full cumulative Gate), commit your changes, call `paseo-factory_agent_claim` (or `agent_claim`), and end your turn immediately once `queued`; automated verification runs `npm test` asynchronously.",
     ),
-    "the engineer completion footer uses fast slice checks and async claim wording",
+    "the engineer completion footer uses fast slice checks, topology-blind verification wording, and async claim wording",
   );
+  assert.ok(nudge.includes("agent_ask"), "the continuation footer reminds Peer of agent_ask");
+  assert.equal(/GateQueue/.test(nudge), false, "the continuation footer stays topology-blind");
 
   // The empty-string message is the omitted spelling — and the one-per-task
   // cap refuses it exactly like a bare second repoke.

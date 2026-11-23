@@ -225,7 +225,7 @@ test("bridge.mjs exposes strictly role-scoped tools in tools/list and enforces r
       ],
     });
     const leadTools = ((leadResponses[1].result as { tools: Array<{ name: string }> }).tools).map((t) => t.name).sort();
-    assert.deepEqual(leadTools, ["lead_close_task", "lead_create_worktree", "lead_dispatch_agent", "lead_merge", "lead_needs_human", "lead_read_ledger", "lead_record_store_note", "lead_release", "lead_remove_worktree", "lead_repoke_agent", "lead_report_to_supervisor", "lead_retire_task", "lead_set_contract", "lead_store_release", "lead_update_notebook", "lead_verify"]);
+    assert.deepEqual(leadTools, ["lead_close_task", "lead_create_worktree", "lead_dispatch_agent", "lead_merge", "lead_needs_human", "lead_read_ledger", "lead_record_store_note", "lead_release", "lead_remove_worktree", "lead_reply_peer", "lead_report_to_supervisor", "lead_retire_task", "lead_set_contract", "lead_store_release", "lead_update_notebook", "lead_verify"]);
 
     // 3. Working Agent session
     const agentResponses = await runMcpSession({
@@ -238,7 +238,7 @@ test("bridge.mjs exposes strictly role-scoped tools in tools/list and enforces r
       ],
     });
     const agentTools = ((agentResponses[1].result as { tools: Array<{ name: string }> }).tools).map((t) => t.name).sort();
-    assert.deepEqual(agentTools, ["agent_claim", "agent_escalate_blocker"]);
+    assert.deepEqual(agentTools, ["agent_ask", "agent_claim"]);
     const agentIllegalCall = agentResponses[2].result as { isError?: boolean; content: Array<{ text: string }> };
     assert.equal(agentIllegalCall.isError, true);
 
@@ -1200,7 +1200,7 @@ test("lead_repoke_agent with message delivers the Lead's ruling into the live Pe
       { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "RULING-1", gate: "true", disposition: "architect", description: brief4("Brief v1: design the adapter boundary.") } } },
       { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "lead_dispatch_agent", arguments: { tasks: ["RULING-1"] } } },
       { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "RULING-1", gate: "true", artifact: "README.md", description: brief4("Brief v2 (reconciled): the facade owns the retry policy.") } } },
-      { jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "lead_repoke_agent", arguments: { task: "RULING-1", agent: "peer-created-1", message: "Ruling (REOPEN_REQUEST foundation): the facade owns the retry policy â€” drop the caller-side backoff." } } },
+      { jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "lead_reply_peer", arguments: { task: "RULING-1", agent: "peer-created-1", message: "Ruling (REOPEN_REQUEST foundation): the facade owns the retry policy â€” drop the caller-side backoff." } } },
       { jsonrpc: "2.0", id: 6, method: "tools/call", params: { name: "lead_repoke_agent", arguments: { task: "RULING-1", agent: "peer-created-1", message: "Second turn: green the gate on the reconciled Brief." } } },
     ],
   });
@@ -1211,9 +1211,9 @@ test("lead_repoke_agent with message delivers the Lead's ruling into the live Pe
     return result.content[0].text;
   };
 
-  // 1. The Lead schema advertises the optional message parameter (AC 6).
+  // 1. The Lead schema advertises lead_reply_peer with message (AC 6).
   const tools = (byId.get(1)!.result as { tools: Array<{ name: string, inputSchema: { properties: Record<string, unknown> } }> }).tools;
-  const repokeTool = tools.find((tool) => tool.name === "lead_repoke_agent")!;
+  const repokeTool = tools.find((tool) => tool.name === "lead_reply_peer")!;
   assert.equal((repokeTool.inputSchema.properties.message as { type?: string })?.type, "string", "the message property is a string");
 
   okText(2); // the Brief
@@ -1233,15 +1233,14 @@ test("lead_repoke_agent with message delivers the Lead's ruling into the live Pe
   assert.ok(first.includes("Brief v2 (reconciled): the facade owns the retry policy."), "the updated Brief is named after the lead_set_contract reconciliation");
   assert.ok((deliveries[1]?.text ?? "").includes("Second turn: green the gate on the reconciled Brief."), "the second turn's ruling rode its own delivery");
 
-  // 3. Each turn landed its own dispatch line; the message body never
-  //    persisted (the agent stamp remains the line's target).
+  // 3. Each turn landed its own dispatch line with ADR 0069 ruling metadata.
   const repokeLines = readFileSync(join(stateDir, "projects", slug, "ledger.jsonl"), "utf8")
     .trim()
     .split("\n")
     .map((line) => JSON.parse(line))
     .filter((e) => e.event === "repoke_dispatched" && e.task === "RULING-1");
   assert.equal(repokeLines.length, 2, "each reconciliation turn landed a repoke_dispatched line");
-  assert.ok(repokeLines.every((e) => !("message" in e)), "the message body is delivery-only â€” never persisted on the line");
+  assert.ok(repokeLines.every((e) => e.kind === "ruling" && typeof e.message === "string" && e.message.length > 0), "each ruling turn persists kind=ruling and message");
 
   // 4. The message-less cap stays verbatim (AC 3): with the spend marker
   //    present, a bare repoke is refused already-spent.
@@ -1337,14 +1336,16 @@ test("the MCP fallback spawn prompt branches on the disposition (ticket 03, ADR 
   assert.ok(readOnlyPrompt.includes("outcome"), "the handoff fields still ride the instruction");
   assert.match(readOnlyPrompt, /blocking defects/, "the reviewer disposition's evidence expectation rides the prompt");
 
-  // 2. The engineer fallback prompt instructs fast slice checks + commit + claim + end turn when queued.
+  // 2. The engineer fallback prompt instructs fast slice checks + commit + claim + end turn when queued (topology-blind).
   const engineerPrompt = createdPrompts[1]!;
   assert.ok(
     engineerPrompt.includes(
-      "run fast slice checks during TDD (never pre-run the full cumulative Gate), commit on branch factory/ENGD-1, call agent_claim (the daemon GateQueue runs the Gate asynchronously), and end your turn immediately once `queued`.",
+      "run fast slice checks during TDD (never pre-run the full cumulative Gate), commit on branch factory/ENGD-1, call agent_claim (automated verification runs asynchronously), and end your turn immediately once `queued`.",
     ),
     "the engineer clause avoids pre-running the full cumulative Gate and instructs end-of-turn on queued",
   );
+  assert.equal(/GateQueue/.test(engineerPrompt), false, "engineer fallback prompt is topology-blind");
+  assert.ok(engineerPrompt.includes("agent_ask"), "engineer fallback prompt includes agent_ask premise-check reminder");
   assert.ok(!engineerPrompt.includes("pass gate `npm test`"), "engineer is never told to pass the full Gate before agent_claim");
   assert.ok(!engineerPrompt.includes("read-only-disposition-fence"), "no read-only fence leaks into the engineer prompt");
 });
@@ -1447,7 +1448,7 @@ test("agent_claim carries the mandatory six-field handoff end-to-end (ADR 0053 Â
         jsonrpc: "2.0",
         id: 3,
         method: "tools/call",
-        params: { name: "agent_claim", arguments: { ...handoffArgs, outcome: "partial", ownership: "lease returned; findings doc pending" } },
+        params: { name: "agent_claim", arguments: { ...handoffArgs, outcome: "complete", ownership: "lease returned; findings doc pending" } },
       },
     ],
   });
@@ -1486,7 +1487,7 @@ test("agent_claim carries the mandatory six-field handoff end-to-end (ADR 0053 Â
   assert.equal(reconEvents.filter((e) => e.event === "claim_reported").length, 1, "the refused call opened no Attempt");
   assert.equal(reconEvents.filter((e) => e.event === "gate_started").length, 1, "the refused call started no Gate");
   const claimLine = reconEvents.find((e) => e.event === "claim_reported");
-  assert.equal(claimLine.handoff.outcome, "partial");
+  assert.equal(claimLine.handoff.outcome, "complete");
   assert.equal(claimLine.handoff.ownership, "lease returned; findings doc pending", "the explicit ownership rides verbatim");
   assert.equal(claimLine.handoff.unknowns, "none â€” layout confirmed against README");
 
@@ -1496,7 +1497,7 @@ test("agent_claim carries the mandatory six-field handoff end-to-end (ADR 0053 Â
   assert.ok(reportEvt?.path, "the report event records the report path");
   const report = readFileSync(String(reportEvt.path), "utf8");
   const canonical = [
-    "- Outcome: partial",
+    "- Outcome: complete",
     "- Snapshot:",
     "- Scope: read README.md, traced src/entries",
     "- Verification: gate ran green; no checks skipped",
