@@ -80,6 +80,7 @@ export function Btn({
   solid = false,
   variant,
   testID,
+  accentColour,
 }: {
   theme: PluginTheme;
   label: string;
@@ -92,11 +93,12 @@ export function Btn({
   variant?: BtnVariant;
   /** The E2E / structural-test hook (the panel names its actions up front). */
   testID?: string;
+  accentColour?: string;
 }) {
   const mode: BtnVariant | "tone" = variant ?? (solid ? "primary" : tone !== undefined ? "tone" : "secondary");
   // A `solid` button keeps filling with its own tone (e.g. statusWarning); only the default is accent.
-  const colour = theme.colors[tone ?? "accent"];
-  const isMuted = tone === "foregroundMuted";
+  const colour = accentColour ?? theme.colors[tone ?? "accent"];
+  const isMuted = tone === "foregroundMuted" && accentColour === undefined;
   const fg = disabled
     ? theme.colors.foregroundMuted
     : mode === "primary"
@@ -104,7 +106,7 @@ export function Btn({
       : mode === "danger"
         ? theme.colors.statusDanger
         : mode === "ghost"
-          ? theme.colors.foregroundMuted
+          ? (accentColour ?? theme.colors.foregroundMuted)
           : mode === "tone" && !isMuted
             ? colour
             : theme.colors.foreground;
@@ -254,14 +256,17 @@ export function Card({
   children,
   gap = SPACING[2.5],
   style,
+  testID,
 }: {
   theme: PluginTheme;
   children: ReactNode;
   gap?: number;
   style?: ViewStyle;
+  testID?: string;
 }) {
   return (
     <View
+      {...(testID === undefined ? {} : { testID })}
       style={{
         borderWidth: 1,
         borderColor: theme.colors.border,
@@ -277,6 +282,46 @@ export function Card({
   );
 }
 
+/**
+ * One alert-stack item: a 3px tone bar, a faint tint, the title in the tone
+ * colour and — wide — the actions on that same line; detail lines under it.
+ * Narrow, the actions drop to their own line below the detail.
+ */
+export function AlertRow({
+  theme,
+  testID,
+  colour,
+  title,
+  wide,
+  actions,
+  children,
+}: {
+  theme: PluginTheme;
+  testID?: string;
+  colour: string;
+  title: string;
+  wide: boolean;
+  actions?: ReactNode;
+  children?: ReactNode;
+}) {
+  return (
+    <View
+      {...(testID === undefined ? {} : { testID })}
+      style={{ flexDirection: "row", borderRadius: RADIUS.md, overflow: "hidden", backgroundColor: tint(colour, "10") }}
+    >
+      <View style={{ width: 3, backgroundColor: colour }} />
+      <View style={{ flex: 1, minWidth: 0, gap: SPACING[1], paddingVertical: SPACING[2.5], paddingHorizontal: SPACING[3] }}>
+        <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: SPACING[2] }}>
+          <Text style={{ ...text(theme, "rowTitle"), color: colour, flexShrink: 1 }}>{title}</Text>
+          {wide ? (actions ?? null) : null}
+        </View>
+        {children}
+        {wide ? null : (actions ?? null)}
+      </View>
+    </View>
+  );
+}
+
 /** A single-choice recessed track; selection retains full contrast even when locked. */
 export function SegmentedControl<T extends string>({
   theme,
@@ -286,6 +331,8 @@ export function SegmentedControl<T extends string>({
   disabled = false,
   size = "md",
   testID,
+  optionTestIDPrefix,
+  accentColour,
 }: {
   theme: PluginTheme;
   options: readonly {
@@ -293,13 +340,17 @@ export function SegmentedControl<T extends string>({
     label: string;
     icon?: string;
     badge?: string;
+    accentColour?: string;
   }[];
   value: T;
   onChange: (value: T) => void;
   disabled?: boolean;
   size?: "sm" | "md";
   testID?: string;
+  optionTestIDPrefix?: string;
+  accentColour?: string;
 }) {
+  const optPrefix = optionTestIDPrefix ?? testID;
   return (
     <View
       {...(testID === undefined ? {} : { testID })}
@@ -318,13 +369,14 @@ export function SegmentedControl<T extends string>({
     >
       {options.map((option) => {
         const active = option.value === value;
+        const resolvedAccent = option.accentColour ?? accentColour ?? theme.colors.accent;
         const color = active
-          ? theme.colors.accent
+          ? resolvedAccent
           : theme.colors.foregroundMuted;
         return (
           <Pressable
             key={option.value}
-            {...(testID === undefined ? {} : { testID: `${testID}-${option.value}` })}
+            {...(optPrefix === undefined ? {} : { testID: `${optPrefix}-${option.value}` })}
             accessibilityRole="radio"
             accessibilityState={{ selected: active, disabled }}
             accessibilityLabel={option.label}
@@ -342,9 +394,9 @@ export function SegmentedControl<T extends string>({
               alignItems: "center",
               borderRadius: RADIUS.md,
               borderWidth: 1.5,
-              borderColor: active ? theme.colors.accent : "transparent",
+              borderColor: active ? resolvedAccent : "transparent",
               backgroundColor: active
-                ? tint(theme.colors.accent, "20")
+                ? tint(resolvedAccent, "20")
                 : "transparent",
             }}
           >
@@ -440,6 +492,7 @@ export function ChoiceChip({
   selected,
   disabled,
   onPress,
+  accentColour,
 }: {
   theme: PluginTheme;
   testID: string;
@@ -447,8 +500,9 @@ export function ChoiceChip({
   selected: boolean;
   disabled: boolean;
   onPress: () => void;
+  accentColour?: string;
 }) {
-  const accent = theme.colors.accent;
+  const accent = accentColour ?? theme.colors.accent;
   return (
     <Pressable
       testID={testID}

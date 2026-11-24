@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-11-24
+
+**Project tab redesign: unified 3-tier `Card` layout, compact KPI `Project usage` strip, collapsible `Skill packs` drawer, unified `Open Design` control, modal `GitHub publish`, smart `Store Release` summary bar, and 100% `FACTORY_PALETTE` alignment (ADR 0057 & ADR 0066 amendments).**
+
+### Added
+
+- **Shared UI kit palette primitives (`plugin/client/kit/pill.tsx`):** Exported reusable `AlertRow`, added `testID` on `Card`, and added `accentColour` support across `Btn`, `ChoiceChip`, and `SegmentedControl` (with per-option `accentColour` and `optionTestIDPrefix`).
+- **Unified `OpenDesignControl` (`plugin/client/factory/open-design.tsx`, `plugin/client/factory/shell.tsx`):** Added `part="unified"` combining status polling, auto-sync, and a single action row (`Open Studio`, `Sync`, `Change…`, 1-click ghost `Unlink`) while eliminating duplicate `openDesignStatus` polling.
+
+### Changed
+
+- **Compact 3-tier `Project` tab (`plugin/client/factory/project-panel.tsx`):** Unified `Card` containers with a `60/40` desktop Tier 2 pairing (`Skill packs` + `Open Design`, 100% width when Open Design is absent), 4-tile KPI `Project usage` strip with header `▸ Breakdown` toggle and `palette.lead` `By Model` bar, single-line `Skill packs` rows with collapsible `Core` row, `inactive packs` drawer (preserving open state across toggles), wrapped monospace skill chips, header ghost `Reset`/`Settings`, and `palette.ok` Switch (`test/client-kit.test.ts`, `test/client-project-panel.test.ts`, `test/client-mobile-safety.test.ts`).
+- **`GitHub & Release` card (`plugin/client/factory/github-release-card.tsx`, `plugin/client/factory/shell.tsx`):** Migrated 100% to `FACTORY_PALETTE`, horizontal `wide` key-value rows, per-mode `SegmentedControl`, `AlertRow` for unauthenticated `gh`, moved `GitHubPublishForm` into a `<Modal>` (hidden when unauthenticated, stays open on error and closes on success), and collapsed `> 2` `Release branch` options into an inline drawer.
+- **`Store Release` card (`plugin/client/factory/store-release-card.tsx`):** Migrated 100% to `FACTORY_PALETTE`, defaults to a 2-line summary bar on mobile Projects (1-line on non-mobile), auto-expands only when attention is needed (`Active Hole`, failed `lastRun`, or missing Vault keys while `mode !== "off"`), honors manual collapse across polls, and preserves strict zero-button Paseo Mobile read-only discipline.
+
+### Documentation
+
+- **ADR 0057 & ADR 0066:** Amended `docs/adr/0057-every-seat-replacement-is-a-handoff-supervisor-handoff-and-wide-colourful-factory-tab.md` and `docs/adr/0066-store-release-bridge-vault-store-notebook-and-release-lab-handoff.md`.
+
 ## [0.23.1] - 2026-11-24
 
 **Eliminate `O(T × N²)` CPU lockup during 5-second Peer sweeps on large multi-hundred-task Ledgers (`plugin/server/peer-in-flight.ts`, `plugin/server/peer-handoff.ts`).**

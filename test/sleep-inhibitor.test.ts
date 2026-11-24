@@ -212,9 +212,13 @@ test('plugin/index.server.ts contribute() spawns caffeinate -i during active Sto
   writeFileSync(
     fakeCaffeinate,
     `#!${process.execPath}
-import { writeFileSync } from 'node:fs';
-writeFileSync(${JSON.stringify(argsPath)}, JSON.stringify(process.argv.slice(2)));
-writeFileSync(${JSON.stringify(pidPath)}, String(process.pid));
+import { renameSync, writeFileSync } from 'node:fs';
+const pidTmp = ${JSON.stringify(`${pidPath}.tmp`)};
+writeFileSync(pidTmp, String(process.pid));
+renameSync(pidTmp, ${JSON.stringify(pidPath)});
+const argsTmp = ${JSON.stringify(`${argsPath}.tmp`)};
+writeFileSync(argsTmp, JSON.stringify(process.argv.slice(2)));
+renameSync(argsTmp, ${JSON.stringify(argsPath)});
 setInterval(() => {}, 60000);
 `,
   );

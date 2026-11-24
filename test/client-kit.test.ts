@@ -72,6 +72,135 @@ test("Btn keeps its testID and button role", () => {
   assert.match(btn(), /data-testid="b"[^>]*data-role="button"/);
 });
 
+test("Btn accentColour overrides primary, tone, and enabled ghost foreground while preserving disabled and defaults", () => {
+  const lead = "#2f7899";
+  const wait = "#8f6802";
+  const bad = "#c8253d";
+
+  const primary = btn({ variant: "primary", accentColour: lead });
+  assert.equal(labelColour(primary), c.surface0);
+  assert.equal(idle(primary, "backgroundColor"), lead);
+  assert.equal(idle(primary, "borderColor"), `${lead}66`);
+
+  const toneBtn = btn({ tone: "statusWarning", accentColour: wait });
+  assert.equal(labelColour(toneBtn), wait);
+  assert.equal(idle(toneBtn, "backgroundColor"), `${wait}0d`);
+  assert.equal(idle(toneBtn, "borderColor"), `${wait}66`);
+
+  const ghost = btn({ variant: "ghost", accentColour: bad });
+  assert.equal(labelColour(ghost), bad);
+  assert.equal(idle(ghost, "borderColor"), "transparent");
+  assert.equal(idle(ghost, "backgroundColor"), "transparent");
+
+  const disabledGhost = btn({ variant: "ghost", accentColour: bad, disabled: true });
+  assert.equal(labelColour(disabledGhost), c.foregroundMuted);
+  assert.match(disabledGhost, /&quot;opacity&quot;:0\.45/);
+});
+
+test("Card forwards optional testID and keeps shared card container styling", () => {
+  const withId = renderToStaticMarkup(createElement(kit.Card, { theme, testID: "card-hook" }, createElement("span", null, "Body")));
+  assert.match(withId, /data-testid="card-hook"/);
+  assert.match(withId, /&quot;borderWidth&quot;:1,&quot;borderColor&quot;:&quot;#cccccc&quot;,&quot;backgroundColor&quot;:&quot;#f5f5f5&quot;,&quot;borderRadius&quot;:8,&quot;padding&quot;:12/);
+  const withoutId = renderToStaticMarkup(createElement(kit.Card, { theme }, createElement("span", null, "Body")));
+  assert.equal(withoutId.includes("data-testid="), false);
+});
+
+test("AlertRow renders 3px bar, tinted fill, and places actions on title line when wide or below children when narrow", () => {
+  const colour = "#c8253d";
+  const renderAlert = (wide: boolean) =>
+    renderToStaticMarkup(
+      createElement(
+        kit.AlertRow,
+        {
+          theme,
+          testID: "alert-hook",
+          colour,
+          title: "Broken state",
+          wide,
+          actions: createElement(kit.Btn, { theme, small: true, label: "Fix", testID: "alert-action", onPress: () => {} }),
+        },
+        createElement("span", { "data-testid": "alert-detail" }, "Detail copy"),
+      ),
+    );
+
+  const wide = renderAlert(true);
+  assert.match(wide, /data-testid="alert-hook"/);
+  assert.match(wide, /&quot;backgroundColor&quot;:&quot;#c8253d10&quot;/);
+  assert.match(wide, /&quot;width&quot;:3,&quot;backgroundColor&quot;:&quot;#c8253d&quot;/);
+  assert.match(wide, /&quot;color&quot;:&quot;#c8253d&quot;[^}]*\}"[^>]*>Broken state</);
+  assert.ok(wide.indexOf('data-testid="alert-action"') < wide.indexOf('data-testid="alert-detail"'), "wide places actions on the title row before children");
+
+  const narrow = renderAlert(false);
+  assert.ok(narrow.indexOf('data-testid="alert-detail"') < narrow.indexOf('data-testid="alert-action"'), "narrow places actions below children");
+});
+
+test("ChoiceChip applies accentColour when selected and defaults to theme.colors.accent", () => {
+  const lead = "#2f7899";
+  const selectedWithAccent = renderToStaticMarkup(
+    createElement(kit.ChoiceChip, { theme, testID: "cc-1", label: "Opt", selected: true, disabled: false, accentColour: lead, onPress: () => {} }),
+  );
+  assert.equal(idle(selectedWithAccent, "borderColor"), lead);
+  assert.equal(idle(selectedWithAccent, "backgroundColor"), `${lead}1f`);
+  assert.ok(selectedWithAccent.includes(`&quot;color&quot;:&quot;${lead}&quot;`));
+
+  const selectedDefault = renderToStaticMarkup(
+    createElement(kit.ChoiceChip, { theme, testID: "cc-2", label: "Opt", selected: true, disabled: false, onPress: () => {} }),
+  );
+  assert.equal(idle(selectedDefault, "borderColor"), c.accent);
+  assert.equal(idle(selectedDefault, "backgroundColor"), `${c.accent}1f`);
+
+  const unselected = renderToStaticMarkup(
+    createElement(kit.ChoiceChip, { theme, testID: "cc-3", label: "Opt", selected: false, disabled: false, accentColour: lead, onPress: () => {} }),
+  );
+  assert.equal(idle(unselected, "borderColor"), c.border);
+  assert.equal(idle(unselected, "backgroundColor"), c.surface1);
+});
+
+test("SegmentedControl supports control accentColour, per-option accentColour, and optionTestIDPrefix", () => {
+  const lead = "#2f7899";
+  const ok = "#337e58";
+  const idleHex = "#677176";
+
+  const controlAccent = renderToStaticMarkup(
+    createElement(kit.SegmentedControl, {
+      theme,
+      testID: "seg-ctrl",
+      accentColour: lead,
+      value: "a",
+      onChange: () => {},
+      options: [{ value: "a", label: "Alpha" }, { value: "b", label: "Beta" }],
+    }),
+  );
+  assert.ok(controlAccent.includes('data-testid="seg-ctrl"'));
+  assert.ok(controlAccent.includes('data-testid="seg-ctrl-a"'));
+  assert.ok(controlAccent.includes(`&quot;borderColor&quot;:&quot;${lead}&quot;`));
+  assert.ok(controlAccent.includes(`&quot;backgroundColor&quot;:&quot;${lead}20&quot;`));
+  assert.ok(controlAccent.includes(`&quot;color&quot;:&quot;${lead}&quot;`));
+
+  const perOptionAndPrefix = renderToStaticMarkup(
+    createElement(kit.SegmentedControl, {
+      theme,
+      optionTestIDPrefix: "mode-opt",
+      accentColour: lead,
+      value: "auto",
+      onChange: () => {},
+      options: [
+        { value: "off", label: "off", accentColour: idleHex },
+        { value: "on-request", label: "on-request" },
+        { value: "auto", label: "auto", accentColour: ok },
+      ],
+    }),
+  );
+  assert.equal(perOptionAndPrefix.includes('data-testid="mode-opt"'), false, "container omits testID when only optionTestIDPrefix is set");
+  assert.ok(perOptionAndPrefix.includes('data-testid="mode-opt-off"'));
+  assert.ok(perOptionAndPrefix.includes('data-testid="mode-opt-on-request"'));
+  assert.ok(perOptionAndPrefix.includes('data-testid="mode-opt-auto"'));
+  assert.ok(perOptionAndPrefix.includes(`&quot;borderColor&quot;:&quot;${ok}&quot;`));
+  assert.ok(perOptionAndPrefix.includes(`&quot;backgroundColor&quot;:&quot;${ok}20&quot;`));
+  assert.ok(perOptionAndPrefix.includes(`&quot;color&quot;:&quot;${ok}&quot;`));
+  assert.equal(perOptionAndPrefix.includes(lead), false, "inactive option does not apply active tint");
+});
+
 test("Tabs renders one hook per tab and only the selected one carries the selected state", () => {
   const items = [{ id: "a", label: "Team" }, { id: "b", label: "Models", badge: 3 }, { id: "c", label: "Project", badge: 0 }];
   const html = renderToStaticMarkup(createElement(tabs.Tabs, { theme, tabs: items, value: "b", onChange: () => {}, testID: "x" }));

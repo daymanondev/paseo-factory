@@ -38,7 +38,7 @@ async function load(entry: string, platformOs = "ios"): Promise<Exports> {
               const tag = (name) => ({ children, onPress, disabled, ...rest }) => React.createElement(name, { disabled, onClick: onPress, 'data-testid': rest.testID, 'data-role': rest.accessibilityRole, 'aria-label': rest.accessibilityLabel, 'data-selected': rest.accessibilityState && rest.accessibilityState.selected !== undefined ? String(rest.accessibilityState.selected) : undefined, 'data-checked': rest.accessibilityState && rest.accessibilityState.checked !== undefined ? String(rest.accessibilityState.checked) : undefined }, typeof children === 'function' ? children({ pressed: false }) : children);
               exports.View = tag('div'); exports.ScrollView = tag('div'); exports.Text = tag('span'); exports.Pressable = tag('button'); exports.TextInput = ({ value, placeholder, onChangeText, ...rest }) => React.createElement('input', { value: value ?? '', placeholder, 'data-testid': rest.testID, onChange: (event) => onChangeText && onChangeText(event.target.value) });
               exports.Icon = () => null;
-              exports.useRpc = contract => input => globalThis.__factoryClientRpc(contract.name, input);
+              exports.useRpc = contract => React.useCallback(input => globalThis.__factoryClientRpc(contract.name, input), [contract]);
               exports.useWorkspace = () => "/project";
               exports.useToast = () => ({ show() {}, error(message) { globalThis.__factoryClientErrors?.push(message); } });
               exports.Platform = { OS: ${JSON.stringify(platformOs)}, select: (spec) => (spec[${JSON.stringify(platformOs)}] !== undefined ? spec[${JSON.stringify(platformOs)}] : spec.default) };
@@ -393,6 +393,7 @@ test("W11: the tab saves standing models in Project scope, Peer choices through 
       assert.deepEqual(calls.filter(c => c.method !== "factory.snapshot").at(-1), { method: "factory.profiles.apply", input: { projectRoot: "/project", profileId: "balanced" } });
       assert.equal(container.querySelector('[data-testid="factory-profile-chip"]')?.textContent, "Balanced ▾", "the refreshed profile is visible");
       await click("factory-tab-project");
+      await click("factory-skill-packs-inactive-toggle");
       await click("factory-skill-pack-expo");
       assert.deepEqual(calls.filter(c => c.method !== "factory.snapshot").at(-1), { method: "factory.skills.toggle_pack", input: { projectRoot: "/project", pack: "expo", enabled: true } });
       const pack = container.querySelector('[data-testid="factory-skill-pack-expo"]')!;
@@ -401,6 +402,7 @@ test("W11: the tab saves standing models in Project scope, Peer choices through 
       assert.equal(pack.getAttribute("aria-label"), "Disable Expo");
       await click("factory-skill-pack-expo");
       assert.deepEqual(calls.filter(c => c.method !== "factory.snapshot").at(-1), { method: "factory.skills.toggle_pack", input: { projectRoot: "/project", pack: "expo", enabled: false } });
+      assert.ok(container.querySelector('[data-testid="factory-skill-pack-expo"]'), "the inactive packs drawer stays open after toggling a pack off");
       } finally { await act(() => root.unmount()); }
     });
   } finally { globals.__factoryClientRpc = prior; globals.__factoryClientErrors = priorErrors; }
@@ -431,8 +433,9 @@ test("W11: mobile keeps every model chip editable and excludes machine-default, 
         { target: "peer:task-1", value: "codex/gpt-live:high" }, { target: "worker", value: "codex/gpt-live:high" },
       ]);
       assert.deepEqual(rotated, ["lead"], "an unchanged live Lead rotates instead of writing a lane");
-      // The pack list is read-only on mobile: shown on the Project tab, with no toggle.
+      // The pack list is read-only on mobile: shown on the Project tab, with disclosure allowed and zero write switches.
       await act(() => root.render(createElement(ProjectPanel, { key: "project", theme: testTheme, panel: modelPanelFixture(), modelView: modelPickerFixture, mobile: true, now: Date.now(), daemonError: null, initialUi: { tab: "project" }, skillPacks: [{ id: "expo", label: "Expo", enabled: false }], actions: { ...modelPanelActions, toggleSkillPack() { assert.fail("mobile pack write"); } } })));
+      await act(() => (container.querySelector('[data-testid="factory-skill-packs-inactive-toggle"]') as HTMLElement).click());
       assert.match(container.querySelector('[data-testid="factory-skill-packs"]')!.textContent!, /Expo/);
       assert.equal(container.querySelector('[data-testid="factory-skill-pack-expo"]'), null);
     } finally { await act(() => root.unmount()); }
@@ -769,7 +772,7 @@ test('W14: iOS and Android expose exactly the Project model, handoff and adoptio
           await click('factory-panel-menu-toggle');
           assert.match(container.querySelector('[data-testid="factory-panel-menu"]')!.textContent!, /Reset, Rotate and Delete on Paseo Desktop/, 'desktop-only Project actions explain where to continue');
           await click('factory-tab-project');
-          for (const id of ['factory-handoff-retry', 'factory-panel-needs-you-action-retry', 'factory-profile-chip-menu', 'factory-skill-pack-expo', 'factory-panel-open-settings', 'factory-panel-menu-reset', 'factory-panel-menu-rotate', 'factory-panel-menu-delete', 'factory-panel-menu-confirm-reset', 'factory-panel-menu-confirm-rotate', 'factory-panel-menu-confirm-delete', 'factory-panel-start-supervisor', 'factory-panel-needs-you-action-prerequisites', 'factory-panel-needs-you-action-supervisor', 'factory-panel-needs-you-action-design', 'factory-open-design-sync', 'factory-open-design-studio']) {
+          for (const id of ['factory-handoff-retry', 'factory-panel-needs-you-action-retry', 'factory-profile-chip-menu', 'factory-skill-pack-expo', 'factory-skill-packs-reset', 'factory-skill-packs-manage', 'factory-panel-open-settings', 'factory-panel-menu-reset', 'factory-panel-menu-rotate', 'factory-panel-menu-delete', 'factory-panel-menu-confirm-reset', 'factory-panel-menu-confirm-rotate', 'factory-panel-menu-confirm-delete', 'factory-panel-start-supervisor', 'factory-panel-needs-you-action-prerequisites', 'factory-panel-needs-you-action-supervisor', 'factory-panel-needs-you-action-design', 'factory-open-design-link', 'factory-open-design-sync', 'factory-open-design-studio', 'factory-open-design-change', 'factory-open-design-unlink']) {
             assert.equal(container.querySelector(`[data-testid="${id}"]`), null, `${platform} hides ${id}`);
           }
           assert.ok(container.querySelector('[data-testid="factory-panel-od"]'), 'the design status shows on the Project tab');
@@ -1108,6 +1111,7 @@ test('Project pack writes accept dynamic IDs, reset explicit selection and navig
     try {
       await act(() => render(false));
       assert.ok(byId('factory-skill-packs-reset'));
+      await act(() => byId('factory-skill-packs-inactive-toggle')!.click());
       await act(() => byId('factory-skill-pack-custom-owner')!.click());
       await act(() => byId('factory-skill-packs-reset')!.click());
       await act(() => byId('factory-skill-packs-manage')!.click());
@@ -1116,6 +1120,8 @@ test('Project pack writes accept dynamic IDs, reset explicit selection and navig
       assert.equal(byId('factory-skill-packs-reset'), null);
       await act(() => render(true));
       for (const id of ['factory-skill-pack-custom-owner', 'factory-skill-packs-reset', 'factory-skill-packs-manage']) assert.equal(byId(id), null);
+      await act(() => byId('factory-skill-packs-inactive-toggle')!.click());
+      assert.equal(byId('factory-skill-pack-custom-owner'), null, 'mobile inactive drawer still exposes zero write switches');
       await act(() => byId('factory-skill-pack-expand-custom-owner')!.click());
       assert.match(byId('factory-skill-pack-skills-custom-owner')!.textContent!, /asc-iap/);
       assert.equal(writes.length, 3);
@@ -1205,6 +1211,7 @@ test('Project Shell scopes dynamic pack and profile writes to the snapshot Proje
       try {
         await act(() => root.render(createElement(FactoryShell, { theme: testTheme, dir: '/requested-project', layout: { compact: false, platform: 'web' }, openSettings: () => { settings++; } })));
         await click('factory-tab-project');
+        await click('factory-skill-packs-inactive-toggle');
         await click('factory-skill-pack-source-owner');
         await click('factory-skill-packs-reset');
         await click('factory-skill-packs-manage');
@@ -1397,6 +1404,8 @@ test("FactoryShell GitHub Publish dispatches githubPublish with Public confirm +
       try {
         await act(() => root.render(createElement(FactoryShell, { theme: testTheme, dir: "/tmp/cool-widget", layout: { compact: false, platform: "web" } })));
         await click("factory-tab-project");
+        assert.equal(container.querySelector('[data-testid="factory-panel-github-publish"]'), null, "publish modal stays closed until triggered");
+        await click("factory-panel-github-publish-open");
         assert.ok(byId("factory-panel-github-publish"));
         await click("factory-panel-github-publish-owner-acme-org");
         await typeInto("factory-panel-github-publish-description", "Demo widget repo");
@@ -1414,8 +1423,10 @@ test("FactoryShell GitHub Publish dispatches githubPublish with Public confirm +
           confirmPublicName: "cool-widget",
           allowSensitiveFiles: true,
         });
-        assert.equal(container.querySelector('[data-testid="factory-panel-github-publish"]'), null, "publish form disappears once origin exists");
+        assert.equal(container.querySelector('[data-testid="factory-panel-github-publish"]'), null, "publish modal closes once origin exists");
+        assert.equal(container.querySelector('[data-testid="factory-panel-github-publish-open"]'), null, "publish trigger disappears once origin exists");
         assert.match(byId("factory-panel-github-origin").textContent!, /acme-org\/cool-widget/);
+        assert.match(byId("factory-panel-release-feedback").textContent!, /Published acme-org\/cool-widget \(public\)\./);
       } finally { await act(() => root.unmount()); }
     });
   } finally { g.__factoryClientRpc = prior; }
@@ -1638,6 +1649,9 @@ test("FactoryShell Store Release card switches modes (off -> on-request -> auto-
       try {
         await act(() => root.render(createElement(FactoryShell, { theme: testTheme, dir: "/snapshot-project", layout: { compact: false, platform: "web" } })));
         await click("factory-tab-project");
+        assert.equal(byId("factory-panel-store-release-mode"), null, "healthy mobile project starts collapsed to 2-line summary bar");
+        assert.ok(byId("factory-panel-store-release-last"), "summary bar renders Latest run on line 2");
+        await click("factory-panel-store-release-toggle");
         assert.equal(chip("off").getAttribute("data-selected"), "true");
         const initialReads = readCount;
 
@@ -1861,5 +1875,186 @@ test("FactoryShell adoptSupervisor and ProjectPanel openAgent (Supervisor, Lead,
         } finally { await act(() => root.unmount()); }
       });
     }
+  } finally { g.__factoryClientRpc = prior; }
+});
+
+test("OpenDesignControl unified mode runs a single status poll in FactoryShell, shows update/unlink controls, and only mounts picker modal when picking", async () => {
+  const { FactoryShell } = await load("plugin/client/factory/shell.tsx", "web");
+  const { OpenDesignControl } = await load("plugin/client/factory/open-design.tsx", "web");
+  const { testTheme } = await import("./client-markup.ts");
+  const { createElement } = await import("react");
+
+  const panel = modelPanelFixture();
+  panel.openDesign = { state: "linked", projectName: "Studio App", syncedAt: new Date().toISOString(), detail: null };
+  const view = {
+    ...modelPickerFixture,
+    machineLanes: modelPickerFixture.lanes,
+    hasProjectLaneOverride: false,
+    panel,
+    project: { root: "/snapshot-project", slug: "my-app", missingRoot: false },
+    kpis: { running: 0, needsHuman: 0 },
+    companionTools: [],
+    corePlugin: {},
+    vault: {},
+    skillHub: { skillPacksExplicit: false, projectPacks: [] },
+    daemonError: null,
+  };
+
+  let statusCalls = 0;
+  let unlinkCalls = 0;
+  let currentLink: any = { projectId: "proj-1", projectName: "Studio App", digest: "d1", sourceUpdatedAt: 100 };
+  let updateAvailable = false;
+
+  const g = globalThis as Record<string, any>, prior = g.__factoryClientRpc;
+  g.__factoryClientRpc = async (method: string) => {
+    if (method === "factory.snapshot") return { ok: true, view };
+    if (method === "factory.self.update.status") return { ok: true, current: "0.23.1", latest: "0.23.1", updateAvailable: false };
+    if (method === "factory.release.settings.read") return { ok: false, code: "stub", error: "stub" };
+    if (method === "factory.store_release.read") return { ok: false, code: "stub", error: "stub" };
+    if (method === "factory.open_design.status") {
+      statusCalls++;
+      return { ok: true, link: currentLink, updateAvailable };
+    }
+    if (method === "factory.open_design.catalog") return { ok: true, projects: [] };
+    if (method === "factory.open_design.unlink") {
+      unlinkCalls++;
+      currentLink = null;
+      return { ok: true };
+    }
+    return { ok: true };
+  };
+
+  try {
+    // 1. FactoryShell mounts one unified OpenDesignControl -> exactly 1 status RPC on initial Project tab load
+    await mountUnderNativeWindow(async (createRoot, container, act) => {
+      const root = createRoot(container);
+      const byId = (id: string) => container.querySelector(`[data-testid="${id}"]`) as HTMLElement | null;
+      try {
+        await act(async () => {
+          root.render(createElement(FactoryShell, { theme: testTheme, dir: "/snapshot-project", layout: { compact: false, platform: "web" } }));
+          await new Promise<void>((r) => setTimeout(r, 15));
+        });
+        assert.equal(statusCalls, 0, "Team tab does not mount OpenDesignControl");
+        await act(async () => {
+          byId("factory-tab-project")!.click();
+          await new Promise<void>((r) => setTimeout(r, 15));
+        });
+        assert.equal(statusCalls, 1, "unified OpenDesignControl fires a single status RPC (no duplicate card+menu poll)");
+        assert.ok(byId("factory-open-design-studio"));
+        assert.equal(byId("factory-open-design-studio")?.textContent, "Open Studio");
+        assert.equal(byId("factory-open-design-sync")?.textContent, "Sync");
+        assert.ok(byId("factory-open-design-change"));
+        assert.ok(byId("factory-open-design-unlink"));
+        assert.equal(container.querySelector("[data-modal-title]"), null, "picker modal does not mount when closed");
+
+        await act(async () => {
+          byId("factory-open-design-unlink")!.click();
+          await new Promise<void>((r) => setTimeout(r, 15));
+        });
+        assert.equal(unlinkCalls, 1, "1-click Unlink dispatches unlink RPC");
+        assert.ok(byId("factory-open-design-link"), "unlinked state shows Link Open Design… button");
+      } finally { await act(() => root.unmount()); }
+    });
+
+    // 2. Direct OpenDesignControl part="unified" with updateAvailable=true highlights Sync with palette.wait and opens modal only on pick
+    currentLink = { projectId: "proj-1", projectName: "Studio App", digest: "d1", sourceUpdatedAt: 100 };
+    updateAvailable = true;
+    await mountUnderNativeWindow(async (createRoot, container, act) => {
+      const root = createRoot(container);
+      const byId = (id: string) => container.querySelector(`[data-testid="${id}"]`) as HTMLElement | null;
+      try {
+        await act(async () => {
+          root.render(createElement(OpenDesignControl, { theme: testTheme, root: "/snapshot-project", part: "unified", onChanged() {} }));
+          await new Promise<void>((r) => setTimeout(r, 15));
+        });
+        assert.equal(byId("factory-open-design-sync")?.textContent, "Update available — Sync");
+        assert.equal(container.querySelector('[data-modal-title="Link Open Design project"]'), null);
+        await act(async () => {
+          byId("factory-open-design-change")!.click();
+          await new Promise<void>((r) => setTimeout(r, 15));
+        });
+        assert.ok(container.querySelector('[data-modal-title="Link Open Design project"]'), "picker modal mounts when picking is true");
+      } finally { await act(() => root.unmount()); }
+    });
+  } finally { g.__factoryClientRpc = prior; }
+});
+
+test("FactoryShell GitHub Publish modal stays open on error and closes on retry success", async () => {
+  const { FactoryShell } = await load("plugin/client/factory/shell.tsx", "web");
+  const { testTheme } = await import("./client-markup.ts");
+  const { createElement } = await import("react");
+
+  const view = {
+    ...modelPickerFixture,
+    machineLanes: modelPickerFixture.lanes,
+    hasProjectLaneOverride: false,
+    panel: modelPanelFixture(),
+    project: { root: "/tmp/retry-widget", slug: "retry-widget", missingRoot: false },
+    kpis: { running: 0, needsHuman: 0 },
+    companionTools: [],
+    corePlugin: {},
+    vault: {},
+    skillHub: { skillPacksExplicit: false, projectPacks: [] },
+    daemonError: null,
+  };
+  let origin: { remoteUrl: string; slug: string; visibility: "public" | "private"; defaultBranch: string } | null = null;
+  let shouldFail = true;
+  const makeSettings = () => ({
+    project: "retry-widget",
+    projectRoot: "/tmp/retry-widget",
+    mode: "off" as const,
+    branch: null,
+    resolvedBranch: origin ? "main" : null,
+    defaultBranch: origin ? "main" : null,
+    branchCandidates: ["main"],
+    updatedAt: null,
+    pendingRequest: null,
+    origin,
+    gh: { installed: true, authenticated: true, user: "octo" },
+    lastRelease: null,
+  });
+
+  const g = globalThis as Record<string, any>, prior = g.__factoryClientRpc;
+  g.__factoryClientRpc = async (method: string, input: any) => {
+    if (method === "factory.snapshot") return { ok: true, view };
+    if (method === "factory.self.update.status") return { ok: true, current: "0.23.1", latest: "0.23.1", updateAvailable: false };
+    if (method === "factory.release.settings.read") return { ok: true, settings: makeSettings() };
+    if (method === "factory.github.publish.preflight") {
+      return {
+        ok: true, project: "retry-widget", projectRoot: "/tmp/retry-widget", originPresent: false,
+        gh: { installed: true, authenticated: true, user: "octo" },
+        owners: ["octo"], defaultOwner: "octo", defaultName: "retry-widget",
+        sensitiveFiles: [], hasUncommittedChanges: false, commitHistoryNotScannedNote: "",
+      };
+    }
+    if (method === "factory.github.publish") {
+      if (shouldFail) return { ok: false, code: "repo-exists", error: "Repository octo/retry-widget already exists." };
+      origin = { remoteUrl: "https://github.com/octo/retry-widget.git", slug: `${input.owner}/${input.name}`, visibility: input.visibility, defaultBranch: "main" };
+      return { ok: true, slug: origin.slug, remoteUrl: origin.remoteUrl, visibility: origin.visibility, url: `https://github.com/${origin.slug}`, settings: makeSettings() };
+    }
+    return { ok: true };
+  };
+
+  try {
+    await mountUnderNativeWindow(async (createRoot, container, act) => {
+      const root = createRoot(container);
+      const byId = (id: string) => container.querySelector(`[data-testid="${id}"]`) as HTMLElement | null;
+      try {
+        await act(() => root.render(createElement(FactoryShell, { theme: testTheme, dir: "/tmp/retry-widget", layout: { compact: false, platform: "web" } })));
+        await act(() => byId("factory-tab-project")!.click());
+        await act(() => byId("factory-panel-github-publish-open")!.click());
+        assert.ok(byId("factory-panel-github-publish"));
+
+        await act(() => byId("factory-panel-github-publish-submit")!.click());
+        const modalAfterError = byId("factory-panel-github-publish");
+        assert.ok(modalAfterError, "modal stays open when publish returns false / error");
+        assert.match(modalAfterError.querySelector('[data-testid="factory-panel-release-feedback"]')?.textContent ?? "", /already exists/);
+
+        shouldFail = false;
+        await act(() => byId("factory-panel-github-publish-submit")!.click());
+        assert.equal(byId("factory-panel-github-publish"), null, "modal closes after retry succeeds");
+        assert.match(byId("factory-panel-release-feedback")?.textContent ?? "", /Published octo\/retry-widget \(private\)/);
+      } finally { await act(() => root.unmount()); }
+    });
   } finally { g.__factoryClientRpc = prior; }
 });

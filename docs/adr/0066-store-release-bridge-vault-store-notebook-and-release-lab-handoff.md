@@ -1,7 +1,7 @@
 # 0066 — Store Release Server Bridge, Private Vault Store Defaults, and Cross-Project Store Notebook
 
 - **Date:** 2026-11-20
-- **Status:** Accepted — ratified by the Owner over `/grill-with-docs` rounds 1–3 (Q1–Q12); amended 2026-11-23 for the two-tier `Store release` timeout contract, detached `-pgid` termination with grace, read-only stalled-`Phase` diagnosis, and active `Store release` sleep inhibition.
+- **Status:** Accepted — ratified by the Owner over `/grill-with-docs` rounds 1–3 (Q1–Q12); amended 2026-11-23 for the two-tier `Store release` timeout contract, detached `-pgid` termination with grace, read-only stalled-`Phase` diagnosis, and active `Store release` sleep inhibition; amended 2026-11-24 for the **Store Release** summary-bar default and attention-driven auto-expand.
 - **Grounded in:** `CONTEXT.md` · `docs/adr/0014-private-vault-hydration-and-release-lab-companion.md` · `docs/adr/0061-lead-owned-release-per-project-release-mode-and-one-time-github-publish.md` · `src/roles-contract.ts` · `src/vault-materialization.ts` · `plugin/server/store-release.ts` · `plugin/index.server.ts` · `factory-release-lab` `docs/adr/0003-deterministic-agent-free-native-first-store-runner.md`.
 - **Amends:** ADR 0061 §2 (adds a sibling typed server-side **Store release** bridge alongside GitHub-only `lead_release`, keeping GitHub `Release` and mobile `Store release` cleanly separated) · ADR 0014 §3–§4 (extends `Private vault` hydration with `APPLE_TEAM_ID`, `store-defaults.json`, Day-0 keystore write-back, and the two-tier `Store notebook`).
 
@@ -23,7 +23,8 @@
    - Because the runner writes every phase transition to `<paseoHome>/release-lab/runs/<runId>.json`, the Owner can watch live pipeline progress and approve `Hole`s either in the **`Release Lab`** Paseo UI (`Rocket` panel) or directly in **`Supervisor`** chat — both surfaces read and mutate the exact same run state.
 
 2. **Two-tier autonomy & Owner-only `Store release mode` (`off` | `on-request` | `auto-staging`).**
-   - Stored in per-Project `project-settings.json` (seat-unwritable, Owner-only via the Project panel's **Store Release** card placed directly beneath **GitHub & Release**, collapsed by default on non-mobile projects):
+   - Stored in per-Project `project-settings.json` (seat-unwritable, Owner-only via the Project panel's **Store Release** card placed directly beneath **GitHub & Release**):
+     - **Default collapse & attention-driven auto-expand (amended 2026-11-24; `.scratch/project-tab-redesign/spec.md`):** On mobile projects, the **Store Release** card defaults collapsed to a compact 2-line summary bar (and a 1-line summary bar on non-mobile projects), auto-expanding only when Owner attention is needed — an active `Hole`, a failed `lastRun`, or missing `Private vault` store credentials while `Store release mode !== "off"`. Manual collapse is preserved across snapshot polls unless the active Project changes or a new attention key appears, and Paseo mobile remains strictly zero-button read-only.
      - `off` (default): `lead_store_release` refuses with `store-release-not-granted`.
      - `on-request`: `supervisor_dispatch_lead` carries an explicit **Store release request** (`storeRelease: { target: "staging" | "production", platforms?: ("android" | "ios")[], resumeRunId?: string, resolution?: unknown }`).
      - `auto-staging`: after `lead_release` succeeds on a mobile project, `Lead` automatically triggers `lead_store_release({ action: "stage" })` to upload to Google Play `internal`/`draft` and/or TestFlight without prompting the Owner.

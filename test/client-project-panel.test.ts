@@ -209,9 +209,12 @@ test("a handoff that is waiting is amber words on the Lead row; a vacant Lead on
   assert.equal(hasHook(vacant, "factory-panel-peers"), false, "the Peers section is hidden when no Peer is running");
 });
 
-test("an unlinked Open Design section collapses to one line", async () => {
+test("an unlinked Open Design card shows the Not linked badge and status line", async () => {
   const html = await render(makePanel({ openDesign: { state: "unlinked", projectName: null, syncedAt: null, detail: null } }), { initialUi: { tab: "project" } });
-  assert.match(html, /Open Design · not linked/);
+  const card = elementOf(html, "factory-panel-od");
+  assert.match(card, /Open Design/);
+  assert.match(card, /Not linked/);
+  assert.match(card, /Not linked to an Open Design project\./);
 });
 
 test("desktop mounts the Open Design actions on the card; mobile shows the link status alone", async () => {
@@ -532,11 +535,12 @@ test("no client source offers Start Lead or an Accept action — acceptance and 
   }
 });
 
-test("W10: the shell passes measured width and preserves both Open Design control modes on the main section", () => {
+test("W10: the shell passes measured width and mounts the single unified Open Design control on the Project tab", () => {
   const shell = read("plugin/client/factory/shell.tsx");
   assert.match(shell, /width=\{containerWidth\}/);
-  assert.match(shell, /part="card"/);
-  assert.match(shell, /part="menu"/);
+  assert.match(shell, /part="unified"/);
+  assert.equal((shell.match(/<OpenDesignControl\b/g) ?? []).length, 1, "only one unified OpenDesignControl mounts");
+  assert.doesNotMatch(shell, /part="card"|part="menu"/);
   assert.match(read("plugin/index.client.tsx"), /client\.openSettings\("paseo-factory"\)/);
   assert.match(read("plugin/client/factory/entries.tsx"), /FactoryTabErrorBoundary/);
 });
@@ -726,25 +730,37 @@ test("06: the Lane profile section names the active profile as modified and list
   assert.doesNotMatch(mobile, /Save a Lane profile in Settings/);
 });
 
-test("06: a skill pack is a switch whose checked state follows `enabled`; mobile shows the On/Off word and no switch", async () => {
+test("06: a skill pack is a switch whose checked state follows `enabled`; inactive packs collapse behind a drawer and mobile shows On/Off with no switch", async () => {
   const packs = [{ id: "expo", label: "Expo", enabled: true, autoDetected: true }, { id: "web", label: "Web", enabled: false, autoDetected: false }];
-  const desktop = await render(makePanel(), { initialUi: { tab: "project" }, skillPacks: packs, actions: { toggleSkillPack() {} } });
+  const collapsed = await render(makePanel(), { initialUi: { tab: "project" }, skillPacks: packs, actions: { toggleSkillPack() {} } });
+  assert.ok(hasHook(collapsed, "factory-skill-packs-inactive-toggle"));
+  assert.equal(hasHook(collapsed, "factory-skill-pack-web"), false, "disabled packs start collapsed behind the inactive drawer");
+
+  const desktop = await render(makePanel(), { initialUi: { tab: "project", expandedSkillPacks: ["web"] }, skillPacks: packs, actions: { toggleSkillPack() {} } });
   const tagOf = (html: string, id: string): string => html.match(new RegExp(`<button[^>]*data-testid="${id}"[^>]*>`))![0];
   const on = tagOf(desktop, "factory-skill-pack-expo");
   const off = tagOf(desktop, "factory-skill-pack-web");
   assert.match(on, /data-role="switch"/); assert.match(on, /data-checked="true"/); assert.match(on, /aria-label="Disable Expo"/);
   assert.match(off, /data-role="switch"/); assert.match(off, /data-checked="false"/); assert.match(off, /aria-label="Enable Web"/);
-  const mobile = await render(makePanel(), { mobile: true, initialUi: { tab: "project" }, skillPacks: packs, actions: { toggleSkillPack() {} } });
+  const mobile = await render(makePanel(), { mobile: true, initialUi: { tab: "project", expandedSkillPacks: ["web"] }, skillPacks: packs, actions: { toggleSkillPack() {} } });
   assert.equal(hasHook(mobile, "factory-skill-pack-expo"), false, "no switch on mobile");
   assert.match(mobile, /Expo[\s\S]*Auto-detected[\s\S]*>On</);
   assert.match(mobile, />Off</);
 });
 
-test("06: the Project tab's sections are hairline-separated, not bordered cards", async () => {
-  const html = await render(makePanel(), { initialUi: { tab: "project" }, skillPacks: [{ id: "expo", label: "Expo", enabled: true, autoDetected: false }] });
-  assert.doesNotMatch(elementOf(html, "factory-skill-packs"), /borderWidth&quot;:1,&quot;borderColor/);
-  assert.doesNotMatch(elementOf(html, "factory-panel-od"), /borderRadius/);
-  assert.match(elementOf(html, "factory-panel-od"), /borderTopWidth&quot;:1/);
+test("06: the Project tab's sections are unified bordered Card containers", async () => {
+  const html = await render(makePanel({ usage: recordedUsage }), {
+    initialUi: { tab: "project" },
+    skillPacks: [{ id: "expo", label: "Expo", enabled: true, autoDetected: false }],
+    release: makeRelease(),
+    storeRelease: makeStoreRelease({ isMobile: true, platforms: ["ios"] }),
+  });
+  for (const id of ["project-usage-card", "factory-skill-packs", "factory-panel-od", "factory-panel-github-release", "factory-panel-store-release"]) {
+    const card = elementOf(html, id);
+    const rootTag = card.slice(0, card.indexOf(">"));
+    assert.match(rootTag, /&quot;borderWidth&quot;:1,&quot;borderColor&quot;:&quot;#cccccc&quot;,&quot;backgroundColor&quot;:&quot;#f5f5f5&quot;,&quot;borderRadius&quot;:8,&quot;padding&quot;:12/, `${id} uses Card styling`);
+  }
+  assert.doesNotMatch(elementOf(html, "factory-panel-od").slice(0, elementOf(html, "factory-panel-od").indexOf(">")), /borderTopWidth&quot;:1/);
 });
 
 test("W10: seat roles, state words and model chips carry semantic colour and context uses the real mark", async () => {
@@ -1165,23 +1181,38 @@ test("11: useSelfUpdate polls status while reloading, tolerates transient errors
 });
 
 
-test("Project skill packs show dynamic kinds, installed counts and the always-on Core baseline", async () => {
+test("Project skill packs show dynamic kinds, installed counts, collapsed Core baseline, and inactive drawer", async () => {
+  const packs = [
+    { id: "source-acme", label: "Acme tools", kind: "source", installedCount: 2, skills: ["acme-a", "acme-b"], enabled: true, autoDetected: false },
+    { id: "my-pack", label: "My workflow", kind: "custom", installedCount: 0, skills: ["missing-skill"], enabled: false, autoDetected: false },
+    { id: "expo", label: "Expo", kind: "builtin", installedCount: 1, skills: ["expo-router"], enabled: true, autoDetected: true },
+  ];
   const html = await render(makePanel(), {
     initialUi: { tab: "project" },
-    skillPacks: [
-      { id: "source-acme", label: "Acme tools", kind: "source", installedCount: 2, skills: ["acme-a", "acme-b"], enabled: true, autoDetected: false },
-      { id: "my-pack", label: "My workflow", kind: "custom", installedCount: 0, skills: ["missing-skill"], enabled: false, autoDetected: false },
-      { id: "expo", label: "Expo", kind: "builtin", installedCount: 1, skills: ["expo-router"], enabled: true, autoDetected: true },
-    ], actions: { toggleSkillPack() {} },
+    skillPacks: packs,
+    actions: { toggleSkillPack() {} },
   });
+  assert.match(html, /Core \+ 2 active/);
   assert.match(html, /Acme tools[\s\S]*2 installed[\s\S]*Source/);
-  assert.match(html, /My workflow[\s\S]*0 installed[\s\S]*Custom/);
   assert.match(html, /Expo[\s\S]*1 installed[\s\S]*Built-in[\s\S]*Auto-detected/);
+  assert.match(html, /Inactive packs \(1\)/);
+  assert.equal(hasHook(html, "factory-panel-skill-my-pack"), false, "inactive pack starts collapsed in drawer");
   assert.ok(hasHook(html, "factory-skill-pack-expand-source-acme"));
   assert.equal(hasHook(html, "factory-skill-pack-skills-source-acme"), false, "membership starts collapsed");
+  assert.ok(hasHook(html, "factory-skill-pack-expand-core"));
+  assert.equal(hasHook(html, "factory-skill-pack-skills-core"), false, "Core starts collapsed");
   assert.match(html, /Core[\s\S]*Always on/);
-  assert.match(html, /tdd[\s\S]*diagnosing-bugs[\s\S]*code-review[\s\S]*codebase-design[\s\S]*domain-modeling[\s\S]*research/);
   assert.equal(hasHook(html, "factory-skill-pack-core"), false, "Core has no toggle");
+
+  const expanded = await render(makePanel(), {
+    initialUi: { tab: "project", expandedSkillPacks: ["core", "my-pack"] },
+    skillPacks: packs,
+    actions: { toggleSkillPack() {} },
+  });
+  assert.match(expanded, /My workflow[\s\S]*0 installed[\s\S]*Custom/);
+  assert.ok(hasHook(expanded, "factory-skill-pack-skills-core"));
+  assert.match(expanded, /tdd[\s\S]*diagnosing-bugs[\s\S]*code-review[\s\S]*codebase-design[\s\S]*domain-modeling[\s\S]*research/);
+  assert.equal(hasHook(expanded, "factory-skill-pack-core"), false, "Core still has no toggle when expanded");
 });
 
 test("Project pack membership expands for inspection on desktop and mobile without mobile writes", async () => {
@@ -1347,11 +1378,11 @@ test("thinkingColour maps xhigh to max and SegmentedControl attaches optional te
   assert.equal(withoutId.includes("data-testid="), false);
 });
 
-test("Project usage leads with new and cached tokens, window switcher, and a collapsed desktop breakdown", async () => {
+test("Project usage leads with a 4-tile KPI strip, window switcher, and a collapsed desktop breakdown", async () => {
   const html = await render(makePanel({ usage: recordedUsage }), { initialUi: { tab: "project" } });
   assert.ok(hasHook(html, "project-usage-card"));
-  const summaryHtml = leafOf(html, "project-usage-summary");
-  assert.match(stripTags(summaryHtml), /1\.5M new \(1\.2M in · 340k out\) · 87% cache \(10\.9M\) · 12\.4M total · 64 sessions/);
+  const summaryHtml = elementOf(html, "project-usage-summary");
+  assert.match(stripTags(summaryHtml), /New tokens.*1\.5M.*1\.2M in · 340k out.*Cache hit.*87%.*10\.9M cached.*Total.*12\.4M.*tokens.*Sessions.*64.*sessions/);
   assert.ok(summaryHtml.includes("#8f6802"), "87% cache hit uses wait palette colour");
   assert.ok(hasHook(html, "project-usage-window"));
   assert.ok(hasHook(html, "project-usage-window-all"));
@@ -1446,7 +1477,7 @@ test("desktop Project usage supports By Seat nested expansion, By Model thinking
     // 4. Switch window to 7d -> updates summary and shows window note
     await act(() => (container.querySelector('[data-testid="project-usage-window-7d"]') as HTMLButtonElement).click());
     const summary7d = container.querySelector('[data-testid="project-usage-summary"]')!;
-    assert.match(summary7d.textContent!, /400k new \(310k in · 90k out\) · 92% cache \(3\.6M\) · 4\.0M total · 12 sessions/);
+    assert.match(summary7d.textContent!, /New tokens400k310k in · 90k outCache hit92%3\.6M cachedTotal4\.0MtokensSessions12sessions/);
     assert.ok(summary7d.innerHTML.includes("#337e58"), "92% cache hit uses ok palette colour");
     assert.match(container.querySelector('[data-testid="project-usage-window-note"]')?.textContent ?? "", /Sessions active in last 7d — multi-day seats show full session totals/);
 
@@ -1473,7 +1504,7 @@ test("desktop Project usage supports By Seat nested expansion, By Model thinking
 
 test("mobile Project usage shows totals and read-only window switcher without breakdown or writes", async () => {
   const html = await render(makePanel({ usage: recordedUsage }), { mobile: true, initialUi: { tab: "project" } });
-  assert.match(stripTags(leafOf(html, "project-usage-summary")), /1\.5M new \(1\.2M in · 340k out\) · 87% cache \(10\.9M\) · 12\.4M total · 64 sessions/);
+  assert.match(stripTags(elementOf(html, "project-usage-summary")), /New tokens.*1\.5M.*1\.2M in · 340k out.*Cache hit.*87%.*10\.9M cached.*Total.*12\.4M.*tokens.*Sessions.*64.*sessions/);
   const card = elementOf(html, "project-usage-card");
   assert.ok(hasHook(card, "project-usage-window"));
   assert.ok(hasHook(card, "project-usage-window-all"));
@@ -1551,8 +1582,8 @@ test("unscoped or older panels omit Project usage, and an unknown cache-hit rati
     assert.equal(hasHook(await render(makePanel({ usage }), { initialUi: { tab: "project" } }), "project-usage-card"), false);
   }
   const html = await render(makePanel({ usage: { ...recordedUsage, newTokens: 0, cachedTokens: 0, cacheReadTokens: 0, totalTokens: 0, inputUncachedTokens: 0, outputTokens: 0, sessionCount: 1, cacheHitPercent: null, seats: [], models: [], windows: undefined } }), { initialUi: { tab: "project" } });
-  const summaryHtml = leafOf(html, "project-usage-summary");
-  assert.match(stripTags(summaryHtml), /^0 new \(0 in · 0 out\) · – cache \(0\) · 0 total · 1 session$/);
+  const summaryHtml = elementOf(html, "project-usage-summary");
+  assert.match(stripTags(summaryHtml), /^New tokens00 in · 0 outCache hit–0 cachedTotal0tokensSessions1session$/);
   assert.ok(summaryHtml.includes("#677176"), "null cacheHitPercent uses idle palette colour");
 });
 
@@ -1739,7 +1770,7 @@ test("GitHub & Release card renders desktop mode/branch selectors, no-origin hin
   assert.doesNotMatch(elementOf(mobileHtml, "factory-panel-github-release"), /<button/);
 });
 
-test("GitHub Publish form renders only without origin on desktop, gates Public & sensitive files, and hides once origin exists", async () => {
+test("GitHub Publish modal trigger renders only without origin on authenticated desktop, gates Public & sensitive files, and hides once origin exists", async () => {
   const preflight = {
     project: "my-app",
     projectRoot: "/repo/my-app",
@@ -1753,35 +1784,35 @@ test("GitHub Publish form renders only without origin on desktop, gates Public &
     commitHistoryNotScannedNote: "Commit history is not scanned for past secrets — only tracked files at HEAD are checked.",
   };
 
-  // 1. With origin already set -> Publish form is absent
+  // 1. With origin already set -> Publish trigger & modal are absent
   const withOrigin = await render(makePanel(), {
     initialUi: { tab: "project" },
     release: makeRelease(),
     publishPreflight: preflight,
   });
+  assert.equal(hasHook(withOrigin, "factory-panel-github-publish-open"), false);
   assert.equal(hasHook(withOrigin, "factory-panel-github-publish"), false);
 
-  // 2. Interactive Publish form without origin: owner, name (folder default), optional description, Private default (hides confirm/sensitive)
+  // 2. Unauthenticated gh -> Publish trigger is hidden even when origin is null
+  const unauthNoOrigin = await render(makePanel(), {
+    initialUi: { tab: "project" },
+    release: makeRelease({ origin: null, resolvedBranch: null, defaultBranch: null, gh: { installed: true, authenticated: false, user: null } }),
+    publishPreflight: preflight,
+    releaseActions: { publish: async () => {} },
+  });
+  assert.equal(hasHook(unauthNoOrigin, "factory-panel-github-publish-open"), false, "Publish trigger stays hidden when !gh.authenticated");
+
+  // 3. Authenticated no-origin desktop renders trigger while keeping modal closed until clicked
   const noOriginHtml = await render(makePanel(), {
     initialUi: { tab: "project" },
     release: makeRelease({ origin: null, resolvedBranch: null, defaultBranch: null, gh: { installed: true, authenticated: true, user: "octo" } }),
     publishPreflight: preflight,
     releaseActions: { publish: async () => {} },
   });
-  for (const hook of [
-    "factory-panel-github-publish",
-    "factory-panel-github-publish-owner",
-    "factory-panel-github-publish-name",
-    "factory-panel-github-publish-description",
-    "factory-panel-github-publish-visibility",
-    "factory-panel-github-publish-submit",
-  ]) {
-    assert.ok(hasHook(noOriginHtml, hook), `${hook} renders on no-origin desktop`);
-  }
-  assert.equal(hasHook(noOriginHtml, "factory-panel-github-publish-confirm-name"), false, "Private mode hides Public typed-name confirmation");
-  assert.equal(hasHook(noOriginHtml, "factory-panel-github-publish-sensitive"), false, "Private mode hides Public sensitive-file warning");
+  assert.ok(hasHook(noOriginHtml, "factory-panel-github-publish-open"));
+  assert.equal(hasHook(noOriginHtml, "factory-panel-github-publish"), false, "Publish form stays unmounted until modal is opened");
 
-  // 3. Switching to Public reveals -confirm-name, -sensitive, and history-not-scanned note, and gates submit until both match
+  // 4. Opening modal exposes owner, name, description, Private default, and Public confirms/sensitive gating
   const publishedCalls: Array<Record<string, unknown>> = [];
   const { ProjectPanel } = await loadPanel();
   const { createElement, act } = await import("react");
@@ -1810,6 +1841,20 @@ test("GitHub Publish form renders only without origin on desktop, gates Public &
         }),
       ),
     );
+    assert.equal(container.querySelector('[data-testid="factory-panel-github-publish"]'), null);
+    await act(() => (container.querySelector('[data-testid="factory-panel-github-publish-open"]') as HTMLButtonElement).click());
+    for (const hook of [
+      "factory-panel-github-publish",
+      "factory-panel-github-publish-owner",
+      "factory-panel-github-publish-name",
+      "factory-panel-github-publish-description",
+      "factory-panel-github-publish-visibility",
+      "factory-panel-github-publish-submit",
+    ]) {
+      assert.ok(container.querySelector(`[data-testid="${hook}"]`), `${hook} renders inside modal`);
+    }
+    assert.equal(container.querySelector('[data-testid="factory-panel-github-publish-confirm-name"]'), null, "Private mode hides Public typed-name confirmation");
+    assert.equal(container.querySelector('[data-testid="factory-panel-github-publish-sensitive"]'), null, "Private mode hides Public sensitive-file warning");
     const submitBtn = () => container.querySelector('[data-testid="factory-panel-github-publish-submit"]') as HTMLButtonElement;
     assert.equal(submitBtn().disabled, false, "Private publish is ready without sensitive override");
 
@@ -1923,8 +1968,8 @@ test("Store Release card renders directly below GitHub & Release on the Project 
   }
 });
 
-test("Store Release card renders mobile off, mobile auto-staging, missing-Vault-keys warning, active Hole, and Open Release Lab states with mobile read-only discipline", async () => {
-  // 1. Mobile Project in `off` mode: expanded by default, all 3 platforms + Vault readiness, no active Hole
+test("Store Release card renders mobile 2-line summary bar, attention auto-expand, missing-Vault-keys rules, active Hole, and Open Release Lab states with mobile read-only discipline", async () => {
+  // 1. Healthy mobile Project in `off` mode: starts collapsed to 2-line summary bar (platforms, Vault ready, Latest run)
   const mobileOffHtml = await render(makePanel(), {
     initialUi: { tab: "project" },
     storeRelease: makeStoreRelease({
@@ -1939,28 +1984,29 @@ test("Store Release card renders mobile off, mobile auto-staging, missing-Vault-
   for (const hook of [
     "factory-panel-store-release",
     "factory-panel-store-release-toggle",
-    "factory-panel-store-release-mode",
-    "factory-panel-store-release-vault",
-    "factory-panel-store-release-platforms",
     "factory-panel-store-release-last",
     "factory-panel-store-release-open-lab",
   ]) {
-    assert.ok(hasHook(mobileOffHtml, hook), `${hook} renders when mobile Project is expanded by default`);
+    assert.ok(hasHook(mobileOffHtml, hook), `${hook} renders in the 2-line mobile summary bar`);
   }
-  assert.equal(hasHook(mobileOffHtml, "factory-panel-store-release-hole"), false, "no Hole banner when activeHole is null");
-  assert.equal(hasHook(mobileOffHtml, "factory-panel-store-release-vault-warning"), false, "no missing-keys warning when all required keys are ready");
-  assert.match(elementOf(mobileOffHtml, "factory-panel-store-release-mode"), /off/i);
-  const platformsHtml = elementOf(mobileOffHtml, "factory-panel-store-release-platforms");
-  assert.match(platformsHtml, /Android/);
-  assert.match(platformsHtml, /iOS/);
-  assert.match(platformsHtml, /Expo/);
-  const vaultReadyHtml = elementOf(mobileOffHtml, "factory-panel-store-release-vault");
-  assert.match(vaultReadyHtml, /ASC \.p8/);
-  assert.match(vaultReadyHtml, /Team ID/);
-  assert.match(vaultReadyHtml, /GPlay JSON/);
+  for (const collapsedHook of [
+    "factory-panel-store-release-mode",
+    "factory-panel-store-release-vault",
+    "factory-panel-store-release-platforms",
+    "factory-panel-store-release-hole",
+    "factory-panel-store-release-vault-warning",
+  ]) {
+    assert.equal(hasHook(mobileOffHtml, collapsedHook), false, `${collapsedHook} stays collapsed for healthy mobile Project`);
+  }
+  const summaryCard = elementOf(mobileOffHtml, "factory-panel-store-release");
+  assert.match(summaryCard, /off/i);
+  assert.match(summaryCard, /Android/);
+  assert.match(summaryCard, /iOS/);
+  assert.match(summaryCard, /Expo/);
+  assert.match(summaryCard, /Vault ready/);
   assert.match(elementOf(mobileOffHtml, "factory-panel-store-release-last"), /No store runs yet/);
 
-  // 2. Mobile Project in `auto-staging` mode with pendingRequest and failed lastRun
+  // 2. Mobile Project in `auto-staging` mode with pendingRequest and failed lastRun -> auto-expands
   const mobileAutoHtml = await render(makePanel(), {
     initialUi: { tab: "project" },
     storeRelease: makeStoreRelease({
@@ -2003,21 +2049,38 @@ test("Store Release card renders mobile off, mobile auto-staging, missing-Vault-
   assert.match(lastHtml, /xcodebuild-failed/);
   assert.match(lastHtml, /Missing provisioning profile/);
 
-  // 3. Missing-Vault-keys warning: only warns when keys needed for detected platforms are absent
+  // 3. Missing-Vault-keys warning: calm & collapsed in mode="off", warns & auto-expands when mode !== "off"
+  const offMissingKeysHtml = await render(makePanel(), {
+    initialUi: { tab: "project" },
+    storeRelease: makeStoreRelease({
+      isMobile: true,
+      mode: "off",
+      platforms: ["android", "ios"],
+      vault: { ascKey: false, appleTeamId: false, gplayJson: false },
+    }),
+  });
+  assert.equal(hasHook(offMissingKeysHtml, "factory-panel-store-release-vault-warning"), false, "mode=off with missing keys stays calm and collapsed");
+  assert.equal(hasHook(offMissingKeysHtml, "factory-panel-store-release-mode"), false);
+  assert.match(elementOf(offMissingKeysHtml, "factory-panel-store-release"), /Vault · 3 missing/);
+  assert.equal(elementOf(offMissingKeysHtml, "factory-panel-store-release").includes("#8f6802"), false, "mode=off missing keys uses idle badge, not warning amber");
+
   const androidOnlyOkHtml = await render(makePanel(), {
     initialUi: { tab: "project" },
     storeRelease: makeStoreRelease({
       isMobile: true,
+      mode: "on-request",
       platforms: ["android"],
       vault: { ascKey: false, appleTeamId: false, gplayJson: true },
     }),
   });
   assert.equal(hasHook(androidOnlyOkHtml, "factory-panel-store-release-vault-warning"), false, "Android-only project with GPlay JSON ready has no warning");
+  assert.equal(hasHook(androidOnlyOkHtml, "factory-panel-store-release-mode"), false, "Android-only project with GPlay JSON ready stays collapsed");
 
   const missingKeysHtml = await render(makePanel(), {
     initialUi: { tab: "project" },
     storeRelease: makeStoreRelease({
       isMobile: true,
+      mode: "on-request",
       platforms: ["android", "ios"],
       vault: { ascKey: false, appleTeamId: false, gplayJson: false },
     }),
@@ -2164,6 +2227,8 @@ test("Store Release card renders Owner-only mode selector chips, busy/disabled s
       ),
     );
     const chip = (mode: string) => container.querySelector(`[data-testid="factory-panel-store-release-mode-${mode}"]`) as HTMLButtonElement;
+    assert.equal(chip("off"), null, "healthy mobile project starts collapsed");
+    await act(() => (container.querySelector('[data-testid="factory-panel-store-release-toggle"]') as HTMLButtonElement).click());
     assert.ok(chip("off"));
     assert.ok(chip("on-request"));
     assert.ok(chip("auto-staging"));
@@ -2744,5 +2809,707 @@ test("ADR 0068 (Ticket 07): FactoryShell wires gateQueueCancel for Team tab Gate
     await act(() => root.unmount());
     Object.assign(g, saved);
     dom.window.close();
+  }
+});
+
+test("Project tab 3-tier layout: wide desktop renders 60/40 Tier 2 split, 100% SkillPacks when openDesign is null, and stacks on narrow or mobile", async () => {
+  const skillPacks = [{ id: "expo", label: "Expo", enabled: true, autoDetected: true }];
+  const release = makeRelease();
+  const storeRelease = makeStoreRelease({ isMobile: true, platforms: ["ios"] });
+
+  // 1. Wide desktop with openDesign !== null -> Tier 1 Usage, Tier 2 60/40 row, Tier 3 stacked GitHub & Store Release
+  const wide = await render(makePanel({ usage: recordedUsage }), {
+    width: 900,
+    mobile: false,
+    initialUi: { tab: "project" },
+    skillPacks,
+    release,
+    storeRelease,
+  });
+  assert.ok(hasHook(wide, "factory-project-tier2"), "wide desktop renders Tier 2 horizontal split container");
+  const tier2 = elementOf(wide, "factory-project-tier2");
+  const tier2Root = tier2.slice(0, tier2.indexOf(">"));
+  assert.match(tier2Root, /&quot;flexDirection&quot;:&quot;row&quot;/);
+  assert.match(tier2Root, /&quot;alignItems&quot;:&quot;flex-start&quot;/);
+  assert.match(tier2, /&quot;flex&quot;:3,&quot;minWidth&quot;:0/);
+  assert.match(tier2, /&quot;flex&quot;:2,&quot;minWidth&quot;:0/);
+  assert.ok(tier2.indexOf('data-testid="factory-skill-packs"') < tier2.indexOf('data-testid="factory-panel-od"'));
+  const tierOrder = [
+    "project-usage-card",
+    "factory-project-tier2",
+    "factory-panel-github-release",
+    "factory-panel-store-release",
+  ];
+  for (let i = 1; i < tierOrder.length; i++) {
+    assert.ok(at(wide, tierOrder[i - 1]!) < at(wide, tierOrder[i]!), `${tierOrder[i - 1]} precedes ${tierOrder[i]}`);
+  }
+
+  // 2. Wide desktop with openDesign === null -> SkillPacks takes 100% width without factory-project-tier2
+  const noDesign = await render(makePanel({ usage: recordedUsage, openDesign: null }), {
+    width: 900,
+    mobile: false,
+    initialUi: { tab: "project" },
+    skillPacks,
+    release,
+    storeRelease,
+  });
+  assert.equal(hasHook(noDesign, "factory-project-tier2"), false);
+  assert.equal(hasHook(noDesign, "factory-panel-od"), false);
+  assert.ok(hasHook(noDesign, "factory-skill-packs"));
+
+  // 3. Narrow desktop (< 720) and mobile (even at width 900) stack vertically without factory-project-tier2
+  for (const opts of [{ width: 500, mobile: false }, { width: 900, mobile: true }]) {
+    const stacked = await render(makePanel({ usage: recordedUsage }), {
+      ...opts,
+      initialUi: { tab: "project" },
+      skillPacks,
+      release,
+      storeRelease,
+    });
+    assert.equal(hasHook(stacked, "factory-project-tier2"), false, `no 60/40 split for width=${opts.width} mobile=${opts.mobile}`);
+    assert.ok(at(stacked, "factory-skill-packs") < at(stacked, "factory-panel-od"));
+  }
+});
+
+test("ProjectUsage 4-tile KPI strip wraps on narrow widths, pairs header controls, and uses palette.lead for By Model share bars", async () => {
+  const { ProjectPanel } = await loadPanel();
+  const { createElement, act } = await import("react");
+  const { JSDOM } = await import(["jsdom"].join(""));
+  const darkTheme = { colors: { ...theme.colors, surface0: "#0d1117" } };
+
+  // Wide vs narrow KPI strip wrapping
+  const wideHtml = await render(makePanel({ usage: recordedUsage }), { width: 900, initialUi: { tab: "project" } });
+  const wideStrip = elementOf(wideHtml, "project-usage-summary");
+  assert.match(wideStrip.slice(0, wideStrip.indexOf(">")), /&quot;flexWrap&quot;:&quot;nowrap&quot;/);
+  const narrowHtml = await render(makePanel({ usage: recordedUsage }), { width: 500, initialUi: { tab: "project" } });
+  const narrowStrip = elementOf(narrowHtml, "project-usage-summary");
+  assert.match(narrowStrip.slice(0, narrowStrip.indexOf(">")), /&quot;flexWrap&quot;:&quot;wrap&quot;/);
+
+  // Header window switcher + By Model share bar use palette.lead in both light and dark themes
+  for (const [label, t, leadHex] of [["light", theme, "#2f7899"], ["dark", darkTheme, "#5fa8cc"]] as const) {
+    const dom = new JSDOM("<!doctype html><div id=root></div>");
+    const g = globalThis as Record<string, any>;
+    const saved = { window: g.window, document: g.document, IS_REACT_ACT_ENVIRONMENT: g.IS_REACT_ACT_ENVIRONMENT };
+    g.window = dom.window; g.document = dom.window.document; g.IS_REACT_ACT_ENVIRONMENT = true;
+    const { createRoot } = await import("react-dom/client");
+    const container = dom.window.document.getElementById("root")!;
+    const root = createRoot(container);
+    try {
+      await act(() => root.render(createElement(ProjectPanel, { theme: t, width: 900, panel: makePanel({ usage: recordedUsage }), mobile: false, now: Date.now(), daemonError: null, actions: noopActions(), initialUi: { tab: "project" } })));
+      await act(() => (container.querySelector('[data-testid="project-usage-toggle"]') as HTMLButtonElement).click());
+      await act(() => (container.querySelector('[data-testid="project-usage-mode-model"]') as HTMLButtonElement).click());
+      const modelsHtml = container.querySelector('[data-testid="project-usage-models"]')!.innerHTML;
+      assert.ok(modelsHtml.includes(`${leadHex}22`), `${label} By Model share bar track uses palette.lead 22`);
+      assert.ok(modelsHtml.includes(`${leadHex}aa`), `${label} By Model share bar fill uses palette.lead aa`);
+      const modeHtml = container.querySelector('[data-testid="project-usage-mode"]')!.innerHTML;
+      assert.ok(modeHtml.includes(leadHex), `${label} project-usage-mode uses palette.lead`);
+      const windowHtml = container.querySelector('[data-testid="project-usage-window"]')!.innerHTML;
+      assert.ok(windowHtml.includes(leadHex), `${label} project-usage-window uses palette.lead`);
+    } finally {
+      await act(() => root.unmount());
+      Object.assign(g, saved);
+      dom.window.close();
+    }
+  }
+});
+
+test("SkillPacks Core expands wrapped monospace chips without Switch, inactive drawer stays open across pack toggles, and mobile allows disclosure without writes", async () => {
+  const { ProjectPanel } = await loadPanel();
+  const { createElement, act } = await import("react");
+  const { JSDOM } = await import(["jsdom"].join(""));
+  const dom = new JSDOM("<!doctype html><div id=root></div>");
+  const g = globalThis as Record<string, any>;
+  const saved = { window: g.window, document: g.document, IS_REACT_ACT_ENVIRONMENT: g.IS_REACT_ACT_ENVIRONMENT };
+  g.window = dom.window; g.document = dom.window.document; g.IS_REACT_ACT_ENVIRONMENT = true;
+  const { createRoot } = await import("react-dom/client");
+  const container = dom.window.document.getElementById("root")!;
+  const root = createRoot(container);
+
+  let packs = [
+    { id: "pack-active", label: "Active pack", kind: "builtin" as const, installedCount: 1, skills: ["act-1", "act-2"], enabled: true, autoDetected: true },
+    { id: "pack-a", label: "Pack A", kind: "custom" as const, installedCount: 2, skills: ["skill-a1", "skill-a2"], enabled: false, autoDetected: false },
+    { id: "pack-b", label: "Pack B", kind: "source" as const, installedCount: 1, skills: ["skill-b1"], enabled: false, autoDetected: false },
+  ];
+  const toggleCalls: Array<[string, boolean]> = [];
+  const renderDesktop = () =>
+    act(() =>
+      root.render(
+        createElement(ProjectPanel, {
+          theme,
+          panel: makePanel(),
+          mobile: false,
+          now: Date.now(),
+          daemonError: null,
+          initialUi: { tab: "project" },
+          skillPacks: packs.map((p) => ({ ...p })),
+          actions: {
+            ...noopActions(),
+            toggleSkillPack: (id: string, enabled: boolean) => {
+              toggleCalls.push([id, enabled]);
+              packs = packs.map((p) => (p.id === id ? { ...p, enabled } : p));
+            },
+          },
+        }),
+      ),
+    );
+
+  const byId = (id: string) => container.querySelector(`[data-testid="${id}"]`) as HTMLElement | null;
+  try {
+    await renderDesktop();
+    assert.equal(byId("factory-skill-pack-core"), null, "Core has no Switch");
+    assert.equal(byId("factory-skill-pack-skills-core"), null, "Core starts collapsed");
+
+    // Expand Core -> wrapped monospace skill tags
+    await act(() => byId("factory-skill-pack-expand-core")!.click());
+    const coreSkills = byId("factory-skill-pack-skills-core")!;
+    assert.ok(coreSkills);
+    assert.match(coreSkills.innerHTML, /&quot;flexDirection&quot;:&quot;row&quot;,&quot;flexWrap&quot;:&quot;wrap&quot;/);
+    assert.match(coreSkills.innerHTML, /&quot;fontFamily&quot;:&quot;Menlo&quot;/);
+    assert.match(coreSkills.textContent!, /tdd.*research/);
+
+    // Open inactive packs drawer -> toggle pack-a on -> drawer stays open for pack-b -> toggle pack-a back off -> stays in open drawer
+    assert.equal(byId("factory-panel-skill-pack-a"), null);
+    await act(() => byId("factory-skill-packs-inactive-toggle")!.click());
+    assert.ok(byId("factory-panel-skill-pack-a"));
+    assert.ok(byId("factory-panel-skill-pack-b"));
+
+    await act(() => byId("factory-skill-pack-pack-a")!.click());
+    await renderDesktop();
+    assert.deepEqual(toggleCalls, [["pack-a", true]]);
+    assert.ok(byId("factory-panel-skill-pack-a"), "enabled pack moves to active list");
+    assert.ok(byId("factory-panel-skill-pack-b"), "inactive drawer stays open across pack enable toggle");
+    assert.match(byId("factory-skill-packs-inactive-toggle")!.textContent!, /▾ Inactive packs \(1\)/);
+
+    await act(() => byId("factory-skill-pack-pack-a")!.click());
+    await renderDesktop();
+    assert.deepEqual(toggleCalls, [["pack-a", true], ["pack-a", false]]);
+    assert.ok(byId("factory-panel-skill-pack-a"), "disabled pack returns inside still-open inactive drawer");
+    assert.match(byId("factory-skill-packs-inactive-toggle")!.textContent!, /▾ Inactive packs \(2\)/);
+
+    // Mobile allows Core expand + inactive drawer toggle + pack skill tag inspection with zero switches/writes
+    await act(() =>
+      root.render(
+        createElement(ProjectPanel, {
+          key: "mobile-packs",
+          theme,
+          panel: makePanel(),
+          mobile: true,
+          now: Date.now(),
+          daemonError: null,
+          initialUi: { tab: "project" },
+          skillPacks: packs,
+          actions: {
+            ...noopActions(),
+            toggleSkillPack() { assert.fail("mobile must not toggle"); },
+            resetSkillPacks() { assert.fail("mobile must not reset"); },
+            manageSkillPacks() { assert.fail("mobile must not open settings"); },
+          },
+        }),
+      ),
+    );
+    await act(() => byId("factory-skill-pack-expand-core")!.click());
+    assert.ok(byId("factory-skill-pack-skills-core"));
+    await act(() => byId("factory-skill-packs-inactive-toggle")!.click());
+    await act(() => byId("factory-skill-pack-expand-pack-b")!.click());
+    const mobilePackSkills = byId("factory-skill-pack-skills-pack-b")!;
+    assert.match(mobilePackSkills.textContent!, /skill-b1/);
+    assert.match(mobilePackSkills.innerHTML, /&quot;flexWrap&quot;:&quot;wrap&quot;/);
+    const mobileCard = byId("factory-skill-packs")!;
+    assert.equal(mobileCard.querySelector('[data-role="switch"]'), null, "zero switches on mobile");
+    assert.equal(byId("factory-skill-packs-reset"), null);
+    assert.equal(byId("factory-skill-packs-manage"), null);
+  } finally {
+    await act(() => root.unmount());
+    Object.assign(g, saved);
+    dom.window.close();
+  }
+});
+
+test("OpenDesign Broken renders AlertRow in palette.bad and OpenDesignControl unified renders Unlink ghost in palette.bad across light and dark", async () => {
+  const darkTheme = { colors: { ...theme.colors, surface0: "#0d1117" } };
+  for (const [label, t, badHex] of [["light", theme, "#c8253d"], ["dark", darkTheme, "#fe5462"]] as const) {
+    const html = await render(
+      makePanel({
+        openDesign: {
+          state: "broken",
+          projectName: "App Design",
+          syncedAt: null,
+          detail: "Staged files missing — sync again.",
+        },
+      }),
+      { theme: t, initialUi: { tab: "project" } },
+    );
+    const card = elementOf(html, "factory-panel-od");
+    assert.match(card, />Broken</);
+    assert.match(card, /Open Design link is broken · App Design/);
+    assert.match(card, /Staged files missing — sync again\./);
+    assert.ok(card.includes(`&quot;width&quot;:3,&quot;backgroundColor&quot;:&quot;${badHex}&quot;`), `${label} Broken AlertRow has 3px palette.bad bar`);
+    assert.ok(card.includes(`&quot;backgroundColor&quot;:&quot;${badHex}10&quot;`), `${label} Broken AlertRow has palette.bad 10% tint`);
+  }
+
+  // Load OpenDesignControl with data-idle-style exposed to verify Unlink ghost palette.bad & Open Studio palette.lead
+  const { build } = await import("esbuild");
+  const { createRequire } = await import("node:module");
+  const bundle = await build({
+    entryPoints: [join(repoRoot, "plugin/client/factory/open-design.tsx")],
+    bundle: true,
+    write: false,
+    platform: "node",
+    format: "cjs",
+    jsx: "automatic",
+    external: ["react", "react/jsx-runtime"],
+    plugins: [
+      {
+        name: "od-native-adapter",
+        setup(b) {
+          b.onResolve({ filter: /^(react-native|@getpaseo\/plugin\/client\/ui|@getpaseo\/plugin\/client)$/ }, (args) => ({ path: args.path, namespace: "od-native" }));
+          b.onLoad({ filter: /.*/, namespace: "od-native" }, () => ({
+            loader: "js",
+            contents: `
+              const React = require('react');
+              const tag = (name) => ({ children, onPress, disabled, testID, style }) =>
+                React.createElement(name, { disabled, onClick: onPress, 'data-testid': testID, 'data-style': typeof style === 'object' && style !== null ? JSON.stringify(style) : undefined, 'data-idle-style': typeof style === 'function' ? JSON.stringify(style({ pressed: false })) : undefined }, typeof children === 'function' ? children({ pressed: false }) : children);
+              exports.View = tag('div'); exports.ScrollView = tag('div'); exports.Text = tag('span'); exports.Pressable = tag('button');
+              exports.Icon = () => null;
+              exports.Platform = { OS: 'ios', select: (spec) => spec.ios ?? spec.default };
+              exports.useRpc = (contract) => React.useCallback((input) => globalThis.__odTestRpc(contract.name, input), [contract]);
+              exports.openExternalUrl = async () => {};
+              exports.DocumentFrame = () => null;
+              const Modal = ({ children, open }) => open ? React.createElement('div', {}, children) : null;
+              Modal.Content = tag('div');
+              exports.Modal = Modal;
+            `,
+          }));
+        },
+      },
+    ],
+  });
+  const mod = { exports: {} as Exports };
+  new Function("require", "module", "exports", bundle.outputFiles[0]!.text)(createRequire(import.meta.url), mod, mod.exports);
+  const { OpenDesignControl } = mod.exports;
+
+  const { createElement, act } = await import("react");
+  const { JSDOM } = await import(["jsdom"].join(""));
+  const g = globalThis as Record<string, any>;
+  const savedRpc = g.__odTestRpc;
+  g.__odTestRpc = async (method: string) => {
+    if (method === "factory.open_design.status") {
+      return { ok: true, link: { projectId: "p1", projectName: "Studio App", digest: "d1", sourceUpdatedAt: 10 }, updateAvailable: false };
+    }
+    return { ok: true };
+  };
+  try {
+    for (const [label, t, badHex, leadHex] of [["light", theme, "#c8253d", "#2f7899"], ["dark", darkTheme, "#fe5462", "#5fa8cc"]] as const) {
+      const dom = new JSDOM("<!doctype html><div id=root></div>");
+      const savedDom = { window: g.window, document: g.document, IS_REACT_ACT_ENVIRONMENT: g.IS_REACT_ACT_ENVIRONMENT };
+      g.window = dom.window; g.document = dom.window.document; g.IS_REACT_ACT_ENVIRONMENT = true;
+      const { createRoot } = await import("react-dom/client");
+      const container = dom.window.document.getElementById("root")!;
+      const root = createRoot(container);
+      try {
+        await act(async () => {
+          root.render(createElement(OpenDesignControl, { theme: t, root: "/repo/app", part: "unified", onChanged() {} }));
+          await new Promise<void>((r) => setTimeout(r, 15));
+        });
+        const studioBtn = container.querySelector('[data-testid="factory-open-design-studio"]')!;
+        assert.ok(studioBtn.getAttribute("data-idle-style")?.includes(leadHex), `${label} Open Studio uses palette.lead`);
+        const unlinkBtn = container.querySelector('[data-testid="factory-open-design-unlink"]')!;
+        assert.ok(unlinkBtn.getAttribute("data-idle-style")?.includes('"borderColor":"transparent"'), `${label} Unlink is ghost`);
+        assert.ok(unlinkBtn.innerHTML.includes(badHex), `${label} Unlink ghost foreground uses palette.bad`);
+      } finally {
+        await act(() => root.unmount());
+        Object.assign(g, savedDom);
+        dom.window.close();
+      }
+    }
+  } finally {
+    g.__odTestRpc = savedRpc;
+  }
+});
+
+test("GitHub & Release modal stays open on return false / rejected publish, closes on success, and >2 branch drawer toggles & auto-closes on select", async () => {
+  const { ProjectPanel } = await loadPanel();
+  const { createElement, act } = await import("react");
+  const { JSDOM } = await import(["jsdom"].join(""));
+  const dom = new JSDOM("<!doctype html><div id=root></div>");
+  const g = globalThis as Record<string, any>;
+  const saved = { window: g.window, document: g.document, IS_REACT_ACT_ENVIRONMENT: g.IS_REACT_ACT_ENVIRONMENT };
+  g.window = dom.window; g.document = dom.window.document; g.IS_REACT_ACT_ENVIRONMENT = true;
+  const { createRoot } = await import("react-dom/client");
+  const container = dom.window.document.getElementById("root")!;
+  const root = createRoot(container);
+
+  const byId = (id: string) => container.querySelector(`[data-testid="${id}"]`) as HTMLElement | null;
+
+  try {
+    // 1. > 2 branch candidates -> collapsible drawer opens and auto-closes on select; wide uses horizontal KeyValueRow
+    const branchChanges: Array<string | null> = [];
+    await act(() =>
+      root.render(
+        createElement(ProjectPanel, {
+          theme,
+          width: 900,
+          panel: makePanel(),
+          mobile: false,
+          now: Date.now(),
+          daemonError: null,
+          actions: noopActions(),
+          initialUi: { tab: "project" },
+          release: makeRelease({
+            branch: "release",
+            resolvedBranch: "release",
+            defaultBranch: "main",
+            branchCandidates: ["main", "release", "staging"],
+          }),
+          releaseActions: {
+            setBranch: (b: string | null) => { branchChanges.push(b); },
+          },
+        }),
+      ),
+    );
+    const branchRow = byId("factory-panel-release-branch")!;
+    assert.match(branchRow.getAttribute("data-style") ?? "", /"flexDirection":"row"/, "wide KeyValueRow lays out horizontally");
+    assert.equal(byId("factory-panel-release-branch-option-staging"), null, "> 2 branch options start collapsed");
+    assert.equal(byId("factory-panel-release-branch-toggle")?.textContent, "Change ▾");
+
+    await act(() => byId("factory-panel-release-branch-toggle")!.click());
+    assert.equal(byId("factory-panel-release-branch-toggle")?.textContent, "Hide ▴");
+    assert.ok(byId("factory-panel-release-branch-option-main"));
+    assert.ok(byId("factory-panel-release-branch-option-release"));
+    assert.ok(byId("factory-panel-release-branch-option-staging"));
+
+    await act(() => byId("factory-panel-release-branch-option-staging")!.click());
+    assert.deepEqual(branchChanges, ["staging"]);
+    assert.equal(byId("factory-panel-release-branch-option-staging"), null, "drawer auto-closes on branch select");
+    assert.equal(byId("factory-panel-release-branch-toggle")?.textContent, "Change ▾");
+
+    // 2. Modal stays open on return false (with releaseFeedback error) and on thrown error, then closes on true
+    let publishBehavior: "false" | "throw" | "true" = "false";
+    const renderPublishPanel = (feedback: { text: string; tone: "info" | "success" | "error" } | null = null) =>
+      act(() =>
+        root.render(
+          createElement(ProjectPanel, {
+            key: "pub",
+            theme,
+            width: 500,
+            panel: makePanel(),
+            mobile: false,
+            now: Date.now(),
+            daemonError: null,
+            actions: noopActions(),
+            initialUi: { tab: "project" },
+            release: makeRelease({ origin: null, resolvedBranch: null, defaultBranch: null, gh: { installed: true, authenticated: true, user: "octo" } }),
+            releaseFeedback: feedback,
+            releaseActions: {
+              publish: async () => {
+                if (publishBehavior === "false") return false;
+                if (publishBehavior === "throw") throw new Error("Network failure during publish");
+                return true;
+              },
+            },
+          }),
+        ),
+      );
+
+    await renderPublishPanel();
+    assert.doesNotMatch(byId("factory-panel-github-origin")!.getAttribute("data-style") ?? "", /"flexDirection":"row"/, "narrow KeyValueRow stacks vertically");
+    await act(() => byId("factory-panel-github-publish-open")!.click());
+    assert.ok(byId("factory-panel-github-publish"));
+
+    await act(() => byId("factory-panel-github-publish-submit")!.click());
+    await renderPublishPanel({ text: "Publish refused by GitHub", tone: "error" });
+    assert.ok(byId("factory-panel-github-publish"), "modal stays open on return false");
+    assert.match(byId("factory-panel-release-feedback")?.textContent ?? "", /Publish refused by GitHub/);
+
+    publishBehavior = "throw";
+    await renderPublishPanel(null);
+    await act(() => byId("factory-panel-github-publish-submit")!.click());
+    assert.ok(byId("factory-panel-github-publish"), "modal stays open on thrown error");
+    assert.match(byId("factory-panel-release-feedback")?.textContent ?? "", /Network failure during publish/);
+
+    publishBehavior = "true";
+    await act(() => byId("factory-panel-github-publish-submit")!.click());
+    assert.equal(byId("factory-panel-github-publish"), null, "modal closes on publish success");
+  } finally {
+    await act(() => root.unmount());
+    Object.assign(g, saved);
+    dom.window.close();
+  }
+});
+
+test("Store Release preserves manual collapse across snapshot polls until projectRoot changes or a new attentionKey appears", async () => {
+  const { ProjectPanel } = await loadPanel();
+  const { createElement, act } = await import("react");
+  const { JSDOM } = await import(["jsdom"].join(""));
+  const dom = new JSDOM("<!doctype html><div id=root></div>");
+  const g = globalThis as Record<string, any>;
+  const saved = { window: g.window, document: g.document, IS_REACT_ACT_ENVIRONMENT: g.IS_REACT_ACT_ENVIRONMENT };
+  g.window = dom.window; g.document = dom.window.document; g.IS_REACT_ACT_ENVIRONMENT = true;
+  const { createRoot } = await import("react-dom/client");
+  const container = dom.window.document.getElementById("root")!;
+  const root = createRoot(container);
+
+  const byId = (id: string) => container.querySelector(`[data-testid="${id}"]`) as HTMLElement | null;
+  const renderStore = (storeRelease: StoreReleaseView, mobile = false) =>
+    act(() =>
+      root.render(
+        createElement(ProjectPanel, {
+          theme,
+          panel: makePanel(),
+          mobile,
+          now: Date.now(),
+          daemonError: null,
+          actions: noopActions(),
+          initialUi: { tab: "project" },
+          storeRelease,
+        }),
+      ),
+    );
+
+  try {
+    // 1. Starts expanded because mode !== "off" with missing ASC .p8 key (attentionKey = "vault:ASC .p8")
+    const baseStore = makeStoreRelease({
+      projectRoot: "/repo/app-one",
+      isMobile: true,
+      mode: "on-request",
+      platforms: ["ios"],
+      vault: { ascKey: false, appleTeamId: true, gplayJson: true },
+    });
+    await renderStore(baseStore);
+    assert.ok(byId("factory-panel-store-release-mode"), "auto-expanded for missing Vault key while mode !== off");
+    assert.equal(byId("factory-panel-store-release-toggle")?.textContent, "▾ Hide");
+
+    // 2. Owner manually collapses -> stays collapsed across subsequent polls with same projectRoot + same attentionKey
+    await act(() => byId("factory-panel-store-release-toggle")!.click());
+    assert.equal(byId("factory-panel-store-release-mode"), null);
+    assert.equal(byId("factory-panel-store-release-toggle")?.textContent, "Configure ▾");
+
+    await renderStore({ ...baseStore, updatedAt: "2026-11-24T01:00:00Z" });
+    assert.equal(byId("factory-panel-store-release-mode"), null, "manual collapse persists across snapshot poll");
+
+    // 3. New attentionKey appears on same projectRoot (e.g. Active Hole) -> auto-expands
+    await renderStore({
+      ...baseStore,
+      activeHole: { runId: "run-9", kind: "app-store-review", phase: "submit", pausedAt: "2026-11-24T02:00:00Z" },
+    });
+    assert.ok(byId("factory-panel-store-release-mode"), "new attentionKey auto-expands despite prior manual collapse");
+    assert.ok(byId("factory-panel-store-release-hole"));
+
+    // 4. Collapse again, then switch projectRoot -> healthy project resets to collapsed, attention project resets to expanded
+    await act(() => byId("factory-panel-store-release-toggle")!.click());
+    assert.equal(byId("factory-panel-store-release-mode"), null);
+
+    await renderStore(makeStoreRelease({ projectRoot: "/repo/app-two", isMobile: true, mode: "off", platforms: ["ios"] }));
+    assert.equal(byId("factory-panel-store-release-mode"), null, "switching to healthy projectRoot resets to collapsed");
+
+    await renderStore(
+      makeStoreRelease({
+        projectRoot: "/repo/app-three",
+        isMobile: true,
+        mode: "auto-staging",
+        platforms: ["android"],
+        lastRun: {
+          id: "run-fail",
+          playbook: "stage",
+          status: "failed",
+          platforms: ["android"],
+          createdAt: "2026-11-24T02:00:00Z",
+          updatedAt: "2026-11-24T02:01:00Z",
+          completedAt: "2026-11-24T02:01:00Z",
+          error: "Play upload failed",
+          failure: null,
+        },
+      }),
+    );
+    assert.ok(byId("factory-panel-store-release-mode"), "switching to projectRoot with failed run resets to auto-expanded");
+
+    // 5. Paseo mobile with attention auto-expands with zero <button> elements
+    await renderStore(
+      makeStoreRelease({
+        projectRoot: "/repo/app-mobile-hole",
+        isMobile: true,
+        mode: "on-request",
+        platforms: ["ios"],
+        vault: { ascKey: false, appleTeamId: false, gplayJson: true },
+        activeHole: { runId: "run-mob", kind: "final-release-approval", phase: "submit", pausedAt: "2026-11-24T03:00:00Z" },
+      }),
+      true,
+    );
+    const mobileCard = byId("factory-panel-store-release")!;
+    assert.ok(byId("factory-panel-store-release-hole"));
+    assert.ok(byId("factory-panel-store-release-vault-warning"));
+    assert.equal(mobileCard.querySelectorAll("button").length, 0, "mobile Store Release card renders zero <button> elements");
+  } finally {
+    await act(() => root.unmount());
+    Object.assign(g, saved);
+    dom.window.close();
+  }
+});
+
+test("FACTORY_PALETTE covers every Project-tab card in both light and dark themes with zero host accent or status leaks", async () => {
+  const { ProjectPanel } = await loadPanel();
+  const { createElement, act } = await import("react");
+  const { JSDOM } = await import(["jsdom"].join(""));
+
+  const canaryLight = {
+    colors: {
+      surface0: "#ffffff",
+      surface1: "#f5f5f5",
+      surface2: "#eeeeee",
+      foreground: "#111111",
+      foregroundMuted: "#555555",
+      border: "#cccccc",
+      accent: "#ff00fe",
+      statusSuccess: "#01ff02",
+      statusWarning: "#fffe01",
+      statusDanger: "#ff0101",
+    },
+  };
+  const canaryDark = {
+    colors: {
+      ...canaryLight.colors,
+      surface0: "#0d1117",
+      surface1: "#161b22",
+      surface2: "#21262d",
+      foreground: "#f0f6fc",
+      foregroundMuted: "#8b949e",
+      border: "#30363d",
+    },
+  };
+
+  const usageWithSupervisor: NonNullable<PanelView["usage"]> = {
+    ...recordedUsage,
+    seats: [
+      {
+        seat: "supervisor",
+        label: "Supervisor",
+        newTokens: 100_000,
+        inputUncachedTokens: 80_000,
+        outputTokens: 20_000,
+        cachedTokens: 400_000,
+        cacheReadTokens: 400_000,
+        totalTokens: 500_000,
+        sessionCount: 4,
+        sharePercent: 20,
+        cacheHitPercent: 80,
+        models: [],
+      },
+      ...recordedUsage.seats,
+    ],
+    windows: {
+      ...recordedUsage.windows!,
+      all: {
+        ...recordedAllWindow,
+        seats: [
+          {
+            seat: "supervisor",
+            label: "Supervisor",
+            newTokens: 100_000,
+            inputUncachedTokens: 80_000,
+            outputTokens: 20_000,
+            cachedTokens: 400_000,
+            cacheReadTokens: 400_000,
+            totalTokens: 500_000,
+            sessionCount: 4,
+            sharePercent: 20,
+            cacheHitPercent: 80,
+            models: [],
+          },
+          ...recordedAllWindow.seats,
+        ],
+      },
+    },
+  };
+
+  const expectedLight = { ok: "#337e58", wait: "#8f6802", bad: "#c8253d", lead: "#2f7899", peer: "#287a81", supervisor: "#7459b4", idle: "#677176" };
+  const expectedDark = { ok: "#68b78d", wait: "#cd9a22", bad: "#fe5462", lead: "#5fa8cc", peer: "#5db3ba", supervisor: "#a798d7", idle: "#6c767b" };
+
+  for (const [label, t, pal] of [["light", canaryLight, expectedLight], ["dark", canaryDark, expectedDark]] as const) {
+    const dom = new JSDOM("<!doctype html><div id=root></div>");
+    const g = globalThis as Record<string, any>;
+    const saved = { window: g.window, document: g.document, IS_REACT_ACT_ENVIRONMENT: g.IS_REACT_ACT_ENVIRONMENT };
+    g.window = dom.window; g.document = dom.window.document; g.IS_REACT_ACT_ENVIRONMENT = true;
+    const { createRoot } = await import("react-dom/client");
+    const container = dom.window.document.getElementById("root")!;
+    const root = createRoot(container);
+    try {
+      await act(() =>
+        root.render(
+          createElement(ProjectPanel, {
+            theme: t,
+            width: 900,
+            mobile: false,
+            now: Date.now(),
+            daemonError: null,
+            initialUi: { tab: "project", expandedSkillPacks: ["core", "inactive-pack"] },
+            panel: makePanel({
+              usage: usageWithSupervisor,
+              openDesign: { state: "broken", projectName: "Studio", syncedAt: null, detail: "Sync failed" },
+            }),
+            skillPacks: [
+              { id: "active-pack", label: "Active", kind: "builtin", installedCount: 1, skills: ["s1"], enabled: true, autoDetected: true },
+              { id: "inactive-pack", label: "Inactive", kind: "custom", installedCount: 0, skills: [], enabled: false, autoDetected: false },
+            ],
+            skillPacksExplicit: true,
+            actions: { ...noopActions(), toggleSkillPack() {}, resetSkillPacks() {}, manageSkillPacks() {} },
+            release: makeRelease({
+              mode: "on-request",
+              pendingRequest: { version: "0.24.0", requestedAt: new Date().toISOString() },
+              gh: { installed: true, authenticated: false, user: null },
+              lastRelease: {
+                version: "0.23.0",
+                tag: "v0.23.0",
+                commit: "abcdef1234567",
+                branch: "main",
+                url: "https://github.com/acme/my-app/releases/tag/v0.23.0",
+                mode: "on-request",
+                ts: new Date().toISOString(),
+              },
+            }),
+            releaseFeedback: { text: "Release note", tone: "info" },
+            releaseActions: { setMode() {}, setBranch() {}, checkLogin() {}, copyLoginCommand() {}, openUrl() {} },
+            storeRelease: makeStoreRelease({
+              isMobile: true,
+              mode: "auto-staging",
+              platforms: ["ios", "android"],
+              vault: { ascKey: false, appleTeamId: true, gplayJson: false },
+              activeHole: { runId: "r1", kind: "final-release-approval", phase: "submit", pausedAt: new Date().toISOString() },
+              lastRun: {
+                id: "r0",
+                playbook: "stage",
+                status: "failed",
+                platforms: ["ios"],
+                createdAt: new Date().toISOString(),
+                updatedAt: new Date().toISOString(),
+                completedAt: new Date().toISOString(),
+                error: "Build failed",
+                failure: null,
+              },
+            }),
+            storeReleaseFeedback: { text: "Saved", tone: "success" },
+            storeReleaseActions: { setMode() {} },
+            onOpenReleaseLab() {},
+            onOpenSettings() {},
+          }),
+        ),
+      );
+      await act(() => (container.querySelector('[data-testid="project-usage-toggle"]') as HTMLButtonElement).click());
+      const bySeatHtml = container.querySelector('[data-testid="project-usage-seats"]')!.innerHTML.toLowerCase();
+      assert.ok(bySeatHtml.includes(pal.supervisor), `${label} By Seat uses FACTORY_PALETTE.supervisor (${pal.supervisor})`);
+      await act(() => (container.querySelector('[data-testid="project-usage-mode-model"]') as HTMLButtonElement).click());
+
+      const bodyHtml = container.querySelector('[data-testid="factory-tab-body-project"]')!.innerHTML.toLowerCase();
+      for (const forbidden of ["#ff00fe", "#01ff02", "#fffe01", "#ff0101"]) {
+        assert.equal(bodyHtml.includes(forbidden), false, `${label} Project tab must never leak host colour ${forbidden}`);
+      }
+      for (const [role, hex] of Object.entries(pal)) {
+        if (role === "supervisor") continue; // verified in By Seat above before switching to By Model
+        assert.ok(bodyHtml.includes(hex), `${label} Project tab uses FACTORY_PALETTE.${role} (${hex})`);
+      }
+    } finally {
+      await act(() => root.unmount());
+      Object.assign(g, saved);
+      dom.window.close();
+    }
   }
 });

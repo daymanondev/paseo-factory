@@ -6,7 +6,7 @@
  * adoption and existing handoff/Open Design actions retain their host gates.
  */
 import type { PluginTheme } from "@getpaseo/plugin";
-import { Modal, TextInput } from "@getpaseo/plugin/client/ui";
+import { Icon, Modal, TextInput } from "@getpaseo/plugin/client/ui";
 import { createContext, useContext, useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { Pressable, Text, View } from "react-native";
@@ -16,7 +16,7 @@ import { GitHubReleaseCard } from "./github-release-card.tsx";
 import type { GitHubReleaseActions, ReleaseCardFeedback } from "./github-release-card.tsx";
 import { StoreReleaseCard } from "./store-release-card.tsx";
 import type { StoreReleaseActions, StoreReleaseCardFeedback } from "./store-release-card.tsx";
-import { Btn, RoleName, SegmentedControl, ToneBadge } from "../kit/pill.tsx";
+import { AlertRow, Btn, Card, RoleName, SegmentedControl, ToneBadge } from "../kit/pill.tsx";
 import { Tabs } from "../kit/tabs.tsx";
 import { RADIUS, SPACING, dispositionColour, factoryPalette, hoveredOf, statusBadgeColour, text, thinkingColour, tint } from "../kit/theme.ts";
 import type { Colour } from "../kit/theme.ts";
@@ -148,27 +148,6 @@ function Section({ theme, testID, divider = true, children }: { theme: PluginThe
   return (
     <View testID={testID} style={{ gap: SPACING[2], ...(divider ? { marginTop: SPACING[4], paddingTop: SPACING[4], borderTopWidth: 1, borderTopColor: theme.colors.border } : {}) }}>
       {children}
-    </View>
-  );
-}
-
-/**
- * One alert-stack item: a 3px tone bar, a faint tint, the title in the tone
- * colour and — wide — the actions on that same line; detail lines under it.
- * Narrow, the actions drop to their own line below the detail.
- */
-function AlertRow({ theme, testID, colour, title, wide, actions, children }: { theme: PluginTheme; testID: string; colour: string; title: string; wide: boolean; actions: ReactNode; children?: ReactNode }) {
-  return (
-    <View testID={testID} style={{ flexDirection: "row", borderRadius: RADIUS.md, overflow: "hidden", backgroundColor: tint(colour, "10") }}>
-      <View style={{ width: 3, backgroundColor: colour }} />
-      <View style={{ flex: 1, minWidth: 0, gap: SPACING[1], paddingVertical: SPACING[2.5], paddingHorizontal: SPACING[3] }}>
-        <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: SPACING[2] }}>
-          <Text style={{ ...text(theme, "rowTitle"), color: colour, flexShrink: 1 }}>{title}</Text>
-          {wide ? actions : null}
-        </View>
-        {children}
-        {wide ? null : actions}
-      </View>
     </View>
   );
 }
@@ -629,29 +608,48 @@ function Seats({
 }
 
 /**
- * The Open Design section: a not-linked Project costs one line; a linked one
- * names the design and its last sync. Desktop mounts the Shell's actions
- * (Sync / Studio) in `desktopActions`; mobile shows the status alone.
+ * The Open Design card: unlinked stays compact; a healthy link names the design
+ * and its last sync; a broken link highlights via `AlertRow`. Desktop mounts the
+ * Shell's unified actions in `desktopActions`; mobile shows status alone.
  */
 function OpenDesign({ theme, openDesign, now, desktopActions }: { theme: PluginTheme; openDesign: PanelOpenDesign; now: number; desktopActions: ReactNode }) {
+  const palette = factoryPalette(theme);
   const broken = openDesign.state === "broken";
+  const unlinked = openDesign.state === "unlinked";
+  const syncLine = openDesign.detail ?? `Synced ${agoOf(openDesign.syncedAt, now)}`;
   return (
-    <Section theme={theme} testID="factory-panel-od">
-      {openDesign.state === "unlinked" ? (
-        <Text style={text(theme, "label")}>Open Design · not linked</Text>
+    <Card theme={theme} testID="factory-panel-od">
+      <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: SPACING[2] }}>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: SPACING[1.5] }}>
+          <Icon name="Palette" size={14} color={palette.supervisor} />
+          <SectionTitle theme={theme} label="Open Design" />
+        </View>
+        <ToneBadge
+          theme={theme}
+          label={broken ? "Broken" : unlinked ? "Not linked" : "Linked"}
+          colour={broken ? palette.bad : unlinked ? palette.idle : palette.ok}
+          dot={!unlinked}
+        />
+      </View>
+      {unlinked ? (
+        <Text style={text(theme, "meta")}>Not linked to an Open Design project.</Text>
+      ) : broken ? (
+        <AlertRow
+          theme={theme}
+          colour={palette.bad}
+          title={`Open Design link is broken${openDesign.projectName === null ? "" : ` · ${openDesign.projectName}`}`}
+          wide={false}
+        >
+          <Text style={text(theme, "meta")}>{syncLine}</Text>
+        </AlertRow>
       ) : (
-        <View style={{ gap: SPACING[1] }}>
-          <Text style={text(theme, "rowTitle", broken ? "statusDanger" : undefined)}>
-            {broken ? "Open Design link is broken" : "Open Design"}
-            {openDesign.projectName === null ? "" : ` · ${openDesign.projectName}`}
-          </Text>
-          <Text style={text(theme, "meta")}>
-            {openDesign.detail ?? `Synced ${agoOf(openDesign.syncedAt, now)}`}
-          </Text>
+        <View style={{ gap: SPACING[0.5] }}>
+          <Text style={text(theme, "rowTitle")}>{openDesign.projectName ?? "Linked design"}</Text>
+          <Text style={text(theme, "meta")}>{syncLine}</Text>
         </View>
       )}
       {desktopActions}
-    </Section>
+    </Card>
   );
 }
 
@@ -813,8 +811,8 @@ export function HandoffBlock({ theme, handoffs, mobile, wide = false, actions }:
   </View>;
 }
 
-/** A tiny on/off switch: a 34×20 track and a knob, accent when on. Mobile never mounts it (the word stands in). */
-function Switch({ theme, testID, label, checked, disabled, onToggle }: { theme: PluginTheme; testID: string; label: string; checked: boolean; disabled: boolean; onToggle: () => void }) {
+/** A tiny on/off switch: a 34×20 track and a knob, accent (or `activeColour`) when on. Mobile never mounts it (the badge stands in). */
+function Switch({ theme, testID, label, checked, disabled, onToggle, activeColour }: { theme: PluginTheme; testID: string; label: string; checked: boolean; disabled: boolean; onToggle: () => void; activeColour?: string }) {
   return (
     <Pressable
       testID={testID}
@@ -823,50 +821,169 @@ function Switch({ theme, testID, label, checked, disabled, onToggle }: { theme: 
       accessibilityState={{ checked, disabled }}
       disabled={disabled}
       onPress={onToggle}
-      style={{ width: 34, height: 20, borderRadius: 10, padding: 2, justifyContent: "center", alignItems: checked ? "flex-end" : "flex-start", backgroundColor: checked ? theme.colors.accent : theme.colors.surface2, opacity: disabled ? 0.5 : 1 }}
+      style={{ width: 34, height: 20, borderRadius: 10, padding: 2, justifyContent: "center", alignItems: checked ? "flex-end" : "flex-start", backgroundColor: checked ? (activeColour ?? theme.colors.accent) : theme.colors.surface2, opacity: disabled ? 0.5 : 1 }}
     >
       <View style={{ width: 16, height: 16, borderRadius: 8, backgroundColor: theme.colors.surface0 }} />
     </Pressable>
   );
 }
 
-export function SkillPacks({ theme, packs, onToggle, onReset, onManage, explicit = false, busy = false, initiallyExpanded = [], divider = false }: { theme: PluginTheme; packs: readonly MenuSkillPack[]; onToggle?: (pack: string, enabled: boolean) => void; onReset?: () => void; onManage?: () => void; explicit?: boolean; busy?: boolean; initiallyExpanded?: readonly string[]; divider?: boolean }) {
+const CORE_SKILLS = ["tdd", "diagnosing-bugs", "code-review", "codebase-design", "domain-modeling", "research"] as const;
+const PACK_KIND_LABELS: Record<NonNullable<MenuSkillPack["kind"]>, string> = { builtin: "Built-in", source: "Source", custom: "Custom" };
+
+function SkillTags({ theme, skills }: { theme: PluginTheme; skills: readonly string[] }) {
+  return (
+    <View style={{ flexDirection: "row", flexWrap: "wrap", gap: SPACING[1] }}>
+      {skills.map((skill) => (
+        <View
+          key={skill}
+          style={{
+            paddingHorizontal: SPACING[1.5],
+            paddingVertical: 2,
+            borderRadius: RADIUS.sm,
+            borderWidth: 1,
+            borderColor: theme.colors.border,
+            backgroundColor: theme.colors.surface0,
+          }}
+        >
+          <Text style={text(theme, "code")}>{skill}</Text>
+        </View>
+      ))}
+    </View>
+  );
+}
+
+export function SkillPacks({ theme, packs, onToggle, onReset, onManage, explicit = false, busy = false, initiallyExpanded = [], divider: _divider = false }: { theme: PluginTheme; packs: readonly MenuSkillPack[]; onToggle?: (pack: string, enabled: boolean) => void; onReset?: () => void; onManage?: () => void; explicit?: boolean; busy?: boolean; initiallyExpanded?: readonly string[]; divider?: boolean }) {
+  const palette = factoryPalette(theme);
   const [expanded, setExpanded] = useState<readonly string[]>(initiallyExpanded);
-  return <Section theme={theme} testID="factory-skill-packs" divider={divider}>
-    <SectionTitle theme={theme} label="Skill packs" />
-    <View style={{ flexDirection: "row", flexWrap: "wrap", gap: SPACING[2] }}>
-      {explicit && onReset ? <Btn theme={theme} small testID="factory-skill-packs-reset" label="Reset to auto-detect" disabled={busy} onPress={onReset} /> : null}
-      {onManage ? <Btn theme={theme} small testID="factory-skill-packs-manage" label="Manage in Settings" onPress={onManage} /> : null}
-    </View>
-    <View style={{ gap: SPACING[1] }}>
-      <Text style={text(theme, "rowTitle")}>Core · Always on</Text>
-      <Text style={text(theme, "meta")}>Every Peer keeps the Core skills, including tdd, diagnosing-bugs, code-review, codebase-design, domain-modeling, research.</Text>
-    </View>
-    {packs.length === 0 ? <Text style={text(theme, "meta")}>No skill packs available.</Text> : packs.map((pack) => (
-      <View key={pack.id} testID={`factory-panel-skill-${pack.id}`} style={{ gap: SPACING[2], paddingVertical: SPACING[2], borderTopWidth: 1, borderTopColor: theme.colors.border }}>
-        <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: SPACING[3] }}>
+  const activePacks = packs.filter((pack) => pack.enabled);
+  const inactivePacks = packs.filter((pack) => !pack.enabled);
+  const [inactiveOpen, setInactiveOpen] = useState<boolean>(() => inactivePacks.some((pack) => initiallyExpanded.includes(pack.id)));
+  const enabledCount = activePacks.length;
+  const coreExpanded = expanded.includes("core");
+  const toggleExpanded = (id: string) => {
+    setExpanded((current) => (current.includes(id) ? current.filter((item) => item !== id) : [...current, id]));
+  };
+
+  const renderPackRow = (pack: MenuSkillPack) => {
+    const isExpanded = expanded.includes(pack.id);
+    return (
+      <View key={pack.id} testID={`factory-panel-skill-${pack.id}`} style={{ gap: SPACING[1.5], paddingVertical: SPACING[2], borderTopWidth: 1, borderTopColor: theme.colors.border }}>
+        <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: SPACING[2] }}>
           <Pressable
             testID={`factory-skill-pack-expand-${pack.id}`}
             accessibilityRole="button"
-            accessibilityLabel={`${expanded.includes(pack.id) ? "Collapse" : "Expand"} ${pack.label} skills`}
-            accessibilityState={{ expanded: expanded.includes(pack.id) }}
-            onPress={() => setExpanded(current => current.includes(pack.id) ? current.filter(id => id !== pack.id) : [...current, pack.id])}
-            style={{ flex: 1, minWidth: 0, gap: SPACING[1] }}
+            accessibilityLabel={`${isExpanded ? "Collapse" : "Expand"} ${pack.label} skills`}
+            accessibilityState={{ expanded: isExpanded }}
+            onPress={() => toggleExpanded(pack.id)}
+            style={(state) => ({
+              flex: 1,
+              minWidth: 0,
+              flexDirection: "row",
+              alignItems: "center",
+              flexWrap: "wrap",
+              gap: SPACING[1.5],
+              borderRadius: RADIUS.sm,
+              paddingVertical: 2,
+              backgroundColor: hoveredOf(state) || state.pressed ? theme.colors.surface2 : "transparent",
+            })}
           >
+            <Text style={text(theme, "label")}>{isExpanded ? "▾" : "▸"}</Text>
             <Text style={text(theme, "rowTitle")}>{pack.label}</Text>
-            <Text style={text(theme, "meta")}>{pack.installedCount === undefined ? "Installed count unavailable" : `${pack.installedCount} installed`}{pack.kind === undefined ? "" : ` · ${{ builtin: "Built-in", source: "Source", custom: "Custom" }[pack.kind]}`}</Text>
-            {pack.autoDetected ? <Text style={text(theme, "meta")}>Auto-detected</Text> : null}
-            <Text style={text(theme, "meta")}>{expanded.includes(pack.id) ? "Hide skills ▴" : "Show skills ▾"}</Text>
+            <Text style={text(theme, "meta")}>
+              {`${pack.installedCount ?? "?"} installed`}
+              {pack.kind === undefined ? "" : ` · ${PACK_KIND_LABELS[pack.kind]}`}
+            </Text>
+            {pack.autoDetected ? <ToneBadge theme={theme} label="Auto-detected" colour={palette.peer} dot={false} pill={false} /> : null}
           </Pressable>
-          {onToggle === undefined ? <Text style={text(theme, "label", pack.enabled ? undefined : "foregroundMuted")}>{pack.enabled ? "On" : "Off"}</Text> : <Switch theme={theme} testID={`factory-skill-pack-${pack.id}`} label={`${pack.enabled ? "Disable" : "Enable"} ${pack.label}`} checked={pack.enabled} disabled={busy} onToggle={() => onToggle(pack.id, !pack.enabled)} />}
+          {onToggle === undefined ? (
+            <ToneBadge theme={theme} label={pack.enabled ? "On" : "Off"} colour={pack.enabled ? palette.ok : palette.idle} dot={false} />
+          ) : (
+            <Switch theme={theme} activeColour={palette.ok} testID={`factory-skill-pack-${pack.id}`} label={`${pack.enabled ? "Disable" : "Enable"} ${pack.label}`} checked={pack.enabled} disabled={busy} onToggle={() => onToggle(pack.id, !pack.enabled)} />
+          )}
         </View>
-        {expanded.includes(pack.id) ? <View testID={`factory-skill-pack-skills-${pack.id}`} style={{ gap: SPACING[1] }}>
-          {pack.description ? <Text style={text(theme, "meta")}>{pack.description}</Text> : null}
-          {pack.skills === undefined ? <Text style={text(theme, "meta")}>Skill membership unavailable.</Text> : pack.skills.length === 0 ? <Text style={text(theme, "meta")}>No skills in this pack.</Text> : pack.skills.map(skill => <Text key={skill} style={text(theme, "meta")}>{skill}</Text>)}
-        </View> : null}
+        {isExpanded ? (
+          <View testID={`factory-skill-pack-skills-${pack.id}`} style={{ gap: SPACING[1.5] }}>
+            {pack.description ? <Text style={text(theme, "meta")}>{pack.description}</Text> : null}
+            {pack.skills === undefined ? (
+              <Text style={text(theme, "meta")}>Skill membership unavailable.</Text>
+            ) : pack.skills.length === 0 ? (
+              <Text style={text(theme, "meta")}>No skills in this pack.</Text>
+            ) : (
+              <SkillTags theme={theme} skills={pack.skills} />
+            )}
+          </View>
+        ) : null}
       </View>
-    ))}
-  </Section>;
+    );
+  };
+
+  return (
+    <Card theme={theme} testID="factory-skill-packs" gap={SPACING[2]}>
+      <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: SPACING[2] }}>
+        <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[2] }}>
+          <SectionTitle theme={theme} label="Skill packs" />
+          <ToneBadge theme={theme} label={enabledCount > 0 ? `Core + ${enabledCount} active` : "Core only"} colour={palette.peer} dot={false} />
+        </View>
+        {(explicit && onReset) || onManage ? (
+          <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[1] }}>
+            {explicit && onReset ? <Btn theme={theme} small variant="ghost" testID="factory-skill-packs-reset" label="Reset" disabled={busy} onPress={onReset} /> : null}
+            {onManage ? <Btn theme={theme} small variant="ghost" testID="factory-skill-packs-manage" label="Settings ↗" onPress={onManage} /> : null}
+          </View>
+        ) : null}
+      </View>
+      <View>
+        <View style={{ paddingVertical: SPACING[1.5], gap: SPACING[1.5] }}>
+          <Pressable
+            testID="factory-skill-pack-expand-core"
+            accessibilityRole="button"
+            accessibilityLabel={`${coreExpanded ? "Collapse" : "Expand"} Core skills`}
+            accessibilityState={{ expanded: coreExpanded }}
+            onPress={() => toggleExpanded("core")}
+            style={(state) => ({
+              flexDirection: "row",
+              alignItems: "center",
+              flexWrap: "wrap",
+              gap: SPACING[1.5],
+              borderRadius: RADIUS.sm,
+              paddingVertical: 2,
+              backgroundColor: hoveredOf(state) || state.pressed ? theme.colors.surface2 : "transparent",
+            })}
+          >
+            <Text style={text(theme, "label")}>{coreExpanded ? "▾" : "▸"}</Text>
+            <Text style={text(theme, "rowTitle")}>Core</Text>
+            <ToneBadge theme={theme} label="Always on" colour={palette.peer} dot={false} />
+          </Pressable>
+          {coreExpanded ? (
+            <View testID="factory-skill-pack-skills-core" style={{ gap: SPACING[1.5] }}>
+              <Text style={text(theme, "meta")}>Every Peer keeps the Core skills.</Text>
+              <SkillTags theme={theme} skills={CORE_SKILLS} />
+            </View>
+          ) : null}
+        </View>
+        {packs.length === 0 ? (
+          <Text style={text(theme, "meta")}>No skill packs available.</Text>
+        ) : (
+          <>
+            {activePacks.map(renderPackRow)}
+            {inactivePacks.length > 0 ? (
+              <View style={{ borderTopWidth: 1, borderTopColor: theme.colors.border, paddingTop: SPACING[1.5], gap: SPACING[1.5] }}>
+                <Btn
+                  theme={theme}
+                  small
+                  variant="ghost"
+                  testID="factory-skill-packs-inactive-toggle"
+                  label={`${inactiveOpen ? "▾" : "▸"} Inactive packs (${inactivePacks.length})`}
+                  onPress={() => setInactiveOpen(!inactiveOpen)}
+                />
+                {inactiveOpen ? <View>{inactivePacks.map(renderPackRow)}</View> : null}
+              </View>
+            ) : null}
+          </>
+        )}
+      </View>
+    </Card>
+  );
 }
 
 /** One Models-tab row: role name, the seat's chip (opens the modal), and where the value comes from. */
@@ -1186,6 +1303,7 @@ function ProjectUsageModelsView({
   models: readonly UsageModelRow[];
   wide: boolean;
 }) {
+  const palette = factoryPalette(theme);
   if (models.length === 0) {
     return (
       <View testID="project-usage-models">
@@ -1212,8 +1330,8 @@ function ProjectUsageModelsView({
             theme={theme}
             wide={wide}
             row={row}
-            trackColour={tint(theme.colors.accent, "22")}
-            fillColour={tint(theme.colors.accent, "88")}
+            trackColour={tint(palette.lead, "22")}
+            fillColour={tint(palette.lead, "aa")}
             identity={<UsageModelIdentity theme={theme} provider={row.provider} model={row.model} />}
           />
         </View>
@@ -1233,6 +1351,7 @@ function ProjectUsage({
   mobile: boolean;
   wide: boolean;
 }) {
+  const palette = factoryPalette(theme);
   const [windowKey, setWindowKey] = useState<UsageWindowKey>("all");
   const [expanded, setExpanded] = useState(false);
   const [mode, setMode] = useState<UsageBreakdownMode>("seat");
@@ -1240,12 +1359,12 @@ function ProjectUsage({
 
   if (usage.state === "empty") {
     return (
-      <Section theme={theme} testID="project-usage-card" divider={false}>
+      <Card theme={theme} testID="project-usage-card">
         <SectionTitle theme={theme} label="Project usage" />
         <Text testID="project-usage-empty" style={text(theme, "meta")}>
           No usage recorded yet
         </Text>
-      </Section>
+      </Card>
     );
   }
 
@@ -1255,20 +1374,58 @@ function ProjectUsage({
       current.includes(seat) ? current.filter((item) => item !== seat) : [...current, seat],
     );
   };
+  const kpiTiles = [
+    {
+      label: "New tokens",
+      value: formatTokenCount(active.newTokens),
+      sub: `${formatTokenCount(active.inputUncachedTokens)} in · ${formatTokenCount(active.outputTokens)} out`,
+    },
+    {
+      label: "Cache hit",
+      value: formatCacheHit(active.cacheHitPercent),
+      valueColour: cacheHitColour(theme, active.cacheHitPercent),
+      sub: `${formatTokenCount(active.cachedTokens)} cached`,
+    },
+    {
+      label: "Total",
+      value: formatTokenCount(active.totalTokens),
+      sub: "tokens",
+    },
+    {
+      label: "Sessions",
+      value: String(active.sessionCount),
+      sub: active.sessionCount === 1 ? "session" : "sessions",
+    },
+  ];
 
   return (
-    <Section theme={theme} testID="project-usage-card" divider={false}>
+    <Card theme={theme} testID="project-usage-card">
       <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: SPACING[2] }}>
         <SectionTitle theme={theme} label="Project usage" />
-        {usage.windows !== undefined ? (
-          <SegmentedControl
-            theme={theme}
-            size="sm"
-            testID="project-usage-window"
-            value={windowKey}
-            onChange={setWindowKey}
-            options={USAGE_WINDOW_OPTIONS}
-          />
+        {usage.windows !== undefined || (!mobile && active.state !== "empty") ? (
+          <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[2] }}>
+            {usage.windows !== undefined ? (
+              <SegmentedControl
+                theme={theme}
+                size="sm"
+                accentColour={palette.lead}
+                testID="project-usage-window"
+                value={windowKey}
+                onChange={setWindowKey}
+                options={USAGE_WINDOW_OPTIONS}
+              />
+            ) : null}
+            {!mobile && active.state !== "empty" ? (
+              <Btn
+                theme={theme}
+                small
+                variant="ghost"
+                testID="project-usage-toggle"
+                label={`${expanded ? "▾" : "▸"} Breakdown`}
+                onPress={() => setExpanded(!expanded)}
+              />
+            ) : null}
+          </View>
         ) : null}
       </View>
       {active.state === "empty" ? (
@@ -1277,33 +1434,46 @@ function ProjectUsage({
         </Text>
       ) : (
         <>
-          <Text testID="project-usage-summary" style={text(theme, "label")}>
-            {`${formatTokenCount(active.newTokens)} new (${formatTokenCount(active.inputUncachedTokens)} in · ${formatTokenCount(active.outputTokens)} out) · `}
-            <Text style={{ color: cacheHitColour(theme, active.cacheHitPercent), fontWeight: "600" }}>
-              {`${formatCacheHit(active.cacheHitPercent)} cache`}
-            </Text>
-            {` (${formatTokenCount(active.cachedTokens)}) · ${formatTokenCount(active.totalTokens)} total · ${active.sessionCount} ${active.sessionCount === 1 ? "session" : "sessions"}`}
-          </Text>
+          <View testID="project-usage-summary" style={{ flexDirection: "row", flexWrap: wide ? "nowrap" : "wrap", gap: SPACING[2] }}>
+            {kpiTiles.map((tile) => (
+              <View
+                key={tile.label}
+                style={{
+                  ...(wide ? { flex: 1, minWidth: 0 } : { flexBasis: "47%" as const, flexGrow: 1, minWidth: 0 }),
+                  backgroundColor: theme.colors.surface0,
+                  borderRadius: RADIUS.md,
+                  borderWidth: 1,
+                  borderColor: theme.colors.border,
+                  padding: SPACING[2],
+                  gap: SPACING[0.5],
+                }}
+              >
+                <Text style={text(theme, "badge")}>{tile.label}</Text>
+                <Text
+                  style={{
+                    ...text(theme, "stat"),
+                    fontVariant: ["tabular-nums"],
+                    ...(tile.valueColour === undefined ? {} : { color: tile.valueColour }),
+                  }}
+                  numberOfLines={1}
+                >
+                  {tile.value}
+                </Text>
+                <Text style={{ ...text(theme, "meta"), fontVariant: ["tabular-nums"] }}>{tile.sub}</Text>
+              </View>
+            ))}
+          </View>
           {windowKey !== "all" ? (
             <Text testID="project-usage-window-note" style={text(theme, "meta")}>
               {`Sessions active in last ${windowKey} — multi-day seats show full session totals`}
             </Text>
           ) : null}
-          {mobile ? null : (
-            <Btn
-              theme={theme}
-              small
-              variant="ghost"
-              testID="project-usage-toggle"
-              label={`${expanded ? "▾" : "▸"} Breakdown`}
-              onPress={() => setExpanded(!expanded)}
-            />
-          )}
           {!mobile && expanded ? (
             <View testID="project-usage-breakdown" style={{ gap: SPACING[2.5] }}>
               <SegmentedControl
                 theme={theme}
                 size="sm"
+                accentColour={palette.lead}
                 testID="project-usage-mode"
                 value={mode}
                 onChange={setMode}
@@ -1324,7 +1494,7 @@ function ProjectUsage({
           ) : null}
         </>
       )}
-    </Section>
+    </Card>
   );
 }
 
@@ -1524,7 +1694,7 @@ export function ProjectPanel({
       />
     );
   const models = <ModelsTab theme={theme} panel={panel} mobile={mobile} actions={actions} modelView={modelView} machineLanes={machineLanes} hasProjectLaneOverride={hasProjectLaneOverride} />;
-  const packs = <SkillPacks theme={theme} divider={panel.usage != null} packs={skillPacks} explicit={skillPacksExplicit} {...(!mobile ? { onReset: actions.resetSkillPacks, onManage: actions.manageSkillPacks } : {})} initiallyExpanded={initialUi?.expandedSkillPacks ?? []} busy={actions.busy} {...(!mobile && actions.toggleSkillPack !== undefined ? { onToggle: actions.toggleSkillPack } : {})} />;
+  const packs = <SkillPacks theme={theme} packs={skillPacks} explicit={skillPacksExplicit} {...(!mobile ? { onReset: actions.resetSkillPacks, onManage: actions.manageSkillPacks } : {})} initiallyExpanded={initialUi?.expandedSkillPacks ?? []} busy={actions.busy} {...(!mobile && actions.toggleSkillPack !== undefined ? { onToggle: actions.toggleSkillPack } : {})} />;
   const design = panel.openDesign === null ? null : <OpenDesign theme={theme} openDesign={panel.openDesign} now={now} desktopActions={mobile ? null : openDesignActions} />;
   // The header chip names the active profile and jumps to the Models tab, where profiles are applied.
   const profileLabel = `${panel.profile.active?.name ?? "No Lane profile"}${panel.profile.modified ? " (modified)" : ""}`;
@@ -1563,8 +1733,31 @@ export function ProjectPanel({
             }}
             testID="factory-tab"
           />
-          <View testID={`factory-tab-body-${tab}`}>
-            {tab === "team" ? boundary("Seats", seats) : tab === "models" ? boundary("Models", models) : <>{boundary("Project usage", panel.usage == null ? null : <ProjectUsage theme={theme} usage={panel.usage} mobile={mobile} wide={wide} />)}{boundary("Skill packs", packs)}{boundary("Open Design", design)}{release === null ? null : boundary("GitHub & Release", <GitHubReleaseCard theme={theme} release={release} publishPreflight={publishPreflight} mobile={mobile} now={now} busy={releaseBusy} feedback={releaseFeedback} copiedLogin={releaseCopiedLogin} {...(releaseActions === undefined ? {} : { actions: releaseActions })} />)}{storeRelease === null ? null : boundary("Store Release", <StoreReleaseCard theme={theme} storeRelease={storeRelease} mobile={mobile} now={now} busy={storeReleaseBusy} feedback={storeReleaseFeedback} {...(storeReleaseActions === undefined ? {} : { actions: storeReleaseActions })} {...(onOpenReleaseLab === undefined ? {} : { onOpenReleaseLab })} {...(onOpenSettings === undefined ? {} : { onOpenSettings })} />)}</>}
+          <View testID={`factory-tab-body-${tab}`} style={tab === "project" ? { gap: SPACING[3] } : undefined}>
+            {tab === "team" ? (
+              boundary("Seats", seats)
+            ) : tab === "models" ? (
+              boundary("Models", models)
+            ) : (
+              <>
+                {panel.usage == null ? null : boundary("Project usage", <ProjectUsage theme={theme} usage={panel.usage} mobile={mobile} wide={wide} />)}
+                {design === null ? (
+                  boundary("Skill packs", packs)
+                ) : wide && !mobile ? (
+                  <View testID="factory-project-tier2" style={{ flexDirection: "row", alignItems: "flex-start", gap: SPACING[3] }}>
+                    <View style={{ flex: 3, minWidth: 0 }}>{boundary("Skill packs", packs)}</View>
+                    <View style={{ flex: 2, minWidth: 0 }}>{boundary("Open Design", design)}</View>
+                  </View>
+                ) : (
+                  <>
+                    {boundary("Skill packs", packs)}
+                    {boundary("Open Design", design)}
+                  </>
+                )}
+                {release === null ? null : boundary("GitHub & Release", <GitHubReleaseCard theme={theme} release={release} publishPreflight={publishPreflight} mobile={mobile} wide={wide} now={now} busy={releaseBusy} feedback={releaseFeedback} copiedLogin={releaseCopiedLogin} {...(releaseActions === undefined ? {} : { actions: releaseActions })} />)}
+                {storeRelease === null ? null : boundary("Store Release", <StoreReleaseCard theme={theme} storeRelease={storeRelease} mobile={mobile} wide={wide} now={now} busy={storeReleaseBusy} feedback={storeReleaseFeedback} {...(storeReleaseActions === undefined ? {} : { actions: storeReleaseActions })} {...(onOpenReleaseLab === undefined ? {} : { onOpenReleaseLab })} {...(onOpenSettings === undefined ? {} : { onOpenSettings })} />)}
+              </>
+            )}
           </View>
         </>
       ) : (

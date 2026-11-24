@@ -365,37 +365,39 @@ export function FactoryShell({
     void refreshStoreReleaseView(activeReleaseRoot);
   }, [activeReleaseRoot, view?.generatedAt, view?.panel.isProject, refreshReleaseView, refreshStoreReleaseView]);
 
-  const runReleaseAct = async (work: (projectRoot: string) => Promise<void>) => {
-    if (activeReleaseRoot === null || releaseBusy) return;
+  const runReleaseAct = async (work: (projectRoot: string) => Promise<boolean | void>): Promise<boolean> => {
+    if (activeReleaseRoot === null || releaseBusy) return false;
     setReleaseBusy(true);
     setReleaseFeedback(null);
     try {
-      await work(activeReleaseRoot);
+      return (await work(activeReleaseRoot)) !== false;
     } catch (error) {
       setReleaseFeedback({
         text: error instanceof Error ? error.message : String(error),
         tone: "error",
       });
+      return false;
     } finally {
       setReleaseBusy(false);
     }
   };
 
-  const publishProjectRepo = (input: GitHubPublishSubmitInput) =>
+  const publishProjectRepo = (input: GitHubPublishSubmitInput): Promise<boolean> =>
     runReleaseAct(async (projectRoot) => {
       const reply = await githubPublishCall({ projectRoot, ...input });
       if (!reply.ok) {
         setReleaseFeedback({ text: reply.error, tone: "error" });
-        return;
+        return false;
       }
       setReleaseView(reply.settings);
       setPublishPreflightView(null);
-      setReleaseFeedback({ text: `Published ${reply.slug} (${reply.visibility}).`, tone: "info" });
+      setReleaseFeedback({ text: `Published ${reply.slug} (${reply.visibility}).`, tone: "success" });
       refresh();
+      return true;
     });
 
-  const updateReleaseSettings = (patch: { mode?: "off" | "on-request" | "auto"; branch?: string | null }) =>
-    runReleaseAct(async (projectRoot) => {
+  const updateReleaseSettings = async (patch: { mode?: "off" | "on-request" | "auto"; branch?: string | null }): Promise<void> => {
+    await runReleaseAct(async (projectRoot) => {
       const reply = await releaseWriteCall({ projectRoot, ...patch });
       if (!reply.ok) {
         setReleaseFeedback({ text: reply.error, tone: "error" });
@@ -406,6 +408,7 @@ export function FactoryShell({
         setReleaseFeedback({ text: "Pending Release request was dropped.", tone: "info" });
       }
     });
+  };
 
   const updateStoreReleaseMode = async (mode: StoreReleaseMode) => {
     if (activeReleaseRoot === null || storeReleaseBusy || mobile) return;
@@ -1062,10 +1065,14 @@ export function FactoryShell({
             actions={{ openAgent, installPrerequisites, handoffStart: startHandoff, handoffReplaceNow: replaceHandoff, handoffCancel: cancelHandoff, handoffRetry: retryHandoff, viewHandover, startSupervisor, syncOpenDesign, adoptSupervisor, saveSeatModel, setMachineDefault, applyProfile: applyProjectProfile, toggleSkillPack: toggleProjectSkillPack, resetSkillPacks: resetProjectSkillPacks, saveProfile: saveProjectProfile, resetProjectLanes, cancelGateQueueItem, manageSkillPacks: () => { if (!mobile) openSettings?.(); }, busy: busy || activePluginAct !== null }}
             openDesignActions={
               !mobile && view.project !== null && view.project.missingRoot !== true ? (
-                <>
-                  <OpenDesignControl key={`${view.project.root}:card`} part="card" theme={theme} root={view.project.root} sourceKey={`${serverId ?? "local"}:${view.project.root}`} onChanged={refresh} />
-                  <OpenDesignControl key={`${view.project.root}:link`} part="menu" theme={theme} root={view.project.root} sourceKey={`${serverId ?? "local"}:${view.project.root}`} onChanged={refresh} />
-                </>
+                <OpenDesignControl
+                  key={view.project.root}
+                  part="unified"
+                  theme={theme}
+                  root={view.project.root}
+                  sourceKey={`${serverId ?? "local"}:${view.project.root}`}
+                  onChanged={refresh}
+                />
               ) : null
             }
             onboarding={
