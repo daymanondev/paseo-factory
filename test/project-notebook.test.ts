@@ -10,6 +10,7 @@ import {
   readProjectNotebook,
 } from "../src/project.ts";
 import { PROJECT_NOTEBOOK_MAX_GUARD_ROWS } from "../src/preflight.ts";
+import { LEAD_WAVE_LAWS } from "../src/roles-contract.ts";
 import { disposeDir, makeTempDir } from "./helpers.ts";
 
 /**
@@ -141,4 +142,11 @@ test("readProjectNotebook without projectRoot never touches a legacy scratch cop
 
 test("PROJECT_NOTEBOOK_MAX_GUARD_ROWS pins the Recurrence Guard row cap (spec line 106)", () => {
   assert.equal(PROJECT_NOTEBOOK_MAX_GUARD_ROWS, 12);
+});
+
+test("LEAD_WAVE_LAWS enforces project-only Project notebook isolation (ADR 0070)", () => {
+  const notebookLaw = LEAD_WAVE_LAWS.find((law) => law.startsWith("Project Notebook & Recurrence Guard"));
+  assert.ok(notebookLaw !== undefined);
+  assert.match(notebookLaw, /strictly project-owned verification\/run facts/);
+  assert.match(notebookLaw, /never record Factory MCP tool names, CLI commands\/flags, or SLP workflow laws/);
 });

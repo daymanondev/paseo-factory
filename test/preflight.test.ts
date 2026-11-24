@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { makeTempDir, disposeDir, factoryErrorCode, gitCommitAll } from "./helpers.ts";
-import { buildSeatKickoffPacket, writeProjectNotebook, syncLegacyScratchNotebook, PROJECT_NOTEBOOK_MAX_GUARD_ROWS } from "../src/preflight.ts";
+import { buildSeatKickoffPacket, summarizeActiveStoreRelease, writeProjectNotebook, syncLegacyScratchNotebook, PROJECT_NOTEBOOK_MAX_GUARD_ROWS } from "../src/preflight.ts";
 import { projectNotebookPath } from "../src/project.ts";
 import { setProjectReleaseSettings, setProjectStoreReleaseSettings } from "../src/project-settings.ts";
 import { storeMemoryDir } from "../src/vault-materialization.ts";
@@ -563,4 +563,113 @@ test("seat kickoff packet includes Store release mode, Vault readiness booleans,
   });
   assert.match(manifestPacket, /^- Store release: mode=off, platforms=\[none\], vault=\{ascKey=true, appleTeamId=true, gplayJson=false\}$/m);
   assert.ok(manifestPacket.includes(`- Store notebook (read-only): ${storeMemoryDir(home)}`));
+});
+
+test("summarizeActiveStoreRelease tracks running, paused Holes, completion/failure suppression, and latest unresolved run", () => {
+  const ts = "2026-11-24T06:00:00.000Z";
+  assert.equal(summarizeActiveStoreRelease([]), undefined);
+
+  const running: LedgerEvent[] = [
+    { seq: 1, ts, event: "store_release_started", runId: "run-1", action: "stage", platforms: ["android", "ios"], mode: "on-request" },
+  ];
+  assert.equal(
+    summarizeActiveStoreRelease(running),
+    "- Active store release: runId=run-1, action=stage, platforms=[android, ios], status=running",
+  );
+
+  // Paused without guidePath carries action & platforms from started
+  const pausedNoGuide: LedgerEvent[] = [
+    ...running,
+    { seq: 2, ts, event: "store_release_paused", runId: "run-1", holeKind: "day0-store-init", phase: "preflight" },
+  ];
+  assert.equal(
+    summarizeActiveStoreRelease(pausedNoGuide),
+    "- Active store release: runId=run-1, action=stage, platforms=[android, ios], status=paused, phase=preflight, holeKind=day0-store-init",
+  );
+
+  // Paused with guidePath appends guide=...
+  const pausedWithGuide: LedgerEvent[] = [
+    ...running,
+    { seq: 2, ts, event: "store_release_paused", runId: "run-1", holeKind: "final-release-approval", phase: "submit", hasConsoleGuide: true, guidePath: "/state/guide/CONSOLE_GUIDE.md" },
+  ];
+  assert.equal(
+    summarizeActiveStoreRelease(pausedWithGuide),
+    "- Active store release: runId=run-1, action=stage, platforms=[android, ios], status=paused, phase=submit, holeKind=final-release-approval, guide=/state/guide/CONSOLE_GUIDE.md",
+  );
+
+  // Resumed run updates back to running, then completed/failed suppresses it
+  const completed: LedgerEvent[] = [
+    ...pausedWithGuide,
+    { seq: 3, ts, event: "store_release_started", runId: "run-1", action: "resume", platforms: ["android", "ios"], mode: "on-request" },
+    { seq: 4, ts, event: "store_release_completed", runId: "run-1", action: "resume", platforms: ["android", "ios"], summary: "done" },
+  ];
+  assert.equal(summarizeActiveStoreRelease(completed), undefined);
+
+  const failed: LedgerEvent[] = [
+    ...running,
+    { seq: 2, ts, event: "store_release_failed", runId: "run-1", action: "stage", failureClass: "app-repo", code: "build-failed", detail: "err" },
+  ];
+  assert.equal(summarizeActiveStoreRelease(failed), undefined);
+
+  // Multi-run: latest unresolved wins even if a newer run already completed
+  const multiRun: LedgerEvent[] = [
+    { seq: 1, ts, event: "store_release_started", runId: "run-paused", action: "submit", platforms: ["ios"], mode: "on-request" },
+    { seq: 2, ts, event: "store_release_paused", runId: "run-paused", holeKind: "price-conflict", phase: "metadata" },
+    { seq: 3, ts, event: "store_release_started", runId: "run-done", action: "probe", platforms: ["android"], mode: "on-request" },
+    { seq: 4, ts, event: "store_release_completed", runId: "run-done", action: "probe", platforms: ["android"], summary: "ok" },
+  ];
+  assert.equal(
+    summarizeActiveStoreRelease(multiRun),
+    "- Active store release: runId=run-paused, action=submit, platforms=[ios], status=paused, phase=metadata, holeKind=price-conflict",
+  );
+});
+
+test("buildSeatKickoffPacket emits Active store release for both lead and supervisor directly under Store release and even without static mobile markers", (t) => {
+  const home = makeTempDir("active-store-kickoff-home-");
+  disposeDir(t, home);
+  const stateDir = join(home, "plugin-state", "paseo-factory");
+  const mobileRoot = makeTempDir("active-store-mobile-");
+  disposeDir(t, mobileRoot);
+  mkdirSync(join(mobileRoot, "ios", "App.xcodeproj"), { recursive: true });
+  setProjectStoreReleaseSettings(stateDir, "mob-proj", { mode: "on-request" });
+
+  const ts = "2026-11-24T06:00:00.000Z";
+  const pausedEvents: LedgerEvent[] = [
+    { seq: 1, ts, event: "store_release_started", runId: "sr-42", action: "stage", platforms: ["ios"], mode: "on-request" },
+    { seq: 2, ts, event: "store_release_paused", runId: "sr-42", holeKind: "day0-store-init", phase: "preflight", guidePath: "/tmp/CONSOLE_GUIDE.md" },
+  ];
+
+  for (const role of ["lead", "supervisor"] as const) {
+    const packet = buildSeatKickoffPacket({
+      role,
+      projectSlug: "mob-proj",
+      projectRoot: mobileRoot,
+      ledgerEvents: pausedEvents,
+      stateDir,
+      paseoHome: home,
+      omitSystemPromptDuplicates: true,
+    });
+    const storeIdx = packet.indexOf("- Store release:");
+    const activeIdx = packet.indexOf("- Active store release: runId=sr-42, action=stage, platforms=[ios], status=paused, phase=preflight, holeKind=day0-store-init, guide=/tmp/CONSOLE_GUIDE.md");
+    const notebookIdx = packet.indexOf("- Store notebook (read-only):");
+    assert.ok(storeIdx !== -1 && activeIdx !== -1 && notebookIdx !== -1, `${role} packet includes all three store lines`);
+    assert.ok(storeIdx < activeIdx && activeIdx < notebookIdx, `${role} places Active store release directly beneath Store release`);
+  }
+
+  // Non-mobile / absent-manifest directory still surfaces Active store release
+  const plainRoot = makeTempDir("active-store-plain-");
+  disposeDir(t, plainRoot);
+  writeFileSync(join(plainRoot, "README.md"), "plain\n");
+  for (const role of ["lead", "supervisor"] as const) {
+    const packet = buildSeatKickoffPacket({
+      role,
+      projectSlug: "plain-proj",
+      projectRoot: plainRoot,
+      ledgerEvents: [{ seq: 1, ts, event: "store_release_started", runId: "sr-99", action: "submit", platforms: ["android"], mode: "auto-staging" }],
+      stateDir,
+      paseoHome: home,
+      omitSystemPromptDuplicates: true,
+    });
+    assert.match(packet, /^- Active store release: runId=sr-99, action=submit, platforms=\[android\], status=running$/m);
+  }
 });

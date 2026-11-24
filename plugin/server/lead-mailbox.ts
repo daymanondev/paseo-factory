@@ -96,7 +96,7 @@ import {
 } from "./core/mailbox.ts";
 import type { LeadMailFrom, LeadMailItem, LeadMailKind, MailRecipient } from "./core/mailbox.ts";
 import { boundTaskPeers, peerIsRunning } from "./task-peers.ts";
-import { driverWavesInFlight, projectEventsOf as sharedProjectEventsOf, projectFactoryOf, projectPeersInFlight, projectStreamOf as sharedProjectStreamOf, taskFactoryOf as sharedTaskFactoryOf, taskHasSettledPeerOutcome, tasksWithOpenGate } from "./peer-in-flight.ts";
+import { driverWavesInFlight, projectEventsOf as sharedProjectEventsOf, projectFactoryOf, projectOwnAndTaskEventsOf as sharedProjectOwnAndTaskEventsOf, projectPeersInFlight, projectStreamOf as sharedProjectStreamOf, taskFactoryOf as sharedTaskFactoryOf, taskHasSettledPeerOutcome, tasksWithOpenGate } from "./peer-in-flight.ts";
 import { foldTasks, renderLedgerLine } from "./view.ts";
 import type { TaskView } from "../shared/view.ts";
 import { normalizeLanesWithDaemon, readBeforeLeadPumpHook } from "./spool.ts";
@@ -107,10 +107,10 @@ import type {
   SpoolSupervisorReportRequest,
 } from "./spool.ts";
 import type { SurfaceAgentSnapshot, SurfaceDaemonApi } from "./surface-rpc.ts";
-import { capHandoffText, parseHandoffFile, renderHandoffFile, validHandoffText } from "./handoff-text.ts";
+import { capHandoffText, normalizeHandoffPaths, parseHandoffFile, renderHandoffFile, validHandoffText } from "./handoff-text.ts";
 import type { HandoffFileMetadata } from "./handoff-text.ts";
 import { readHandoffProgress, writeHandoffProgress, laneRef, laneValue } from "./handoff-progress.ts";
-import { buildSubstituteHandover, readNotebook, readHandoverGit, renderOpenTaskEvidence } from "./substitute-handover.ts";
+import { buildSubstituteHandover, extractCleanTimelineText, readNotebook, readHandoverGit, renderOpenTaskEvidence } from "./substitute-handover.ts";
 import type { HandoffProgress, HandoffRequest, HandoffReply } from "../shared/handoff.ts";
 import { createSupervisorHandoffRuntime } from "./supervisor-handoff.ts";
 import { refetchTurnTimeline } from "./turn-timeline.ts";
@@ -434,6 +434,12 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
   const taskFactoryOf = (slug: string, task: string | undefined): Factory => sharedTaskFactoryOf(ledgerSource, slug, task);
   /** The Project's Ledger stream: its OWN Factory's events plus any task the wired Factory still owns (the legacy root bridge). */
   const projectStreamOf = (slug: string): readonly LedgerEvent[] => sharedProjectStreamOf(ledgerSource, slug);
+  const projectOwnAndTaskEventsOf = (slug: string, explicitRoot?: string): readonly LedgerEvent[] => {
+    const root = explicitRoot ?? readProjectRegistration(deps.stateDir, slug)?.root;
+    return root !== undefined && root !== ""
+      ? sharedProjectOwnAndTaskEventsOf(ledgerSource, deps.stateDir, slug, root)
+      : projectStreamOf(slug);
+  };
   /** Every available Ledger stream — the root fallback's plus each ALREADY-OPEN
    * Project's (a pure peek: the polling paths must never open, validate, or
    * recover a Ledger mid-maintenance, and a read never mints state). */
@@ -482,7 +488,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
   };
   const peerBlockersQueued = new Set<string>();
   const peerHandoff = createPeerHandoffRuntime({
-    factory: deps.factory, factoryFor: (slug, task) => taskFactoryOf(slug, task), eventsFor: projectStreamOf, stateDir: deps.stateDir, home: deps.home, stopAgent: deps.stopAgent,
+    factory: deps.factory, factoryFor: (slug, task) => taskFactoryOf(slug, task), eventsFor: slug => projectOwnAndTaskEventsOf(slug), stateDir: deps.stateDir, home: deps.home, stopAgent: deps.stopAgent,
     daemon: resolveDaemon, timeoutMs: handoffTimeoutMs, ownerTimeoutMs: deps.ownerHandoffTimeoutMs, readTokens: (agent) => readLeadContextTokens(agent, deps.usagePaths), log,
     ...(deps.usage === undefined ? {} : { recordUsage: async (input: { slug: string; task: string; agent: SurfaceAgentSnapshot }) => { await deps.usage!.meterAgentBoundary({ task: input.task, agent: input.agent, slug: input.slug }); } }),
     queueNotice: (slug, task, key, text) => {
@@ -535,8 +541,9 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     onLane: projectLane, renderMail: renderSupervisorMailBatch, log,
     markKickoffSent: id => { kickoffSentAgentIds.add(id); inFlightKickoffAgentIds.add(id); },
     evidence: slug => {
-      const events = projectStreamOf(slug);
-      return { events, digest: renderLedgerDigest(events), tasks: renderOpenTaskEvidence(foldTasks(events)) };
+      const events = projectOwnAndTaskEventsOf(slug);
+      const digestEvents = events.filter(evt => !(evt.event === "git_blocked" && (!("task" in evt) || typeof evt.task !== "string")));
+      return { events, digest: renderLedgerDigest(digestEvents), tasks: renderOpenTaskEvidence(foldTasks(events)) };
     },
     retire: async (slug, agent) => {
       const reg = readProjectRegistration(deps.stateDir, slug);
@@ -770,7 +777,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       role,
       projectSlug: slug,
       projectRoot: reg?.root ?? agent.cwd ?? "",
-      ledgerEvents: projectStreamOf(slug),
+      ledgerEvents: projectOwnAndTaskEventsOf(slug, reg?.root ?? agent.cwd ?? undefined),
       helperMcps: discoverHelperMcps({ stateDir: deps.stateDir, ...(deps.home ? { userHome: resolveVaultUserHome(deps.home) } : {}) }).servers,
       ...(lanes !== undefined ? { lanes } : {}),
       // v0.1.0 (ADR 0048 §3): every newly created or rotated Supervisor/Lead
@@ -1316,15 +1323,16 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     const stale = false;
     if (substitute) {
       updateProgress(slug, { state: "substitute", handover: "substitute" });
-      let timeline = (input.timeline ?? []).map(item => item.text ?? "").filter(Boolean).slice(-6).join("\n\n");
+      let timeline = extractCleanTimelineText(input.timeline ?? [], { maxEntries: 6 });
       if (!timeline && input.agentId) try {
         const entries = await refetchTurnTimeline(resolveDaemon().agents.ref(input.agentId).timeline, input.turnId ?? null);
-        timeline = entries.map(entry => { const item = entry.item ?? entry as { text?: string }; return item.text ?? ""; }).join("\n\n");
+        timeline = extractCleanTimelineText(entries, { maxEntries: 6 });
       } catch { /* timeline is best effort */ }
       if (!stillCurrent(slug, "handoff completion")) return;
-      const events = projectEventsOf(slug, root);
-      handoffText = buildSubstituteHandover({ digest: renderLedgerDigest(events), notebook: readNotebook(projectNotebookPath(deps.stateDir, slug)), git: readHandoverGit(root), tasks: renderOpenTaskEvidence(foldTasks(events)), timeline, maxBytes: LEAD_HANDOFF_MAX_BYTES });
-    } else handoffText = capHandoffText(handoffText!, LEAD_HANDOFF_MAX_BYTES);
+      const events = projectOwnAndTaskEventsOf(slug, root);
+      const digestEvents = events.filter(evt => !(evt.event === "git_blocked" && (!("task" in evt) || typeof evt.task !== "string")));
+      handoffText = buildSubstituteHandover({ digest: renderLedgerDigest(digestEvents), notebook: readNotebook(projectNotebookPath(deps.stateDir, slug)), git: readHandoverGit(root), tasks: renderOpenTaskEvidence(foldTasks(events)), timeline, maxBytes: LEAD_HANDOFF_MAX_BYTES });
+    } else handoffText = capHandoffText(normalizeHandoffPaths(handoffText!, [root]), LEAD_HANDOFF_MAX_BYTES);
     updateProgress(slug, { handover: substitute ? "substitute" : "extracted" });
     atomicJson(extractionPath(slug), { requestedAt, prior, stale, ...(snapshot?.sends === undefined ? {} : { sends: snapshot.sends }) });
     try {
@@ -2101,7 +2109,8 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
           const lastTurnAt = lastLeadTurnAt.get(agentId);
           const fresh = disk?.meta !== undefined && lastTurnAt !== undefined && Date.parse(disk.meta.writtenAt) >= Date.parse(lastTurnAt);
           if (!fresh) {
-            const events = projectEventsOf(registration.slug, registration.root);
+            const events = projectOwnAndTaskEventsOf(registration.slug, registration.root);
+            const digestEvents = events.filter(evt => !(evt.event === "git_blocked" && (!("task" in evt) || typeof evt.task !== "string")));
             let timeline = "(outgoing Lead was archived)";
             let evidenceTimer: ReturnType<typeof setTimeout> | undefined;
             try {
@@ -2111,11 +2120,11 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
                 resolveDaemon().agents.ref(agentId).timeline.refetch({ direction: "tail", limit: 6 }),
                 new Promise<never>((_, reject) => { evidenceTimer = setTimeout(() => reject(new Error("Archived Lead timeline timed out")), 1000); }),
               ]);
-              timeline = (page.entries ?? []).map(entry => (entry.item ?? entry as { text?: string }).text ?? "").filter(Boolean).join("\n\n") || timeline;
+              timeline = extractCleanTimelineText(page.entries ?? []) || timeline;
             } catch { /* Lost-Lead recovery remains useful without optional evidence. */ }
             finally { clearTimeout(evidenceTimer); }
             if (!stillCurrent(registration.slug, "lost-Lead recovery")) return;
-            const body = buildSubstituteHandover({ digest: renderLedgerDigest(events), notebook: readNotebook(projectNotebookPath(deps.stateDir, registration.slug)), git: readHandoverGit(registration.root), tasks: renderOpenTaskEvidence(foldTasks(events)), timeline, maxBytes: LEAD_HANDOFF_MAX_BYTES });
+            const body = buildSubstituteHandover({ digest: renderLedgerDigest(digestEvents), notebook: readNotebook(projectNotebookPath(deps.stateDir, registration.slug)), git: readHandoverGit(registration.root), tasks: renderOpenTaskEvidence(foldTasks(events)), timeline, maxBytes: LEAD_HANDOFF_MAX_BYTES });
             mkdirSync(projectStateDir(deps.stateDir, registration.slug), { recursive: true });
             writeFileSync(join(projectStateDir(deps.stateDir, registration.slug), "lead-handoff.md"), renderHandoffFile(body, { leadId: agentId, writtenAt: new Date().toISOString() }));
           }
@@ -2326,19 +2335,19 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
  * The one bounded Handoff Extraction prompt — fixed sections, fixed ceiling, no
  * new work.
  */
-function renderHandoffExtractionPrompt(slug: string, reason: HandoffProgress["reason"] = "context-mark"): string {
+export function renderHandoffExtractionPrompt(slug: string, reason: HandoffProgress["reason"] = "context-mark"): string {
   return [
     `# Lead handoff extraction — project ${slug}`,
     "",
     reason === "context-mark" ? `Your context window has crossed the ${LEAD_ROTATE_TOKENS.toLocaleString("en-US")}-token rotation threshold, so this standing Lead seat is rotating: you are being retired, and a fresh successor Lead continues the project from your handoff.` : `This standing Lead seat is handing off (${reason}). A fresh successor Lead continues the project from your handoff.`,
     "",
-    "Put the entire Markdown handoff directly in your final assistant message, in one piece, without running shell commands or writing files to disk. The plugin server reads your reply and persists it automatically, capping it at 8 KB. Keep it a lean tactical baton, not an archive: never copy-paste active Contract.description blocks verbatim (they are already recorded in ledger.jsonl), and never write detailed post-mortems or test inventories of already-accepted waves. Use exactly these five sections:",
+    "Put the entire Markdown handoff directly in your final assistant message, in one piece, without running shell commands or writing files to disk. The plugin server reads your reply and persists it automatically, capping it at 8 KB. Keep it a lean tactical baton, not an archive: never copy-paste active Contract.description blocks verbatim (they are already recorded in ledger.jsonl), and never write detailed post-mortems or test inventories of already-accepted waves. Record strictly project facts, architectural decisions, open questions, failed approaches, and repo-relative file pointers — never cite Factory MCP tool names, CLI commands/flags, SLP workflow laws, or plugin wiring quirks, and never include file:// URLs (the harness injects fresh role rules and machine-verified state automatically). Use exactly these five sections in order:",
     "",
-    "1. Goal & Remaining Roadmap",
-    "2. Uncontracted Next Tasks",
-    "3. Key Technical Findings",
-    "4. Open Questions",
-    "5. Read-First Files",
+    "1. Current Wave & In-Flight State",
+    "2. Open Questions & Owner Decisions",
+    "3. Dead Ends & Failed Approaches",
+    "4. Read-First Files — repo-relative path:line only (never file:// URLs)",
+    "5. Key Technical Findings & Next Wave Plan",
     "",
     "Start no new tasks, spawn no agents, set no contracts, and accept nothing — the handoff reply is this turn's only deliverable. End your turn after the complete Markdown document.",
   ].join("\n");

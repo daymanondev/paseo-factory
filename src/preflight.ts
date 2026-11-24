@@ -215,6 +215,71 @@ function resolveKickoffPaseoHome(explicitHome?: string, stateDir?: string): stri
   return derivePaseoHomeFromStateDir(stateDir);
 }
 
+/**
+ * Folds `store_release_{started,paused,completed,failed}` chronologically by
+ * `runId` and renders `- Active store release: ...` for the latest unresolved
+ * run (`running` or `paused`), or `undefined` when all runs are resolved or absent.
+ */
+export function summarizeActiveStoreRelease(events: readonly LedgerEvent[]): string | undefined {
+  const runs = new Map<
+    string,
+    {
+      runId: string;
+      action: string;
+      platforms: readonly string[];
+      status: "running" | "paused" | "resolved";
+      phase?: string;
+      holeKind?: string;
+      guidePath?: string;
+    }
+  >();
+
+  for (const evt of events) {
+    if (evt.event === "store_release_started") {
+      runs.delete(evt.runId);
+      runs.set(evt.runId, {
+        runId: evt.runId,
+        action: evt.action,
+        platforms: evt.platforms,
+        status: "running",
+      });
+    } else if (evt.event === "store_release_paused") {
+      const prior = runs.get(evt.runId);
+      runs.delete(evt.runId);
+      runs.set(evt.runId, {
+        runId: evt.runId,
+        action: prior?.action ?? "unknown",
+        platforms: prior?.platforms ?? [],
+        status: "paused",
+        phase: evt.phase,
+        holeKind: evt.holeKind,
+        ...(evt.guidePath === undefined ? {} : { guidePath: evt.guidePath }),
+      });
+    } else if (evt.event === "store_release_completed" || evt.event === "store_release_failed") {
+      const prior = runs.get(evt.runId);
+      runs.delete(evt.runId);
+      runs.set(evt.runId, {
+        runId: evt.runId,
+        action: evt.action,
+        platforms: prior?.platforms ?? [],
+        status: "resolved",
+      });
+    }
+  }
+
+  const latest = [...runs.values()].reverse().find((r) => r.status === "running" || r.status === "paused");
+  if (latest === undefined) return undefined;
+  const platformsLabel = latest.platforms.length > 0 ? latest.platforms.join(", ") : "none";
+  if (latest.status === "running") {
+    return `- Active store release: runId=${latest.runId}, action=${latest.action}, platforms=[${platformsLabel}], status=running`;
+  }
+  const guideSuffix =
+    typeof latest.guidePath === "string" && latest.guidePath.trim() !== ""
+      ? `, guide=${latest.guidePath}`
+      : "";
+  return `- Active store release: runId=${latest.runId}, action=${latest.action}, platforms=[${platformsLabel}], status=paused, phase=${latest.phase ?? "unknown"}, holeKind=${latest.holeKind ?? "unknown"}${guideSuffix}`;
+}
+
 export function buildSeatKickoffPacket(input: SeatKickoffPacketInput): string {
   const omitDuplicates = input.omitSystemPromptDuplicates === true;
   const branch = runGitFast(input.projectRoot, ["rev-parse", "--abbrev-ref", "HEAD"]) || "(detached/unborn)";
@@ -277,6 +342,7 @@ export function buildSeatKickoffPacket(input: SeatKickoffPacketInput): string {
     );
   }
 
+  const activeStoreRelease = summarizeActiveStoreRelease(input.ledgerEvents);
   const detectedPlatforms = detectMobilePlatforms(input.projectRoot);
   const hasStoreManifest = input.projectRoot !== "" && existsSync(join(input.projectRoot, ".store-release", "manifest.json"));
   if (detectedPlatforms.length > 0 || hasStoreManifest) {
@@ -291,8 +357,13 @@ export function buildSeatKickoffPacket(input: SeatKickoffPacketInput): string {
     const platformsLabel = detectedPlatforms.length > 0 ? detectedPlatforms.join(", ") : "none";
     releaseLines.push(
       `- Store release: mode=${storeMode}, platforms=[${platformsLabel}], vault={ascKey=${vault.ascKey}, appleTeamId=${vault.appleTeamId}, gplayJson=${vault.gplayJson}}`,
+    );
+    if (activeStoreRelease !== undefined) releaseLines.push(activeStoreRelease);
+    releaseLines.push(
       `- Store notebook (read-only): ${storeNotebookDir} (lessons.md, apps/<canonical-app>.md)`,
     );
+  } else if (activeStoreRelease !== undefined) {
+    releaseLines.push(activeStoreRelease);
   }
 
   const roleLines = [`- Role MCP tools (paseo_factory): ${roleTools}`, `- Law: ${fireAndEndTurn}`];

@@ -4,11 +4,12 @@ import { existsSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from "
 import { readHandoffProgress } from "../plugin/server/handoff-progress.ts";
 import { join } from "node:path";
 import { createFactory } from "../plugin/server/core/factory.ts";
+import { factoryRegistryFor } from "../plugin/server/projects.ts";
 import { CorrelationRegistry } from "../plugin/server/core/correlations.ts";
-import { projectStateDir, resolveProject, writeProjectRegistration } from "../plugin/server/core/project.ts";
+import { projectNotebookPath, projectStateDir, resolveProject, writeProjectRegistration } from "../plugin/server/core/project.ts";
 import { prepareTaskWorktree } from "../plugin/server/core/workspace.ts";
 import { createLeadMailRuntime } from "../plugin/server/lead-mailbox.ts";
-import { PEER_HANDOFF_TOKENS } from "../plugin/server/peer-handoff.ts";
+import { PEER_HANDOFF_TOKENS, renderPeerHandoffExtractionPrompt } from "../plugin/server/peer-handoff.ts";
 import { createSurfaceHandlers, type SurfaceAgentSnapshot, type SurfaceDaemonApi } from "../plugin/server/surface-rpc.ts";
 import { handleSpoolRequest, startSpool } from "../plugin/server/spool.ts";
 import { saveLanes } from "../plugin/server/core/lanes.ts";
@@ -556,7 +557,8 @@ test("Owner Replace now persists a substitute and failed creation retries across
   if (failed.ok) { assert.equal(failed.progress?.state, "failed"); assert.equal(failed.progress?.handover, "substitute"); }
   assert.equal(f.sent.filter(message => message.id === f.peer.id).length, 0);
   const saved = readFileSync(f.handoff, "utf8");
-  for (const section of ["Plugin-built handover", "Ledger digest", "Project notebook", "Git state", "Open Tasks", "Recent timeline"]) assert.ok(saved.includes(section));
+  for (const section of ["Plugin-built handover", "Ledger digest", "Git state", "Open Tasks", "Recent timeline"]) assert.ok(saved.includes(section));
+  assert.equal(saved.includes("Project notebook"), false, "Peer substitute handover never includes Lead's Project notebook");
   f.runtime.stop();
   const restarted = f.makeRuntime(); t.after(() => restarted.stop());
   f.daemon.agents.create = create;
@@ -761,4 +763,88 @@ test("auto context-mark Peer handoff normalizes legacy effort-suffixed Antigravi
   assert.deepEqual(f.created[1]!.config, { provider: "antigravity/gemini-4-hydrogen", thinkingOptionId: "medium" });
 
   assert.equal(readFileSync(projectLanesFile, "utf8"), lanesBefore, "lanes.json on disk stays unmutated");
+});
+
+test("Peer substitute strips echoed extraction prompts, omits Project notebook, and excludes task-less git_blocked from Ledger digest", async t => {
+  const f = fixture(t);
+  writeFileSync(projectNotebookPath(f.stateDir, f.slug), "## 1. Verification & Run Recipe\nlead_merge only\n");
+  const projectFactory = factoryRegistryFor(f.stateDir, { root: f.factory }).factoryForProject(f.slug);
+  f.factory.ledger.append({
+    event: "git_blocked",
+    blockId: "gb-root-noise",
+    command: "git push",
+    rule: "release-fence",
+    reason: "root blocked noise",
+    cwd: f.root,
+  });
+  projectFactory.ledger.append({
+    event: "git_blocked",
+    blockId: "gb-proj-noise",
+    command: "git push",
+    rule: "release-fence",
+    reason: "project taskless blocked noise",
+    cwd: f.root,
+  });
+  projectFactory.ledger.append({
+    event: "store_release_started",
+    runId: "sr-peer-keep",
+    action: "stage",
+    platforms: ["ios"],
+    mode: "on-request",
+  });
+  const ref = f.daemon.agents.ref;
+  f.daemon.agents.ref = id => ({
+    ...ref(id),
+    timeline: {
+      refetch: async () => ({
+        entries: [
+          { item: { type: "user_message", text: "# Peer handoff extraction — Task T-04\n\nStart no new work." } },
+          { item: { type: "tool_call", text: "raw tool call" } },
+          { item: { type: "assistant_message", text: "Fixed auth token parser; test/auth.test.ts still fails on expiry." } },
+        ],
+      }),
+    },
+  });
+  f.peer.lastUsage = null;
+  const res = await f.surface.handoff({ projectRoot: f.root, seat: "peer:T-04" }, "replaceNow");
+  assert.equal(res.ok, true);
+  const saved = readFileSync(f.handoff, "utf8");
+  assert.equal(saved.includes("Project notebook"), false);
+  assert.equal(saved.includes("lead_merge only"), false);
+  assert.equal(saved.includes("# Peer handoff extraction"), false);
+  assert.equal(saved.includes("git refused release-fence"), false);
+  assert.ok(saved.includes("store release stage started [ios] (on-request)"), "Project store_release_* stays visible in digest");
+  assert.ok(saved.includes("Assistant: Fixed auth token parser; test/auth.test.ts still fails on expiry."));
+});
+
+test("renderPeerHandoffExtractionPrompt unifies context-mark and owner prompts with Priority-First isolation and normalizes extracted Peer file:// paths before capping", async t => {
+  const ctxPrompt = renderPeerHandoffExtractionPrompt({ task: "T-09", reason: "context-mark", mark: 200_000 });
+  const ownerPrompt = renderPeerHandoffExtractionPrompt({ task: "T-09", reason: "owner" });
+  for (const prompt of [ctxPrompt, ownerPrompt]) {
+    assert.match(prompt, /^# Peer handoff extraction — Task T-09/);
+    assert.match(prompt, /1\. Remaining Requirements & Failing Checks[\s\S]*2\. Dead Ends & Do-Not-Retry[\s\S]*3\. Read-First Files for Successor[\s\S]*4\. Completed & Verified Slice/);
+    assert.equal(prompt.includes("Worktree Git Status"), false, "never asks Peer to duplicate worktreeDigest");
+    assert.match(prompt, /never mention Factory MCP tools/);
+    assert.match(prompt, /Never include `file:\/\/` URLs/);
+  }
+  assert.match(ctxPrompt, /200,000 tokens/);
+  assert.match(ownerPrompt, /Owner requested a successor/);
+
+  const f = fixture(t);
+  await f.runtime.onLeadTurnEnded(ended(f.peer.id));
+  const reply = [
+    "# 1. Remaining Requirements & Failing Checks",
+    `Inspect [pending.txt](file://${f.cwd}/pending.txt) and ${f.root}/README.md`,
+    "Note: agent_claim symbol stays untouched.",
+    "",
+    "# 2. Dead Ends & Do-Not-Retry",
+    "Avoid patching the regex directly.",
+  ].join("\n");
+  await f.runtime.onLeadTurnEnded(ended(f.peer.id, reply));
+  const saved = readFileSync(f.handoff, "utf8");
+  assert.ok(saved.includes("[pending.txt](pending.txt)"));
+  assert.ok(saved.includes("README.md"));
+  assert.equal(saved.includes(`file://${f.cwd}`), false);
+  assert.equal(saved.includes(f.root), false);
+  assert.ok(saved.includes("agent_claim"), "no server-side symbol scrubber");
 });

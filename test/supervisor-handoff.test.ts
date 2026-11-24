@@ -40,7 +40,7 @@ test('Supervisor provider handoff carries Owner goals and held reports into its 
   const f = fixture(t);
   const changed = await f.surface.lanesSet({ projectRoot: f.root, lane: 'supervisor', value: 'claude/opus-4-8' }); assert.equal(changed.ok, true);
   assert.equal(f.created.length, 0);
-  assert.match(f.sent[0]?.text ?? '', /Owner goals[\s\S]*decisions taken[\s\S]*open questions/i);
+  assert.match(f.sent[0]?.text ?? '', /Owner Goals & Active Constraints[\s\S]*Open Questions & Pending Confirmations[\s\S]*Decisions Taken/i);
   const report = await f.runtime.reportSupervisor({ id: 'report', kind: 'supervisor_report', project: f.slug, message: 'Wave is ready' }); assert.equal(report.ok, true);
   assert.equal(f.mailbox().supervisorQueued.length, 1);
   await f.runtime.onLeadTurnEnded({ agentId: 'old', outcome: { kind: 'completed' }, timeline: [{ type: 'assistant_message', text: '## Owner goals\nShip safely\n## Decisions taken\nUse new lane\n## Open questions\nNone' }] });
@@ -61,7 +61,7 @@ test('legacy Supervisor revoke RPC starts a continuity handoff instead of retiri
   registerSurfaceRpc({ handle: (rpc: { name: string }, handler: typeof revoke) => { if (rpc.name === 'factory.supervisor.revoke') revoke = handler; } } as never, f.surface);
   assert.ok(revoke); await revoke({ projectRoot: f.root }, {});
   assert.deepEqual(f.archived, []);
-  assert.match(f.sent[0]?.text ?? '', /Owner goals/);
+  assert.match(f.sent[0]?.text ?? '', /Owner Goals & Active Constraints/);
 });
 
 test('Supervisor near its mark raises a Hand off now suggestion without creating a successor', async t => {
@@ -324,4 +324,82 @@ test('Supervisor handoff normalizes legacy effort-suffixed Antigravity lanes aga
   const kickoff = f.sent.find(s => s.id === 'successor-1')?.text ?? '';
   assert.match(kickoff, /supervisor=antigravity\/gemini-4-argon:high/);
   assert.equal(readFileSync(projectLanesFile, 'utf8'), lanesBefore);
+});
+
+test('Supervisor substitute extracts clean timeline text instead of raw JSON and strips extraction echoes', async t => {
+  const f = fixture(t);
+  const ref = f.daemon.agents.ref;
+  f.daemon.agents.ref = id => ({
+    ...ref(id),
+    timeline: {
+      refetch: async () => ({
+        entries: [
+          { turnId: 't1', item: { type: 'user_message', text: 'Supervisor handoff: reply first with a short continuity handover.' } },
+          { turnId: 't1', item: { type: 'tool_call', name: 'read_file' } },
+          { turnId: 't1', item: { type: 'user_message', text: 'Ship Android and iOS builds.' } },
+          { turnId: 't1', item: { type: 'assistant_message', text: 'Dispatched Lead for store release prep.' } },
+        ],
+      }),
+    },
+  });
+  const replaced = await f.surface.handoff({ projectRoot: f.root, seat: 'supervisor' }, 'replaceNow');
+  assert.ok(replaced.ok);
+  const handover = await f.surface.handoff({ projectRoot: f.root, seat: 'supervisor' }, 'handover');
+  assert.ok(handover.ok);
+  const text = handover.text!;
+  assert.equal(text.includes('"item"'), false, 'never dumps raw JSON.stringify entry objects');
+  assert.equal(text.includes('Supervisor handoff: reply first'), false, 'strips echoed Supervisor prompt');
+  assert.ok(text.includes('User: Ship Android and iOS builds.'));
+  assert.ok(text.includes('Assistant: Dispatched Lead for store release prep.'));
+});
+
+test('Supervisor extraction prompt enforces Priority-First isolation and normalizes file:// root URLs before capping', async t => {
+  const f = fixture(t);
+  await f.surface.handoff({ projectRoot: f.root, seat: 'supervisor' }, 'start');
+  const prompt = f.sent[0]!.text;
+  assert.match(prompt, /1\. Owner Goals & Active Constraints[\s\S]*2\. Open Questions & Pending Confirmations[\s\S]*3\. Decisions Taken/);
+  assert.match(prompt, /never record Factory MCP tool schemas, CLI flags, SLP workflow rules, runtime wiring bugs, or file:\/\/ URLs/);
+
+  await f.runtime.onLeadTurnEnded({
+    agentId: 'old',
+    outcome: { kind: 'completed' },
+    timeline: [
+      {
+        type: 'assistant_message',
+        text: `## Owner Goals & Active Constraints\nReview [README.md](file://${f.root}/README.md) and file://${f.root}/docs/spec.md\nKeep supervisor_dispatch_lead note intact.`,
+      },
+    ],
+  });
+  const saved = readFileSync(join(projectStateDir(f.stateDir, f.slug), 'supervisor-handoff.md'), 'utf8');
+  assert.ok(saved.includes('[README.md](README.md)'));
+  assert.ok(saved.includes('docs/spec.md'));
+  assert.equal(saved.includes(`file://${f.root}`), false);
+  assert.ok(saved.includes('supervisor_dispatch_lead'), 'no server-side symbol scrubber');
+});
+
+test('Supervisor succession kickoff packet surfaces Project-own active/paused store_release_* state', async t => {
+  const f = fixture(t);
+  const { factoryRegistryFor } = await import('../plugin/server/projects.ts');
+  const projectFactory = factoryRegistryFor(f.stateDir, { root: f.factory }).factoryForProject(f.slug);
+  projectFactory.ledger.append({
+    event: 'store_release_started',
+    runId: 'sr-sup-1',
+    action: 'stage',
+    platforms: ['android', 'ios'],
+    mode: 'on-request',
+  });
+  projectFactory.ledger.append({
+    event: 'store_release_paused',
+    runId: 'sr-sup-1',
+    holeKind: 'day0-store-init',
+    phase: 'preflight',
+    guidePath: '/tmp/GUIDE.md',
+  });
+
+  await f.surface.handoff({ projectRoot: f.root, seat: 'supervisor' }, 'replaceNow');
+  const kickoff = f.sent.find(s => s.id === 'successor-1')?.text ?? '';
+  assert.match(
+    kickoff,
+    /^- Active store release: runId=sr-sup-1, action=stage, platforms=\[android, ios\], status=paused, phase=preflight, holeKind=day0-store-init, guide=\/tmp\/GUIDE\.md$/m,
+  );
 });

@@ -24,7 +24,7 @@ import { GATE_QUEUE_FILENAME, readPersistedGateQueue, snapshotFromGateQueueFile 
 import type { GateQueueItem, GateQueueSnapshot } from "./core/gate-queue-status.ts";
 import { attemptEvidenceName } from "./core/factory.ts";
 import { boundTaskPeers } from "./task-peers.ts";
-import { peerHandoffsInProgress, projectPeersInFlight } from "./peer-in-flight.ts";
+import { peerHandoffsInProgress, projectOwnAndTaskEventsOf, projectPeersInFlight } from "./peer-in-flight.ts";
 import { withProjectIngressLock } from "./core/project-ingress-lock.ts";
 import { projectTask } from "./core/task-state.ts";
 import { upgradeFactory } from "./core/history-upgrade.ts";
@@ -1687,8 +1687,11 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
   const retireSeat = (seat: SeatName, slug: string | undefined, root: string | undefined, context?: SurfaceCallContext) =>
     serializeSeat(`${slug}:${seat}`, () => retireSeatUnlocked(seat, slug, root, context));
 
-  /** The Project's own ledger stream for a seat kickoff packet — its Factory's events, never a wrong-Project's. */
-  const projectLedgerEventsOf = (slug: string): readonly LedgerEvent[] => {
+  /** The Project's own ledger stream for a seat kickoff packet — Project-own events plus workspace-owned tasks, never a wrong-Project's. */
+  const projectLedgerEventsOf = (slug: string, root?: string): readonly LedgerEvent[] => {
+    if (root !== undefined && root !== "") {
+      return projectOwnAndTaskEventsOf({ factory: deps.factory, registry: deps.registry }, deps.stateDir, slug, root);
+    }
     try {
       return factoryForSlug(slug).ledger.events;
     } catch {
@@ -1728,7 +1731,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       role: "supervisor",
       projectSlug: project.slug,
       projectRoot: project.root,
-      ledgerEvents: projectLedgerEventsOf(project.slug),
+      ledgerEvents: projectLedgerEventsOf(project.slug, project.root),
       helperMcps: discoverHelperMcps({ stateDir: deps.stateDir, userHome: resolveSurfaceUserHome() }).servers,
       ...(lanes !== undefined ? { lanes } : {}),
       stateDir: deps.stateDir,
@@ -2105,7 +2108,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
               role: "supervisor",
               projectSlug: project.slug,
               projectRoot: project.root,
-              ledgerEvents: projectLedgerEventsOf(project.slug),
+              ledgerEvents: projectLedgerEventsOf(project.slug, project.root),
               helperMcps: discoverHelperMcps({ stateDir: deps.stateDir, userHome: resolveSurfaceUserHome() }).servers,
               lanes: normalizeLanesWithProviders(lanes.lanes, providers),
               stateDir: deps.stateDir,

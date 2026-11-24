@@ -1628,6 +1628,8 @@ test("Lead wave laws rewrite the Project notebook for the plugin single writer â
     assert.match(surface, /<= 12 active Recurrence Guard rows/);
     assert.match(surface, /State: observed \(1x\)/);
     assert.match(surface, /State: verified/);
+    assert.match(surface, /strictly project-owned verification\/run facts/);
+    assert.match(surface, /never record Factory MCP tool names, CLI commands\/flags, or SLP workflow laws/);
   }
 });
 

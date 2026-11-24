@@ -194,7 +194,7 @@ export function projectStreamOf(source: ProjectLedgerSource, slug: string, stric
   const project = projectFactoryOf(source, slug, strict);
   if (project === source.factory) return source.factory.ledger.events;
   const wiredOnly = source.factory.ledger.events.filter((evt) => {
-    if (!("task" in evt) || typeof evt.task !== "string") return true; // machine-level facts stay visible
+    if (!("task" in evt) || typeof evt.task !== "string") return false;
     return project.contractFor(evt.task) === undefined;
   });
   return [...project.ledger.events, ...wiredOnly];
@@ -208,18 +208,49 @@ function realpathSafe(path: string): string {
   }
 }
 
+function taskBelongsToProjectRoot(
+  source: ProjectLedgerSource,
+  slug: string,
+  root: string,
+  normRoot: string,
+  worktreesDir: string,
+  task: string,
+  strict: boolean,
+): boolean {
+  const contract = taskFactoryOf(source, slug, task, strict).contractFor(task);
+  if (contract === undefined) return false;
+  const ws = contract.workspace;
+  const normWs = realpathSafe(resolve(ws));
+  return ws === root || ws.startsWith(`${root}/`) || normWs === normRoot || normWs.startsWith(`${normRoot}/`) ||
+    ws === worktreesDir || ws.startsWith(`${worktreesDir}/`);
+}
+
 /** The Project's task-scoped events: tasks whose Contract workspace sits inside `root` (symlinks resolved) or the Project's worktrees dir. */
 export function projectEventsOf(source: ProjectLedgerSource, stateDir: string, slug: string, root: string, strict = false): readonly LedgerEvent[] {
   const normRoot = realpathSafe(resolve(root));
   const worktreesDir = join(projectStateDir(stateDir, slug), "worktrees");
   return projectStreamOf(source, slug, strict).filter((evt) => {
     if (!("task" in evt) || typeof evt.task !== "string") return false;
-    const contract = taskFactoryOf(source, slug, evt.task, strict).contractFor(evt.task);
-    if (contract === undefined) return false;
-    const ws = contract.workspace;
-    const normWs = realpathSafe(resolve(ws));
-    return ws === root || ws.startsWith(`${root}/`) || normWs === normRoot || normWs.startsWith(`${normRoot}/`) ||
-      ws === worktreesDir || ws.startsWith(`${worktreesDir}/`);
+    return taskBelongsToProjectRoot(source, slug, root, normRoot, worktreesDir, evt.task, strict);
+  });
+}
+
+/**
+ * The Project's own task-less events (`store_release_*`, `release_*`, etc.)
+ * plus workspace-owned task events (including legacy root-bridge tasks).
+ */
+export function projectOwnAndTaskEventsOf(
+  source: ProjectLedgerSource,
+  stateDir: string,
+  slug: string,
+  root: string,
+  strict = false,
+): readonly LedgerEvent[] {
+  const normRoot = realpathSafe(resolve(root));
+  const worktreesDir = join(projectStateDir(stateDir, slug), "worktrees");
+  return projectStreamOf(source, slug, strict).filter((evt) => {
+    if (!("task" in evt) || typeof evt.task !== "string") return true;
+    return taskBelongsToProjectRoot(source, slug, root, normRoot, worktreesDir, evt.task, strict);
   });
 }
 

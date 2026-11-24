@@ -123,6 +123,10 @@ test("LEAD_WAVE_LAWS, Lead contract, and Lead bootstrap feature lead_reply_peer,
   const leadContract = renderRoleContract("lead");
   assert.match(leadContract, /paseo-factory_lead_reply_peer/);
   assert.match(leadContract, /\[--reopen-if <text>\]/);
+  for (const surface of leadSurfaces) {
+    assert.match(surface, /strictly project-owned verification\/run facts/);
+    assert.match(surface, /never record Factory MCP tool names, CLI commands\/flags, or SLP workflow laws/);
+  }
 });
 
 test("disposition-prompt helpers render Reopen if:, keep continuation topology-blind, and append agent_ask premise check (ADR 0069)", () => {

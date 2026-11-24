@@ -3,18 +3,57 @@ import { readFileSync } from "node:fs";
 import type { TaskView } from "../shared/view.ts";
 import { capHandoffText } from "./handoff-text.ts";
 
+const EXTRACTION_PROMPT_ECHO_RE = /^(?:# (?:Peer|Lead) handoff extraction\b|Supervisor handoff:)/i;
+
+/**
+ * Extracts only human-readable `user_message` and `assistant_message` text
+ * from heterogeneous timeline entries, stripping tool blobs and echoed
+ * plugin handoff extraction prompts.
+ */
+export function extractCleanTimelineText(
+  entries: readonly unknown[],
+  options?: { maxEntries?: number },
+): string {
+  const messages: string[] = [];
+  for (const entry of entries) {
+    if (entry === null || typeof entry !== "object") continue;
+    const candidate =
+      "item" in entry && entry.item !== null && typeof entry.item === "object"
+        ? entry.item
+        : entry;
+    const type = (candidate as { type?: unknown }).type;
+    const text = (candidate as { text?: unknown }).text;
+    if ((type !== "user_message" && type !== "assistant_message") || typeof text !== "string") {
+      continue;
+    }
+    const trimmed = text.trim();
+    if (trimmed === "" || EXTRACTION_PROMPT_ECHO_RE.test(trimmed)) continue;
+    const collapsed = trimmed.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n");
+    const speaker = type === "user_message" ? "User" : "Assistant";
+    messages.push(`${speaker}: ${collapsed}`);
+  }
+  const maxEntries = options?.maxEntries;
+  const bounded =
+    maxEntries !== undefined
+      ? maxEntries <= 0
+        ? []
+        : messages.slice(-maxEntries)
+      : messages;
+  return bounded.join("\n\n");
+}
+
 /** Shared continuity document for a dead or unresponsive Supervisor, Lead or Peer. */
 export function buildSubstituteHandover(input: {
   digest: string;
-  notebook: string;
+  notebook?: string;
   git: string;
   tasks: string;
   timeline: string;
   maxBytes: number;
 }): string {
-  const sections = [
+  const sections: [string, string][] = [
     ["Ledger digest", input.digest],
-    ["Project notebook", input.notebook],
+    ...(input.notebook === undefined ? [] : [["Project notebook", input.notebook] as [string, string]]),
     ["Git state", input.git],
     ["Open Tasks", input.tasks],
     ["Recent timeline", input.timeline],

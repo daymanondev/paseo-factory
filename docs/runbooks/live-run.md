@@ -51,6 +51,15 @@ factory --home /path/to/paseo-home transcript <agent-id-or-prefix>
 
 The exporter reads persisted agent records and `~/.gemini/antigravity-cli/conversations/<conversationId>.db` (`steps` table). It also accepts a direct conversation id and `--conversations-dir <dir>`. Markdown is the default; HTML is self-contained and escapes transcript content. Exporting never resumes an agent or writes to its conversation database.
 
+## Upgrading plugin while a Project is running
+
+When shipping a new `paseo-factory` release while an existing Project already has active seats or running Tasks, adapt running projects cleanly through the UI controls rather than editing `~/.paseo/plugins/` on disk:
+
+1. **Pause the `Gate queue`:** Open **Factory overview** (`Factory` sidebar entry) and click **Pause queue**. Already-running Gates finish cleanly, and queued Claims hold without starting new shell Gates mid-upgrade.
+2. **Update `paseo-factory` in Paseo Desktop:** Install/update the release through Paseo Desktop's plugin update flow and let the daemon reload cleanly (never copy/rsync files into `~/.paseo/plugins/` mid-run).
+3. **Hand off active seats:** From the Project panel's **Team** tab, trigger **Lead Handoff** (and **Supervisor Handoff** when Supervisor instructions, kickoff packets, or Supervisor MCP schemas changed). Each successor seat boots fresh with the new version's `Live role contract`, `paseo_factory` MCP tool schemas, and clean 4-Layer extracted continuity (no need to message Supervisor solely to hold Lead unless Lead is mid-wave and needs an Owner pause note; triggering `Lead Handoff` directly waits for the safe quiet point if a Peer is in flight).
+4. **Resume the queue:** Once the successor seats are `idle` / active on the new version, click **Resume queue** in **Factory overview**.
+
 ## 1. Preflight
 
 - Daemon alive: `paseo status --home ~/.paseo-factory`.

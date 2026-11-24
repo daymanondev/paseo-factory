@@ -8,9 +8,9 @@ import { normalizeLanesWithDaemon, providerCatalogForLane } from './spool.ts';
 import { projectStateDir, projectNotebookPath, readProjectRegistration, writeProjectRegistration } from './core/project.ts';
 import { readLeadMailbox, requeueLeadMail, deliverLeadMail } from './core/mailbox.ts';
 import { buildSeatKickoffPacket } from './core/preflight.ts';
-import { capHandoffText, validHandoffText } from './handoff-text.ts';
+import { capHandoffText, normalizeHandoffPaths, validHandoffText } from './handoff-text.ts';
 import { laneRef, laneValue, readHandoffProgress, writeHandoffProgress } from './handoff-progress.ts';
-import { buildSubstituteHandover, readHandoverGit, readNotebook } from './substitute-handover.ts';
+import { buildSubstituteHandover, extractCleanTimelineText, readHandoverGit, readNotebook } from './substitute-handover.ts';
 import type { HandoffProgress, HandoffRequest, HandoffReply } from '../shared/handoff.ts';
 import type { SurfaceAgentSnapshot, SurfaceDaemonApi } from './surface-rpc.ts';
 import type { LeadMailItem } from './core/mailbox.ts';
@@ -67,10 +67,10 @@ export function createSupervisorHandoffRuntime(deps: {
       }
       const source = validHandoffText(extracted) ? 'extracted' : 'substitute';
       const timeline = source === 'substitute'
-        ? (tail ?? await timelineTail(data.outgoingId, turnId)).map(entry => JSON.stringify(entry)).join('\n') || '(outgoing Supervisor unavailable)'
+        ? extractCleanTimelineText(tail ?? await timelineTail(data.outgoingId, turnId)) || '(outgoing Supervisor unavailable)'
         : '';
       if (source === 'substitute') update(slug, { state: 'substitute' });
-      data.text = source === 'extracted' ? capHandoffText(extracted!, SUPERVISOR_HANDOFF_MAX_BYTES) : buildSubstituteHandover({ ...evidence, notebook: readNotebook(projectNotebookPath(deps.stateDir, slug)), git: readHandoverGit(reg.root), timeline, maxBytes: SUPERVISOR_HANDOFF_MAX_BYTES });
+      data.text = source === 'extracted' ? capHandoffText(normalizeHandoffPaths(extracted!, [reg.root]), SUPERVISOR_HANDOFF_MAX_BYTES) : buildSubstituteHandover({ ...evidence, notebook: readNotebook(projectNotebookPath(deps.stateDir, slug)), git: readHandoverGit(reg.root), timeline, maxBytes: SUPERVISOR_HANDOFF_MAX_BYTES });
       writeFileSync(path(slug, 'supervisor-handoff.md'), data.text);
       save(slug, data); update(slug, { state: 'creating-successor', handover: source });
     }
@@ -182,7 +182,15 @@ export function createSupervisorHandoffRuntime(deps: {
       if (input.action === 'replaceNow' || !outgoing || outgoing.status === 'error') await complete(slug);
       else {
         arm(slug, deps.timeoutMs);
-        try { await deps.daemon().agents.ref(outgoing.id).send(`Supervisor handoff: reply first with a short continuity handover in three sections: Owner goals, Decisions taken, Open questions. Keep it below ${SUPERVISOR_HANDOFF_MAX_BYTES} UTF-8 bytes. Do not dispatch work or message the Lead; the plugin persists your reply and hands held reports to your successor.`); }
+        try {
+          await deps.daemon().agents.ref(outgoing.id).send([
+            `Supervisor handoff: reply first with a short continuity handover below ${SUPERVISOR_HANDOFF_MAX_BYTES} UTF-8 bytes in three sections in order:`,
+            '1. Owner Goals & Active Constraints',
+            '2. Open Questions & Pending Confirmations',
+            '3. Decisions Taken',
+            'Capture strictly project goals, scope/product decisions, and pending Owner confirmations — never record Factory MCP tool schemas, CLI flags, SLP workflow rules, runtime wiring bugs, or file:// URLs (fresh tooling and kickoff state load automatically at successor boot). Do not dispatch work or message the Lead; the plugin persists your reply and hands held reports to your successor.',
+          ].join('\n\n'));
+        }
         catch { await complete(slug); }
       }
       return { ok: true, progress: progress(slug) };

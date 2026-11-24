@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-11-24
+
+**Handoff Context & Control-Plane Isolation: Priority-First continuity extraction with `Dead Ends`, section-aware capping and repo-relative path normalization, clean `Substitute handover`s, and active/paused `Store release` kickoff surfacing (ADR 0070).**
+
+### Added
+
+- **Repo-relative path normalization & section-aware handoff capping (`plugin/server/handoff-text.ts`, `test/handoff-text.test.ts`):** Added `normalizeHandoffPaths(text, roots)` to strip exact worktree/project-root prefixes and `file://` URLs down to repo-relative forward-slashed paths while preserving external URLs and symbols, and upgraded `capHandoffText(text, maxBytes)` to perform bottom-up section-aware Markdown truncation (`^#{1,2}\s+`) with reserved per-section floors (`Math.min(512, Math.floor(maxBytes / (sections.length * 2)))`) within unchanged `4 KB` / `8 KB` / `12 KB` byte limits.
+- **Priority-First extraction prompts & 4-Layer Control-Plane Isolation (`plugin/server/peer-handoff.ts`, `plugin/server/lead-mailbox.ts`, `plugin/server/supervisor-handoff.ts`):** Unified Peer context-mark and Owner extraction prompts into `renderPeerHandoffExtractionPrompt` (4 Priority-First sections, omitting duplicated `Worktree Git Status` already injected by `worktreeDigest`), reordered Lead (`8 KB`, 5 sections) and Supervisor (`4 KB`, 3 sections) prompts around Priority-First continuation with explicit `Dead Ends & Do-Not-Retry`, semantic 4-Layer isolation clauses (never recording Factory MCP tools, CLI flags, SLP laws, or runtime wiring quirks; no server-side regex scrubber), and pre-cap path normalization across all 3 extracted handoff paths.
+- **Machine-verified active/paused `Store release` line in `Seat kickoff packet` (`src/preflight.ts`, `plugin/server/core/preflight.ts`):** Exported `summarizeActiveStoreRelease(events)` to chronologically fold `store_release_{started,paused,completed,failed}` by `runId` and surface `- Active store release: ...` directly beneath `- Store release: ...` for both `lead` and `supervisor` seats whenever a release run is active or paused at a `Hole`.
+
+### Fixed
+
+- **Clean `Substitute handover` & Project-scoped Ledger events (`plugin/server/peer-in-flight.ts`, `plugin/server/substitute-handover.ts`, `plugin/server/peer-handoff.ts`, `plugin/server/supervisor-handoff.ts`, `plugin/server/lead-mailbox.ts`, `plugin/server/surface-rpc.ts`):** Stopped `projectStreamOf` from pulling task-less legacy root events into registered Projects, added `projectOwnAndTaskEventsOf` to retain Project-owned `store_release_*`/`release_*` events while isolating root-bridge tasks, excluded task-less `git_blocked` noise from `Substitute handover` `Ledger digest`, added shared `extractCleanTimelineText` (human-readable `user_message`/`assistant_message` text only, replacing `JSON.stringify` dumps in `supervisor-handoff.ts` and stripping echoed `# Peer/Lead/Supervisor handoff extraction` prompts), and made `notebook?: string` optional on `buildSubstituteHandover` so Peer substitutes omit Lead's `Project notebook` (`test/peer-handoff.test.ts`).
+- **Clean `Project notebook` isolation law (`src/roles-contract.ts`, `plugin/server/core/roles-contract.ts`, `plugin/bin/vault.mjs`):** Tightened `"Project Notebook & Recurrence Guard"` in `LEAD_WAVE_LAWS` so `notebook.md` records strictly project-owned verification/run recipes and codebase `Cause → Effect` recurrence mechanisms rather than Factory MCP tool names, CLI flags, or SLP workflow laws.
+
+### Documentation
+
+- **ADR 0070, `CONTEXT.md`, & `docs/runbooks/live-run.md`:** Added `docs/adr/0070-handoff-context-and-control-plane-isolation.md` (amending ADR 0047, ADR 0050, ADR 0057, ADR 0066), updated `Project notebook`, `Handoff`, and `Seat kickoff packet` entries in `CONTEXT.md`, and documented the live mid-run plugin upgrade procedure (`Gate queue Pause` → Paseo Desktop plugin update → `Lead Handoff` / `Supervisor Handoff` → `Resume queue`) in `docs/runbooks/live-run.md`.
+
 ## [0.22.0] - 2026-11-24
 
 **Project usage v2: normalized model identities, nested `Seat → Models` breakdown, `All / 7d / 24h` active-session windows, and `FACTORY_PALETTE` tabular styling (ADR 0043 amendment).**

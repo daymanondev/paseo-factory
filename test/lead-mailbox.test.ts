@@ -3863,3 +3863,111 @@ test("ADR 0058 quiet-point holds on open gate_queued/gate_started even when Peer
   );
 });
 
+test("Lead substitute strips # Lead handoff extraction prompt echoes and excludes task-less git_blocked from Ledger digest", async (t) => {
+  const f = makeSpooledRuntime(t);
+  f.fake.agents.push({ id: "lead-clean-sub", status: "idle", labels: { seat: "lead", project: f.slug }, cwd: f.projectRoot });
+  writeProjectRegistration(f.stateDir, f.slug, { root: f.projectRoot, lead: "lead-clean-sub" });
+  const { factoryRegistryFor } = await import("../plugin/server/projects.ts");
+  const projectFactory = factoryRegistryFor(f.stateDir, { root: f.factory }).factoryForProject(f.slug);
+  f.factory.ledger.append({
+    event: "git_blocked",
+    blockId: "gb-root-noise",
+    command: "git push",
+    rule: "release-fence",
+    reason: "root blocked noise",
+    cwd: f.projectRoot,
+  });
+  projectFactory.ledger.append({
+    event: "git_blocked",
+    blockId: "gb-taskless-noise",
+    command: "git push",
+    rule: "release-fence",
+    reason: "taskless blocked noise",
+    cwd: f.projectRoot,
+  });
+  projectFactory.ledger.append({
+    event: "store_release_started",
+    runId: "sr-lead-keep",
+    action: "stage",
+    platforms: ["android"],
+    mode: "on-request",
+  });
+  await f.surface.handoff({ projectRoot: f.projectRoot, seat: "lead" }, "start");
+  await f.leadMail.onLeadTurnEnded({
+    agentId: "lead-clean-sub",
+    outcome: { kind: "failed" },
+    timeline: [
+      { type: "user_message", text: `# Lead handoff extraction — project ${f.slug}\n\nUse 5 sections.` },
+      { type: "tool_call" },
+      { type: "assistant_message", text: "Next wave targets checkout retry recovery." },
+    ],
+  });
+  const handover = await f.surface.handoff({ projectRoot: f.projectRoot, seat: "lead" }, "handover");
+  assert.ok(handover.ok);
+  const text = handover.text!;
+  assert.equal(text.includes("# Lead handoff extraction"), false, "strips echoed Lead extraction prompt");
+  assert.equal(text.includes("git refused release-fence"), false, "excludes task-less git_blocked from substitute Ledger digest");
+  assert.ok(text.includes("store release stage started [android] (on-request)"), "retains Project store_release_* in substitute Ledger digest");
+  assert.ok(text.includes("Assistant: Next wave targets checkout retry recovery."));
+});
+
+test("Lead extraction prompt enforces Priority-First 4-Layer isolation and normalizes file:// root URLs before capping", async (t) => {
+  const { renderHandoffExtractionPrompt } = await import("../plugin/server/lead-mailbox.ts");
+  const prompt = renderHandoffExtractionPrompt("demo-proj", "owner");
+  assert.match(
+    prompt,
+    /1\. Current Wave & In-Flight State[\s\S]*2\. Open Questions & Owner Decisions[\s\S]*3\. Dead Ends & Failed Approaches[\s\S]*4\. Read-First Files[\s\S]*5\. Key Technical Findings & Next Wave Plan/,
+  );
+  assert.match(prompt, /never cite Factory MCP tool names, CLI commands\/flags, SLP workflow laws, or plugin wiring quirks/);
+  assert.match(prompt, /never include file:\/\/ URLs/);
+
+  const f = makeSpooledRuntime(t);
+  f.fake.agents.push({ id: "lead-norm", status: "idle", labels: { seat: "lead", project: f.slug }, cwd: f.projectRoot });
+  writeProjectRegistration(f.stateDir, f.slug, { root: f.projectRoot, lead: "lead-norm" });
+  await f.surface.handoff({ projectRoot: f.projectRoot, seat: "lead" }, "start");
+  await f.leadMail.onLeadTurnEnded({
+    agentId: "lead-norm",
+    outcome: { kind: "completed" },
+    timeline: [
+      {
+        type: "assistant_message",
+        text: `# 1. Current Wave & In-Flight State\nInspect [${f.projectRoot}/README.md](file://${f.projectRoot}/README.md) and file://${f.projectRoot}/src/main.ts\nSymbol lead_merge stays intact.`,
+      },
+    ],
+  });
+  const saved = handoffBodyOnDisk(join(projectStateDir(f.stateDir, f.slug), "lead-handoff.md"));
+  assert.ok(saved.includes("[README.md](README.md)"));
+  assert.ok(saved.includes("src/main.ts"));
+  assert.equal(saved.includes(`file://${f.projectRoot}`), false);
+  assert.ok(saved.includes("lead_merge"), "no server-side symbol scrubber");
+});
+
+test("Turn-1 Seat kickoff packet surfaces Project-own Active store release without leaking root store_release_*", async (t) => {
+  const f = makeSpooledRuntime(t);
+  const { factoryRegistryFor } = await import("../plugin/server/projects.ts");
+  const projectFactory = factoryRegistryFor(f.stateDir, { root: f.factory }).factoryForProject(f.slug);
+
+  // Unrelated root-factory store release must not leak into registered Project kickoff
+  f.factory.ledger.append({
+    event: "store_release_started",
+    runId: "sr-root-leak",
+    action: "submit",
+    platforms: ["ios"],
+    mode: "on-request",
+  });
+  // Registered Project's own active store release must surface in Turn-1 Lead kickoff
+  projectFactory.ledger.append({
+    event: "store_release_started",
+    runId: "sr-proj-1",
+    action: "stage",
+    platforms: ["android"],
+    mode: "auto-staging",
+  });
+
+  await f.leadMail.dispatchLead({ id: "disp-sr-1", kind: "lead_dispatch", project: f.slug, message: "Continue store release check" });
+  const leadSend = f.fake.sent.find((s) => /seat kickoff packet · role=lead/.test(s.text));
+  assert.ok(leadSend !== undefined, "Lead receives Turn-1 kickoff packet");
+  assert.match(leadSend.text, /^- Active store release: runId=sr-proj-1, action=stage, platforms=\[android\], status=running$/m);
+  assert.equal(leadSend.text.includes("sr-root-leak"), false, "root-factory store release never leaks into registered Project kickoff");
+});
+

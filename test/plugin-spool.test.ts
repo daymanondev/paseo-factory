@@ -1028,7 +1028,7 @@ test("a turn ending at >= 160k acks its batch, locks handing_over, holds arrivin
   assert.match(steerText(steer), /entire Markdown handoff directly in your final assistant message, in one piece/);
   assert.match(steerText(steer), /without running shell commands or writing files to disk/);
   assert.match(steerText(steer), /plugin server reads your reply and persists it automatically/);
-  for (const section of ["Goal & Remaining Roadmap", "Uncontracted Next Tasks", "Key Technical Findings", "Open Questions", "Read-First Files"]) {
+  for (const section of ["Current Wave & In-Flight State", "Open Questions & Owner Decisions", "Dead Ends & Failed Approaches", "Read-First Files", "Key Technical Findings & Next Wave Plan"]) {
     assert.ok(steerText(steer).includes(section), `the extraction prompt names the section "${section}"`);
   }
   assert.ok(steerText(steer).includes("Start no new tasks"), "the extraction prompt bounds the turn");

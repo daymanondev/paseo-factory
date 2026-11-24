@@ -4,7 +4,7 @@ import { readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Factory } from "./core/factory.ts";
 import { isReadOnlyPeerDisposition, type ContractSet, type LedgerEvent, type PeerDisposition } from "./core/events.ts";
-import { projectStateDir, projectNotebookPath } from "./core/project.ts";
+import { projectStateDir, readProjectRegistration } from "./core/project.ts";
 import { hasUnansweredPeerAsk, projectTask } from "./core/task-state.ts";
 import { atomicJson, readOptionalJson } from "./core/json-store.ts";
 import { taskWorktreeBranch } from "./core/workspace.ts";
@@ -17,9 +17,9 @@ import { associateTaskPeer, createTaskPeer, resolvePeerDispatchLane, resolveSpaw
 import { formatReopenIfBlock, peerHandoffContinuationFooter, readOnlyDispositionEvidence } from "./core/disposition-prompt.ts";
 import { laneRef, readHandoffProgress, writeHandoffProgress } from "./handoff-progress.ts";
 import type { HandoffRequest, HandoffReply, HandoffProgress } from "../shared/handoff.ts";
-import { buildSubstituteHandover, readNotebook, readHandoverGit, renderOpenTaskEvidence } from "./substitute-handover.ts";
+import { buildSubstituteHandover, extractCleanTimelineText, readHandoverGit, renderOpenTaskEvidence } from "./substitute-handover.ts";
 import { foldTasks, renderLedgerLine } from "./view.ts";
-import { capHandoffText, validHandoffText } from "./handoff-text.ts";
+import { capHandoffText, normalizeHandoffPaths, validHandoffText } from "./handoff-text.ts";
 
 import { handoffMarkTokens, PEER_CONTEXT_MARK_TOKENS } from "./handoff-limits.ts";
 
@@ -27,6 +27,29 @@ export const PEER_HANDOFF_TOKENS = PEER_CONTEXT_MARK_TOKENS;
 const MAX_PEER_HANDOFFS = 1;
 const SUMMARY_BYTES = 12 * 1024;
 const INTERRUPTED = "The outgoing Peer was interrupted during handoff extraction. Rely on the machine-verified worktree digest and inspect the remaining requirements and checks.";
+
+export function renderPeerHandoffExtractionPrompt(input: {
+  task: string;
+  reason: "context-mark" | "owner";
+  mark?: number;
+  maxBytes?: number;
+}): string {
+  const maxKb = Math.round((input.maxBytes ?? SUMMARY_BYTES) / 1024);
+  const triggerLine =
+    input.reason === "context-mark"
+      ? `Your context crossed ${(input.mark ?? PEER_HANDOFF_TOKENS).toLocaleString("en-US")} tokens. Start no new work and submit no Claim during extraction.`
+      : "The Owner requested a successor. Start no new work and submit no Claim during extraction.";
+  return [
+    `# Peer handoff extraction — Task ${input.task}`,
+    triggerLine,
+    `Preserve the existing committed work and uncommitted edits. Put the entire Markdown handoff directly in your final assistant message, in one piece, without running shell commands or writing files to disk. The plugin server reads your reply and persists it automatically, capping it at ${maxKb} KB. Use these four sections in order:`,
+    "1. Remaining Requirements & Failing Checks",
+    "2. Dead Ends & Do-Not-Retry — approaches or fixes attempted, exact errors, and why they failed so the successor does not repeat them",
+    "3. Read-First Files for Successor — repo-relative path:line pointers only (never file:// URLs; up to 10 items)",
+    "4. Completed & Verified Slice",
+    "Describe code, tests, commands, and repository facts only — never mention Factory MCP tools (`agent_claim`, `agent_ask`), CLI commands, Factory workflow rules, or runtime bugs (fresh tooling loads automatically for your successor). Never include `file://` URLs or copy `git status` / `git log` blocks (authoritative worktree git state is injected automatically by the harness). Record completed checks and exact remaining failures. This bounded handoff is this turn's only deliverable; end your turn after the complete Markdown document.",
+  ].join("\n\n");
+}
 
 interface PeerHandoffState {
   contractEpochSeq: number;
@@ -204,11 +227,19 @@ export function createPeerHandoffRuntime(deps: PeerHandoffDeps) {
       if (summary === undefined) {
         progress(slug, task, state, "substitute");
         let timeline = INTERRUPTED;
-        try { const tail = await bounded(refetchTurnTimeline(daemon.agents.ref(state.outgoingId!).timeline, input?.turnId ?? null)); timeline += "\n" + tail.map(entry => (entry.item ?? entry).text ?? "").filter(Boolean).join("\n"); } catch { /* Substitute remains useful without native timeline. */ }
+        try {
+          const tail = await bounded(refetchTurnTimeline(daemon.agents.ref(state.outgoingId!).timeline, input?.turnId ?? null));
+          const clean = extractCleanTimelineText(tail);
+          if (clean !== "") timeline += `\n\n${clean}`;
+        } catch { /* Substitute remains useful without native timeline. */ }
         const events = eventsOf(slug);
-        summary = buildSubstituteHandover({ digest: events.slice(-20).map(renderLedgerLine).join("\n"), notebook: readNotebook(projectNotebookPath(deps.stateDir, slug)), git: readHandoverGit(state.worktree!), tasks: renderOpenTaskEvidence(foldTasks(events)), timeline, maxBytes: SUMMARY_BYTES });
+        const digestEvents = events.filter(evt => !(evt.event === "git_blocked" && (!("task" in evt) || typeof evt.task !== "string")));
+        summary = buildSubstituteHandover({ digest: digestEvents.slice(-20).map(renderLedgerLine).join("\n"), git: readHandoverGit(state.worktree!), tasks: renderOpenTaskEvidence(foldTasks(events)), timeline, maxBytes: SUMMARY_BYTES });
       }
-      writeFileSync(path, capHandoffText(summary, SUMMARY_BYTES));
+      const finalSummary = state.handover === "extracted"
+        ? normalizeHandoffPaths(summary, [state.worktree ?? "", readProjectRegistration(deps.stateDir, slug)?.root ?? ""])
+        : summary;
+      writeFileSync(path, capHandoffText(finalSummary, SUMMARY_BYTES));
       state.phase = "retiring";
       save(slug, task, state);
       clear(`${slug}:${task}`);
@@ -423,12 +454,7 @@ export function createPeerHandoffRuntime(deps: PeerHandoffDeps) {
           if (peer.status === "error") throw new Error("outgoing Peer in error state");
           if (peerIsRunning(peer)) await stopPeer(peer.id);
           if (!eligible(slug, contract)) continue;
-          await bounded(deps.daemon().agents.ref(peer.id).send([
-            `# Peer handoff extraction — Task ${task}`, `Your context crossed ${mark.toLocaleString("en-US")} tokens. Start no new work and submit no Claim during extraction.`,
-            "Preserve the existing committed work and uncommitted edits. Put the entire Markdown handoff directly in your final assistant message, in one piece, without running shell commands or writing files to disk. The plugin server reads your reply and persists it automatically, capping it at 12 KB. Use these four sections:",
-            "1. Completed & Verified Slice", "2. Worktree Git Status & Uncommitted Edits", "3. Remaining Requirements & Failing Checks", "4. Read-First Files for Successor",
-            "Record completed checks and exact remaining failures. This bounded handoff is this turn's only deliverable; end your turn after the complete Markdown document.",
-          ].join("\n\n")));
+          await bounded(deps.daemon().agents.ref(peer.id).send(renderPeerHandoffExtractionPrompt({ task, reason: "context-mark", mark })));
         } catch (error) {
           deps.log(`Peer handoff extraction bypassed: ${String(error)}`);
           await finish(slug, contract, state, live);
@@ -516,7 +542,7 @@ export function createPeerHandoffRuntime(deps: PeerHandoffDeps) {
           try {
             if (peerIsRunning(peer)) await stopPeer(peer.id, Math.max(1, state.requestedAt! + extractionTimeout(state) - Date.now()));
             if (!eligible(input.slug, contract)) return { ok: false, code: "peer-task-ineligible", error: "A Claim started during handoff" };
-            await bounded(deps.daemon().agents.ref(peer.id).send(`# Peer handoff extraction — Task ${task}\n\nThe Owner requested a successor. Start no new work and submit no Claim. Preserve committed work and uncommitted edits. Put the entire Markdown handoff directly in your final assistant message, in one piece, without running shell commands or writing files to disk. Use four sections: Completed & Verified Slice; Worktree Git Status & Uncommitted Edits; Remaining Requirements & Failing Checks; Read-First Files for Successor. End your turn after this handoff (12 KB maximum).`), Math.max(1, state.requestedAt! + extractionTimeout(state) - Date.now()));
+            await bounded(deps.daemon().agents.ref(peer.id).send(renderPeerHandoffExtractionPrompt({ task, reason: "owner" })), Math.max(1, state.requestedAt! + extractionTimeout(state) - Date.now()));
             return { ok: true, progress: current() };
           } catch (error) { deps.log(`Peer Owner extraction bypassed: ${String(error)}`); }
         }
