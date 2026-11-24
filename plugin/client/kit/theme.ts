@@ -122,6 +122,7 @@ export function factoryPalette(theme: PluginTheme) {
 
 /** An explicit thinking word always accompanies this chip accent. Unknown values stay idle. */
 export function thinkingColour(theme: PluginTheme, thinking?: string): string {
-  const level = ["off", "minimal", "low", "medium", "high", "max"].indexOf(thinking ?? "off");
+  const normalized = thinking === "xhigh" ? "max" : (thinking ?? "off");
+  const level = ["off", "minimal", "low", "medium", "high", "max"].indexOf(normalized);
   return factoryPalette(theme).thinking[Math.max(0, level)]!;
 }

@@ -11,8 +11,8 @@ import type { HandoffProgress } from "../shared/handoff.ts";
  */
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import type { AgentView, PanelGateQueueEntry, PanelNeedsYouItem, PanelOpenDesign, PanelPeerRow, PanelSeatRow, PanelSupervisorCandidateRow, PanelTone, PanelView, PanelProfile, ScopedLaneRef, SeatAllowedAction, ProjectView, TaskView } from "../shared/view.ts";
-import { foldProjectUsageSummary, type ProjectUsageFile } from "./core/usage-status.ts";
+import type { AgentView, PanelGateQueueEntry, PanelNeedsYouItem, PanelOpenDesign, PanelPeerRow, PanelSeatRow, PanelSupervisorCandidateRow, PanelTone, PanelUsageWindow, PanelView, PanelProfile, ScopedLaneRef, SeatAllowedAction, ProjectView, TaskView } from "../shared/view.ts";
+import { foldProjectUsageSummary, type ModelUsageRow, type ProjectUsageFile, type UsageBuckets } from "./core/usage-status.ts";
 import { MAX_ATTEMPTS } from "./core/events.ts";
 import { openDesignBundleReady, readOpenDesignLink } from "./core/open-design/open-design-link-state.ts";
 import { readProjectSettings } from "./core/project-settings.ts";
@@ -403,12 +403,43 @@ function handoffsOf(input: PanelInput): HandoffProgress[] {
   return [...handoffs.values()].filter(progress => !closed.has(progress.seat)).sort((a, b) => a.seat.localeCompare(b.seat));
 }
 
-function usageOf(file: PanelInput["usage"]): PanelView["usage"] {
-  if (file === undefined) return null;
-  const summary = foldProjectUsageSummary(file ?? undefined);
-  if (summary === null) return { state: "empty", newTokens: 0, cachedTokens: 0, cacheReadTokens: 0, totalTokens: 0, cacheHitPercent: null, inputUncachedTokens: 0, outputTokens: 0, sessionCount: 0, seats: [], models: [] };
+const DAY_MS = 86_400_000;
+
+function emptyUsageWindow(): PanelUsageWindow {
+  return {
+    state: "empty",
+    newTokens: 0,
+    cachedTokens: 0,
+    cacheReadTokens: 0,
+    totalTokens: 0,
+    cacheHitPercent: null,
+    inputUncachedTokens: 0,
+    outputTokens: 0,
+    sessionCount: 0,
+    seats: [],
+    models: [],
+  };
+}
+
+function cacheHitOf(row: Pick<UsageBuckets, "inputUncachedTokens" | "cacheReadTokens" | "cacheWriteTokens">): number | null {
+  const input = row.inputUncachedTokens + row.cacheReadTokens + row.cacheWriteTokens;
+  return input > 0 ? Math.round((row.cacheReadTokens / input) * 100) : null;
+}
+
+function shareOf(
+  row: Pick<UsageBuckets, "inputUncachedTokens" | "outputTokens" | "totalTokens">,
+  parent: Pick<UsageBuckets, "inputUncachedTokens" | "outputTokens" | "totalTokens">,
+): number {
+  const rowNew = row.inputUncachedTokens + row.outputTokens;
+  const parentNew = parent.inputUncachedTokens + parent.outputTokens;
+  return parentNew > 0 ? (rowNew / parentNew) * 100 : parent.totalTokens > 0 ? (row.totalTokens / parent.totalTokens) * 100 : 0;
+}
+
+function usageWindowOf(file: ProjectUsageFile, sinceMs?: number): PanelUsageWindow {
+  const summary = foldProjectUsageSummary(file, sinceMs === undefined ? undefined : { sinceMs });
+  if (summary === null) return emptyUsageWindow();
   const { totals, byModel, bySeat } = summary;
-  const metrics = (row: typeof totals) => ({
+  const metrics = (row: UsageBuckets) => ({
     newTokens: row.inputUncachedTokens + row.outputTokens,
     inputUncachedTokens: row.inputUncachedTokens,
     cachedTokens: row.cacheReadTokens + row.cacheWriteTokens,
@@ -417,15 +448,43 @@ function usageOf(file: PanelInput["usage"]): PanelView["usage"] {
     totalTokens: row.totalTokens,
     sessionCount: row.sessionCount,
   });
-  const share = (totalTokens: number) => totals.totalTokens > 0 ? totalTokens / totals.totalTokens * 100 : 0;
-  const input = totals.inputUncachedTokens + totals.cacheReadTokens + totals.cacheWriteTokens;
+  const rankBreakdown = (a: { newTokens: number; totalTokens: number }, b: { newTokens: number; totalTokens: number }) =>
+    (b.newTokens - a.newTokens) || (b.totalTokens - a.totalTokens);
+  const rankModel = <T extends { newTokens: number; totalTokens: number; provider: string; model: string }>(a: T, b: T) =>
+    rankBreakdown(a, b) || a.provider.localeCompare(b.provider) || a.model.localeCompare(b.model);
+  const mapModel = (row: ModelUsageRow, parent: UsageBuckets) => ({
+    provider: row.provider,
+    model: row.model,
+    ...metrics(row),
+    cacheHitPercent: cacheHitOf(row),
+    sharePercent: shareOf(row, parent),
+  });
   return {
     state: "recorded",
     ...metrics(totals),
-    cacheHitPercent: input > 0 ? Math.round(totals.cacheReadTokens / input * 100) : null,
-    seats: bySeat.sort((a, b) => b.totalTokens - a.totalTokens || a.label.localeCompare(b.label)).map(row => ({ seat: row.seat, label: row.label, ...metrics(row), sharePercent: share(row.totalTokens) })),
-    models: byModel.sort((a, b) => b.totalTokens - a.totalTokens || a.provider.localeCompare(b.provider) || a.model.localeCompare(b.model)).map(row => ({ provider: row.provider, model: row.model, ...metrics(row), sharePercent: share(row.totalTokens) })),
+    cacheHitPercent: cacheHitOf(totals),
+    seats: bySeat
+      .map(row => ({
+        seat: row.seat,
+        label: row.label,
+        ...metrics(row),
+        cacheHitPercent: cacheHitOf(row),
+        sharePercent: shareOf(row, totals),
+        models: row.models.map(model => mapModel(model, row)).sort(rankModel),
+      }))
+      .sort((a, b) => rankBreakdown(a, b) || a.label.localeCompare(b.label)),
+    models: byModel.map(row => mapModel(row, totals)).sort(rankModel),
   };
+}
+
+function usageOf(file: PanelInput["usage"], now: number): PanelView["usage"] {
+  if (file === undefined) return null;
+  if (file === null) return emptyUsageWindow();
+  const all = usageWindowOf(file);
+  if (all.state === "empty") return all;
+  const w7d = usageWindowOf(file, now - 7 * DAY_MS);
+  const w24h = usageWindowOf(file, now - DAY_MS);
+  return { ...all, windows: { all, "7d": w7d, "24h": w24h } };
 }
 
 /** Projects the whole panel — pure over `input`. */
@@ -451,7 +510,7 @@ export function foldPanel(input: PanelInput): PanelView {
     profile: input.profile ?? { active: null, list: [], modified: false },
     defaultWorker: { role: "worker", title: "Default worker", lane: input.seatLanes?.worker ?? fallbackLane },
     handoffs: handoffsOf(input).map(handoff => ({ ...handoff, allowedActions: handoffActions(handoff, input.handovers?.includes(handoff.seat) === true) })),
-    usage: usageOf(input.usage),
+    usage: usageOf(input.usage, input.now),
     isProject: true,
     name: input.project.name ?? input.project.slug,
     summary: summaryOf(input, items.length, peers.length),

@@ -683,10 +683,21 @@ test("gate-queue ticket 01: claim enforces Contract timeoutSeconds (and 900s def
     const pidDir = makeTempDir();
     const parentPidPath = join(pidDir, "parent.pid");
     const pidPath = join(pidDir, "descendant.pid");
+    const readPid = (file: string): number | null => {
+      if (!existsSync(file)) return null;
+      const raw = readFileSync(file, "utf8").trim();
+      if (!/^\d+$/.test(raw)) return null;
+      const pid = Number(raw);
+      return Number.isSafeInteger(pid) && pid > 1 ? pid : null;
+    };
+    const killPidFile = (file: string): void => {
+      const pid = readPid(file);
+      if (pid === null) return;
+      try { process.kill(pid, "SIGKILL"); } catch { /* already dead */ }
+    };
     t.after(() => {
       for (const file of [pidPath, parentPidPath]) {
-        if (!existsSync(file)) continue;
-        try { process.kill(Number(readFileSync(file, "utf8")), "SIGKILL"); } catch { /* already dead */ }
+        killPidFile(file);
       }
     });
     disposeDir(t, pidDir);
@@ -696,15 +707,17 @@ test("gate-queue ticket 01: claim enforces Contract timeoutSeconds (and 900s def
     const stateDir = join(dir, "state");
     // Put helper scripts in pidDir (outside the Git worktree) so the Git tree stays clean!
     writeFileSync(join(pidDir, "descendant.mjs"), `
-      import { writeFileSync } from "node:fs";
+      import { renameSync, writeFileSync } from "node:fs";
       process.on("SIGTERM", () => {});
       setInterval(() => {}, 1000);
-      writeFileSync(${JSON.stringify(pidPath)}, String(process.pid));
+      writeFileSync(${JSON.stringify(`${pidPath}.tmp`)}, String(process.pid));
+      renameSync(${JSON.stringify(`${pidPath}.tmp`)}, ${JSON.stringify(pidPath)});
     `);
     writeFileSync(join(pidDir, "parent.mjs"), `
       import { spawn } from "node:child_process";
-      import { writeFileSync } from "node:fs";
-      writeFileSync(${JSON.stringify(parentPidPath)}, String(process.pid));
+      import { renameSync, writeFileSync } from "node:fs";
+      writeFileSync(${JSON.stringify(`${parentPidPath}.tmp`)}, String(process.pid));
+      renameSync(${JSON.stringify(`${parentPidPath}.tmp`)}, ${JSON.stringify(parentPidPath)});
       spawn(process.execPath, [${JSON.stringify(join(pidDir, "descendant.mjs"))}], { stdio: "ignore" });
       setInterval(() => {}, 1000);
     `);
@@ -755,7 +768,8 @@ test("gate-queue ticket 01: claim enforces Contract timeoutSeconds (and 900s def
       });
 
       const deadline = Date.now() + 20_000;
-      while (!existsSync(pidPath)) {
+      let pid: number | null = null;
+      while ((pid = readPid(pidPath)) === null) {
         if (Date.now() >= deadline) throw new Error(`${scenario.name}: descendant did not start within 20s`);
         await yieldBriefly();
       }
@@ -765,7 +779,6 @@ test("gate-queue ticket 01: claim enforces Contract timeoutSeconds (and 900s def
       await new Promise((resolve) => setImmediate(resolve));
       assert.equal(settled, false, `${scenario.name}: must not time out before ${scenario.expectedTimeoutMs}ms`);
 
-      const pid = Number(readFileSync(pidPath, "utf8"));
       const aliveStatus = spawnSync("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" }).stdout.trim();
       assert.ok(aliveStatus !== "" && !aliveStatus.startsWith("Z"), `${scenario.name}: descendant ${pid} still running before timeout`);
 
@@ -788,8 +801,7 @@ test("gate-queue ticket 01: claim enforces Contract timeoutSeconds (and 900s def
       t.mock.timers.reset();
       if (!settled) {
         for (const file of [pidPath, parentPidPath]) {
-          if (!existsSync(file)) continue;
-          try { process.kill(Number(readFileSync(file, "utf8")), "SIGKILL"); } catch { /* already dead */ }
+          killPidFile(file);
         }
         await Promise.race([
           claimPromise?.catch(() => {}),

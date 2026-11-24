@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-11-24
+
+**Project usage v2: normalized model identities, nested `Seat → Models` breakdown, `All / 7d / 24h` active-session windows, and `FACTORY_PALETTE` tabular styling (ADR 0043 amendment).**
+
+### Added
+
+- **`All / 7d / 24h` active-session windows & nested `Seat → Models` projection (`src/usage-status.ts`, `plugin/shared/view.ts`, `plugin/server/panel.ts`):** Added `sinceMs` filtering on `updatedAt`, per-seat nested `models` arrays with seat-relative new-token shares, per-row `cacheHitPercent`, and deterministic `windows` (`all`, `7d`, `24h`) computed from `input.now` while keeping top-level `PanelUsage` fields backward-compatible.
+- **Tabular `Project usage` card with `FACTORY_PALETTE` (`plugin/client/factory/project-panel.tsx`, `plugin/client/kit/pill.tsx`, `plugin/client/kit/theme.ts`):** Added `All | 7d | 24h` window switcher on desktop and mobile (with multi-day footnote and empty-window state), desktop `By Seat` (`Peer` expanded by default, `Lead`/`Supervisor` collapsed) and `By Model` toggle, tabular `New | Cache | Hit | Ses` columns (`>= 720px` wide / `< 720px` 2-line narrow), seat-colored share bars (`<RoleName />`, `watch` → `idle`), semantic cache-hit coloring (`ok >= 90%`, `wait 70–89%`, `bad < 70%`, `idle` unknown), `thinkingColour` `xhigh` → `max` mapping, and `SegmentedControl` `testID` hooks.
+
+### Fixed
+
+- **Antigravity model preservation & historical usage normalization (`src/usage-extractor.ts`, `src/usage-status.ts`, `plugin/bin/usage-status.mjs`):** Preserved known Paseo model names during Antigravity extraction instead of overwriting with `model-<enum>`, extended `ANTIGRAVITY_MODELS` fallback (`1417`, `1525–1528`), normalized historical `model-1525..1528`, casing (`GLM-5.3` → `glm-5.3`), and provider aliases (`copilot` → `github-copilot`) while keeping routes (`zcode` vs `zai`) and effort suffixes separate, filtered zero-token rows from breakdowns, ranked by `newTokens`, and added `cache-hit` to `factory status` seat/model lines.
+
+### Documentation
+
+- **ADR 0043 & `CONTEXT.md`:** Amended `docs/adr/0043-plugin-owned-multi-provider-token-metering-and-project-usage-rollup.md` and updated the `Project usage` glossary entry in `CONTEXT.md`.
+
 ## [0.21.1] - 2026-11-24
 
 **Harden ADR 0069 handbacks, `peer_ask` atomicity, `Loop Health` aggregation, `ruling` vs. `denial-stall` repoke caps, and prompt/legacy-alias alignment.**

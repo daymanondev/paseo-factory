@@ -285,6 +285,7 @@ export function SegmentedControl<T extends string>({
   onChange,
   disabled = false,
   size = "md",
+  testID,
 }: {
   theme: PluginTheme;
   options: readonly {
@@ -297,9 +298,11 @@ export function SegmentedControl<T extends string>({
   onChange: (value: T) => void;
   disabled?: boolean;
   size?: "sm" | "md";
+  testID?: string;
 }) {
   return (
     <View
+      {...(testID === undefined ? {} : { testID })}
       accessibilityRole="radiogroup"
       style={{
         flexDirection: "row",
@@ -321,6 +324,7 @@ export function SegmentedControl<T extends string>({
         return (
           <Pressable
             key={option.value}
+            {...(testID === undefined ? {} : { testID: `${testID}-${option.value}` })}
             accessibilityRole="radio"
             accessibilityState={{ selected: active, disabled }}
             accessibilityLabel={option.label}

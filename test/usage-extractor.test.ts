@@ -324,6 +324,54 @@ test("antigravity: Paseo 0.17.1 ACP plugin: sessionId wrapper resolves SQLite st
   assert.equal(usage.latestContextWindowTokens, 8_000 + 20_000 + 1_200);
 });
 
+test("antigravity: enums 1525-1528 map when agent model is absent, unknown enum preserves agent.config.model, and unknown enum without Paseo model falls back to model-<enum>", async t => {
+  const { dir, userHome } = tempHomes(t);
+  const cases = [
+    [1525, "gemini-4-hydrogen-high"],
+    [1526, "gemini-4-hydrogen-medium"],
+    [1527, "gemini-4-hydrogen-low"],
+    [1528, "gemini-4-neon-high"],
+  ] as const;
+  for (const [modelEnum, expectedModel] of cases) {
+    const convId = `conv-${modelEnum}`;
+    const db = await openSqlite(t, join(userHome, ".gemini", "antigravity-cli", "conversations", `${convId}.db`));
+    db.exec("CREATE TABLE steps (idx INTEGER PRIMARY KEY, step_type INTEGER, metadata BLOB)");
+    db.prepare("INSERT INTO steps VALUES (?, ?, ?)").run(1, 15, antigravityMetadata({ modelEnum, inputTokens: 1_000, outputTokens: 200, cacheReadTokens: 3_000, thinkingTokens: 50, responseTokens: 150 }));
+    const usage = await createUsageExtractor({ userHome, stateDir: dir }).extract({
+      id: `peer-${modelEnum}`,
+      provider: "antigravity",
+      persistence: { sessionId: convId },
+    });
+    assert.ok(usage);
+    assert.equal(usage.model, expectedModel, `enum ${modelEnum} maps to ${expectedModel} when agent model is absent`);
+  }
+
+  // Unknown enum 1599 preserves agent.config.model instead of overwriting with model-1599.
+  const preservedDb = await openSqlite(t, join(userHome, ".gemini", "antigravity-cli", "conversations", "conv-1599-config.db"));
+  preservedDb.exec("CREATE TABLE steps (idx INTEGER PRIMARY KEY, step_type INTEGER, metadata BLOB)");
+  preservedDb.prepare("INSERT INTO steps VALUES (?, ?, ?)").run(1, 15, antigravityMetadata({ modelEnum: 1599, inputTokens: 500, outputTokens: 100, cacheReadTokens: 1_000, thinkingTokens: 20, responseTokens: 80 }));
+  const preserved = await createUsageExtractor({ userHome, stateDir: dir }).extract({
+    id: "peer-1599-config",
+    provider: "antigravity",
+    config: { model: "gemini-4-hydrogen-high" },
+    persistence: { sessionId: "conv-1599-config" },
+  });
+  assert.ok(preserved);
+  assert.equal(preserved.model, "gemini-4-hydrogen-high", "unknown enum preserves real Paseo config.model");
+
+  // Unknown enum 1599 falls back to model-1599 only when Paseo gave no model.
+  const fallbackDb = await openSqlite(t, join(userHome, ".gemini", "antigravity-cli", "conversations", "conv-1599-fallback.db"));
+  fallbackDb.exec("CREATE TABLE steps (idx INTEGER PRIMARY KEY, step_type INTEGER, metadata BLOB)");
+  fallbackDb.prepare("INSERT INTO steps VALUES (?, ?, ?)").run(1, 15, antigravityMetadata({ modelEnum: 1599, inputTokens: 500, outputTokens: 100, cacheReadTokens: 1_000, thinkingTokens: 20, responseTokens: 80 }));
+  const fallback = await createUsageExtractor({ userHome, stateDir: dir }).extract({
+    id: "peer-1599-fallback",
+    provider: "antigravity",
+    persistence: { sessionId: "conv-1599-fallback" },
+  });
+  assert.ok(fallback);
+  assert.equal(fallback.model, "model-1599", "falls back to model-1599 when Paseo gave no model");
+});
+
 test("antigravity: the Brain transcript.jsonl is the fallback when the conversations db is absent", async t => {
   const { dir, userHome } = tempHomes(t);
   const transcript = join(userHome, ".gemini", "antigravity", "brain", "conv-9", ".system_generated", "logs", "transcript.jsonl");

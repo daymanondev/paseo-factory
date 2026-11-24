@@ -6,7 +6,7 @@ import fs from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { createFactory } from "../plugin/server/core/factory.ts";
 import { ensureProjectRegistered, resolveProject, writeProjectRegistration } from "../plugin/server/core/project.ts";
-import { usageFilePath, type ProjectUsageFile, type SessionUsageRecord } from "../plugin/server/core/usage-status.ts";
+import { foldProjectUsageSummary, normalizeUsageModel, statusUsageLines, usageFilePath, type ProjectUsageFile, type SessionUsageRecord } from "../plugin/server/core/usage-status.ts";
 import { createUsageRuntime } from "../plugin/server/usage-rollup.ts";
 import { LEAD_ROTATE_TOKENS, createLeadMailRuntime, readLeadContextTokens } from "../plugin/server/lead-mailbox.ts";
 import { createPeerHandoffRuntime, PEER_HANDOFF_TOKENS } from "../plugin/server/peer-handoff.ts";
@@ -715,4 +715,123 @@ test("cached usage follows changed files and forget/reset hygiene", async t => {
   runtime.forget(slug);
   write(45);
   assert.equal((await runtime.loadOrBackfillProjectUsage(slug))?.sessions.peer?.totalTokens, 45);
+});
+
+test("normalizeUsageModel normalizes aliases, historical antigravity enums, and case while keeping routes and thinking levels distinct", () => {
+  assert.deepEqual(normalizeUsageModel(" Copilot ", "GPT-6.1-SOL"), { provider: "github-copilot", model: "gpt-6.1-sol" });
+  assert.deepEqual(normalizeUsageModel("github-copilot", "gpt-6.1-sol"), { provider: "github-copilot", model: "gpt-6.1-sol" });
+  assert.deepEqual(normalizeUsageModel("antigravity", "model-1417"), { provider: "antigravity", model: "gemini-4-argon-high" });
+  assert.deepEqual(normalizeUsageModel("antigravity", "MODEL-1525"), { provider: "antigravity", model: "gemini-4-hydrogen-high" });
+  assert.deepEqual(normalizeUsageModel("antigravity", "model-1526"), { provider: "antigravity", model: "gemini-4-hydrogen-medium" });
+  assert.deepEqual(normalizeUsageModel("antigravity", "model-1527"), { provider: "antigravity", model: "gemini-4-hydrogen-low" });
+  assert.deepEqual(normalizeUsageModel("antigravity", "model-1528"), { provider: "antigravity", model: "gemini-4-neon-high" });
+  assert.deepEqual(normalizeUsageModel("antigravity", "model-1599"), { provider: "antigravity", model: "model-1599" });
+  assert.deepEqual(normalizeUsageModel("zcode", "GLM-5.3"), { provider: "zcode", model: "glm-5.3" });
+  assert.deepEqual(normalizeUsageModel("zai", "GLM-5.3"), { provider: "zai", model: "glm-5.3" });
+  assert.deepEqual(normalizeUsageModel("openai", "gpt-5-high"), { provider: "openai", model: "gpt-5-high" });
+  assert.deepEqual(normalizeUsageModel("openai", "gpt-5-medium"), { provider: "openai", model: "gpt-5-medium" });
+  assert.deepEqual(normalizeUsageModel("openai", "gpt-5-low"), { provider: "openai", model: "gpt-5-low" });
+  assert.deepEqual(normalizeUsageModel("openai", "gpt-5-xhigh"), { provider: "openai", model: "gpt-5-xhigh" });
+});
+
+test("foldProjectUsageSummary builds per-seat models, normalizes identities, filters sinceMs, ranks by newTokens, and prints cache-hit on status lines", t => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const stateDir = join(dir, "state");
+  const slug = "rollup-v2";
+  const nowMs = Date.parse("2026-11-24T12:00:00.000Z");
+  const rec = (
+    agentId: string,
+    seat: SessionUsageRecord["seat"],
+    provider: string,
+    model: string,
+    updatedAt: string,
+    input: number,
+    cacheRead: number,
+    output: number,
+    task?: string,
+  ): SessionUsageRecord => ({
+    agentId,
+    projectSlug: slug,
+    seat,
+    ...(task !== undefined ? { task } : {}),
+    harness: provider === "copilot" ? "copilot" : "pi",
+    provider,
+    model,
+    turns: 1,
+    inputUncachedTokens: input,
+    cacheReadTokens: cacheRead,
+    cacheWriteTokens: 0,
+    outputTokens: output,
+    reasoningTokens: 0,
+    totalTokens: input + cacheRead + output,
+    updatedAt,
+  });
+
+  const file: ProjectUsageFile = {
+    version: 1,
+    projectSlug: slug,
+    updatedAt: "2026-11-24T12:00:00.000Z",
+    sessions: {
+      // Recent Peer sessions (within 24h): normalized copilot + antigravity enum + distinct zcode/zai
+      "peer-cp-1": rec("peer-cp-1", "agent", "copilot", "GPT-6.1-SOL", "2026-11-24T10:00:00.000Z", 300, 700, 100, "T-CP"),
+      "peer-cp-2": rec("peer-cp-2", "agent", "github-copilot", "gpt-6.1-sol", "2026-11-24T11:00:00.000Z", 100, 900, 100, "T-CP"),
+      "peer-zai": rec("peer-zai", "agent", "zai", "GLM-5.3", "2026-11-24T09:00:00.000Z", 20, 5_000, 30, "T-ZAI"),
+      "peer-zcode": rec("peer-zcode", "agent", "zcode", "glm-5.3", "2026-11-24T08:00:00.000Z", 10, 0, 5, "T-ZCODE"),
+      "peer-zero": rec("peer-zero", "agent", "openai", "zero-model", "2026-11-24T07:00:00.000Z", 0, 0, 0),
+      // 3-day-old Lead session (within 7d, outside 24h)
+      "lead-1": rec("lead-1", "lead", "antigravity", "model-1525", "2026-11-21T12:00:00.000Z", 500, 500, 500),
+      // 10-day-old Supervisor session (outside 7d) + invalid timestamp
+      "sup-old": rec("sup-old", "supervisor", "antigravity", "model-1528", "2026-11-14T11:00:00.000Z", 2_000, 0, 500),
+      "sup-bad-ts": rec("sup-bad-ts", "supervisor", "openai", "bad-ts", "not-a-date", 1, 0, 0),
+    },
+  };
+
+  const all = foldProjectUsageSummary(file)!;
+  assert.equal(all.totals.sessionCount, 8);
+  assert.equal(all.bySeat.map(s => s.seat).join(","), "supervisor,lead,agent", "ranked by newTokens descending");
+  assert.ok(!all.byModel.some(m => m.model === "zero-model"), "zero-token model excluded from byModel");
+  const peerSeat = all.bySeat.find(s => s.seat === "agent")!;
+  assert.ok(!peerSeat.models.some(m => m.model === "zero-model"), "zero-token model excluded from seat.models");
+  assert.deepEqual(
+    peerSeat.models.map(m => `${m.provider}/${m.model}:${m.sessionCount}`),
+    ["github-copilot/gpt-6.1-sol:2", "zai/glm-5.3:1", "zcode/glm-5.3:1"],
+    "copilot merged into github-copilot, zai and zcode stayed distinct, ordered by newTokens desc",
+  );
+  assert.equal(all.bySeat.find(s => s.seat === "lead")!.models[0]!.model, "gemini-4-hydrogen-high");
+  assert.equal(all.bySeat.find(s => s.seat === "supervisor")!.models[0]!.model, "gemini-4-neon-high");
+
+  // 24h window excludes lead-1, sup-old, sup-bad-ts
+  const w24h = foldProjectUsageSummary(file, { sinceMs: nowMs - 86_400_000 })!;
+  assert.equal(w24h.totals.sessionCount, 5);
+  assert.deepEqual(w24h.bySeat.map(s => s.seat), ["agent"]);
+
+  // 7d window includes lead-1 and peer sessions, excludes sup-old and sup-bad-ts
+  const w7d = foldProjectUsageSummary(file, { sinceMs: nowMs - 7 * 86_400_000 })!;
+  assert.equal(w7d.totals.sessionCount, 6);
+  assert.deepEqual(w7d.bySeat.map(s => s.seat), ["lead", "agent"]);
+
+  // Window matching no records returns null
+  assert.equal(foldProjectUsageSummary(file, { sinceMs: nowMs + 1 }), null);
+
+  // Zero-token-only project keeps totals.sessionCount=1 and empty breakdowns
+  const zeroOnly: ProjectUsageFile = {
+    version: 1, projectSlug: slug, updatedAt: "2026-11-24T12:00:00.000Z",
+    sessions: { z: rec("z", "agent", "openai", "gpt-5", "2026-11-24T12:00:00.000Z", 0, 0, 0) },
+  };
+  const zeroSummary = foldProjectUsageSummary(zeroOnly)!;
+  assert.equal(zeroSummary.totals.sessionCount, 1);
+  assert.deepEqual(zeroSummary.bySeat, []);
+  assert.deepEqual(zeroSummary.byModel, []);
+
+  // statusUsageLines prints cache-hit on both seat and model lines
+  mkdirSync(projectStateDirOf(stateDir, slug), { recursive: true });
+  writeFileSync(usageFilePath(stateDir, slug), JSON.stringify(file));
+  const lines = statusUsageLines(stateDir);
+  const seatLines = lines.filter(line => line.startsWith("  seat "));
+  const modelLines = lines.filter(line => line.startsWith("  model "));
+  assert.equal(seatLines.length, 3);
+  assert.ok(seatLines.every(line => /· cache-hit (?:\d+%|–)/.test(line)), "every seat line includes cache-hit");
+  assert.ok(modelLines.some(line => line.includes("github-copilot/gpt-6.1-sol") && /· cache-hit 80%/.test(line)), "merged copilot model line prints 80% cache-hit");
+  assert.ok(modelLines.some(line => line.includes("zcode/glm-5.3") && /· cache-hit 0%/.test(line)), "zero-cache model prints 0% cache-hit");
 });

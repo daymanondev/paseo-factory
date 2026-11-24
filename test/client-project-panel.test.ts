@@ -992,10 +992,18 @@ test("04: the model chip is a quiet pill — no border, surface fill, code-style
 
 /** The `<span>` / `<button>` carrying a test hook, through its closing tag (`elementOf` walks divs only). */
 function leafOf(html: string, id: string): string {
-  const match = new RegExp(`<(span|button)\\b[^>]*data-testid="${id}"[^>]*>.*?</\\1>`).exec(html);
-  if (match === null) throw new Error(`no ${id} in the markup`);
-  return match[0];
+  const open = new RegExp(`<(span|button)\\b[^>]*data-testid="${id}"[^>]*>`).exec(html);
+  if (open === null) throw new Error(`no ${id} in the markup`);
+  const tag = open[1]!;
+  let depth = 0;
+  for (const m of html.slice(open.index).matchAll(new RegExp(`<${tag}\\b|<\\/${tag}>`, "g"))) {
+    depth += m[0].startsWith("</") ? -1 : 1;
+    if (depth === 0) return html.slice(open.index, open.index + m.index! + m[0].length);
+  }
+  throw new Error(`unbalanced ${tag} markup for ${id}`);
 }
+
+const stripTags = (html: string): string => html.replace(/<[^>]+>/g, "");
 
 const selfUpdateView = (state: Record<string, unknown> = {}) => ({
   state: { phase: "idle", current: "0.8.2", latest: "0.8.2", updateAvailable: false, upToDate: false, note: null, error: null, ...state },
@@ -1199,23 +1207,157 @@ test("Project pack membership expands for inspection on desktop and mobile witho
     }
   }
 });
-const recordedUsage: NonNullable<PanelView["usage"]> = {
-  state: "recorded", totalTokens: 12_400_000, cacheHitPercent: 87, newTokens: 1_540_000, cachedTokens: 10_860_000, cacheReadTokens: 10_800_000,
-  inputUncachedTokens: 1_200_000, outputTokens: 340_000, sessionCount: 64,
+const recordedAllWindow = {
+  state: "recorded" as const,
+  totalTokens: 12_400_000,
+  cacheHitPercent: 87,
+  newTokens: 1_540_000,
+  cachedTokens: 10_860_000,
+  cacheReadTokens: 10_800_000,
+  inputUncachedTokens: 1_200_000,
+  outputTokens: 340_000,
+  sessionCount: 64,
   seats: [
-    { seat: "agent", label: "Peer", newTokens: 1_000_000, inputUncachedTokens: 800_000, outputTokens: 200_000, cachedTokens: 8_300_000, cacheReadTokens: 8_260_000, totalTokens: 9_300_000, sessionCount: 50, sharePercent: 75 },
-    { seat: "lead", label: "Lead", newTokens: 540_000, inputUncachedTokens: 400_000, outputTokens: 140_000, cachedTokens: 2_560_000, cacheReadTokens: 2_540_000, totalTokens: 3_100_000, sessionCount: 14, sharePercent: 25 },
+    {
+      seat: "agent",
+      label: "Peer",
+      newTokens: 1_000_000,
+      inputUncachedTokens: 800_000,
+      outputTokens: 200_000,
+      cachedTokens: 8_300_000,
+      cacheReadTokens: 8_260_000,
+      totalTokens: 9_300_000,
+      sessionCount: 50,
+      sharePercent: 64,
+      cacheHitPercent: 92,
+      models: [
+        { provider: "codex", model: "gpt-5.4-xhigh", newTokens: 700_000, inputUncachedTokens: 560_000, outputTokens: 140_000, cachedTokens: 6_300_000, cacheReadTokens: 6_280_000, totalTokens: 7_000_000, sessionCount: 38, sharePercent: 70, cacheHitPercent: 94 },
+        { provider: "zai", model: "glm-5.3-flash", newTokens: 300_000, inputUncachedTokens: 240_000, outputTokens: 60_000, cachedTokens: 2_000_000, cacheReadTokens: 1_980_000, totalTokens: 2_300_000, sessionCount: 12, sharePercent: 30, cacheHitPercent: 85 },
+      ],
+    },
+    {
+      seat: "lead",
+      label: "Lead",
+      newTokens: 540_000,
+      inputUncachedTokens: 400_000,
+      outputTokens: 140_000,
+      cachedTokens: 2_560_000,
+      cacheReadTokens: 2_540_000,
+      totalTokens: 3_100_000,
+      sessionCount: 14,
+      sharePercent: 36,
+      cacheHitPercent: 65,
+      models: [
+        { provider: "antigravity", model: "gemini-4-hydrogen-high", newTokens: 540_000, inputUncachedTokens: 400_000, outputTokens: 140_000, cachedTokens: 2_560_000, cacheReadTokens: 2_540_000, totalTokens: 3_100_000, sessionCount: 14, sharePercent: 100, cacheHitPercent: 65 },
+      ],
+    },
   ],
   models: [
-    { provider: "codex", model: "gpt-6", newTokens: 1_000_000, inputUncachedTokens: 800_000, outputTokens: 200_000, cachedTokens: 8_300_000, cacheReadTokens: 8_260_000, totalTokens: 9_300_000, sessionCount: 50, sharePercent: 75 },
-    { provider: "pi", model: "glm", newTokens: 540_000, inputUncachedTokens: 400_000, outputTokens: 140_000, cachedTokens: 2_560_000, cacheReadTokens: 2_540_000, totalTokens: 3_100_000, sessionCount: 14, sharePercent: 25 },
+    { provider: "codex", model: "gpt-5.4-xhigh", newTokens: 700_000, inputUncachedTokens: 560_000, outputTokens: 140_000, cachedTokens: 6_300_000, cacheReadTokens: 6_280_000, totalTokens: 7_000_000, sessionCount: 38, sharePercent: 45, cacheHitPercent: 94 },
+    { provider: "antigravity", model: "gemini-4-hydrogen-high", newTokens: 540_000, inputUncachedTokens: 400_000, outputTokens: 140_000, cachedTokens: 2_560_000, cacheReadTokens: 2_540_000, totalTokens: 3_100_000, sessionCount: 14, sharePercent: 36, cacheHitPercent: 65 },
+    { provider: "zai", model: "glm-5.3-flash", newTokens: 300_000, inputUncachedTokens: 240_000, outputTokens: 60_000, cachedTokens: 2_000_000, cacheReadTokens: 1_980_000, totalTokens: 2_300_000, sessionCount: 12, sharePercent: 19, cacheHitPercent: 85 },
   ],
 };
 
-test("Project usage leads with new and cached tokens and a collapsed desktop breakdown", async () => {
+const recorded7dWindow = {
+  state: "recorded" as const,
+  totalTokens: 4_000_000,
+  cacheHitPercent: 92,
+  newTokens: 400_000,
+  cachedTokens: 3_600_000,
+  cacheReadTokens: 3_550_000,
+  inputUncachedTokens: 310_000,
+  outputTokens: 90_000,
+  sessionCount: 12,
+  seats: [
+    {
+      seat: "agent",
+      label: "Peer",
+      newTokens: 400_000,
+      inputUncachedTokens: 310_000,
+      outputTokens: 90_000,
+      cachedTokens: 3_600_000,
+      cacheReadTokens: 3_550_000,
+      totalTokens: 4_000_000,
+      sessionCount: 12,
+      sharePercent: 100,
+      cacheHitPercent: 92,
+      models: [
+        { provider: "codex", model: "gpt-5.4-xhigh", newTokens: 400_000, inputUncachedTokens: 310_000, outputTokens: 90_000, cachedTokens: 3_600_000, cacheReadTokens: 3_550_000, totalTokens: 4_000_000, sessionCount: 12, sharePercent: 100, cacheHitPercent: 92 },
+      ],
+    },
+  ],
+  models: [
+    { provider: "codex", model: "gpt-5.4-xhigh", newTokens: 400_000, inputUncachedTokens: 310_000, outputTokens: 90_000, cachedTokens: 3_600_000, cacheReadTokens: 3_550_000, totalTokens: 4_000_000, sessionCount: 12, sharePercent: 100, cacheHitPercent: 92 },
+  ],
+};
+
+const emptyUsageWindow = {
+  state: "empty" as const,
+  totalTokens: 0,
+  cacheHitPercent: null,
+  newTokens: 0,
+  cachedTokens: 0,
+  cacheReadTokens: 0,
+  inputUncachedTokens: 0,
+  outputTokens: 0,
+  sessionCount: 0,
+  seats: [],
+  models: [],
+};
+
+const recordedUsage: NonNullable<PanelView["usage"]> = {
+  ...recordedAllWindow,
+  windows: {
+    all: recordedAllWindow,
+    "7d": recorded7dWindow,
+    "24h": emptyUsageWindow,
+  },
+};
+
+test("thinkingColour maps xhigh to max and SegmentedControl attaches optional testID hooks", async () => {
+  const { thinkingColour, factoryPalette } = await loadModule("plugin/client/kit/theme.ts");
+  const { SegmentedControl } = await loadModule("plugin/client/kit/pill.tsx");
+  const { createElement } = await import("react");
+  const { renderToStaticMarkup } = await import("react-dom/server");
+  const darkTheme = { colors: { ...theme.colors, surface0: "#000000" } };
+
+  assert.equal(thinkingColour(theme, "xhigh"), thinkingColour(theme, "max"));
+  assert.equal(thinkingColour(theme, "xhigh"), factoryPalette(theme).thinking[5]);
+  assert.equal(thinkingColour(darkTheme, "xhigh"), factoryPalette(darkTheme).thinking[5]);
+  assert.notEqual(thinkingColour(theme, "xhigh"), factoryPalette(theme).idle);
+
+  const withId = renderToStaticMarkup(createElement(SegmentedControl, {
+    theme,
+    testID: "seg-test",
+    value: "a",
+    onChange: () => {},
+    options: [{ value: "a", label: "Alpha" }, { value: "b", label: "Beta" }],
+  }));
+  assert.ok(hasHook(withId, "seg-test"));
+  assert.ok(hasHook(withId, "seg-test-a"));
+  assert.ok(hasHook(withId, "seg-test-b"));
+
+  const withoutId = renderToStaticMarkup(createElement(SegmentedControl, {
+    theme,
+    value: "a",
+    onChange: () => {},
+    options: [{ value: "a", label: "Alpha" }],
+  }));
+  assert.equal(withoutId.includes("data-testid="), false);
+});
+
+test("Project usage leads with new and cached tokens, window switcher, and a collapsed desktop breakdown", async () => {
   const html = await render(makePanel({ usage: recordedUsage }), { initialUi: { tab: "project" } });
   assert.ok(hasHook(html, "project-usage-card"));
-  assert.match(leafOf(html, "project-usage-summary"), /1\.5M new \(1\.2M in · 340k out\) · 87% cache \(10\.9M\) · 12\.4M total · 64 sessions/);
+  const summaryHtml = leafOf(html, "project-usage-summary");
+  assert.match(stripTags(summaryHtml), /1\.5M new \(1\.2M in · 340k out\) · 87% cache \(10\.9M\) · 12\.4M total · 64 sessions/);
+  assert.ok(summaryHtml.includes("#8f6802"), "87% cache hit uses wait palette colour");
+  assert.ok(hasHook(html, "project-usage-window"));
+  assert.ok(hasHook(html, "project-usage-window-all"));
+  assert.ok(hasHook(html, "project-usage-window-7d"));
+  assert.ok(hasHook(html, "project-usage-window-24h"));
+  assert.equal(hasHook(html, "project-usage-window-note"), false, "All window shows no multi-day note");
   assert.ok(html.indexOf('data-testid="project-usage-card"') < html.indexOf('data-testid="factory-skill-packs"'));
   assert.match(leafOf(html, "project-usage-toggle"), /▸ Breakdown/);
   assert.equal(hasHook(html, "project-usage-breakdown"), false);
@@ -1223,7 +1365,7 @@ test("Project usage leads with new and cached tokens and a collapsed desktop bre
   assert.equal(hasHook(await render(makePanel({ usage: recordedUsage })), "project-usage-card"), false, "the Team tab has no usage card");
 });
 
-test("desktop Project usage expands and collapses seat and model metrics on press", async () => {
+test("desktop Project usage supports By Seat nested expansion, By Model thinking pills, wide/narrow layouts, and window switching", async () => {
   const { ProjectPanel } = await loadPanel();
   const { createElement, act } = await import("react");
   const { JSDOM } = await import(["jsdom"].join(""));
@@ -1235,21 +1377,90 @@ test("desktop Project usage expands and collapses seat and model metrics on pres
   const container = dom.window.document.getElementById("root")!;
   const root = createRoot(container);
   try {
-    await act(() => root.render(createElement(ProjectPanel, { theme, panel: makePanel({ usage: recordedUsage }), mobile: false, now: Date.now(), daemonError: null, actions: noopActions(), initialUi: { tab: "project" } })));
+    await act(() => root.render(createElement(ProjectPanel, { theme, width: 900, panel: makePanel({ usage: recordedUsage }), mobile: false, now: Date.now(), daemonError: null, actions: noopActions(), initialUi: { tab: "project" } })));
     const toggle = () => container.querySelector('[data-testid="project-usage-toggle"]') as HTMLButtonElement;
     assert.equal(container.querySelector('[data-testid="project-usage-breakdown"]'), null);
+
+    // 1. Expand Breakdown -> By Seat default, Peer (agent) models already expanded, Lead collapsed
     await act(() => toggle().click());
     assert.equal(toggle().textContent, "▾ Breakdown");
-    const breakdown = container.querySelector('[data-testid="project-usage-breakdown"]');
-    assert.ok(breakdown);
-    assert.match(breakdown.textContent!, /BY SEAT.*BY MODEL/);
-    const seats = breakdown.querySelector('[data-testid="project-usage-seats"]');
+    const breakdown = () => container.querySelector('[data-testid="project-usage-breakdown"]')!;
+    assert.ok(breakdown());
+    assert.ok(container.querySelector('[data-testid="project-usage-mode"]'));
+    assert.equal(container.querySelector('[data-testid="project-usage-mode-seat"]')?.getAttribute("data-selected"), "true");
+    assert.equal(container.querySelector('[data-testid="project-usage-mode-model"]')?.getAttribute("data-selected"), "false");
+
+    const seats = container.querySelector('[data-testid="project-usage-seats"]')!;
     assert.ok(seats);
-    assert.deepEqual([...seats.querySelectorAll('[data-testid="project-usage-seat-row"]')].map(row => row.textContent), ["Peer · 1.0M new · 8.3M cache · 50 ses · 75%", "Lead · 540k new · 2.6M cache · 14 ses · 25%"]);
-    const models = container.querySelector('[data-testid="project-usage-models"]');
+    assert.equal(container.querySelector('[data-testid="project-usage-models"]'), null);
+    assert.match(seats.textContent!, /New.*Cache.*Hit.*Ses/, "wide layout renders tabular column headers");
+    const seatRows = [...seats.querySelectorAll('[data-testid="project-usage-seat-row"]')];
+    assert.equal(seatRows.length, 2);
+    assert.match(seatRows[0]!.textContent!, /Peer.*1\.0M.*8\.3M.*92%.*50/);
+    assert.match(seatRows[1]!.textContent!, /Lead.*540k.*2\.6M.*65%.*14/);
+    assert.doesNotMatch(breakdown().textContent!, /\b(64|36|70|30|45|19)%/, "no unlabeled sharePercent% text anywhere");
+
+    // Peer (agent) starts expanded with nested models; Lead starts collapsed
+    const agentModels = container.querySelector('[data-testid="project-usage-seat-models-agent"]');
+    assert.ok(agentModels, "Peer (agent) models are expanded by default");
+    assert.equal(container.querySelector('[data-testid="project-usage-seat-models-lead"]'), null, "Lead models start collapsed");
+    const agentModelRows = [...agentModels.querySelectorAll('[data-testid="project-usage-model-row"]')];
+    assert.equal(agentModelRows.length, 2);
+    assert.match(agentModelRows[0]!.textContent!, /codex\/gpt-5\.4xhigh.*700k.*6\.3M.*94%.*38/);
+    assert.match(agentModelRows[1]!.textContent!, /zai\/glm-5\.3-flash.*300k.*2\.0M.*85%.*12/);
+
+    // Expand Lead, collapse Peer
+    await act(() => (container.querySelector('[data-testid="project-usage-seat-toggle-lead"]') as HTMLButtonElement).click());
+    const leadModels = container.querySelector('[data-testid="project-usage-seat-models-lead"]');
+    assert.ok(leadModels, "clicking Lead seat toggle expands Lead models");
+    assert.match(leadModels.textContent!, /antigravity\/gemini-4-hydrogenhigh.*540k.*2\.6M.*65%.*14/);
+    await act(() => (container.querySelector('[data-testid="project-usage-seat-toggle-agent"]') as HTMLButtonElement).click());
+    assert.equal(container.querySelector('[data-testid="project-usage-seat-models-agent"]'), null, "clicking Peer seat toggle collapses Peer models");
+
+    // 2. Switch to By Model mode -> flat list with provider/model/thinking pill
+    await act(() => (container.querySelector('[data-testid="project-usage-mode-model"]') as HTMLButtonElement).click());
+    assert.equal(container.querySelector('[data-testid="project-usage-seats"]'), null);
+    const models = container.querySelector('[data-testid="project-usage-models"]')!;
     assert.ok(models);
-    assert.deepEqual([...models.querySelectorAll('[data-testid="project-usage-model-row"]')].map(row => row.textContent), ["codex/gpt-6 · 1.0M new · 8.3M cache · 50 ses · 75%", "pi/glm · 540k new · 2.6M cache · 14 ses · 25%"]);
-    assert.doesNotMatch(breakdown.textContent!, /\$|USD|cost/i);
+    const modelRows = [...models.querySelectorAll('[data-testid="project-usage-model-row"]')];
+    assert.equal(modelRows.length, 3);
+    assert.match(modelRows[0]!.textContent!, /codex\/gpt-5\.4xhigh.*700k.*6\.3M.*94%.*38/);
+    assert.ok(modelRows[0]!.innerHTML.includes("#c8253d"), "xhigh thinking pill uses max palette accent (#c8253d)");
+    assert.ok(modelRows[0]!.innerHTML.includes("#337e58"), "94% cache hit uses ok colour (#337e58)");
+    assert.match(modelRows[1]!.textContent!, /antigravity\/gemini-4-hydrogenhigh.*540k.*2\.6M.*65%.*14/);
+    assert.ok(modelRows[1]!.innerHTML.includes("#b23a98"), "high thinking pill uses high palette accent (#b23a98)");
+    assert.ok(modelRows[1]!.innerHTML.includes("#c8253d"), "65% cache hit uses bad colour (#c8253d)");
+    assert.match(modelRows[2]!.textContent!, /zai\/glm-5\.3-flash.*300k.*2\.0M.*85%.*12/);
+    assert.equal(/>flash<\/span>/.test(modelRows[2]!.innerHTML), false, "glm-5.3-flash stays unsplit without a thinking pill");
+    assert.equal(modelRows[2]!.innerHTML.includes('"borderRadius":999'), false, "no thinking pill rendered for glm-5.3-flash");
+    assert.ok(modelRows[2]!.innerHTML.includes("#8f6802"), "85% cache hit uses wait colour (#8f6802)");
+    assert.doesNotMatch(breakdown().textContent!, /\$|USD|cost/i);
+
+    // 3. Narrow desktop (< 720px) switches to 2 compact lines per row
+    await act(() => root.render(createElement(ProjectPanel, { theme, width: 500, panel: makePanel({ usage: recordedUsage }), mobile: false, now: Date.now(), daemonError: null, actions: noopActions(), initialUi: { tab: "project" } })));
+    const narrowModels = container.querySelector('[data-testid="project-usage-models"]')!;
+    assert.doesNotMatch(narrowModels.textContent!, /New.*Cache.*Hit.*Ses/, "narrow layout drops the wide table header row");
+    const narrowModelRows = [...narrowModels.querySelectorAll('[data-testid="project-usage-model-row"]')];
+    assert.match(narrowModelRows[0]!.textContent!, /700k new · 6\.3M cache · 94% hit · 38 ses/);
+
+    // 4. Switch window to 7d -> updates summary and shows window note
+    await act(() => (container.querySelector('[data-testid="project-usage-window-7d"]') as HTMLButtonElement).click());
+    const summary7d = container.querySelector('[data-testid="project-usage-summary"]')!;
+    assert.match(summary7d.textContent!, /400k new \(310k in · 90k out\) · 92% cache \(3\.6M\) · 4\.0M total · 12 sessions/);
+    assert.ok(summary7d.innerHTML.includes("#337e58"), "92% cache hit uses ok palette colour");
+    assert.match(container.querySelector('[data-testid="project-usage-window-note"]')?.textContent ?? "", /Sessions active in last 7d — multi-day seats show full session totals/);
+
+    // 5. Switch window to 24h (empty) -> shows empty window message and hides summary, note, toggle, and breakdown
+    await act(() => (container.querySelector('[data-testid="project-usage-window-24h"]') as HTMLButtonElement).click());
+    assert.match(container.querySelector('[data-testid="project-usage-window-empty"]')?.textContent ?? "", /No active sessions in the last 24h/);
+    assert.equal(container.querySelector('[data-testid="project-usage-summary"]'), null);
+    assert.equal(container.querySelector('[data-testid="project-usage-window-note"]'), null);
+    assert.equal(container.querySelector('[data-testid="project-usage-toggle"]'), null);
+    assert.equal(container.querySelector('[data-testid="project-usage-breakdown"]'), null);
+
+    // 6. Switch back to All and collapse Breakdown
+    await act(() => (container.querySelector('[data-testid="project-usage-window-all"]') as HTMLButtonElement).click());
+    assert.equal(toggle().textContent, "▾ Breakdown");
     await act(() => toggle().click());
     assert.equal(toggle().textContent, "▸ Breakdown");
     assert.equal(container.querySelector('[data-testid="project-usage-breakdown"]'), null);
@@ -1260,25 +1471,76 @@ test("desktop Project usage expands and collapses seat and model metrics on pres
   }
 });
 
-test("mobile Project usage shows new and cached totals without breakdown or writes", async () => {
+test("mobile Project usage shows totals and read-only window switcher without breakdown or writes", async () => {
   const html = await render(makePanel({ usage: recordedUsage }), { mobile: true, initialUi: { tab: "project" } });
-  assert.match(leafOf(html, "project-usage-summary"), /1\.5M new \(1\.2M in · 340k out\) · 87% cache \(10\.9M\) · 12\.4M total · 64 sessions/);
+  assert.match(stripTags(leafOf(html, "project-usage-summary")), /1\.5M new \(1\.2M in · 340k out\) · 87% cache \(10\.9M\) · 12\.4M total · 64 sessions/);
   const card = elementOf(html, "project-usage-card");
+  assert.ok(hasHook(card, "project-usage-window"));
+  assert.ok(hasHook(card, "project-usage-window-all"));
+  assert.ok(hasHook(card, "project-usage-window-7d"));
+  assert.ok(hasHook(card, "project-usage-window-24h"));
   assert.equal(hasHook(card, "project-usage-toggle"), false);
   assert.equal(hasHook(card, "project-usage-models"), false);
   assert.equal(hasHook(card, "project-usage-breakdown"), false);
   assert.equal(hasHook(card, "project-usage-seats"), false);
   assert.doesNotMatch(card, /\$|USD|cost/i);
-  assert.doesNotMatch(card, /<button/);
+  // Only the 3 read-only window switcher buttons exist inside the mobile usage card
+  assert.equal((card.match(/<button\b/g) ?? []).length, 3);
+  assert.equal((card.match(/data-testid="project-usage-window-(?:all|7d|24h)"/g) ?? []).length, 3);
 });
 
-test("empty Project usage keeps a muted card on desktop and mobile", async () => {
-  const usage: NonNullable<PanelView["usage"]> = { state: "empty", newTokens: 0, cachedTokens: 0, cacheReadTokens: 0, seats: [], totalTokens: 0, cacheHitPercent: null, inputUncachedTokens: 0, outputTokens: 0, sessionCount: 0, models: [] };
+test("Project usage handles watch seat (idle tone), null hit rates, legacy unwindowed data, and empty projects", async () => {
+  const watchUsage: NonNullable<PanelView["usage"]> = {
+    ...recordedAllWindow,
+    seats: [
+      {
+        seat: "watch",
+        label: "Watch",
+        newTokens: 10_000,
+        inputUncachedTokens: 8_000,
+        outputTokens: 2_000,
+        cachedTokens: 0,
+        cacheReadTokens: 0,
+        totalTokens: 10_000,
+        sessionCount: 3,
+        sharePercent: 100,
+        cacheHitPercent: null,
+        models: [],
+      },
+    ],
+  };
+  const { ProjectPanel } = await loadPanel();
+  const { createElement, act } = await import("react");
+  const { JSDOM } = await import(["jsdom"].join(""));
+  const dom = new JSDOM("<!doctype html><div id=root></div>");
+  const g = globalThis as Record<string, any>;
+  const saved = { window: g.window, document: g.document, IS_REACT_ACT_ENVIRONMENT: g.IS_REACT_ACT_ENVIRONMENT };
+  g.window = dom.window; g.document = dom.window.document; g.IS_REACT_ACT_ENVIRONMENT = true;
+  const { createRoot } = await import("react-dom/client");
+  const container = dom.window.document.getElementById("root")!;
+  const root = createRoot(container);
+  try {
+    await act(() => root.render(createElement(ProjectPanel, { theme, width: 900, panel: makePanel({ usage: watchUsage }), mobile: false, now: Date.now(), daemonError: null, actions: noopActions(), initialUi: { tab: "project" } })));
+    assert.equal(container.querySelector('[data-testid="project-usage-window"]'), null, "unwindowed usage hides the window switcher");
+    await act(() => (container.querySelector('[data-testid="project-usage-toggle"]') as HTMLButtonElement).click());
+    const watchRow = container.querySelector('[data-testid="project-usage-seat-row"]')!;
+    assert.ok(watchRow);
+    assert.equal(container.querySelector('[data-testid="project-usage-seat-toggle-watch"]'), null, "seat without models is not interactive");
+    assert.ok(watchRow.innerHTML.includes("#677176"), "watch seat uses idle palette dot and null hit colour");
+    assert.match(watchRow.textContent!, /Watch.*10k.*0.*–.*3/);
+  } finally {
+    await act(() => root.unmount());
+    Object.assign(g, saved);
+    dom.window.close();
+  }
+
+  const emptyUsage: NonNullable<PanelView["usage"]> = { ...emptyUsageWindow };
   for (const mobile of [false, true]) {
-    const html = await render(makePanel({ usage }), { mobile, initialUi: { tab: "project" } });
+    const html = await render(makePanel({ usage: emptyUsage }), { mobile, initialUi: { tab: "project" } });
     assert.ok(hasHook(html, "project-usage-card"));
     assert.match(leafOf(html, "project-usage-empty"), /No usage recorded yet/);
     assert.ok(leafOf(html, "project-usage-empty").includes(theme.colors.foregroundMuted));
+    assert.equal(hasHook(html, "project-usage-window"), false);
     assert.equal(hasHook(html, "project-usage-summary"), false);
     assert.equal(hasHook(html, "project-usage-toggle"), false);
   }
@@ -1288,8 +1550,10 @@ test("unscoped or older panels omit Project usage, and an unknown cache-hit rati
   for (const usage of [null, undefined]) {
     assert.equal(hasHook(await render(makePanel({ usage }), { initialUi: { tab: "project" } }), "project-usage-card"), false);
   }
-  const html = await render(makePanel({ usage: { ...recordedUsage, newTokens: 0, cachedTokens: 0, cacheReadTokens: 0, totalTokens: 0, inputUncachedTokens: 0, outputTokens: 0, sessionCount: 1, cacheHitPercent: null, seats: [], models: [] } }), { initialUi: { tab: "project" } });
-  assert.match(leafOf(html, "project-usage-summary"), /0 new \(0 in · 0 out\) · – cache \(0\) · 0 total · 1 session<\/span>/);
+  const html = await render(makePanel({ usage: { ...recordedUsage, newTokens: 0, cachedTokens: 0, cacheReadTokens: 0, totalTokens: 0, inputUncachedTokens: 0, outputTokens: 0, sessionCount: 1, cacheHitPercent: null, seats: [], models: [], windows: undefined } }), { initialUi: { tab: "project" } });
+  const summaryHtml = leafOf(html, "project-usage-summary");
+  assert.match(stripTags(summaryHtml), /^0 new \(0 in · 0 out\) · – cache \(0\) · 0 total · 1 session$/);
+  assert.ok(summaryHtml.includes("#677176"), "null cacheHitPercent uses idle palette colour");
 });
 
 function makeRelease(overrides: Partial<ReleaseSettingsView> = {}): ReleaseSettingsView {

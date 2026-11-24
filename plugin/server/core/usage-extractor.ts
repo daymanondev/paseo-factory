@@ -632,7 +632,13 @@ function extractOpencode(
 // ---- the antigravity reader -----------------------------------------------------------------
 
 /** The known planner model enums — extended as empirical runs name more. */
-const ANTIGRAVITY_MODELS: ReadonlyMap<number, string> = new Map([[1417, "gemini-4-argon-high"]]);
+const ANTIGRAVITY_MODELS: ReadonlyMap<number, string> = new Map([
+  [1417, "gemini-4-argon-high"],
+  [1525, "gemini-4-hydrogen-high"],
+  [1526, "gemini-4-hydrogen-medium"],
+  [1527, "gemini-4-hydrogen-low"],
+  [1528, "gemini-4-neon-high"],
+]);
 
 function readVarint(bytes: Uint8Array, from: number): { value: number; next: number } | undefined {
   let value = 0;
@@ -812,7 +818,12 @@ function extractAntigravity(
       usage.outputTokens += step.outputTokens;
       usage.cacheReadTokens += step.cacheReadTokens;
       usage.reasoningTokens += step.thinkingTokens;
-      if (step.modelEnum !== undefined) usage.model = ANTIGRAVITY_MODELS.get(step.modelEnum) ?? `model-${step.modelEnum}`;
+      if (step.modelEnum !== undefined) {
+        const mapped = ANTIGRAVITY_MODELS.get(step.modelEnum);
+        if (usage.model === "unknown" || /^model-\d+$/.test(usage.model)) {
+          usage.model = mapped ?? `model-${step.modelEnum}`;
+        }
+      }
       usage.latestContextWindowTokens = step.inputTokens + step.cacheReadTokens + step.outputTokens;
     }
     retotal(usage);

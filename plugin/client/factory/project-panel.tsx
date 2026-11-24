@@ -10,12 +10,13 @@ import { Modal, TextInput } from "@getpaseo/plugin/client/ui";
 import { createContext, useContext, useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { Pressable, Text, View } from "react-native";
+import type { TextStyle } from "react-native";
 import type { GitHubPublishPreflightView, PanelGateQueueEntry, PanelNeedsYouItem, PanelOpenDesign, PanelPeerRow, PanelSeatRow, PanelSupervisorCandidateRow, PanelTone, PanelView, Lanes, ReleaseSettingsView, StoreReleaseView } from "../../shared/view.ts";
 import { GitHubReleaseCard } from "./github-release-card.tsx";
 import type { GitHubReleaseActions, ReleaseCardFeedback } from "./github-release-card.tsx";
 import { StoreReleaseCard } from "./store-release-card.tsx";
 import type { StoreReleaseActions, StoreReleaseCardFeedback } from "./store-release-card.tsx";
-import { Btn, RoleName, ToneBadge } from "../kit/pill.tsx";
+import { Btn, RoleName, SegmentedControl, ToneBadge } from "../kit/pill.tsx";
 import { Tabs } from "../kit/tabs.tsx";
 import { RADIUS, SPACING, dispositionColour, factoryPalette, hoveredOf, statusBadgeColour, text, thinkingColour, tint } from "../kit/theme.ts";
 import type { Colour } from "../kit/theme.ts";
@@ -889,35 +890,442 @@ function formatTokenCount(value: number): string {
   return String(value);
 }
 
-function formatUsageRowMetrics(row: { newTokens: number; cachedTokens: number; sessionCount: number; sharePercent: number }): string {
-  return `${formatTokenCount(row.newTokens)} new · ${formatTokenCount(row.cachedTokens)} cache · ${row.sessionCount} ses · ${Math.round(row.sharePercent)}%`;
+type UsageWindowKey = "all" | "7d" | "24h";
+type UsageBreakdownMode = "seat" | "model";
+type UsageView = NonNullable<PanelView["usage"]>;
+type UsageSeatRow = UsageView["seats"][number];
+type UsageModelRow = UsageView["models"][number];
+type UsageRowMetrics = {
+  newTokens: number;
+  cachedTokens: number;
+  sessionCount: number;
+  sharePercent: number;
+  cacheHitPercent?: number | null | undefined;
+};
+
+const USAGE_WINDOW_OPTIONS: readonly { value: UsageWindowKey; label: string }[] = [
+  { value: "all", label: "All" },
+  { value: "7d", label: "7d" },
+  { value: "24h", label: "24h" },
+];
+
+const USAGE_MODE_OPTIONS: readonly { value: UsageBreakdownMode; label: string }[] = [
+  { value: "seat", label: "By Seat" },
+  { value: "model", label: "By Model" },
+];
+
+const USAGE_COL = { new: 72, cache: 72, hit: 56, ses: 44 } as const;
+
+function cacheHitColour(theme: PluginTheme, hit: number | null | undefined): string {
+  const palette = factoryPalette(theme);
+  if (hit == null || !Number.isFinite(hit)) return palette.idle;
+  if (hit >= 90) return palette.ok;
+  if (hit >= 70) return palette.wait;
+  return palette.bad;
 }
 
-function ProjectUsage({ theme, usage, mobile }: { theme: PluginTheme; mobile: boolean; usage: NonNullable<PanelView["usage"]> }) {
-  const [expanded, setExpanded] = useState(false);
-  return <Section theme={theme} testID="project-usage-card" divider={false}>
-    <SectionTitle theme={theme} label="Project usage" />
-    {usage.state === "empty" ? <Text testID="project-usage-empty" style={text(theme, "meta")}>No usage recorded yet</Text> : <>
-      <Text testID="project-usage-summary" style={text(theme, "label")}>
-        {`${formatTokenCount(usage.newTokens)} new (${formatTokenCount(usage.inputUncachedTokens)} in · ${formatTokenCount(usage.outputTokens)} out) · ${usage.cacheHitPercent === null ? "–" : `${Math.round(usage.cacheHitPercent)}%`} cache (${formatTokenCount(usage.cachedTokens)}) · ${formatTokenCount(usage.totalTokens)} total · ${usage.sessionCount} ${usage.sessionCount === 1 ? "session" : "sessions"}`}
+function formatCacheHit(hit: number | null | undefined): string {
+  return hit == null || !Number.isFinite(hit) ? "–" : `${Math.round(hit)}%`;
+}
+
+function splitUsageModelLabel(model: string): { base: string; thinking: string | null } {
+  const match = model.match(/^(.+?)(?:-|:)(low|medium|high|max|xhigh)$/i);
+  if (match === null) return { base: model, thinking: null };
+  return { base: match[1]!, thinking: match[2]!.toLowerCase() };
+}
+
+function seatColourOf(theme: PluginTheme, seat: string): string {
+  const palette = factoryPalette(theme);
+  if (seat === "supervisor") return palette.supervisor;
+  if (seat === "lead") return palette.lead;
+  if (seat === "agent") return palette.peer;
+  return palette.idle;
+}
+
+function UsageShareBar({
+  trackColour,
+  fillColour,
+  sharePercent,
+  width = 56,
+}: {
+  trackColour: string;
+  fillColour: string;
+  sharePercent: number;
+  width?: number;
+}) {
+  const pct = Math.max(2, Math.min(100, Math.round(Number.isFinite(sharePercent) ? sharePercent : 0)));
+  return (
+    <View style={{ width, height: 3, borderRadius: 2, backgroundColor: trackColour, overflow: "hidden", flexShrink: 0 }}>
+      <View style={{ width: `${pct}%`, height: 3, backgroundColor: fillColour }} />
+    </View>
+  );
+}
+
+function UsageTableHeader({ theme, wide }: { theme: PluginTheme; wide: boolean }) {
+  if (!wide) return null;
+  const colStyle = (w: number): TextStyle => ({
+    ...text(theme, "badge"),
+    width: w,
+    flexShrink: 0,
+    textAlign: "right",
+    fontVariant: ["tabular-nums"],
+  });
+  return (
+    <View style={{ flexDirection: "row", alignItems: "center", gap: SPACING[2], paddingHorizontal: SPACING[1], paddingBottom: SPACING[1], borderBottomWidth: 1, borderBottomColor: theme.colors.border }}>
+      <View style={{ flex: 1, minWidth: 0 }} />
+      <Text style={colStyle(USAGE_COL.new)}>New</Text>
+      <Text style={colStyle(USAGE_COL.cache)}>Cache</Text>
+      <Text style={colStyle(USAGE_COL.hit)}>Hit</Text>
+      <Text style={colStyle(USAGE_COL.ses)}>Ses</Text>
+    </View>
+  );
+}
+
+function UsageRowContent({
+  theme,
+  wide,
+  row,
+  trackColour,
+  fillColour,
+  identity,
+}: {
+  theme: PluginTheme;
+  wide: boolean;
+  row: UsageRowMetrics;
+  trackColour: string;
+  fillColour: string;
+  identity: ReactNode;
+}) {
+  const hit = row.cacheHitPercent ?? null;
+  const hitText = formatCacheHit(hit);
+  const hitColour = cacheHitColour(theme, hit);
+  if (wide) {
+    const numStyle = (w: number, muted = false): TextStyle => ({
+      ...text(theme, "code", muted ? "foregroundMuted" : undefined),
+      width: w,
+      flexShrink: 0,
+      textAlign: "right",
+      fontVariant: ["tabular-nums"],
+    });
+    return (
+      <View style={{ flexDirection: "row", alignItems: "center", gap: SPACING[2] }}>
+        <View style={{ flex: 1, minWidth: 0, flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: SPACING[2] }}>
+          {identity}
+          <UsageShareBar trackColour={trackColour} fillColour={fillColour} sharePercent={row.sharePercent} />
+        </View>
+        <Text style={numStyle(USAGE_COL.new)} numberOfLines={1}>{formatTokenCount(row.newTokens)}</Text>
+        <Text style={numStyle(USAGE_COL.cache, true)} numberOfLines={1}>{formatTokenCount(row.cachedTokens)}</Text>
+        <Text style={{ ...numStyle(USAGE_COL.hit), color: hitColour, fontWeight: "600" }} numberOfLines={1}>{hitText}</Text>
+        <Text style={numStyle(USAGE_COL.ses, true)} numberOfLines={1}>{String(row.sessionCount)}</Text>
+      </View>
+    );
+  }
+  return (
+    <View style={{ gap: SPACING[1] }}>
+      <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: SPACING[2] }}>
+        {identity}
+        <UsageShareBar trackColour={trackColour} fillColour={fillColour} sharePercent={row.sharePercent} />
+      </View>
+      <Text style={{ ...text(theme, "code", "foregroundMuted"), fontVariant: ["tabular-nums"] }}>
+        {`${formatTokenCount(row.newTokens)} new · ${formatTokenCount(row.cachedTokens)} cache · `}
+        <Text style={{ color: hitColour, fontWeight: "600", fontVariant: ["tabular-nums"] }}>{`${hitText} hit`}</Text>
+        {` · ${row.sessionCount} ses`}
       </Text>
-      {mobile ? null : <Btn theme={theme} small variant="ghost" testID="project-usage-toggle" label={`${expanded ? "▾" : "▸"} Breakdown`} onPress={() => setExpanded(!expanded)} />}
-      {!mobile && expanded ? <View testID="project-usage-breakdown" style={{ gap: SPACING[3] }}>
-        <View testID="project-usage-seats" style={{ gap: SPACING[1.5] }}>
-          <Text style={text(theme, "badge")}>BY SEAT</Text>
-          {usage.seats.map(row => <Text key={row.seat} testID="project-usage-seat-row" style={text(theme, "code")}>
-            {`${row.label} · ${formatUsageRowMetrics(row)}`}
-          </Text>)}
+    </View>
+  );
+}
+
+function UsageModelIdentity({ theme, provider, model }: { theme: PluginTheme; provider: string; model: string }) {
+  const { base, thinking } = splitUsageModelLabel(model);
+  return (
+    <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[1.5], flex: 1, minWidth: 0 }}>
+      <Text style={{ ...text(theme, "code"), flexShrink: 1 }} numberOfLines={1}>
+        {provider ? <Text style={text(theme, "code", "foregroundMuted")}>{`${provider}/`}</Text> : null}
+        {base}
+      </Text>
+      {thinking !== null ? (
+        <ToneBadge theme={theme} label={thinking} colour={thinkingColour(theme, thinking)} dot={false} />
+      ) : null}
+    </View>
+  );
+}
+
+function UsageSeatIdentity({
+  theme,
+  row,
+  hasModels,
+  expanded,
+}: {
+  theme: PluginTheme;
+  row: UsageSeatRow;
+  hasModels: boolean;
+  expanded: boolean;
+}) {
+  const palette = factoryPalette(theme);
+  return (
+    <View style={{ flexDirection: "row", alignItems: "center", gap: SPACING[1.5], flex: 1, minWidth: 0 }}>
+      <View style={{ width: 12, alignItems: "center", flexShrink: 0 }}>
+        {hasModels ? <Text style={text(theme, "label")}>{expanded ? "▾" : "▸"}</Text> : null}
+      </View>
+      {row.seat === "supervisor" || row.seat === "lead" || row.seat === "agent" ? (
+        <RoleName theme={theme} role={row.seat === "agent" ? "peer" : row.seat} label={row.label} />
+      ) : (
+        <View style={{ flexDirection: "row", alignItems: "center", gap: SPACING[1.5], flexShrink: 1 }}>
+          <View style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: palette.idle, flexShrink: 0 }} />
+          <Text style={{ ...text(theme, "rowTitle", "foregroundMuted"), flexShrink: 1 }} numberOfLines={1}>
+            {row.label}
+          </Text>
         </View>
-        <View testID="project-usage-models" style={{ gap: SPACING[1.5] }}>
-          <Text style={text(theme, "badge")}>BY MODEL</Text>
-          {usage.models.map(row => <Text key={`${row.provider}/${row.model}`} testID="project-usage-model-row" style={text(theme, "code")}>
-            {`${row.provider}/${row.model} · ${formatUsageRowMetrics(row)}`}
-          </Text>)}
+      )}
+    </View>
+  );
+}
+
+function ProjectUsageSeatsView({
+  theme,
+  seats,
+  wide,
+  expandedSeats,
+  onToggleSeat,
+}: {
+  theme: PluginTheme;
+  seats: readonly UsageSeatRow[];
+  wide: boolean;
+  expandedSeats: readonly string[];
+  onToggleSeat: (seat: string) => void;
+}) {
+  if (seats.length === 0) {
+    return (
+      <View testID="project-usage-seats">
+        <Text style={text(theme, "meta")}>No seat usage in this window.</Text>
+      </View>
+    );
+  }
+  return (
+    <View testID="project-usage-seats" style={{ gap: SPACING[1] }}>
+      <UsageTableHeader theme={theme} wide={wide} />
+      {seats.map((row, index) => {
+        const seatColour = seatColourOf(theme, row.seat);
+        const seatModels = row.models ?? [];
+        const hasModels = seatModels.length > 0;
+        const isSeatExpanded = hasModels && expandedSeats.includes(row.seat);
+        const content = (
+          <UsageRowContent
+            theme={theme}
+            wide={wide}
+            row={row}
+            trackColour={tint(seatColour, "22")}
+            fillColour={tint(seatColour, "aa")}
+            identity={<UsageSeatIdentity theme={theme} row={row} hasModels={hasModels} expanded={isSeatExpanded} />}
+          />
+        );
+        return (
+          <View
+            key={row.seat}
+            style={{
+              borderTopWidth: index > 0 ? 1 : 0,
+              borderTopColor: theme.colors.border,
+              paddingTop: index > 0 ? SPACING[1] : 0,
+              gap: SPACING[1],
+            }}
+          >
+            <View testID="project-usage-seat-row">
+              {hasModels ? (
+                <Pressable
+                  testID={`project-usage-seat-toggle-${row.seat}`}
+                  accessibilityRole="button"
+                  accessibilityLabel={`${isSeatExpanded ? "Collapse" : "Expand"} ${row.label} models`}
+                  accessibilityState={{ expanded: isSeatExpanded }}
+                  onPress={() => onToggleSeat(row.seat)}
+                  style={(state) => ({
+                    borderRadius: RADIUS.sm,
+                    paddingVertical: SPACING[1],
+                    paddingHorizontal: SPACING[1],
+                    backgroundColor: hoveredOf(state) || state.pressed ? theme.colors.surface2 : "transparent",
+                  })}
+                >
+                  {content}
+                </Pressable>
+              ) : (
+                <View style={{ paddingVertical: SPACING[1], paddingHorizontal: SPACING[1] }}>{content}</View>
+              )}
+            </View>
+            {isSeatExpanded ? (
+              <View testID={`project-usage-seat-models-${row.seat}`} style={{ paddingLeft: SPACING[4], gap: SPACING[1] }}>
+                {seatModels.map((modelRow) => (
+                  <View
+                    key={`${modelRow.provider}/${modelRow.model}`}
+                    testID="project-usage-model-row"
+                    style={{ paddingVertical: 2, paddingHorizontal: SPACING[1] }}
+                  >
+                    <UsageRowContent
+                      theme={theme}
+                      wide={wide}
+                      row={modelRow}
+                      trackColour={tint(seatColour, "1a")}
+                      fillColour={tint(seatColour, "88")}
+                      identity={<UsageModelIdentity theme={theme} provider={modelRow.provider} model={modelRow.model} />}
+                    />
+                  </View>
+                ))}
+              </View>
+            ) : null}
+          </View>
+        );
+      })}
+    </View>
+  );
+}
+
+function ProjectUsageModelsView({
+  theme,
+  models,
+  wide,
+}: {
+  theme: PluginTheme;
+  models: readonly UsageModelRow[];
+  wide: boolean;
+}) {
+  if (models.length === 0) {
+    return (
+      <View testID="project-usage-models">
+        <Text style={text(theme, "meta")}>No model usage in this window.</Text>
+      </View>
+    );
+  }
+  return (
+    <View testID="project-usage-models" style={{ gap: SPACING[1] }}>
+      <UsageTableHeader theme={theme} wide={wide} />
+      {models.map((row, index) => (
+        <View
+          key={`${row.provider}/${row.model}`}
+          testID="project-usage-model-row"
+          style={{
+            borderTopWidth: index > 0 ? 1 : 0,
+            borderTopColor: theme.colors.border,
+            paddingTop: index > 0 ? SPACING[1.5] : SPACING[0.5],
+            paddingBottom: SPACING[0.5],
+            paddingHorizontal: SPACING[1],
+          }}
+        >
+          <UsageRowContent
+            theme={theme}
+            wide={wide}
+            row={row}
+            trackColour={tint(theme.colors.accent, "22")}
+            fillColour={tint(theme.colors.accent, "88")}
+            identity={<UsageModelIdentity theme={theme} provider={row.provider} model={row.model} />}
+          />
         </View>
-      </View> : null}
-    </>}
-  </Section>;
+      ))}
+    </View>
+  );
+}
+
+function ProjectUsage({
+  theme,
+  usage,
+  mobile,
+  wide,
+}: {
+  theme: PluginTheme;
+  usage: UsageView;
+  mobile: boolean;
+  wide: boolean;
+}) {
+  const [windowKey, setWindowKey] = useState<UsageWindowKey>("all");
+  const [expanded, setExpanded] = useState(false);
+  const [mode, setMode] = useState<UsageBreakdownMode>("seat");
+  const [expandedSeats, setExpandedSeats] = useState<string[]>(["agent"]);
+
+  if (usage.state === "empty") {
+    return (
+      <Section theme={theme} testID="project-usage-card" divider={false}>
+        <SectionTitle theme={theme} label="Project usage" />
+        <Text testID="project-usage-empty" style={text(theme, "meta")}>
+          No usage recorded yet
+        </Text>
+      </Section>
+    );
+  }
+
+  const active = usage.windows?.[windowKey] ?? usage;
+  const toggleSeat = (seat: string) => {
+    setExpandedSeats((current) =>
+      current.includes(seat) ? current.filter((item) => item !== seat) : [...current, seat],
+    );
+  };
+
+  return (
+    <Section theme={theme} testID="project-usage-card" divider={false}>
+      <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: SPACING[2] }}>
+        <SectionTitle theme={theme} label="Project usage" />
+        {usage.windows !== undefined ? (
+          <SegmentedControl
+            theme={theme}
+            size="sm"
+            testID="project-usage-window"
+            value={windowKey}
+            onChange={setWindowKey}
+            options={USAGE_WINDOW_OPTIONS}
+          />
+        ) : null}
+      </View>
+      {active.state === "empty" ? (
+        <Text testID="project-usage-window-empty" style={text(theme, "meta")}>
+          {`No active sessions in the last ${windowKey}`}
+        </Text>
+      ) : (
+        <>
+          <Text testID="project-usage-summary" style={text(theme, "label")}>
+            {`${formatTokenCount(active.newTokens)} new (${formatTokenCount(active.inputUncachedTokens)} in · ${formatTokenCount(active.outputTokens)} out) · `}
+            <Text style={{ color: cacheHitColour(theme, active.cacheHitPercent), fontWeight: "600" }}>
+              {`${formatCacheHit(active.cacheHitPercent)} cache`}
+            </Text>
+            {` (${formatTokenCount(active.cachedTokens)}) · ${formatTokenCount(active.totalTokens)} total · ${active.sessionCount} ${active.sessionCount === 1 ? "session" : "sessions"}`}
+          </Text>
+          {windowKey !== "all" ? (
+            <Text testID="project-usage-window-note" style={text(theme, "meta")}>
+              {`Sessions active in last ${windowKey} — multi-day seats show full session totals`}
+            </Text>
+          ) : null}
+          {mobile ? null : (
+            <Btn
+              theme={theme}
+              small
+              variant="ghost"
+              testID="project-usage-toggle"
+              label={`${expanded ? "▾" : "▸"} Breakdown`}
+              onPress={() => setExpanded(!expanded)}
+            />
+          )}
+          {!mobile && expanded ? (
+            <View testID="project-usage-breakdown" style={{ gap: SPACING[2.5] }}>
+              <SegmentedControl
+                theme={theme}
+                size="sm"
+                testID="project-usage-mode"
+                value={mode}
+                onChange={setMode}
+                options={USAGE_MODE_OPTIONS}
+              />
+              {mode === "seat" ? (
+                <ProjectUsageSeatsView
+                  theme={theme}
+                  seats={active.seats}
+                  wide={wide}
+                  expandedSeats={expandedSeats}
+                  onToggleSeat={toggleSeat}
+                />
+              ) : (
+                <ProjectUsageModelsView theme={theme} models={active.models} wide={wide} />
+              )}
+            </View>
+          ) : null}
+        </>
+      )}
+    </Section>
+  );
 }
 
 /** Seat models (Supervisor, Lead, Default worker), then the Lane profile. Every chip opens the same modal as the Team tab. */
@@ -1156,7 +1564,7 @@ export function ProjectPanel({
             testID="factory-tab"
           />
           <View testID={`factory-tab-body-${tab}`}>
-            {tab === "team" ? boundary("Seats", seats) : tab === "models" ? boundary("Models", models) : <>{boundary("Project usage", panel.usage == null ? null : <ProjectUsage theme={theme} usage={panel.usage} mobile={mobile} />)}{boundary("Skill packs", packs)}{boundary("Open Design", design)}{release === null ? null : boundary("GitHub & Release", <GitHubReleaseCard theme={theme} release={release} publishPreflight={publishPreflight} mobile={mobile} now={now} busy={releaseBusy} feedback={releaseFeedback} copiedLogin={releaseCopiedLogin} {...(releaseActions === undefined ? {} : { actions: releaseActions })} />)}{storeRelease === null ? null : boundary("Store Release", <StoreReleaseCard theme={theme} storeRelease={storeRelease} mobile={mobile} now={now} busy={storeReleaseBusy} feedback={storeReleaseFeedback} {...(storeReleaseActions === undefined ? {} : { actions: storeReleaseActions })} {...(onOpenReleaseLab === undefined ? {} : { onOpenReleaseLab })} {...(onOpenSettings === undefined ? {} : { onOpenSettings })} />)}</>}
+            {tab === "team" ? boundary("Seats", seats) : tab === "models" ? boundary("Models", models) : <>{boundary("Project usage", panel.usage == null ? null : <ProjectUsage theme={theme} usage={panel.usage} mobile={mobile} wide={wide} />)}{boundary("Skill packs", packs)}{boundary("Open Design", design)}{release === null ? null : boundary("GitHub & Release", <GitHubReleaseCard theme={theme} release={release} publishPreflight={publishPreflight} mobile={mobile} now={now} busy={releaseBusy} feedback={releaseFeedback} copiedLogin={releaseCopiedLogin} {...(releaseActions === undefined ? {} : { actions: releaseActions })} />)}{storeRelease === null ? null : boundary("Store Release", <StoreReleaseCard theme={theme} storeRelease={storeRelease} mobile={mobile} now={now} busy={storeReleaseBusy} feedback={storeReleaseFeedback} {...(storeReleaseActions === undefined ? {} : { actions: storeReleaseActions })} {...(onOpenReleaseLab === undefined ? {} : { onOpenReleaseLab })} {...(onOpenSettings === undefined ? {} : { onOpenSettings })} />)}</>}
           </View>
         </>
       ) : (

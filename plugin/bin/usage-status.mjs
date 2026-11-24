@@ -74,12 +74,46 @@ function cacheHitPercentOf(buckets) {
   if (input <= 0) return "\u2013";
   return `${Math.round(buckets.cacheReadTokens / input * 100)}%`;
 }
-function byRecency(a, b) {
-  return Date.parse(a.updatedAt) - Date.parse(b.updatedAt);
+var HISTORICAL_ANTIGRAVITY_MODELS = /* @__PURE__ */ new Map([
+  [1417, "gemini-4-argon-high"],
+  [1525, "gemini-4-hydrogen-high"],
+  [1526, "gemini-4-hydrogen-medium"],
+  [1527, "gemini-4-hydrogen-low"],
+  [1528, "gemini-4-neon-high"]
+]);
+function normalizeUsageModel(provider, model) {
+  const rawProvider = provider.trim().toLowerCase();
+  const normProvider = rawProvider === "copilot" ? "github-copilot" : rawProvider;
+  const rawModel = model.trim().toLowerCase();
+  const enumMatch = /^model-(\d+)$/.exec(rawModel);
+  const mappedOrRaw = enumMatch !== null ? HISTORICAL_ANTIGRAVITY_MODELS.get(Number(enumMatch[1])) ?? rawModel : rawModel;
+  return { provider: normProvider, model: mappedOrRaw.trim().toLowerCase() };
 }
-function foldProjectUsageSummary(file) {
+function byRecency(a, b) {
+  const ta = Date.parse(a.updatedAt);
+  const tb = Date.parse(b.updatedAt);
+  if (Number.isFinite(ta) && Number.isFinite(tb)) return ta - tb;
+  if (Number.isFinite(ta)) return 1;
+  if (Number.isFinite(tb)) return -1;
+  return 0;
+}
+function newTokensOf(row) {
+  return row.inputUncachedTokens + row.outputTokens;
+}
+function compareUsageRank(a, b) {
+  return newTokensOf(b) - newTokensOf(a) || b.totalTokens - a.totalTokens;
+}
+function foldProjectUsageSummary(file, options) {
   if (file === void 0) return null;
-  const records = Object.values(file.sessions).filter((record) => typeof record?.agentId === "string");
+  const sinceMs = options?.sinceMs;
+  const records = Object.values(file.sessions).filter((record) => {
+    if (typeof record?.agentId !== "string") return false;
+    if (sinceMs !== void 0) {
+      const ts = Date.parse(record.updatedAt);
+      if (!Number.isFinite(ts) || ts < sinceMs) return false;
+    }
+    return true;
+  });
   if (records.length === 0) return null;
   const totals = emptyBuckets();
   const models = /* @__PURE__ */ new Map();
@@ -87,27 +121,44 @@ function foldProjectUsageSummary(file) {
   const tasks = /* @__PURE__ */ new Map();
   for (const record of records.sort(byRecency)) {
     addTo(totals, record);
-    const modelKey = `${record.provider}/${record.model}`;
-    const modelRow = models.get(modelKey) ?? { provider: record.provider, harness: String(record.harness), model: record.model, ...emptyBuckets() };
+    const norm = normalizeUsageModel(typeof record.provider === "string" ? record.provider : "", typeof record.model === "string" ? record.model : "");
+    const modelKey = `${norm.provider}/${norm.model}`;
+    const modelRow = models.get(modelKey) ?? { provider: norm.provider, harness: String(record.harness), model: norm.model, ...emptyBuckets() };
     addTo(modelRow, record);
     models.set(modelKey, modelRow);
     const seatKey = record.seat;
-    const seatRow = seats.get(seatKey) ?? { seat: record.seat, label: seatLabelOf(record), ...emptyBuckets() };
+    const seatRow = seats.get(seatKey) ?? { seat: record.seat, label: seatLabelOf(record), modelsMap: /* @__PURE__ */ new Map(), ...emptyBuckets() };
     addTo(seatRow, record);
+    const seatModelRow = seatRow.modelsMap.get(modelKey) ?? { provider: norm.provider, harness: String(record.harness), model: norm.model, ...emptyBuckets() };
+    addTo(seatModelRow, record);
+    seatRow.modelsMap.set(modelKey, seatModelRow);
     seats.set(seatKey, seatRow);
     if (record.task !== void 0 && record.task !== "") {
       const taskRow = tasks.get(record.task) ?? { task: record.task, model: null, ...emptyBuckets() };
       addTo(taskRow, record);
-      taskRow.model = record.model;
+      taskRow.model = norm.model;
       tasks.set(record.task, taskRow);
     }
   }
-  const rank = (a, b) => b.totalTokens - a.totalTokens;
+  const rankModel = (a, b) => compareUsageRank(a, b) || a.provider.localeCompare(b.provider) || a.model.localeCompare(b.model);
+  const rankSeat = (a, b) => compareUsageRank(a, b) || a.label.localeCompare(b.label);
+  const rankTask = (a, b) => compareUsageRank(a, b) || a.task.localeCompare(b.task);
+  const sealModel = (row) => ({
+    ...sealBucket(row),
+    provider: row.provider,
+    harness: row.harness,
+    model: row.model
+  });
   return {
     totals: sealBucket(totals),
-    byModel: [...models.values()].map((row) => ({ ...sealBucket(row), provider: row.provider, harness: row.harness, model: row.model })).sort(rank),
-    bySeat: [...seats.values()].map((row) => ({ ...sealBucket(row), seat: row.seat, label: row.label })).sort(rank),
-    byTask: [...tasks.values()].map((row) => ({ ...sealBucket(row), task: row.task, model: row.model })).sort(rank)
+    byModel: [...models.values()].map(sealModel).filter((row) => row.totalTokens > 0).sort(rankModel),
+    bySeat: [...seats.values()].filter((row) => row.totalTokens > 0).map((row) => ({
+      ...sealBucket(row),
+      seat: row.seat,
+      label: row.label,
+      models: [...row.modelsMap.values()].map(sealModel).filter((m) => m.totalTokens > 0).sort(rankModel)
+    })).sort(rankSeat),
+    byTask: [...tasks.values()].map((row) => ({ ...sealBucket(row), task: row.task, model: row.model })).sort(rankTask)
   };
 }
 function formatTokens(value) {
@@ -126,10 +177,10 @@ function statusUsageLines(stateDir) {
     if (summary === null) continue;
     lines.push(`usage ${slug}: ${formatTokens(summary.totals.totalTokens)} tokens \xB7 ${summary.totals.sessionCount} session(s) \xB7 ${summary.totals.turns} turn(s) \xB7 cache-hit ${cacheHitPercentOf(summary.totals)}${summary.totals.totalCostUsd === null ? "" : ` \xB7 $${summary.totals.totalCostUsd.toFixed(2)}`}`);
     for (const row of summary.bySeat) {
-      lines.push(`  seat ${row.label}: ${formatTokens(row.totalTokens)} tokens \xB7 ${row.sessionCount} session(s)${row.totalCostUsd === null ? "" : ` \xB7 $${row.totalCostUsd.toFixed(2)}`}`);
+      lines.push(`  seat ${row.label}: ${formatTokens(row.totalTokens)} tokens \xB7 ${row.sessionCount} session(s) \xB7 cache-hit ${cacheHitPercentOf(row)}${row.totalCostUsd === null ? "" : ` \xB7 $${row.totalCostUsd.toFixed(2)}`}`);
     }
     for (const row of summary.byModel) {
-      lines.push(`  model ${row.provider}/${row.model} (${row.harness}): ${formatTokens(row.totalTokens)} tokens \xB7 in ${formatTokens(row.inputUncachedTokens)} \xB7 cache-read ${formatTokens(row.cacheReadTokens)} \xB7 out ${formatTokens(row.outputTokens)} \xB7 ${row.turns} turn(s)`);
+      lines.push(`  model ${row.provider}/${row.model} (${row.harness}): ${formatTokens(row.totalTokens)} tokens \xB7 in ${formatTokens(row.inputUncachedTokens)} \xB7 cache-read ${formatTokens(row.cacheReadTokens)} \xB7 out ${formatTokens(row.outputTokens)} \xB7 ${row.turns} turn(s) \xB7 cache-hit ${cacheHitPercentOf(row)}`);
     }
   }
   return lines;
@@ -138,6 +189,7 @@ export {
   cacheHitPercentOf,
   foldProjectUsageSummary,
   formatTokens,
+  normalizeUsageModel,
   readProjectUsage,
   seatLabelOf,
   statusUsageLines,

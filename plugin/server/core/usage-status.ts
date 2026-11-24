@@ -68,6 +68,7 @@ export interface ModelUsageRow extends UsageBuckets {
 export interface SeatUsageRow extends UsageBuckets {
   seat: SessionUsageRecord["seat"];
   label: string;
+  models: ModelUsageRow[];
 }
 
 export interface TaskUsageRow extends UsageBuckets {
@@ -161,42 +162,113 @@ export function cacheHitPercentOf(buckets: Pick<UsageBuckets, "inputUncachedToke
   return `${Math.round((buckets.cacheReadTokens / input) * 100)}%`;
 }
 
+const HISTORICAL_ANTIGRAVITY_MODELS: ReadonlyMap<number, string> = new Map([
+  [1417, "gemini-4-argon-high"],
+  [1525, "gemini-4-hydrogen-high"],
+  [1526, "gemini-4-hydrogen-medium"],
+  [1527, "gemini-4-hydrogen-low"],
+  [1528, "gemini-4-neon-high"],
+]);
+
+/**
+ * Normalizes provider aliases, historical Antigravity enum fallbacks, and
+ * casing while keeping distinct routes (`zcode` vs `zai`) and effort
+ * suffixes (`-high`, `-medium`, `-low`, `-xhigh`) separate.
+ */
+export function normalizeUsageModel(provider: string, model: string): { provider: string; model: string } {
+  const rawProvider = provider.trim().toLowerCase();
+  const normProvider = rawProvider === "copilot" ? "github-copilot" : rawProvider;
+  const rawModel = model.trim().toLowerCase();
+  const enumMatch = /^model-(\d+)$/.exec(rawModel);
+  const mappedOrRaw = enumMatch !== null ? (HISTORICAL_ANTIGRAVITY_MODELS.get(Number(enumMatch[1])) ?? rawModel) : rawModel;
+  return { provider: normProvider, model: mappedOrRaw.trim().toLowerCase() };
+}
+
 function byRecency(a: SessionUsageRecord, b: SessionUsageRecord): number {
-  return Date.parse(a.updatedAt) - Date.parse(b.updatedAt);
+  const ta = Date.parse(a.updatedAt);
+  const tb = Date.parse(b.updatedAt);
+  if (Number.isFinite(ta) && Number.isFinite(tb)) return ta - tb;
+  if (Number.isFinite(ta)) return 1;
+  if (Number.isFinite(tb)) return -1;
+  return 0;
+}
+
+type MutableBucket = UsageBuckets & { costSum: number; costSeen: boolean };
+type MutableModelRow = MutableBucket & ModelUsageRow;
+type MutableSeatRow = MutableBucket & Omit<SeatUsageRow, "models"> & { modelsMap: Map<string, MutableModelRow> };
+type MutableTaskRow = MutableBucket & TaskUsageRow;
+
+function newTokensOf(row: Pick<UsageBuckets, "inputUncachedTokens" | "outputTokens">): number {
+  return row.inputUncachedTokens + row.outputTokens;
+}
+
+function compareUsageRank(a: UsageBuckets, b: UsageBuckets): number {
+  return (newTokensOf(b) - newTokensOf(a)) || (b.totalTokens - a.totalTokens);
 }
 
 /** Folds one Project's rollup into the totals + per-model + per-seat + per-task breakdown. */
-export function foldProjectUsageSummary(file: ProjectUsageFile | undefined): ProjectUsageSummary | null {
+export function foldProjectUsageSummary(file: ProjectUsageFile | undefined, options?: { sinceMs?: number }): ProjectUsageSummary | null {
   if (file === undefined) return null;
-  const records = Object.values(file.sessions).filter(record => typeof record?.agentId === "string");
+  const sinceMs = options?.sinceMs;
+  const records = Object.values(file.sessions).filter(record => {
+    if (typeof record?.agentId !== "string") return false;
+    if (sinceMs !== undefined) {
+      const ts = Date.parse(record.updatedAt);
+      if (!Number.isFinite(ts) || ts < sinceMs) return false;
+    }
+    return true;
+  });
   if (records.length === 0) return null;
   const totals = emptyBuckets();
-  const models = new Map<string, UsageBuckets & { costSum: number; costSeen: boolean } & ModelUsageRow>();
-  const seats = new Map<string, UsageBuckets & { costSum: number; costSeen: boolean } & SeatUsageRow>();
-  const tasks = new Map<string, UsageBuckets & { costSum: number; costSeen: boolean } & TaskUsageRow>();
+  const models = new Map<string, MutableModelRow>();
+  const seats = new Map<string, MutableSeatRow>();
+  const tasks = new Map<string, MutableTaskRow>();
   for (const record of records.sort(byRecency)) {
     addTo(totals, record);
-    const modelKey = `${record.provider}/${record.model}`;
-    const modelRow = models.get(modelKey) ?? { provider: record.provider, harness: String(record.harness), model: record.model, ...emptyBuckets() };
+    const norm = normalizeUsageModel(typeof record.provider === "string" ? record.provider : "", typeof record.model === "string" ? record.model : "");
+    const modelKey = `${norm.provider}/${norm.model}`;
+    const modelRow = models.get(modelKey) ?? { provider: norm.provider, harness: String(record.harness), model: norm.model, ...emptyBuckets() };
     addTo(modelRow, record);
     models.set(modelKey, modelRow);
     const seatKey = record.seat;
-    const seatRow = seats.get(seatKey) ?? { seat: record.seat, label: seatLabelOf(record), ...emptyBuckets() };
+    const seatRow = seats.get(seatKey) ?? { seat: record.seat, label: seatLabelOf(record), modelsMap: new Map(), ...emptyBuckets() };
     addTo(seatRow, record);
+    const seatModelRow = seatRow.modelsMap.get(modelKey) ?? { provider: norm.provider, harness: String(record.harness), model: norm.model, ...emptyBuckets() };
+    addTo(seatModelRow, record);
+    seatRow.modelsMap.set(modelKey, seatModelRow);
     seats.set(seatKey, seatRow);
     if (record.task !== undefined && record.task !== "") {
       const taskRow = tasks.get(record.task) ?? { task: record.task, model: null, ...emptyBuckets() };
       addTo(taskRow, record);
-      taskRow.model = record.model; // recency order — the latest session names the badge
+      taskRow.model = norm.model; // recency order — the latest session names the badge
       tasks.set(record.task, taskRow);
     }
   }
-  const rank = (a: UsageBuckets, b: UsageBuckets) => b.totalTokens - a.totalTokens;
+  const rankModel = (a: ModelUsageRow, b: ModelUsageRow) =>
+    compareUsageRank(a, b) || a.provider.localeCompare(b.provider) || a.model.localeCompare(b.model);
+  const rankSeat = (a: SeatUsageRow, b: SeatUsageRow) =>
+    compareUsageRank(a, b) || a.label.localeCompare(b.label);
+  const rankTask = (a: TaskUsageRow, b: TaskUsageRow) =>
+    compareUsageRank(a, b) || a.task.localeCompare(b.task);
+  const sealModel = (row: MutableModelRow): ModelUsageRow => ({
+    ...sealBucket(row),
+    provider: row.provider,
+    harness: row.harness,
+    model: row.model,
+  });
   return {
     totals: sealBucket(totals),
-    byModel: [...models.values()].map(row => ({ ...sealBucket(row), provider: row.provider, harness: row.harness, model: row.model })).sort(rank),
-    bySeat: [...seats.values()].map(row => ({ ...sealBucket(row), seat: row.seat, label: row.label })).sort(rank),
-    byTask: [...tasks.values()].map(row => ({ ...sealBucket(row), task: row.task, model: row.model })).sort(rank),
+    byModel: [...models.values()].map(sealModel).filter(row => row.totalTokens > 0).sort(rankModel),
+    bySeat: [...seats.values()]
+      .filter(row => row.totalTokens > 0)
+      .map(row => ({
+        ...sealBucket(row),
+        seat: row.seat,
+        label: row.label,
+        models: [...row.modelsMap.values()].map(sealModel).filter(m => m.totalTokens > 0).sort(rankModel),
+      }))
+      .sort(rankSeat),
+    byTask: [...tasks.values()].map(row => ({ ...sealBucket(row), task: row.task, model: row.model })).sort(rankTask),
   };
 }
 
@@ -223,10 +295,10 @@ export function statusUsageLines(stateDir: string): string[] {
     if (summary === null) continue;
     lines.push(`usage ${slug}: ${formatTokens(summary.totals.totalTokens)} tokens · ${summary.totals.sessionCount} session(s) · ${summary.totals.turns} turn(s) · cache-hit ${cacheHitPercentOf(summary.totals)}${summary.totals.totalCostUsd === null ? "" : ` · $${summary.totals.totalCostUsd.toFixed(2)}`}`);
     for (const row of summary.bySeat) {
-      lines.push(`  seat ${row.label}: ${formatTokens(row.totalTokens)} tokens · ${row.sessionCount} session(s)${row.totalCostUsd === null ? "" : ` · $${row.totalCostUsd.toFixed(2)}`}`);
+      lines.push(`  seat ${row.label}: ${formatTokens(row.totalTokens)} tokens · ${row.sessionCount} session(s) · cache-hit ${cacheHitPercentOf(row)}${row.totalCostUsd === null ? "" : ` · $${row.totalCostUsd.toFixed(2)}`}`);
     }
     for (const row of summary.byModel) {
-      lines.push(`  model ${row.provider}/${row.model} (${row.harness}): ${formatTokens(row.totalTokens)} tokens · in ${formatTokens(row.inputUncachedTokens)} · cache-read ${formatTokens(row.cacheReadTokens)} · out ${formatTokens(row.outputTokens)} · ${row.turns} turn(s)`);
+      lines.push(`  model ${row.provider}/${row.model} (${row.harness}): ${formatTokens(row.totalTokens)} tokens · in ${formatTokens(row.inputUncachedTokens)} · cache-read ${formatTokens(row.cacheReadTokens)} · out ${formatTokens(row.outputTokens)} · ${row.turns} turn(s) · cache-hit ${cacheHitPercentOf(row)}`);
     }
   }
   return lines;

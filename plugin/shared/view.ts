@@ -368,6 +368,7 @@ export type ModelUsageRowView = z.infer<typeof ModelUsageRowSchema>;
 export const SeatUsageRowSchema = z.object({
   seat: z.enum(["supervisor", "lead", "agent", "watch"]),
   label: z.string(),
+  models: z.array(ModelUsageRowSchema).optional(),
 }).extend(UsageBucketsSchema.shape);
 export type SeatUsageRowView = z.infer<typeof SeatUsageRowSchema>;
 
@@ -614,12 +615,34 @@ const PanelUsageMetricsSchema = z.object({
   totalTokens: z.number(),
   sessionCount: z.number(),
 });
-const PanelUsageBreakdownSchema = PanelUsageMetricsSchema.extend({ sharePercent: z.number() });
-export const PanelUsageSchema = PanelUsageMetricsSchema.extend({
+const PanelUsageBreakdownSchema = PanelUsageMetricsSchema.extend({
+  sharePercent: z.number(),
+  cacheHitPercent: z.number().nullable().optional(),
+});
+export const PanelUsageModelRowSchema = PanelUsageBreakdownSchema.extend({
+  provider: z.string(),
+  model: z.string(),
+});
+export type PanelUsageModelRow = z.infer<typeof PanelUsageModelRowSchema>;
+export const PanelUsageSeatRowSchema = PanelUsageBreakdownSchema.extend({
+  seat: z.string(),
+  label: z.string(),
+  models: z.array(PanelUsageModelRowSchema).optional(),
+});
+export type PanelUsageSeatRow = z.infer<typeof PanelUsageSeatRowSchema>;
+export const PanelUsageWindowSchema = PanelUsageMetricsSchema.extend({
   state: z.enum(["recorded", "empty"]),
   cacheHitPercent: z.number().nullable(),
-  seats: z.array(PanelUsageBreakdownSchema.extend({ seat: z.string(), label: z.string() })),
-  models: z.array(PanelUsageBreakdownSchema.extend({ provider: z.string(), model: z.string() })),
+  seats: z.array(PanelUsageSeatRowSchema),
+  models: z.array(PanelUsageModelRowSchema),
+});
+export type PanelUsageWindow = z.infer<typeof PanelUsageWindowSchema>;
+export const PanelUsageSchema = PanelUsageWindowSchema.extend({
+  windows: z.object({
+    all: PanelUsageWindowSchema,
+    "7d": PanelUsageWindowSchema,
+    "24h": PanelUsageWindowSchema,
+  }).optional(),
 });
 export type PanelUsage = z.infer<typeof PanelUsageSchema>;
 
