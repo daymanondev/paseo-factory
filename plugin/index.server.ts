@@ -47,7 +47,7 @@ import { migrateLegacyExecutionState } from "./server/core/project-settings.ts";
 import { migrateLegacyRootState } from "./server/core/ledger-migration.ts";
 import { hasActiveStoreReleases, onStoreReleaseActivityChange } from "./server/store-release.ts";
 
-const SHELL_VERSION = "0.23.0";
+const SHELL_VERSION = "0.23.1";
 
 const log = (message: string) => console.log(`[${PLUGIN_ID}] ${message}`);
 

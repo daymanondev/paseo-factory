@@ -28,6 +28,20 @@ const MAX_PEER_HANDOFFS = 1;
 const SUMMARY_BYTES = 12 * 1024;
 const INTERRUPTED = "The outgoing Peer was interrupted during handoff extraction. Rely on the machine-verified worktree digest and inspect the remaining requirements and checks.";
 
+function groupEventsByTask(events: readonly LedgerEvent[]): Map<string, LedgerEvent[]> {
+  const grouped = new Map<string, LedgerEvent[]>();
+  for (const event of events) {
+    if (!("task" in event) || typeof event.task !== "string") continue;
+    let list = grouped.get(event.task);
+    if (list === undefined) {
+      list = [];
+      grouped.set(event.task, list);
+    }
+    list.push(event);
+  }
+  return grouped;
+}
+
 export function renderPeerHandoffExtractionPrompt(input: {
   task: string;
   reason: "context-mark" | "owner";
@@ -329,26 +343,36 @@ export function createPeerHandoffRuntime(deps: PeerHandoffDeps) {
 
   const observeProject = async (slug: string, root: string, input?: LeadTurnEndedInput): Promise<{ notifiedAgentIds: Set<string> }> => {
     const notifiedAgentIds = new Set<string>();
-    const events = eventsOf(slug);
-    const tasks = [...new Set(events.flatMap(event => event.event === "contract_set" && (event.workspace === root || event.workspace.startsWith(`${root}/`)) ? [event.task] : []))];
+    const initialEvents = eventsOf(slug);
+    const tasks = [...new Set(initialEvents.flatMap(event => event.event === "contract_set" && (event.workspace === root || event.workspace.startsWith(`${root}/`)) ? [event.task] : []))];
     if (tasks.length === 0) return { notifiedAgentIds };
     const page = await deps.daemon().agents.list({ filter: { includeArchived: false, includeBackground: true } });
     const live = page.entries.map(entry => entry.agent).filter(agent => agent.archivedAt === null);
+    let currentEvents = eventsOf(slug);
+    let eventsByTask = groupEventsByTask(currentEvents);
+    let snapshotStale = false;
+    const ensureFreshSnapshot = () => {
+      if (!snapshotStale) return;
+      currentEvents = eventsOf(slug);
+      eventsByTask = groupEventsByTask(currentEvents);
+      snapshotStale = false;
+    };
     for (const task of tasks) {
       try {
-        const currentEvents = eventsOf(slug);
-        const projected = projectTask(currentEvents, task), contract = projected.contract!;
+        ensureFreshSnapshot();
+        const taskEvents = eventsByTask.get(task) ?? [];
+        const projected = projectTask(taskEvents, task), contract = projected.contract!;
         if (contract.workspace !== root && !contract.workspace.startsWith(`${root}/`)) continue;
         const key = `${slug}:${task}`;
+        if (projected.acceptance || projected.closed || projected.attempts.some(attempt => attempt.gateOpen) || projected.verdict === "green") { clear(key); continue; }
         let state = readOptionalJson(statePath(slug, task)) as PeerHandoffState | undefined;
         if (state?.contractEpochSeq !== contract.seq) {
           clear(key);
           state = { contractEpochSeq: contract.seq, peerHandoffCount: 0, phase: "idle" };
           save(slug, task, state);
         }
-        if (projected.acceptance || projected.attempts.some(attempt => attempt.gateOpen) || projected.verdict === "green") { clear(key); continue; }
         // GP-R24c4 fix: choke Peer Auto-Handoff while an unanswered peer_asked awaits Lead ruling.
-        if (hasUnansweredPeerAsk(currentEvents, task)) {
+        if (hasUnansweredPeerAsk(taskEvents, task)) {
           clear(key);
           if (state.phase === "extracting") {
             state = {
@@ -367,11 +391,12 @@ export function createPeerHandoffRuntime(deps: PeerHandoffDeps) {
           if (readHandoffProgress(deps.stateDir, slug, `peer:${task}`)?.state === "failed") continue;
           const outgoingId = state.outgoingId;
           if (state.phase !== "extracting" || (input !== undefined && input.agentId === outgoingId && input.outcome.kind !== "canceled") || Date.now() >= state.requestedAt! + extractionTimeout(state) || !live.some(agent => agent.id === outgoingId && agent.status !== "error")) {
+            snapshotStale = true;
             await finish(slug, contract, state, live, input?.agentId === state.outgoingId ? input : undefined);
           } else arm(slug, task, state.requestedAt!, extractionTimeout(state));
           continue;
         }
-        const peers = boundTaskPeers({ stateDir: deps.stateDir, slug, task, events: currentEvents, live });
+        const peers = boundTaskPeers({ stateDir: deps.stateDir, slug, task, events: taskEvents, live });
         const peer = peers[0];
         if (!peer || (input && input.agentId !== peer.id)) continue;
         const reading = deps.readTokens(peer);
@@ -396,6 +421,7 @@ export function createPeerHandoffRuntime(deps: PeerHandoffDeps) {
             state.andonCheckpointEpochSeq = contract.seq;
             save(slug, task, state);
             notifiedAgentIds.add(peer.id);
+            snapshotStale = true;
             try {
               await bounded(deps.daemon().agents.ref(peer.id).send([
                 `Andon Checkpoint (Task ${task}): you have used ~50% of your context budget (${reading.usedTokens.toLocaleString("en-US")} / ${mark.toLocaleString("en-US")} tokens) with no Claim or Ask recorded in this epoch.`,
@@ -428,9 +454,11 @@ export function createPeerHandoffRuntime(deps: PeerHandoffDeps) {
           progress(slug, task, state, "handing-over");
           save(slug, task, state);
           notifiedAgentIds.add(peer.id);
+          snapshotStale = true;
           await finish(slug, contract, state, live);
           continue;
         }
+        snapshotStale = true;
         state = {
           contractEpochSeq: contract.seq,
           peerHandoffCount: state.peerHandoffCount,

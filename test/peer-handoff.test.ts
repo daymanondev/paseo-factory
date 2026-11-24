@@ -9,7 +9,8 @@ import { CorrelationRegistry } from "../plugin/server/core/correlations.ts";
 import { projectNotebookPath, projectStateDir, resolveProject, writeProjectRegistration } from "../plugin/server/core/project.ts";
 import { prepareTaskWorktree } from "../plugin/server/core/workspace.ts";
 import { createLeadMailRuntime } from "../plugin/server/lead-mailbox.ts";
-import { PEER_HANDOFF_TOKENS, renderPeerHandoffExtractionPrompt } from "../plugin/server/peer-handoff.ts";
+import { createPeerHandoffRuntime, PEER_HANDOFF_TOKENS, renderPeerHandoffExtractionPrompt } from "../plugin/server/peer-handoff.ts";
+import type { LedgerEvent } from "../plugin/server/core/events.ts";
 import { createSurfaceHandlers, type SurfaceAgentSnapshot, type SurfaceDaemonApi } from "../plugin/server/surface-rpc.ts";
 import { handleSpoolRequest, startSpool } from "../plugin/server/spool.ts";
 import { saveLanes } from "../plugin/server/core/lanes.ts";
@@ -847,4 +848,59 @@ test("renderPeerHandoffExtractionPrompt unifies context-mark and owner prompts w
   assert.equal(saved.includes(`file://${f.cwd}`), false);
   assert.equal(saved.includes(f.root), false);
   assert.ok(saved.includes("agent_claim"), "no server-side symbol scrubber");
+});
+
+test("observeProject avoids O(T x N) eventsFor rescans on 500 settled tasks", async (t) => {
+  const dir = makeTempDir("peer-handoff-perf-");
+  disposeDir(t, dir);
+  const stateDir = join(dir, "state");
+  const root = join(dir, "repo");
+  mkdirSync(root, { recursive: true });
+
+  const ts = "2026-11-24T00:00:00.000Z";
+  const events: LedgerEvent[] = [];
+  let seq = 1;
+  for (let i = 0; i < 500; i += 1) {
+    const task = `T-${i}`;
+    events.push(
+      { seq: seq++, ts, event: "contract_set", task, workspace: root, gate: "true", artifact: "", base: "abc" },
+      { seq: seq++, ts, event: "spawn_dispatched", task, provider: "pi/m", arity: 1, worktree: join(dir, "wt", task) },
+      { seq: seq++, ts, event: "claim_reported", task, attempt: 1, sha: "1234567" },
+      { seq: seq++, ts, event: "gate_finished", task, attempt: 1, exit: 0, verdict: "green", note: "ok" },
+      { seq: seq++, ts, event: "attempt_accepted", task, attempt: 1 },
+      { seq: seq++, ts, event: "report_written", task, attempt: 1, path: `report-${task}.md` },
+    );
+  }
+
+  let eventsForCalls = 0;
+  const runtime = createPeerHandoffRuntime({
+    factory: { ledger: { events } } as never,
+    eventsFor: () => {
+      eventsForCalls += 1;
+      return events;
+    },
+    stateDir,
+    daemon: () => ({
+      agents: {
+        list: async () => ({ entries: [] }),
+        create: async () => { throw new Error("unexpected create"); },
+        ref: () => { throw new Error("unexpected ref"); },
+      },
+      providers: { listAvailable: async () => ({ providers: [] }), listModels: async () => ({ models: [] }) },
+    }) as never,
+    timeoutMs: 1000,
+    readTokens: () => ({ usedTokens: null }),
+    queueBlocked: () => {},
+    wake: async () => {},
+    log: () => {},
+  });
+  t.after(() => runtime.stop());
+
+  const t0 = performance.now();
+  const result = await runtime.observeProject("perf-slug", root);
+  const elapsedMs = performance.now() - t0;
+
+  assert.equal(result.notifiedAgentIds.size, 0);
+  assert.ok(eventsForCalls <= 3, `expected <= 3 eventsFor calls across 500 settled tasks, got ${eventsForCalls}`);
+  assert.ok(elapsedMs < 250, `expected observeProject over 500 settled tasks in < 250ms, took ${elapsedMs.toFixed(1)}ms`);
 });

@@ -11,7 +11,7 @@
 import { realpathSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { MAX_ATTEMPTS } from "./core/events.ts";
-import type { LedgerEvent } from "./core/events.ts";
+import type { ContractSet, LedgerEvent } from "./core/events.ts";
 import type { Factory } from "./core/factory.ts";
 import { readLeadMailbox } from "./core/mailbox.ts";
 import type { LeadMailItem } from "./core/mailbox.ts";
@@ -189,13 +189,25 @@ export function taskFactoryOf(source: ProjectLedgerSource, slug: string, task: s
   return source.factory.contractFor(task) !== undefined ? source.factory : project;
 }
 
+function contractByTaskOf(events: readonly LedgerEvent[]): Map<string, ContractSet> {
+  const contracts = new Map<string, ContractSet>();
+  for (const evt of events) {
+    if (evt.event === "contract_set") contracts.set(evt.task, evt);
+  }
+  return contracts;
+}
+
 /** The Project's Ledger stream: its OWN Factory's events plus any task the wired Factory still owns (the legacy root bridge). */
 export function projectStreamOf(source: ProjectLedgerSource, slug: string, strict = false): readonly LedgerEvent[] {
   const project = projectFactoryOf(source, slug, strict);
   if (project === source.factory) return source.factory.ledger.events;
+  const projectTasks = new Set<string>();
+  for (const evt of project.ledger.events) {
+    if (evt.event === "contract_set") projectTasks.add(evt.task);
+  }
   const wiredOnly = source.factory.ledger.events.filter((evt) => {
     if (!("task" in evt) || typeof evt.task !== "string") return false;
-    return project.contractFor(evt.task) === undefined;
+    return !projectTasks.has(evt.task);
   });
   return [...project.ledger.events, ...wiredOnly];
 }
@@ -208,31 +220,57 @@ function realpathSafe(path: string): string {
   }
 }
 
-function taskBelongsToProjectRoot(
+function filterProjectEvents(
   source: ProjectLedgerSource,
+  stateDir: string,
   slug: string,
   root: string,
-  normRoot: string,
-  worktreesDir: string,
-  task: string,
   strict: boolean,
-): boolean {
-  const contract = taskFactoryOf(source, slug, task, strict).contractFor(task);
-  if (contract === undefined) return false;
-  const ws = contract.workspace;
-  const normWs = realpathSafe(resolve(ws));
-  return ws === root || ws.startsWith(`${root}/`) || normWs === normRoot || normWs.startsWith(`${normRoot}/`) ||
-    ws === worktreesDir || ws.startsWith(`${worktreesDir}/`);
+  includeTaskless: boolean,
+): readonly LedgerEvent[] {
+  const project = projectFactoryOf(source, slug, strict);
+  const projectContracts = contractByTaskOf(project.ledger.events);
+  const rootContracts = project === source.factory ? undefined : contractByTaskOf(source.factory.ledger.events);
+  const stream = projectStreamOf(source, slug, strict);
+  const normRoot = realpathSafe(resolve(root));
+  const worktreesDir = join(projectStateDir(stateDir, slug), "worktrees");
+  const wsRealpathCache = new Map<string, string>();
+  const belongsByTask = new Map<string, boolean>();
+
+  const taskBelongs = (task: string): boolean => {
+    const cached = belongsByTask.get(task);
+    if (cached !== undefined) return cached;
+    const contract = projectContracts.get(task) ?? rootContracts?.get(task);
+    if (contract === undefined) {
+      belongsByTask.set(task, false);
+      return false;
+    }
+    const ws = contract.workspace;
+    let normWs = wsRealpathCache.get(ws);
+    if (normWs === undefined) {
+      normWs = realpathSafe(resolve(ws));
+      wsRealpathCache.set(ws, normWs);
+    }
+    const belongs =
+      ws === root ||
+      ws.startsWith(`${root}/`) ||
+      normWs === normRoot ||
+      normWs.startsWith(`${normRoot}/`) ||
+      ws === worktreesDir ||
+      ws.startsWith(`${worktreesDir}/`);
+    belongsByTask.set(task, belongs);
+    return belongs;
+  };
+
+  return stream.filter((evt) => {
+    if (!("task" in evt) || typeof evt.task !== "string") return includeTaskless;
+    return taskBelongs(evt.task);
+  });
 }
 
 /** The Project's task-scoped events: tasks whose Contract workspace sits inside `root` (symlinks resolved) or the Project's worktrees dir. */
 export function projectEventsOf(source: ProjectLedgerSource, stateDir: string, slug: string, root: string, strict = false): readonly LedgerEvent[] {
-  const normRoot = realpathSafe(resolve(root));
-  const worktreesDir = join(projectStateDir(stateDir, slug), "worktrees");
-  return projectStreamOf(source, slug, strict).filter((evt) => {
-    if (!("task" in evt) || typeof evt.task !== "string") return false;
-    return taskBelongsToProjectRoot(source, slug, root, normRoot, worktreesDir, evt.task, strict);
-  });
+  return filterProjectEvents(source, stateDir, slug, root, strict, false);
 }
 
 /**
@@ -246,12 +284,7 @@ export function projectOwnAndTaskEventsOf(
   root: string,
   strict = false,
 ): readonly LedgerEvent[] {
-  const normRoot = realpathSafe(resolve(root));
-  const worktreesDir = join(projectStateDir(stateDir, slug), "worktrees");
-  return projectStreamOf(source, slug, strict).filter((evt) => {
-    if (!("task" in evt) || typeof evt.task !== "string") return true;
-    return taskBelongsToProjectRoot(source, slug, root, normRoot, worktreesDir, evt.task, strict);
-  });
+  return filterProjectEvents(source, stateDir, slug, root, strict, true);
 }
 
 /** The Project's queued mailbox items, or `undefined` when the mailbox is unreadable. */

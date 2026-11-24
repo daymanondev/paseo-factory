@@ -9,7 +9,9 @@ import {
   projectEventsOf,
   projectOwnAndTaskEventsOf,
   projectStreamOf,
+  type ProjectLedgerSource,
 } from "../plugin/server/peer-in-flight.ts";
+import type { LedgerEvent } from "../plugin/server/core/events.ts";
 import { buildSubstituteHandover, extractCleanTimelineText } from "../plugin/server/substitute-handover.ts";
 import { disposeDir, gitCommitAll, makeTempDir } from "./helpers.ts";
 
@@ -125,4 +127,66 @@ test("buildSubstituteHandover omits Project notebook when notebook is undefined 
     maxBytes: 4096,
   });
   assert.ok(withNotebook.includes("## Project notebook\n## 1. Verification & Run Recipe"));
+});
+
+test("projectStreamOf, projectEventsOf, and projectOwnAndTaskEventsOf stay O(N) on 6,000-event multi-hundred-task Ledgers without calling contractFor per event", (t) => {
+  const dir = makeTempDir("peer-in-flight-perf-");
+  disposeDir(t, dir);
+  const stateDir = join(dir, "state");
+  const rootA = join(dir, "proj-a");
+  const rootB = join(dir, "proj-b");
+  mkdirSync(rootA, { recursive: true });
+  mkdirSync(rootB, { recursive: true });
+
+  const ts = "2026-11-24T00:00:00.000Z";
+  const projEvents: LedgerEvent[] = [];
+  const rootEvents: LedgerEvent[] = [];
+  let seq = 1;
+  for (let i = 0; i < 500; i += 1) {
+    const task = `T-${i}`;
+    projEvents.push(
+      { seq: seq++, ts, event: "contract_set", task, workspace: rootA, gate: "true", artifact: "", base: "abc" },
+      { seq: seq++, ts, event: "spawn_dispatched", task, provider: "pi/m", arity: 1, worktree: join(dir, "wt", task) },
+      { seq: seq++, ts, event: "claim_reported", task, attempt: 1, sha: "1234567" },
+      { seq: seq++, ts, event: "gate_finished", task, attempt: 1, exit: 0, verdict: "green", note: "ok" },
+      { seq: seq++, ts, event: "attempt_accepted", task, attempt: 1 },
+      { seq: seq++, ts, event: "report_written", task, attempt: 1, path: `report-${task}.md` },
+    );
+  }
+  // 3,000 project events + legacy root task + unrelated project task + task-less root noise
+  projEvents.push({ seq: seq++, ts, event: "store_release_started", runId: "sr-perf", action: "stage", platforms: ["ios"], mode: "on-request" });
+  rootEvents.push(
+    { seq: 1, ts, event: "git_blocked", blockId: "gb-1", command: "git push", rule: "release-fence", reason: "root", cwd: dir },
+    { seq: 2, ts, event: "contract_set", task: "T-LEGACY-A", workspace: rootA, gate: "true", artifact: "", base: "abc" },
+    { seq: 3, ts, event: "contract_set", task: "T-OTHER-B", workspace: rootB, gate: "true", artifact: "", base: "abc" },
+  );
+
+  let contractForCalls = 0;
+  const makeStubFactory = (events: LedgerEvent[]) => ({
+    ledger: { events },
+    contractFor: () => {
+      contractForCalls += 1;
+      throw new Error("linear filter must not call quadratic contractFor()");
+    },
+  });
+  const rootFactory = makeStubFactory(rootEvents);
+  const projectFactory = makeStubFactory(projEvents);
+  const source: ProjectLedgerSource = {
+    factory: rootFactory as never,
+    registry: {
+      factoryForProject: () => projectFactory as never,
+    } as never,
+  };
+
+  const t0 = performance.now();
+  const stream = projectStreamOf(source, "proj-a");
+  const tasksOnly = projectEventsOf(source, stateDir, "proj-a", rootA);
+  const ownAndTasks = projectOwnAndTaskEventsOf(source, stateDir, "proj-a", rootA);
+  const elapsedMs = performance.now() - t0;
+
+  assert.equal(contractForCalls, 0);
+  assert.equal(stream.some((e) => e.event === "git_blocked"), false);
+  assert.equal(tasksOnly.length, 3001, "3,000 Project A events + 1 legacy root task");
+  assert.equal(ownAndTasks.length, 3002, "retains Project A store_release_started + 3,001 task events");
+  assert.ok(elapsedMs < 250, `expected linear filtering in < 250ms, took ${elapsedMs.toFixed(1)}ms`);
 });

@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.1] - 2026-11-24
+
+**Eliminate `O(T × N²)` CPU lockup during 5-second Peer sweeps on large multi-hundred-task Ledgers (`plugin/server/peer-in-flight.ts`, `plugin/server/peer-handoff.ts`).**
+
+### Fixed
+
+- **Linear-time Project Ledger stream filtering (`plugin/server/peer-in-flight.ts`):** Built a single-pass `contractByTaskOf(events)` lookup, `projectTasks` Set, and memoized `wsRealpathCache` / `belongsByTask` maps inside `projectStreamOf`, `projectEventsOf`, and `projectOwnAndTaskEventsOf`, replacing per-event `contractFor()` + repeated `realpathSync()` rescans on `6,000+`-event Ledgers.
+- **Single-pass `observeProject` Peer sweep (`plugin/server/peer-handoff.ts`):** Grouped events once per `observeProject` sweep via `groupEventsByTask(currentEvents)` (refreshing only when an `await` runs inside the loop), skipped already-settled (`accepted`, `closed`, `green`, or `gateOpen`) Tasks before reading/writing `peer-handoff-<task>.json` or scanning `correlations.json`, and scoped `hasUnansweredPeerAsk` / `boundTaskPeers` to each Task's grouped events (`test/peer-in-flight.test.ts`, `test/peer-handoff.test.ts`).
+
 ## [0.23.0] - 2026-11-24
 
 **Handoff Context & Control-Plane Isolation: Priority-First continuity extraction with `Dead Ends`, section-aware capping and repo-relative path normalization, clean `Substitute handover`s, and active/paused `Store release` kickoff surfacing (ADR 0070).**
