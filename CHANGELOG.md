@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.25.0] - 2026-11-25
+
+**Capability-gated Store Release role contracts, dynamic `Role-scoped MCP bridge` exposure with `listChanged`, safe `storeReleaseWrite` live mode-flip refresh, compaction-safe Pi reminders, and `Release lab` `failure.hint` relay (ADR 0071).**
+
+### Added
+
+- **Pure per-Project Store Release capability resolver (`src/store-release-capability.ts`, `plugin/server/core/store-release-capability.ts`):** Added `resolveStoreReleaseCapability` combining mobile Project detection (`detectMobilePlatforms` / `.store-release/manifest.json`) with active `Store release mode` (`mode !== "off"`) into `{ isMobile, mode, isActive, leadEnabled, supervisorTier }`, synced to `plugin/server/core/` and bundled into self-contained `plugin/bin/bridge.mjs` via `scripts/generate-policies.mjs`.
+- **Capability-gated Role contracts & compaction-safe Pi delivery (`src/roles-contract.ts`, `src/preflight.ts`, `plugin/server/roles.ts`, `plugin/server/lead-mailbox.ts`, `plugin/server/supervisor-handoff.ts`, `plugin/server/spool.ts`):**
+  - Split `LEAD_STORE_RELEASE_LAW`, `SUPERVISOR_STORE_RELEASE_BOUNDARY` (`"full"`), and 1-sentence `SUPERVISOR_STORE_RELEASE_OFF_HINT` (`"off-hint"`) out of standing base laws so non-mobile Projects and `mode: "off"` mobile `Lead`s receive zero Store Release instructions, keeping shared Pi `APPEND_SYSTEM.md` 100% Project-agnostic.
+  - Threaded resolved capability into `injectSessionEnv` (`>=0.17.1` `appendSystemPrompt`), `injectRoleOnCreate` (`<0.17.1`), `renderSeatContract`, `renderSeatBootstrapPrompt`, and `buildSeatKickoffPacket` (with `includeDynamicStoreReleaseContract` preserving dynamic Store Release prose across Turn-1 and post-`Handoff` Pi kickoffs even with `omitSystemPromptDuplicates: true`).
+  - Added unconditional compaction-safe Store Release reminders on `Lead mailbox` (`storeRelease` dispatches, `store_release_*` wakeups, `auto-staging` `lead_release` hints) and `Supervisor mailbox` (`Hole` / `Console handoff guide` reports) (`test/roles.test.ts`, `test/preflight.test.ts`, `test/pi-home.test.ts`, `test/lead-mailbox.test.ts`).
+- **Dynamic `Role-scoped MCP bridge` gating (`plugin/bin/bridge.mjs`, `plugin/shared/rpc.ts`, `plugin/shared/handoff.ts`):** Advertised `capabilities.tools.listChanged: true` on `initialize`, gated `lead_store_release`, `lead_record_store_note`, and `supervisor_record_store_note` dynamically on every `tools/list` and `tools/call`, stripped/rejected `supervisor_dispatch_lead.storeRelease` when `supervisorTier !== "full"`, and emitted `notifications/tools/list_changed` when transitions are detected outside `tools/list` (`test/bridge-mcp.test.ts`).
+
+### Fixed & Changed
+
+- **Safe `storeReleaseWrite` live mode-flip refresh (`plugin/server/surface-rpc.ts`, `plugin/server/lead-mailbox.ts`):** On `off ↔ on` capability flips, retires unstarted 0-turn seats cleanly at zero tokens, hands off idle `Lead` seats immediately or schedules quiet-point `Lead` `Handoff` (`rotation_pending` waiting for both current turn end and `projectPeerInFlight === false`), flags `supervisorNeedsHandoff: true` without interrupting started `Supervisor` chats, and triggers zero churn on `on-request ↔ auto-staging` toggles (`test/surface-rpc.test.ts`).
+- **Forward `Release lab` `failure.hint` to `Lead` (`plugin/server/store-release.ts`):** Parsed `failure.hint` from `factory-release-lab` run summaries and included `Hint: <hint>` in `Lead mailbox` failure notifications so `Lead` receives actionable remediation (`screenshot-cmd-missing`, `invalid-screenshot-dimensions`) without carrying screenshot policy in its role prompt (`test/store-release.test.ts`).
+
+### Documentation
+
+- **ADR 0071 & `CONTEXT.md`:** Added `docs/adr/0071-capability-gated-store-release-role-contracts-and-mcp-tools.md` (amending ADR 0013, ADR 0016, ADR 0066, ADR 0067) and updated `Store release`, `Pi harness home`, and `Role-scoped MCP bridge` entries in `CONTEXT.md`.
+
 ## [0.24.0] - 2026-11-24
 
 **Project tab redesign: unified 3-tier `Card` layout, compact KPI `Project usage` strip, collapsible `Skill packs` drawer, unified `Open Design` control, modal `GitHub publish`, smart `Store Release` summary bar, and 100% `FACTORY_PALETTE` alignment (ADR 0057 & ADR 0066 amendments).**

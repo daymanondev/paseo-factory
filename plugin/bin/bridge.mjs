@@ -2895,6 +2895,10 @@ function emitToolsListChanged() {
 }
 
 function observeStoreReleaseCapability(ctx, args, { emitOnChange = false } = {}) {
+  if (capabilityWatchDebounceTimer !== undefined) {
+    clearTimeout(capabilityWatchDebounceTimer);
+    capabilityWatchDebounceTimer = undefined;
+  }
   const capability = resolveSessionStoreReleaseCapability(ctx, args);
   if (ctx.role !== "lead" && ctx.role !== "supervisor") {
     return capability;
@@ -2977,7 +2981,7 @@ function syncCapabilityWatchers(ctx) {
           if (bridgeClosed) return;
           syncCapabilityWatchers(ctx);
           observeStoreReleaseCapability(ctx, undefined, { emitOnChange: true });
-        }, 25);
+        }, 100);
         capabilityWatchDebounceTimer.unref?.();
       });
       watcher.on("error", () => {});

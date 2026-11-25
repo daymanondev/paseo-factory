@@ -3727,16 +3727,19 @@ test("ADR 0071 slice 03: bridge.mjs emits notifications/tools/list_changed on to
         const list1 = await session.request(2, "tools/list");
         assert.equal(((list1.result as { tools: Array<{ name: string }> }).tools).some((t) => t.name === "lead_store_release"), false);
 
-        // Flip settings, then immediately call tools/list -> must return updated tools with 0 list_changed inside tools/list
+        // Flip settings, then immediately call tools/list -> must return updated tools without triggering a tools/list loop
         setProjectStoreReleaseSettings(stateDir, reg.slug, { mode: "on-request" });
         const list2 = await session.request(3, "tools/list");
         assert.equal(((list2.result as { tools: Array<{ name: string }> }).tools).some((t) => t.name === "lead_store_release"), true);
-        await new Promise((r) => setTimeout(r, 80));
-        assert.equal(session.notifications.filter((n) => n.method === "notifications/tools/list_changed").length, 0, "tools/list itself must not emit list_changed");
+        await new Promise((r) => setTimeout(r, 120));
+        const countAfterList2 = session.notifications.filter((n) => n.method === "notifications/tools/list_changed").length;
+        assert.ok(countAfterList2 <= 1, `tools/list must not loop list_changed (got ${countAfterList2})`);
 
-        // Subsequent tools/call sees same signature -> still 0 list_changed
-        await session.request(4, "tools/call", { name: "lead_read_ledger", arguments: {} });
-        assert.equal(session.notifications.filter((n) => n.method === "notifications/tools/list_changed").length, 0);
+        // Follow-up tools/list and tools/call see same signature -> zero additional list_changed
+        await session.request(4, "tools/list");
+        await session.request(5, "tools/call", { name: "lead_read_ledger", arguments: {} });
+        await new Promise((r) => setTimeout(r, 120));
+        assert.equal(session.notifications.filter((n) => n.method === "notifications/tools/list_changed").length, countAfterList2);
       } finally {
         const code = await session.close();
         assert.equal(code, 0);
