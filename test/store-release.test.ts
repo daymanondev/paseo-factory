@@ -1762,3 +1762,199 @@ setInterval(() => {}, 60000);
   const afterBytes = readFileSync(currentRunPath);
   assert.equal(Buffer.compare(afterBytes, beforeBytes), 0, "Release lab run file must remain byte-identical");
 });
+
+test("storeReleaseProject forwards top-level failure.hint to Lead mailbox notification while preserving existing fields", async (t) => {
+  const dir = makeTempDir("store-release-hint-top-");
+  disposeDir(t, dir);
+  const paseoHome = join(dir, "paseo-home");
+  const stateDir = join(paseoHome, "plugin-state", "paseo-factory");
+  const repoDir = makeMobileRepo(dir, ["ios"]);
+  const project = ensureProjectRegistered(stateDir, repoDir);
+  assert.ok(project.ok);
+  const factory = createFactory({ stateDir: join(stateDir, "projects", project.slug) });
+  t.after(() => factory.history.stop());
+
+  acceptCommitOnRepo(factory, repoDir, "T-HINT-1");
+  await factory.accept({ task: "T-HINT-1", attempt: 1, accepted_by: "lead" });
+
+  installFakeRunnerPlugin(paseoHome);
+  writeVaultStoreEnv(paseoHome, {
+    ASC_KEY_PATH: "/tmp/synth-asc.p8",
+    ASC_KEY_ID: "SYNTHKEY",
+    ASC_ISSUER: "00000000-0000-0000-0000-000000000001",
+    APPLE_TEAM_ID: "SYNTHTEAM",
+  });
+  setProjectStoreReleaseSettings(stateDir, project.slug, { mode: "auto-staging" });
+
+  const notifications: Array<{ slug: string; text: string }> = [];
+  const hintText = "Configure toolchain.screenshotCmd and toolchain.screenshotOutputDir in .store-release/manifest.json, or set toolchain.screenshotCmd: null to opt out.";
+  const res = await storeReleaseProject({
+    factory,
+    stateDir,
+    paseoHome,
+    projectSlug: project.slug,
+    projectRoot: repoDir,
+    action: "stage",
+    listPlugins: async () => ({ ok: false as const, reason: "offline" }),
+    notifyLead: (n) => { notifications.push(n); },
+    runner: async () => ({
+      exitCode: 1,
+      stdout: JSON.stringify({
+        id: "run-hint-top",
+        status: "failed",
+        failure: {
+          failureClass: "app-repo",
+          platform: "ios",
+          phase: "phase-3-e2e-and-screenshots",
+          code: "screenshot-cmd-missing",
+          message: "No screenshot capture command configured for E2E phase.",
+          hint: `  ${hintText}  `,
+          logTail: "phase-3-e2e-and-screenshots failed",
+        },
+        phases: [],
+      }),
+      stderr: "",
+    }),
+  });
+
+  assert.equal(res.ok, true);
+  if (res.ok && "settled" in res) await res.settled;
+  assert.equal(notifications.length, 1);
+  const text = notifications[0]!.text;
+  assert.match(text, /\[Store release failed\] action=stage runId=run-hint-top failureClass=app-repo code=screenshot-cmd-missing/);
+  assert.match(text, /Detail: No screenshot capture command configured for E2E phase\./);
+  assert.ok(text.split("\n").includes(`Hint: ${hintText}`), `Expected trimmed Hint line in notification:\n${text}`);
+  assert.match(text, /Diagnostic tail:\nphase-3-e2e-and-screenshots failed/);
+  assert.match(text, /Policy: app-repo/);
+});
+
+test("storeReleaseProject forwards nested phases[].failure.hint to Lead mailbox notification", async (t) => {
+  const dir = makeTempDir("store-release-hint-phase-");
+  disposeDir(t, dir);
+  const paseoHome = join(dir, "paseo-home");
+  const stateDir = join(paseoHome, "plugin-state", "paseo-factory");
+  const repoDir = makeMobileRepo(dir, ["android"]);
+  const project = ensureProjectRegistered(stateDir, repoDir);
+  assert.ok(project.ok);
+  const factory = createFactory({ stateDir: join(stateDir, "projects", project.slug) });
+  t.after(() => factory.history.stop());
+
+  acceptCommitOnRepo(factory, repoDir, "T-HINT-2");
+  await factory.accept({ task: "T-HINT-2", attempt: 1, accepted_by: "lead" });
+
+  installFakeRunnerPlugin(paseoHome);
+  writeVaultStoreEnv(paseoHome, {
+    GPLAY_KEY_PATH: "/tmp/synth-gplay.json",
+  });
+  setProjectStoreReleaseSettings(stateDir, project.slug, { mode: "auto-staging" });
+
+  const notifications: Array<{ slug: string; text: string }> = [];
+  const hintText = "Ensure portrait phone screenshots satisfy Google Play aspect ratio <= 2:1 and >= 320px minimum dimension.";
+  const res = await storeReleaseProject({
+    factory,
+    stateDir,
+    paseoHome,
+    projectSlug: project.slug,
+    projectRoot: repoDir,
+    action: "stage",
+    listPlugins: async () => ({ ok: false as const, reason: "offline" }),
+    notifyLead: (n) => { notifications.push(n); },
+    runner: async () => ({
+      exitCode: 0,
+      stdout: JSON.stringify({
+        id: "run-hint-phase",
+        status: "failed",
+        failure: null,
+        phases: [
+          { id: "phase-1-preflight", state: "green" },
+          {
+            id: "phase-4-metadata",
+            state: "failed",
+            failure: {
+              failureClass: "app-repo",
+              platform: "android",
+              phase: "phase-4-metadata",
+              code: "invalid-screenshot-dimensions",
+              message: "Screenshot screen-1.png (1080x2400) exceeds Play aspect ratio.",
+              hint: hintText,
+            },
+          },
+        ],
+      }),
+      stderr: "",
+    }),
+  });
+
+  assert.equal(res.ok, true);
+  if (res.ok && "settled" in res) await res.settled;
+  assert.equal(notifications.length, 1);
+  const text = notifications[0]!.text;
+  assert.match(text, /\[Store release failed\] action=stage runId=run-hint-phase failureClass=app-repo code=invalid-screenshot-dimensions/);
+  assert.match(text, /Detail: Screenshot screen-1\.png \(1080x2400\) exceeds Play aspect ratio\./);
+  assert.ok(text.split("\n").includes(`Hint: ${hintText}`), `Expected Hint line from nested phase failure:\n${text}`);
+  assert.match(text, /Policy: app-repo/);
+});
+
+test("storeReleaseProject omits Hint line when failure.hint is absent or whitespace-only", async (t) => {
+  const dir = makeTempDir("store-release-hint-omit-");
+  disposeDir(t, dir);
+  const paseoHome = join(dir, "paseo-home");
+  const stateDir = join(paseoHome, "plugin-state", "paseo-factory");
+  const repoDir = makeMobileRepo(dir, ["android"]);
+  const project = ensureProjectRegistered(stateDir, repoDir);
+  assert.ok(project.ok);
+  const factory = createFactory({ stateDir: join(stateDir, "projects", project.slug) });
+  t.after(() => factory.history.stop());
+
+  acceptCommitOnRepo(factory, repoDir, "T-HINT-3");
+  await factory.accept({ task: "T-HINT-3", attempt: 1, accepted_by: "lead" });
+
+  installFakeRunnerPlugin(paseoHome);
+  writeVaultStoreEnv(paseoHome, {
+    GPLAY_KEY_PATH: "/tmp/synth-gplay.json",
+  });
+  setProjectStoreReleaseSettings(stateDir, project.slug, { mode: "auto-staging" });
+
+  const notifications: Array<{ slug: string; text: string }> = [];
+  for (const [label, extraFailure] of [
+    ["absent", {}],
+    ["whitespace", { hint: "   \t\n  " }],
+  ] as const) {
+    const res = await storeReleaseProject({
+      factory,
+      stateDir,
+      paseoHome,
+      projectSlug: project.slug,
+      projectRoot: repoDir,
+      action: "stage",
+      listPlugins: async () => ({ ok: false as const, reason: "offline" }),
+      notifyLead: (n) => { notifications.push(n); },
+      runner: async () => ({
+        exitCode: 1,
+        stdout: JSON.stringify({
+          id: `run-no-hint-${label}`,
+          status: "failed",
+          failure: {
+            failureClass: "app-repo",
+            code: "gradle-compile-error",
+            message: `Build failed (${label})`,
+            ...extraFailure,
+          },
+          phases: [],
+        }),
+        stderr: "",
+      }),
+    });
+    assert.equal(res.ok, true);
+    if (res.ok && "settled" in res) await res.settled;
+  }
+
+  assert.equal(notifications.length, 2);
+  for (const notification of notifications) {
+    assert.equal(
+      notification.text.split("\n").some((line) => line.startsWith("Hint:")),
+      false,
+      `Did not expect Hint line in:\n${notification.text}`,
+    );
+  }
+});
