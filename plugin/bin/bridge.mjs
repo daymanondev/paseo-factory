@@ -11,7 +11,7 @@
  */
 import { execFileSync, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, watch, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 // Self-contained zero-relative-import MCP bridge: per-Project ledger resolution
@@ -2809,6 +2809,186 @@ function bridgeSession() {
 function getAllowedToolNames(role) {
   return bridgeSession().catalog.roles[role ?? "unbound"] ?? [];
 }
+function resolveSessionStoreReleaseCapability(ctx, args) {
+  const argWorkspace =
+    typeof args?.workspace === "string" && args.workspace.trim() !== ""
+      ? resolve(args.workspace.trim())
+      : undefined;
+  let projectRoot = ctx.projectRoot ?? ctx.workspace;
+  let projectSlug = ctx.projectSlug;
+  if (argWorkspace && (!ctx.projectRoot || !ctx.projectSlug)) {
+    const resolved = resolveProjectFromDir(argWorkspace, ctx.stateDir);
+    if (resolved) {
+      if (!ctx.projectRoot) projectRoot = resolved.root;
+      if (!ctx.projectSlug) projectSlug = resolved.slug;
+    } else if (!ctx.projectRoot) {
+      projectRoot = argWorkspace;
+    }
+  }
+  return storeReleaseCapability.resolveStoreReleaseCapability({
+    projectRoot,
+    stateDir: ctx.stateDir,
+    projectSlug,
+  });
+}
+function isToolEnabledForCapability(name, role, capability) {
+  if (role === "lead" && (name === "lead_store_release" || name === "lead_record_store_note")) {
+    return capability.leadEnabled === true;
+  }
+  if (role === "supervisor" && name === "supervisor_record_store_note") {
+    return capability.supervisorTier === "full";
+  }
+  return true;
+}
+function formatStoreReleaseDisabledError(target, capability) {
+  if (!capability.isMobile) {
+    return `store-release-disabled: Store release is disabled for this non-mobile Project (${target} is only available on mobile Projects with Store release enabled).`;
+  }
+  return `store-release-not-granted: Store release is disabled for ${target} because Store release mode is "off" (enable on-request or auto-staging in the Project panel's Store Release card).`;
+}
+function stripStoreReleaseFromSupervisorDispatch(tool) {
+  const props = { ...(tool.inputSchema?.properties ?? {}) };
+  delete props.storeRelease;
+  const description = typeof tool.description === "string"
+    ? tool.description.replace(/,\s*or\s+`storeRelease`[^.]*\./i, ".")
+    : tool.description;
+  return {
+    ...tool,
+    description,
+    inputSchema: {
+      ...tool.inputSchema,
+      properties: props,
+    },
+  };
+}
+function getListedTools(ctx, catalog, capability) {
+  const names = getAllowedToolNames(ctx.role).filter((name) =>
+    isToolEnabledForCapability(name, ctx.role, capability),
+  );
+  return names
+    .map((n) => {
+      const tool = catalog.tools[n];
+      if (!tool) return undefined;
+      if (n === "supervisor_dispatch_lead" && capability.supervisorTier !== "full") {
+        return stripStoreReleaseFromSupervisorDispatch(tool);
+      }
+      return tool;
+    })
+    .filter(Boolean);
+}
+
+let lastCapabilitySignature;
+const capabilityWatchers = new Map();
+let capabilityWatchDebounceTimer;
+let bridgeClosed = false;
+
+function capabilitySignature(capability) {
+  return `${Boolean(capability.leadEnabled)}:${capability.supervisorTier}`;
+}
+
+function emitToolsListChanged() {
+  if (bridgeClosed) return;
+  writeJsonRpcMessage({
+    jsonrpc: "2.0",
+    method: "notifications/tools/list_changed",
+  });
+}
+
+function observeStoreReleaseCapability(ctx, args, { emitOnChange = false } = {}) {
+  const capability = resolveSessionStoreReleaseCapability(ctx, args);
+  if (ctx.role !== "lead" && ctx.role !== "supervisor") {
+    return capability;
+  }
+  const sig = capabilitySignature(capability);
+  if (lastCapabilitySignature === undefined) {
+    lastCapabilitySignature = sig;
+    return capability;
+  }
+  if (sig !== lastCapabilitySignature) {
+    lastCapabilitySignature = sig;
+    if (emitOnChange) {
+      emitToolsListChanged();
+    }
+  }
+  return capability;
+}
+
+function stopCapabilityWatchers() {
+  bridgeClosed = true;
+  if (capabilityWatchDebounceTimer !== undefined) {
+    clearTimeout(capabilityWatchDebounceTimer);
+    capabilityWatchDebounceTimer = undefined;
+  }
+  for (const watcher of capabilityWatchers.values()) {
+    try {
+      watcher.close();
+    } catch {
+      // ignore close errors
+    }
+  }
+  capabilityWatchers.clear();
+}
+
+function syncCapabilityWatchers(ctx) {
+  if (bridgeClosed || (ctx.role !== "lead" && ctx.role !== "supervisor")) return;
+  const targets = [];
+  if (ctx.stateDir && ctx.projectSlug) {
+    const projectDir = join(ctx.stateDir, "projects", ctx.projectSlug);
+    const projectsDir = join(ctx.stateDir, "projects");
+    if (existsSync(projectDir)) {
+      targets.push({ dir: projectDir, filter: (name) => !name || String(name).startsWith("project-settings.json") });
+    } else if (existsSync(projectsDir)) {
+      targets.push({ dir: projectsDir, filter: (name) => !name || String(name) === ctx.projectSlug });
+    } else if (existsSync(ctx.stateDir)) {
+      targets.push({ dir: ctx.stateDir, filter: (name) => !name || String(name) === "projects" });
+    }
+  }
+  const projectRoot = ctx.projectRoot ?? ctx.workspace;
+  if (projectRoot && existsSync(projectRoot)) {
+    targets.push({ dir: projectRoot, filter: () => true });
+    const storeReleaseDir = join(projectRoot, ".store-release");
+    if (existsSync(storeReleaseDir)) {
+      targets.push({ dir: storeReleaseDir, filter: (name) => !name || String(name).startsWith("manifest.json") });
+    }
+  }
+
+  const wantedDirs = new Set(targets.map((t) => t.dir));
+  for (const [dir, watcher] of capabilityWatchers.entries()) {
+    if (!wantedDirs.has(dir)) {
+      try {
+        watcher.close();
+      } catch {
+        // ignore
+      }
+      capabilityWatchers.delete(dir);
+    }
+  }
+
+  for (const target of targets) {
+    if (capabilityWatchers.has(target.dir)) continue;
+    try {
+      const watcher = watch(target.dir, { persistent: false }, (_eventType, filename) => {
+        if (bridgeClosed || !target.filter(filename)) return;
+        if (capabilityWatchDebounceTimer !== undefined) {
+          clearTimeout(capabilityWatchDebounceTimer);
+        }
+        capabilityWatchDebounceTimer = setTimeout(() => {
+          capabilityWatchDebounceTimer = undefined;
+          if (bridgeClosed) return;
+          syncCapabilityWatchers(ctx);
+          observeStoreReleaseCapability(ctx, undefined, { emitOnChange: true });
+        }, 25);
+        capabilityWatchDebounceTimer.unref?.();
+      });
+      watcher.on("error", () => {});
+      watcher.unref?.();
+      capabilityWatchers.set(target.dir, watcher);
+    } catch {
+      // ignore unwatcheable directory
+    }
+  }
+}
+
 async function handleToolCall(name, rawArgs) {
   const { ctx } = bridgeSession();
   const allowed = getAllowedToolNames(ctx.role);
@@ -2820,6 +3000,14 @@ async function handleToolCall(name, rawArgs) {
     );
   }
   const args = typeof rawArgs === "object" && rawArgs !== null ? rawArgs : {};
+  const capability = observeStoreReleaseCapability(ctx, args, { emitOnChange: true });
+  syncCapabilityWatchers(ctx);
+  if (!isToolEnabledForCapability(name, ctx.role, capability)) {
+    return toolResult(formatStoreReleaseDisabledError(name, capability), true);
+  }
+  if (name === "supervisor_dispatch_lead" && "storeRelease" in args && args.storeRelease !== undefined && capability.supervisorTier !== "full") {
+    return toolResult(formatStoreReleaseDisabledError("supervisor_dispatch_lead `storeRelease`", capability), true);
+  }
   const definition = bridgeSession().catalog.tools[name];
   for (const field of ["runId", "scrum", "role", "artifactRefs", "mutationMode", "reportType"]) {
     if (field in args && !(field in definition.inputSchema.properties)) return toolResult(`Field "${field}" is not permitted for tool "${name}".`, true);
@@ -3734,6 +3922,9 @@ async function handleRpcMessage(msg) {
 
   try {
     if (method === "initialize") {
+      const { ctx } = bridgeSession();
+      observeStoreReleaseCapability(ctx, undefined, { emitOnChange: false });
+      syncCapabilityWatchers(ctx);
       const clientProtocol =
         typeof params?.protocolVersion === "string" && params.protocolVersion.trim() !== ""
           ? params.protocolVersion
@@ -3744,7 +3935,9 @@ async function handleRpcMessage(msg) {
         result: {
           protocolVersion: clientProtocol,
           capabilities: {
-            tools: {},
+            tools: {
+              listChanged: true,
+            },
           },
           serverInfo: {
             name: "paseo_factory",
@@ -3762,8 +3955,9 @@ async function handleRpcMessage(msg) {
 
     if (method === "tools/list") {
       const { ctx, catalog } = bridgeSession();
-      const names = getAllowedToolNames(ctx.role);
-      const tools = names.map((n) => catalog.tools[n]).filter(Boolean);
+      const capability = observeStoreReleaseCapability(ctx, undefined, { emitOnChange: false });
+      syncCapabilityWatchers(ctx);
+      const tools = getListedTools(ctx, catalog, capability);
       writeJsonRpcMessage({
         jsonrpc: "2.0",
         id,
@@ -3814,4 +4008,6 @@ async function handleRpcMessage(msg) {
 
 const rpcTransport = bridgePrimitives.createJsonRpcTransport(handleRpcMessage);
 const writeJsonRpcMessage = rpcTransport.write;
+process.stdin.once("end", stopCapabilityWatchers);
+process.stdin.once("close", stopCapabilityWatchers);
 rpcTransport.start();

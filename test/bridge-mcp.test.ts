@@ -208,8 +208,15 @@ test("bridge.mjs exposes strictly role-scoped tools in tools/list and enforces r
         { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "t-01", gate: "true", artifact: "README.md" } } },
       ],
     });
-    const supTools = ((supResponses[1].result as { tools: Array<{ name: string }> }).tools).map((t) => t.name).sort();
-    assert.deepEqual(supTools, ["lead_close_task", "lead_retire_task", "supervisor_accept_task", "supervisor_dispatch_lead", "supervisor_end_cycle", "supervisor_read_ledger", "supervisor_record_store_note"]);
+    const supInitCaps = (supResponses[0].result as { capabilities?: { tools?: { listChanged?: boolean } } }).capabilities;
+    assert.equal(supInitCaps?.tools?.listChanged, true);
+    const supListed = (supResponses[1].result as { tools: Array<{ name: string; description: string; inputSchema: { properties: Record<string, unknown> } }> }).tools;
+    const supTools = supListed.map((t) => t.name).sort();
+    assert.deepEqual(supTools, ["lead_close_task", "lead_retire_task", "supervisor_accept_task", "supervisor_dispatch_lead", "supervisor_end_cycle", "supervisor_read_ledger"]);
+    const supDispatchTool = supListed.find((t) => t.name === "supervisor_dispatch_lead");
+    assert.ok(supDispatchTool);
+    assert.equal("storeRelease" in supDispatchTool.inputSchema.properties, false, "non-mobile supervisor_dispatch_lead omits storeRelease");
+    assert.doesNotMatch(supDispatchTool.description, /storeRelease|Store release|Hole/i);
     const supIllegalCall = supResponses[2].result as { isError?: boolean; content: Array<{ text: string }> };
     assert.equal(supIllegalCall.isError, true);
     assert.match(supIllegalCall.content[0].text, /not permitted|unauthorized|role/i);
@@ -224,8 +231,10 @@ test("bridge.mjs exposes strictly role-scoped tools in tools/list and enforces r
         { jsonrpc: "2.0", id: 2, method: "tools/list" },
       ],
     });
+    const leadInitCaps = (leadResponses[0].result as { capabilities?: { tools?: { listChanged?: boolean } } }).capabilities;
+    assert.equal(leadInitCaps?.tools?.listChanged, true);
     const leadTools = ((leadResponses[1].result as { tools: Array<{ name: string }> }).tools).map((t) => t.name).sort();
-    assert.deepEqual(leadTools, ["lead_close_task", "lead_create_worktree", "lead_dispatch_agent", "lead_merge", "lead_needs_human", "lead_read_ledger", "lead_record_store_note", "lead_release", "lead_remove_worktree", "lead_reply_peer", "lead_report_to_supervisor", "lead_retire_task", "lead_set_contract", "lead_store_release", "lead_update_notebook", "lead_verify"]);
+    assert.deepEqual(leadTools, ["lead_close_task", "lead_create_worktree", "lead_dispatch_agent", "lead_merge", "lead_needs_human", "lead_read_ledger", "lead_release", "lead_remove_worktree", "lead_reply_peer", "lead_report_to_supervisor", "lead_retire_task", "lead_set_contract", "lead_update_notebook", "lead_verify"]);
 
     // 3. Working Agent session
     const agentResponses = await runMcpSession({
@@ -3426,4 +3435,373 @@ test("ADR 0068: bridge lead_dispatch_agent refuses concurrent writable Peers per
   assert.match(multiRes.content[0].text, /spawn dispatched for ENG-B/);
   assert.match(multiRes.content[0].text, /writable-peer-in-flight/);
   assert.match(multiRes.content[0].text, /ENG-B/);
+});
+
+test("ADR 0071 slice 03: bridge.mjs dynamically gates tools/list and supervisor_dispatch_lead.storeRelease schema across mobile mode transitions without mutating the static catalog", async () => {
+  const homeDir = mkdtempSync(join(tmpdir(), "factory-bridge-adr0071-list-"));
+  const stateDir = join(homeDir, "plugin-state", "paseo-factory");
+  const mobileRepo = makeGitRepo();
+  mkdirSync(join(mobileRepo, "android", "app"), { recursive: true });
+  writeFileSync(join(mobileRepo, "android", "app", "build.gradle"), "android {}\n");
+  execFileSync("git", ["add", "."], { cwd: mobileRepo });
+  execFileSync("git", ["commit", "-m", "chore: android marker"], { cwd: mobileRepo });
+
+  try {
+    const reg = ensureProjectRegistered(stateDir, realpathSync(mobileRepo));
+    assert.equal(reg.ok, true);
+    const correlations = new CorrelationRegistry(stateDir);
+    const supCorr = correlations.issue({ role: "supervisor", projectSlug: reg.slug, projectRoot: realpathSync(mobileRepo) });
+    const leadCorr = correlations.issue({ role: "lead", projectSlug: reg.slug, projectRoot: realpathSync(mobileRepo) });
+
+    // 1. Mobile Project with mode: "off" -> Store Release tools and storeRelease param are omitted
+    const supOff = await runMcpSession({
+      args: ["--correlation", supCorr.correlationId, "--state-dir", stateDir],
+      cwd: mobileRepo,
+      requests: [
+        { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
+        { jsonrpc: "2.0", id: 2, method: "tools/list" },
+      ],
+    });
+    const supOffTools = (supOff[1].result as { tools: Array<{ name: string; description: string; inputSchema: { properties: Record<string, unknown> } }> }).tools;
+    assert.equal(supOffTools.some((t) => t.name === "supervisor_record_store_note"), false);
+    const supOffDispatch = supOffTools.find((t) => t.name === "supervisor_dispatch_lead");
+    assert.ok(supOffDispatch);
+    assert.equal("storeRelease" in supOffDispatch.inputSchema.properties, false);
+    assert.doesNotMatch(supOffDispatch.description, /storeRelease|Store release|Hole/i);
+
+    const leadOff = await runMcpSession({
+      args: ["--correlation", leadCorr.correlationId, "--state-dir", stateDir],
+      cwd: mobileRepo,
+      requests: [
+        { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
+        { jsonrpc: "2.0", id: 2, method: "tools/list" },
+      ],
+    });
+    const leadOffNames = (leadOff[1].result as { tools: Array<{ name: string }> }).tools.map((t) => t.name);
+    assert.equal(leadOffNames.includes("lead_store_release"), false);
+    assert.equal(leadOffNames.includes("lead_record_store_note"), false);
+
+    // 2. Flip mode to "on-request" -> full Store Release tools and storeRelease param appear
+    setProjectStoreReleaseSettings(stateDir, reg.slug, { mode: "on-request" });
+    const supOn = await runMcpSession({
+      args: ["--correlation", supCorr.correlationId, "--state-dir", stateDir],
+      cwd: mobileRepo,
+      requests: [
+        { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
+        { jsonrpc: "2.0", id: 2, method: "tools/list" },
+      ],
+    });
+    const supOnTools = (supOn[1].result as { tools: Array<{ name: string; description: string; inputSchema: { properties: Record<string, unknown> } }> }).tools;
+    assert.equal(supOnTools.some((t) => t.name === "supervisor_record_store_note"), true);
+    const supOnDispatch = supOnTools.find((t) => t.name === "supervisor_dispatch_lead");
+    assert.ok(supOnDispatch);
+    assert.equal("storeRelease" in supOnDispatch.inputSchema.properties, true);
+    assert.match(supOnDispatch.description, /storeRelease/);
+
+    const leadOn = await runMcpSession({
+      args: ["--correlation", leadCorr.correlationId, "--state-dir", stateDir],
+      cwd: mobileRepo,
+      requests: [
+        { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
+        { jsonrpc: "2.0", id: 2, method: "tools/list" },
+      ],
+    });
+    const leadOnNames = (leadOn[1].result as { tools: Array<{ name: string }> }).tools.map((t) => t.name);
+    assert.equal(leadOnNames.includes("lead_store_release"), true);
+    assert.equal(leadOnNames.includes("lead_record_store_note"), true);
+  } finally {
+    rmSync(homeDir, { recursive: true, force: true });
+    rmSync(mobileRepo, { recursive: true, force: true });
+  }
+});
+
+test("ADR 0071 slice 03: bridge.mjs rejects disabled Store Release tools and supervisor_dispatch_lead.storeRelease on tools/call", async () => {
+  const homeDir = mkdtempSync(join(tmpdir(), "factory-bridge-adr0071-call-"));
+  const stateDir = join(homeDir, "plugin-state", "paseo-factory");
+  const nonMobileRepo = makeGitRepo();
+  const mobileRepo = makeGitRepo();
+  mkdirSync(join(mobileRepo, "android", "app"), { recursive: true });
+  writeFileSync(join(mobileRepo, "android", "app", "build.gradle"), "android {}\n");
+  execFileSync("git", ["add", "."], { cwd: mobileRepo });
+  execFileSync("git", ["commit", "-m", "chore: android marker"], { cwd: mobileRepo });
+
+  try {
+    const nonMobileReg = ensureProjectRegistered(stateDir, realpathSync(nonMobileRepo));
+    const mobileReg = ensureProjectRegistered(stateDir, realpathSync(mobileRepo));
+    assert.equal(nonMobileReg.ok, true);
+    assert.equal(mobileReg.ok, true);
+    const correlations = new CorrelationRegistry(stateDir);
+    const nmSup = correlations.issue({ role: "supervisor", projectSlug: nonMobileReg.slug, projectRoot: realpathSync(nonMobileRepo) });
+    const nmLead = correlations.issue({ role: "lead", projectSlug: nonMobileReg.slug, projectRoot: realpathSync(nonMobileRepo) });
+    const mSup = correlations.issue({ role: "supervisor", projectSlug: mobileReg.slug, projectRoot: realpathSync(mobileRepo) });
+    const mLead = correlations.issue({ role: "lead", projectSlug: mobileReg.slug, projectRoot: realpathSync(mobileRepo) });
+
+    // 1. Non-mobile Project rejects all Store Release tools and storeRelease dispatch arg
+    const nmSupRes = await runMcpSession({
+      args: ["--correlation", nmSup.correlationId, "--state-dir", stateDir],
+      cwd: nonMobileRepo,
+      requests: [
+        { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "supervisor_record_store_note", arguments: { target: "lessons", content: "# Note" } } },
+        { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "supervisor_dispatch_lead", arguments: { message: "Release app", storeRelease: { target: "staging" } } } },
+      ],
+    });
+    const nmNoteErr = nmSupRes[0].result as { isError?: boolean; content: Array<{ text: string }> };
+    assert.equal(nmNoteErr.isError, true);
+    assert.match(nmNoteErr.content[0].text, /Store release.*disabled.*non-mobile/i);
+    const nmDispatchErr = nmSupRes[1].result as { isError?: boolean; content: Array<{ text: string }> };
+    assert.equal(nmDispatchErr.isError, true);
+    assert.match(nmDispatchErr.content[0].text, /storeRelease.*disabled.*non-mobile|Store release.*disabled.*non-mobile/i);
+
+    const nmLeadRes = await runMcpSession({
+      args: ["--correlation", nmLead.correlationId, "--state-dir", stateDir],
+      cwd: nonMobileRepo,
+      requests: [
+        { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_store_release", arguments: { action: "probe" } } },
+        { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "lead_record_store_note", arguments: { target: "app", content: "# App" } } },
+      ],
+    });
+    for (const r of nmLeadRes) {
+      const err = r.result as { isError?: boolean; content: Array<{ text: string }> };
+      assert.equal(err.isError, true);
+      assert.match(err.content[0].text, /Store release.*disabled.*non-mobile/i);
+    }
+
+    // 2. Mobile Project with mode: "off" rejects Store Release tools and storeRelease dispatch arg
+    const mSupRes = await runMcpSession({
+      args: ["--correlation", mSup.correlationId, "--state-dir", stateDir],
+      cwd: mobileRepo,
+      requests: [
+        { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "supervisor_record_store_note", arguments: { target: "lessons", content: "# Note" } } },
+        { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "supervisor_dispatch_lead", arguments: { message: "Release app", storeRelease: { target: "staging" } } } },
+      ],
+    });
+    for (const r of mSupRes) {
+      const err = r.result as { isError?: boolean; content: Array<{ text: string }> };
+      assert.equal(err.isError, true);
+      assert.match(err.content[0].text, /store-release-not-granted|Store release.*disabled/i);
+    }
+
+    const mLeadRes = await runMcpSession({
+      args: ["--correlation", mLead.correlationId, "--state-dir", stateDir],
+      cwd: mobileRepo,
+      requests: [
+        { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_store_release", arguments: { action: "probe" } } },
+        { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "lead_record_store_note", arguments: { target: "app", content: "# App" } } },
+      ],
+    });
+    for (const r of mLeadRes) {
+      const err = r.result as { isError?: boolean; content: Array<{ text: string }> };
+      assert.equal(err.isError, true);
+      assert.match(err.content[0].text, /store-release-not-granted|Store release.*disabled/i);
+    }
+  } finally {
+    rmSync(homeDir, { recursive: true, force: true });
+    rmSync(nonMobileRepo, { recursive: true, force: true });
+    rmSync(mobileRepo, { recursive: true, force: true });
+  }
+});
+
+function openInteractiveMcpSession(options: { args: string[]; cwd: string }) {
+  const child = spawn(process.execPath, [BRIDGE_BIN, ...options.args], {
+    cwd: options.cwd,
+    env: process.env,
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  const byId = new Map<unknown, Record<string, unknown>>();
+  const notifications: Array<Record<string, unknown>> = [];
+  const waiters: Array<() => void> = [];
+  let stdoutBuf = Buffer.alloc(0);
+  let stderrStr = "";
+  let closed = false;
+  let exitCode: number | null = null;
+
+  child.stderr.on("data", (chunk: Buffer) => {
+    stderrStr += chunk.toString("utf8");
+  });
+
+  const notifyWaiters = () => {
+    for (const w of waiters.splice(0)) w();
+  };
+
+  child.stdout.on("data", (chunk: Buffer) => {
+    stdoutBuf = Buffer.concat([stdoutBuf, chunk]);
+    while (true) {
+      const nlIndex = stdoutBuf.indexOf("\n");
+      if (nlIndex === -1) break;
+      const line = stdoutBuf.subarray(0, nlIndex).toString("utf8").trim();
+      stdoutBuf = stdoutBuf.subarray(nlIndex + 1);
+      if (line === "") continue;
+      const parsed = JSON.parse(line) as Record<string, unknown>;
+      if (parsed.id !== undefined && parsed.id !== null) {
+        byId.set(parsed.id, parsed);
+      } else {
+        notifications.push(parsed);
+      }
+      notifyWaiters();
+    }
+  });
+
+  const closePromise = new Promise<number | null>((resolveClose) => {
+    child.on("close", (code) => {
+      closed = true;
+      exitCode = code;
+      notifyWaiters();
+      resolveClose(code);
+    });
+  });
+
+  const waitUntil = (pred: () => boolean, label: string, timeoutMs = 5_000) =>
+    new Promise<void>((resolveWait, rejectWait) => {
+      if (pred()) return resolveWait();
+      const timer = setTimeout(() => {
+        rejectWait(new Error(`Timed out waiting for ${label}. stderr=${stderrStr} notifications=${JSON.stringify(notifications)}`));
+      }, timeoutMs);
+      const check = () => {
+        if (pred()) {
+          clearTimeout(timer);
+          resolveWait();
+        } else if (closed) {
+          clearTimeout(timer);
+          rejectWait(new Error(`Bridge closed while waiting for ${label}. code=${exitCode} stderr=${stderrStr}`));
+        } else {
+          waiters.push(check);
+        }
+      };
+      waiters.push(check);
+    });
+
+  return {
+    notifications,
+    send(msg: Record<string, unknown>) {
+      child.stdin.write(`${JSON.stringify(msg)}\n`);
+    },
+    async request(id: number, method: string, params?: Record<string, unknown>) {
+      child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, ...(params !== undefined ? { params } : {}) })}\n`);
+      await waitUntil(() => byId.has(id), `response id=${id} (${method})`);
+      return byId.get(id)!;
+    },
+    async waitForNotificationCount(count: number, timeoutMs = 5_000) {
+      await waitUntil(() => notifications.length >= count, `${count} notification(s)`, timeoutMs);
+    },
+    async close() {
+      child.stdin.end();
+      const code = await Promise.race([
+        closePromise,
+        new Promise<number | null>((_, reject) =>
+          setTimeout(() => {
+            child.kill("SIGKILL");
+            reject(new Error(`Bridge did not exit cleanly after stdin.end() (dangling handle). stderr=${stderrStr}`));
+          }, 3_000),
+        ),
+      ]);
+      return code;
+    },
+  };
+}
+
+test("ADR 0071 slice 03: bridge.mjs emits notifications/tools/list_changed on tools/call and file-change transitions without looping inside tools/list and exits cleanly", async () => {
+  const homeDir = mkdtempSync(join(tmpdir(), "factory-bridge-adr0071-notify-"));
+  const stateDir = join(homeDir, "plugin-state", "paseo-factory");
+  const mobileRepo = makeGitRepo();
+  mkdirSync(join(mobileRepo, "android", "app"), { recursive: true });
+  writeFileSync(join(mobileRepo, "android", "app", "build.gradle"), "android {}\n");
+  execFileSync("git", ["add", "."], { cwd: mobileRepo });
+  execFileSync("git", ["commit", "-m", "chore: android marker"], { cwd: mobileRepo });
+
+  try {
+    const reg = ensureProjectRegistered(stateDir, realpathSync(mobileRepo));
+    assert.equal(reg.ok, true);
+    const correlations = new CorrelationRegistry(stateDir);
+    const leadCorr = correlations.issue({ role: "lead", projectSlug: reg.slug, projectRoot: realpathSync(mobileRepo) });
+    const supCorr = correlations.issue({ role: "supervisor", projectSlug: reg.slug, projectRoot: realpathSync(mobileRepo) });
+
+    // Scenario A: tools/list updates signature without emitting list_changed (no loop)
+    {
+      const session = openInteractiveMcpSession({
+        args: ["--correlation", leadCorr.correlationId, "--state-dir", stateDir],
+        cwd: mobileRepo,
+      });
+      try {
+        const initRes = await session.request(1, "initialize", {});
+        assert.equal((initRes.result as { capabilities?: { tools?: { listChanged?: boolean } } }).capabilities?.tools?.listChanged, true);
+        const list1 = await session.request(2, "tools/list");
+        assert.equal(((list1.result as { tools: Array<{ name: string }> }).tools).some((t) => t.name === "lead_store_release"), false);
+
+        // Flip settings, then immediately call tools/list -> must return updated tools with 0 list_changed inside tools/list
+        setProjectStoreReleaseSettings(stateDir, reg.slug, { mode: "on-request" });
+        const list2 = await session.request(3, "tools/list");
+        assert.equal(((list2.result as { tools: Array<{ name: string }> }).tools).some((t) => t.name === "lead_store_release"), true);
+        await new Promise((r) => setTimeout(r, 80));
+        assert.equal(session.notifications.filter((n) => n.method === "notifications/tools/list_changed").length, 0, "tools/list itself must not emit list_changed");
+
+        // Subsequent tools/call sees same signature -> still 0 list_changed
+        await session.request(4, "tools/call", { name: "lead_read_ledger", arguments: {} });
+        assert.equal(session.notifications.filter((n) => n.method === "notifications/tools/list_changed").length, 0);
+      } finally {
+        const code = await session.close();
+        assert.equal(code, 0);
+      }
+    }
+
+    // Scenario B: transition detected on tools/call emits notifications/tools/list_changed,
+    // while on-request <-> auto-staging emits zero notifications
+    {
+      setProjectStoreReleaseSettings(stateDir, reg.slug, { mode: "off" });
+      const session = openInteractiveMcpSession({
+        args: ["--correlation", supCorr.correlationId, "--state-dir", stateDir],
+        cwd: mobileRepo,
+      });
+      try {
+        await session.request(1, "initialize", {});
+        const listOff = await session.request(2, "tools/list");
+        assert.equal(((listOff.result as { tools: Array<{ name: string }> }).tools).some((t) => t.name === "supervisor_record_store_note"), false);
+
+        // Flip to on-request and immediately call supervisor_read_ledger
+        setProjectStoreReleaseSettings(stateDir, reg.slug, { mode: "on-request" });
+        await session.request(3, "tools/call", { name: "supervisor_read_ledger", arguments: {} });
+        await session.waitForNotificationCount(1);
+        assert.equal(session.notifications[0].method, "notifications/tools/list_changed");
+
+        const listOn = await session.request(4, "tools/list");
+        assert.equal(((listOn.result as { tools: Array<{ name: string }> }).tools).some((t) => t.name === "supervisor_record_store_note"), true);
+
+        // Flip on-request -> auto-staging: capability tier remains "full", so zero new notifications
+        setProjectStoreReleaseSettings(stateDir, reg.slug, { mode: "auto-staging" });
+        await session.request(5, "tools/call", { name: "supervisor_read_ledger", arguments: {} });
+        await new Promise((r) => setTimeout(r, 80));
+        assert.equal(session.notifications.length, 1);
+      } finally {
+        const code = await session.close();
+        assert.equal(code, 0);
+      }
+    }
+
+    // Scenario C: idle bridge detects project-settings.json flip via file watcher outside tools/list and exits cleanly
+    {
+      setProjectStoreReleaseSettings(stateDir, reg.slug, { mode: "off" });
+      const session = openInteractiveMcpSession({
+        args: ["--correlation", leadCorr.correlationId, "--state-dir", stateDir],
+        cwd: mobileRepo,
+      });
+      try {
+        await session.request(1, "initialize", {});
+        await session.request(2, "tools/list");
+        assert.equal(session.notifications.length, 0);
+
+        // Flip mode externally with NO further RPC requests
+        setProjectStoreReleaseSettings(stateDir, reg.slug, { mode: "on-request" });
+        await session.waitForNotificationCount(1, 5_000);
+        assert.equal(session.notifications[0].method, "notifications/tools/list_changed");
+
+        const listAfter = await session.request(3, "tools/list");
+        assert.equal(((listAfter.result as { tools: Array<{ name: string }> }).tools).some((t) => t.name === "lead_store_release"), true);
+      } finally {
+        const code = await session.close();
+        assert.equal(code, 0);
+      }
+    }
+  } finally {
+    rmSync(homeDir, { recursive: true, force: true });
+    rmSync(mobileRepo, { recursive: true, force: true });
+  }
 });
