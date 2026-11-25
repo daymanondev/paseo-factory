@@ -8,6 +8,7 @@ import { normalizeLanesWithDaemon, providerCatalogForLane } from './spool.ts';
 import { projectStateDir, projectNotebookPath, readProjectRegistration, writeProjectRegistration } from './core/project.ts';
 import { readLeadMailbox, requeueLeadMail, deliverLeadMail } from './core/mailbox.ts';
 import { buildSeatKickoffPacket } from './core/preflight.ts';
+import { isPiSeat } from './roles.ts';
 import { capHandoffText, normalizeHandoffPaths, validHandoffText } from './handoff-text.ts';
 import { laneRef, laneValue, readHandoffProgress, writeHandoffProgress } from './handoff-progress.ts';
 import { buildSubstituteHandover, extractCleanTimelineText, readHandoverGit, readNotebook } from './substitute-handover.ts';
@@ -75,6 +76,7 @@ export function createSupervisorHandoffRuntime(deps: {
       save(slug, data); update(slug, { state: 'creating-successor', handover: source });
     }
     const agents = await live();
+    let successorProvider = agents.find(a => a.id === data.successorId)?.provider;
     if (!data.successorId) {
       const rawLane = laneValue(current.toLane);
       const lane = normalizeLaneWithProviders(rawLane, await providerCatalogForLane(deps.daemon(), rawLane));
@@ -86,6 +88,7 @@ export function createSupervisorHandoffRuntime(deps: {
           ? await deps.daemon().workspaces!.ref(reg.workspaceId).agents.create(input)
           : await deps.daemon().agents.create({ ...input, cwd: reg.root });
         data.successorId = handle.id; save(slug, data);
+        successorProvider = config.provider;
         deps.log(`Supervisor handoff: created ${handle.id} on ${lane}`);
       } catch (error) { update(slug, { state: 'failed', failure: String(error) }); return; }
     }
@@ -102,7 +105,8 @@ export function createSupervisorHandoffRuntime(deps: {
       const lanes = loadLanes(deps.stateDir, slug);
       const normalizedLanes = lanes.ok ? await normalizeLanesWithDaemon(deps.daemon(), lanes.lanes) : undefined;
       const lead = agents.find(a => a.id === reg.lead);
-      data.kickoff ??= `${buildSeatKickoffPacket({ role: 'supervisor', projectSlug: slug, projectRoot: reg.root, ledgerEvents: evidence.events, ...(normalizedLanes !== undefined ? { lanes: normalizedLanes } : {}), stateDir: deps.stateDir, omitSystemPromptDuplicates: true })}\n\n# Supervisor handover\n${data.text}\n\nLive Lead: ${lead?.id ?? '(none)'}\nOpen Tasks:\n${evidence.tasks || '(none)'}\nHeld reports: ${mail.supervisorQueued.length}`;
+      const includeDynamicStoreReleaseContract = isPiSeat(successorProvider ?? laneValue(current.toLane), 'supervisor', deps.stateDir, slug);
+      data.kickoff ??= `${buildSeatKickoffPacket({ role: 'supervisor', projectSlug: slug, projectRoot: reg.root, ledgerEvents: evidence.events, ...(normalizedLanes !== undefined ? { lanes: normalizedLanes } : {}), stateDir: deps.stateDir, omitSystemPromptDuplicates: true, ...(includeDynamicStoreReleaseContract ? { includeDynamicStoreReleaseContract: true } : {}) })}\n\n# Supervisor handover\n${data.text}\n\nLive Lead: ${lead?.id ?? '(none)'}\nOpen Tasks:\n${evidence.tasks || '(none)'}\nHeld reports: ${mail.supervisorQueued.length}`;
       save(slug, data);
       // Send before marking any report delivered. A failed send keeps this exact kickoff durable.
       await deps.daemon().agents.ref(data.successorId).send(data.kickoff + (mail.supervisorQueued.length ? `\n\n${deps.renderMail(mail.supervisorQueued)}` : ''));

@@ -3971,3 +3971,248 @@ test("Turn-1 Seat kickoff packet surfaces Project-own Active store release witho
   assert.equal(leadSend.text.includes("sr-root-leak"), false, "root-factory store release never leaks into registered Project kickoff");
 });
 
+test("Pi Turn-1 and post-Handoff successor kickoffs receive dynamic Store Release law/boundary on enabled mobile Projects without duplicating base laws or non-Pi prose (ADR 0071)", async (t) => {
+  const { setProjectStoreReleaseSettings } = await import("../plugin/server/core/project-settings.ts");
+  const { LEAD_STORE_RELEASE_LAW, LEAD_WAVE_LAWS, SUPERVISOR_OUTCOME_BOUNDARY, SUPERVISOR_STORE_RELEASE_BOUNDARY } = await import("../plugin/server/core/roles-contract.ts");
+
+  // 1. Pi Lead Turn-1 + post-Handoff successor on enabled mobile Project
+  {
+    const f = makeSpooledRuntime(t);
+    mkdirSync(join(f.projectRoot, "ios", "Demo.xcodeproj"), { recursive: true });
+    setProjectStoreReleaseSettings(f.stateDir, f.slug, { mode: "on-request" });
+    saveLanes(f.stateDir, { supervisor: "pi/zai/glm-5.3", lead: "pi/zai/glm-5.3" });
+
+    await f.leadMail.dispatchLead({ id: "pi-lead-t1", kind: "lead_dispatch", project: f.slug, message: "Ship beta" });
+    const turn1 = f.fake.sent.find((s) => /seat kickoff packet · role=lead/.test(s.text));
+    assert.ok(turn1, "Pi Lead receives Turn-1 kickoff");
+    assert.ok(turn1.text.includes(LEAD_STORE_RELEASE_LAW), "Pi Turn-1 Lead kickoff carries dynamic LEAD_STORE_RELEASE_LAW");
+    assert.ok(!turn1.text.includes(LEAD_WAVE_LAWS[0]!), "Pi Turn-1 Lead kickoff omits static base LEAD_WAVE_LAWS");
+
+    // Trigger Lead handoff -> successor Pi Lead must also receive dynamic LEAD_STORE_RELEASE_LAW
+    const leadId = readProjectRegistration(f.stateDir, f.slug)!.lead!;
+    await f.leadMail.onLeadTurnEnded({ agentId: leadId, outcome: { kind: "completed" } });
+    await f.surface.handoff({ projectRoot: f.projectRoot, seat: "lead" }, "start");
+    await f.leadMail.onLeadTurnEnded({
+      agentId: leadId,
+      outcome: { kind: "completed" },
+      timeline: [{ type: "assistant_message", text: "# 1. Current Wave & In-Flight State\nStaging ready." }],
+    });
+    const successorId = readProjectRegistration(f.stateDir, f.slug)!.lead!;
+    assert.notEqual(successorId, leadId);
+    const successorSend = f.fake.sent.find((s) => s.agentId === successorId && /seat kickoff packet · role=lead/.test(s.text));
+    assert.ok(successorSend, "Pi Lead successor receives Turn-1 kickoff");
+    assert.ok(successorSend.text.includes(LEAD_STORE_RELEASE_LAW), "Pi Lead successor kickoff carries dynamic LEAD_STORE_RELEASE_LAW");
+    assert.ok(!successorSend.text.includes(LEAD_WAVE_LAWS[0]!), "Pi Lead successor kickoff omits static base LEAD_WAVE_LAWS");
+  }
+
+  // 2. Non-Pi Lead Turn-1 & Supervisor Turn-1 on enabled mobile Project omit duplicated Store Release law/boundary
+  {
+    const f = makeSpooledRuntime(t, [
+      { id: "claude-sup-1", provider: "claude/claude-sonnet-4-6", status: "idle" },
+    ]);
+    mkdirSync(join(f.projectRoot, "ios", "Demo.xcodeproj"), { recursive: true });
+    setProjectStoreReleaseSettings(f.stateDir, f.slug, { mode: "on-request" });
+    saveLanes(f.stateDir, { supervisor: "claude/claude-sonnet-4-6", lead: "claude/claude-sonnet-4-6" });
+    f.fake.agents[0]!.labels = { seat: "supervisor", project: f.slug };
+    f.fake.agents[0]!.cwd = f.projectRoot;
+    writeProjectRegistration(f.stateDir, f.slug, { root: f.projectRoot, supervisor: "claude-sup-1" });
+
+    await f.leadMail.dispatchLead({ id: "claude-lead-t1", kind: "lead_dispatch", project: f.slug, message: "Ship beta" });
+    const leadTurn1 = f.fake.sent.find((s) => /seat kickoff packet · role=lead/.test(s.text));
+    assert.ok(leadTurn1);
+    assert.ok(!leadTurn1.text.includes(LEAD_STORE_RELEASE_LAW), "non-Pi Lead kickoff omits duplicate LEAD_STORE_RELEASE_LAW");
+
+    await f.leadMail.reportSupervisor({ id: "claude-sup-rep", kind: "supervisor_report", project: f.slug, message: "Stage ready" });
+    const supTurn1 = f.fake.sent.find((s) => s.agentId === "claude-sup-1" && /seat kickoff packet · role=supervisor/.test(s.text));
+    assert.ok(supTurn1);
+    assert.ok(!supTurn1.text.includes(SUPERVISOR_STORE_RELEASE_BOUNDARY), "non-Pi Supervisor kickoff omits duplicate SUPERVISOR_STORE_RELEASE_BOUNDARY");
+  }
+
+  // 3. Pi Supervisor Turn-1 (via drainSupervisorMailbox and surface supervisorStart / adopt) receives dynamic SUPERVISOR_STORE_RELEASE_BOUNDARY
+  {
+    const f = makeSpooledRuntime(t, [
+      { id: "pi-sup-1", provider: "pi/zai/glm-5.3", status: "idle" },
+    ]);
+    mkdirSync(join(f.projectRoot, "android", "app"), { recursive: true });
+    writeFileSync(join(f.projectRoot, "android", "app", "build.gradle"), "android {}\n");
+    setProjectStoreReleaseSettings(f.stateDir, f.slug, { mode: "on-request" });
+    saveLanes(f.stateDir, { supervisor: "pi/zai/glm-5.3", lead: "pi/zai/glm-5.3" });
+    f.fake.agents[0]!.labels = { seat: "supervisor", project: f.slug };
+    f.fake.agents[0]!.cwd = f.projectRoot;
+    writeProjectRegistration(f.stateDir, f.slug, { root: f.projectRoot, supervisor: "pi-sup-1" });
+
+    await f.leadMail.reportSupervisor({ id: "pi-sup-rep", kind: "supervisor_report", project: f.slug, message: "Stage ready" });
+    const supTurn1 = f.fake.sent.find((s) => s.agentId === "pi-sup-1" && /seat kickoff packet · role=supervisor/.test(s.text));
+    assert.ok(supTurn1);
+    assert.ok(supTurn1.text.includes(SUPERVISOR_STORE_RELEASE_BOUNDARY), "Pi Supervisor Turn-1 kickoff carries dynamic SUPERVISOR_STORE_RELEASE_BOUNDARY");
+    assert.ok(!supTurn1.text.includes(SUPERVISOR_OUTCOME_BOUNDARY), "Pi Supervisor Turn-1 kickoff omits static base SUPERVISOR_OUTCOME_BOUNDARY");
+  }
+
+  // 4. surface.supervisorStart & surface.supervisorAdopt wire includeDynamicStoreReleaseContract for Pi seats only
+  {
+    const f = makeSpooledRuntime(t);
+    mkdirSync(join(f.projectRoot, "ios", "Demo.xcodeproj"), { recursive: true });
+    setProjectStoreReleaseSettings(f.stateDir, f.slug, { mode: "on-request" });
+    saveLanes(f.stateDir, { supervisor: "pi/zai/glm-5.3", lead: "pi/zai/glm-5.3" });
+
+    const started = await f.surface.supervisorStart({ projectRoot: f.projectRoot, directive: "Ship mobile app" });
+    assert.equal(started.ok, true);
+    const createdSend = f.fake.sent.find((s) => /seat kickoff packet · role=supervisor/.test(s.text));
+    assert.ok(createdSend);
+    assert.ok(createdSend.text.includes(SUPERVISOR_STORE_RELEASE_BOUNDARY), "Pi supervisorStart kickoff carries dynamic boundary");
+    assert.ok(!createdSend.text.includes(SUPERVISOR_OUTCOME_BOUNDARY), "Pi supervisorStart kickoff omits static base boundary");
+
+    // Adopt an unstarted Pi candidate (kickoffSupervisorSeat path)
+    f.fake.agents.push({ id: "pi-adopt-sup", provider: "pi/zai/glm-5.3", status: "idle", cwd: f.projectRoot, labels: {} });
+    const adopted = await f.surface.supervisorAdopt({ projectRoot: f.projectRoot, agentId: "pi-adopt-sup" });
+    assert.equal(adopted.ok, true);
+    const adoptSend = f.fake.sent.find((s) => s.agentId === "pi-adopt-sup" && /seat kickoff packet · role=supervisor/.test(s.text));
+    assert.ok(adoptSend);
+    assert.ok(adoptSend.text.includes(SUPERVISOR_STORE_RELEASE_BOUNDARY), "Pi supervisorAdopt kickoff carries dynamic boundary");
+  }
+});
+
+test("Pi Lead and Supervisor receive unconditional compaction-safe Store Release reminders on Turn 2+ mail while non-Pi and disabled Projects do not (ADR 0071)", async (t) => {
+  const { setProjectStoreReleaseSettings } = await import("../plugin/server/core/project-settings.ts");
+
+  // 1. Pi Lead on enabled mobile Project receives compaction-safe reminder on storeRelease dispatch AND store_release_* wakeup on Turn 2+
+  {
+    const f = makeSpooledRuntime(t, [
+      { id: "pi-lead-c", provider: "pi/zai/glm-5.3", status: "idle", lastUserMessageAt: "2026-11-25T10:00:00.000Z" },
+      { id: "pi-sup-c", provider: "pi/zai/glm-5.3", status: "idle", lastUserMessageAt: "2026-11-25T10:00:00.000Z" },
+    ]);
+    mkdirSync(join(f.projectRoot, "ios", "Demo.xcodeproj"), { recursive: true });
+    setProjectStoreReleaseSettings(f.stateDir, f.slug, { mode: "on-request" });
+    saveLanes(f.stateDir, { supervisor: "pi/zai/glm-5.3", lead: "pi/zai/glm-5.3" });
+    f.fake.agents[0]!.labels = { seat: "lead", project: f.slug };
+    f.fake.agents[0]!.cwd = f.projectRoot;
+    f.fake.agents[1]!.labels = { seat: "supervisor", project: f.slug };
+    f.fake.agents[1]!.cwd = f.projectRoot;
+    writeProjectRegistration(f.stateDir, f.slug, { root: f.projectRoot, lead: "pi-lead-c", supervisor: "pi-sup-c" });
+
+    // (a) Unrelated normal dispatch does NOT inject Store Release reminder
+    await f.leadMail.dispatchLead({ id: "disp-normal", kind: "lead_dispatch", project: f.slug, message: "Fix typo in README" });
+    const normalSend = f.fake.sent.at(-1)!;
+    assert.equal(normalSend.agentId, "pi-lead-c");
+    assert.doesNotMatch(normalSend.text, /lead_store_release/);
+    await f.leadMail.onLeadTurnEnded({ agentId: "pi-lead-c", outcome: { kind: "completed" } });
+
+    // (b) storeRelease dispatch (even with generic message text) injects compaction-safe reminder on Turn 2+
+    await f.leadMail.dispatchLead({
+      id: "disp-sr",
+      kind: "lead_dispatch",
+      project: f.slug,
+      from: "supervisor",
+      message: "Please ship build 1.2.0",
+      storeRelease: { target: "staging", platforms: ["ios"] },
+    });
+    const srSend = f.fake.sent.at(-1)!;
+    assert.equal(srSend.agentId, "pi-lead-c");
+    assert.doesNotMatch(srSend.text, /seat kickoff packet/, "Turn 2+ omits kickoff packet");
+    assert.match(srSend.text, /lead_store_release/);
+    assert.match(srSend.text, /lead_record_store_note/);
+    assert.match(srSend.text, /app-repo/);
+    assert.match(srSend.text, /tool-bug|account-policy/);
+    assert.match(srSend.text, /Console handoff guide/);
+    await f.leadMail.onLeadTurnEnded({ agentId: "pi-lead-c", outcome: { kind: "completed" } });
+
+    // (c) store_release_* runner wakeup (e.g. paused at Hole / failed) injects compaction-safe reminder on Turn 2+
+    await f.leadMail.enqueueLeadMail(f.slug, {
+      from: "system",
+      kind: "report",
+      text: "[Store release paused at Hole] action=stage runId=run-hole-1 phase=phase-2 holeKind=day0-store-init\nNext: Relay this Console handoff guide verbatim to Supervisor.",
+    });
+    await f.leadMail.pumpProjectLead(f.slug);
+    const wakeupSend = f.fake.sent.at(-1)!;
+    assert.equal(wakeupSend.agentId, "pi-lead-c");
+    assert.match(wakeupSend.text, /lead_store_release/);
+    assert.match(wakeupSend.text, /lead_record_store_note/);
+    assert.match(wakeupSend.text, /Console handoff guide/);
+    await f.leadMail.onLeadTurnEnded({ agentId: "pi-lead-c", outcome: { kind: "completed" } });
+
+    // (d) Pi Supervisor receiving a Hole / Console handoff guide report from Lead on Turn 2+ gets verbatim relay reminder
+    await f.leadMail.reportSupervisor({
+      id: "rep-hole-1",
+      kind: "supervisor_report",
+      project: f.slug,
+      message: "Store release paused at Hole (day0-store-init). Console handoff guide: open https://play.google.com/console and confirm.",
+    });
+    const supSend = f.fake.sent.find((s) => s.agentId === "pi-sup-c");
+    assert.ok(supSend, "Pi Supervisor receives Hole report");
+    assert.match(supSend.text, /Console handoff guide/);
+    assert.match(supSend.text, /verbatim/i);
+    assert.match(supSend.text, /supervisor_dispatch_lead/);
+    assert.match(supSend.text, /storeRelease/);
+    assert.match(supSend.text, /resumeRunId/);
+    assert.match(supSend.text, /resolution/);
+    assert.match(supSend.text, /supervisor_record_store_note/);
+  }
+
+  // 2. Non-Pi seats (claude) and disabled (mode=off) mobile Projects do NOT receive Pi mailbox reminders
+  {
+    const f = makeSpooledRuntime(t, [
+      { id: "claude-lead-c", provider: "claude/claude-sonnet-4-6", status: "idle", lastUserMessageAt: "2026-11-25T10:00:00.000Z" },
+      { id: "claude-sup-c", provider: "claude/claude-sonnet-4-6", status: "idle", lastUserMessageAt: "2026-11-25T10:00:00.000Z" },
+    ]);
+    mkdirSync(join(f.projectRoot, "ios", "Demo.xcodeproj"), { recursive: true });
+    setProjectStoreReleaseSettings(f.stateDir, f.slug, { mode: "on-request" });
+    saveLanes(f.stateDir, { supervisor: "claude/claude-sonnet-4-6", lead: "claude/claude-sonnet-4-6" });
+    f.fake.agents[0]!.labels = { seat: "lead", project: f.slug };
+    f.fake.agents[0]!.cwd = f.projectRoot;
+    f.fake.agents[1]!.labels = { seat: "supervisor", project: f.slug };
+    f.fake.agents[1]!.cwd = f.projectRoot;
+    writeProjectRegistration(f.stateDir, f.slug, { root: f.projectRoot, lead: "claude-lead-c", supervisor: "claude-sup-c" });
+
+    await f.leadMail.dispatchLead({
+      id: "disp-claude-sr",
+      kind: "lead_dispatch",
+      project: f.slug,
+      from: "supervisor",
+      message: "Ship build 1.2.0",
+      storeRelease: { target: "staging" },
+    });
+    assert.doesNotMatch(f.fake.sent.find((s) => s.agentId === "claude-lead-c")!.text, /compaction-safe/);
+
+    await f.leadMail.reportSupervisor({
+      id: "rep-claude-hole",
+      kind: "supervisor_report",
+      project: f.slug,
+      message: "Store release paused at Hole. Console handoff guide attached.",
+    });
+    assert.doesNotMatch(f.fake.sent.find((s) => s.agentId === "claude-sup-c")!.text, /compaction-safe/);
+  }
+
+  {
+    const f = makeSpooledRuntime(t, [
+      { id: "pi-lead-off", provider: "pi/zai/glm-5.3", status: "idle", lastUserMessageAt: "2026-11-25T10:00:00.000Z" },
+      { id: "pi-sup-off", provider: "pi/zai/glm-5.3", status: "idle", lastUserMessageAt: "2026-11-25T10:00:00.000Z" },
+    ]);
+    mkdirSync(join(f.projectRoot, "ios", "Demo.xcodeproj"), { recursive: true });
+    // mode stays "off"
+    saveLanes(f.stateDir, { supervisor: "pi/zai/glm-5.3", lead: "pi/zai/glm-5.3" });
+    f.fake.agents[0]!.labels = { seat: "lead", project: f.slug };
+    f.fake.agents[0]!.cwd = f.projectRoot;
+    f.fake.agents[1]!.labels = { seat: "supervisor", project: f.slug };
+    f.fake.agents[1]!.cwd = f.projectRoot;
+    writeProjectRegistration(f.stateDir, f.slug, { root: f.projectRoot, lead: "pi-lead-off", supervisor: "pi-sup-off" });
+
+    await f.leadMail.dispatchLead({
+      id: "disp-off-sr",
+      kind: "lead_dispatch",
+      project: f.slug,
+      from: "supervisor",
+      message: "Ship build 1.2.0",
+      storeRelease: { target: "staging" },
+    });
+    assert.doesNotMatch(f.fake.sent.find((s) => s.agentId === "pi-lead-off")!.text, /lead_store_release/);
+
+    await f.leadMail.reportSupervisor({
+      id: "rep-off-hole",
+      kind: "supervisor_report",
+      project: f.slug,
+      message: "Store release paused at Hole.",
+    });
+    assert.doesNotMatch(f.fake.sent.find((s) => s.agentId === "pi-sup-off")!.text, /supervisor_record_store_note/);
+  }
+});
+

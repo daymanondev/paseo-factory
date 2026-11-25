@@ -359,6 +359,22 @@ export function resolveEffectiveProviderFamily(
   return parsed === undefined ? providerFamilyOf(rawProvider) : providerFamilyOf(parsed.provider);
 }
 
+/**
+ * Returns true when a seat runs on Pi (`APPEND_SYSTEM.md` in shared `Pi harness home`),
+ * so dynamic Project-gated Store Release laws/hints ride its `Seat kickoff packet`
+ * without duplicating base laws on non-Pi seats (ADR 0071).
+ */
+export function isPiSeat(
+  provider: string | null | undefined,
+  role: SeatName,
+  stateDir: string,
+  projectSlug: string,
+): boolean {
+  const effectiveProvider =
+    typeof provider === "string" && provider.trim() !== "" ? provider : FACTORY_SEAT_PROVIDER_IDS[role];
+  return resolveEffectiveProviderFamily(effectiveProvider, role, stateDir, projectSlug) === "pi";
+}
+
 function buildPaseoFactoryBridgeServer(input: {
   bridgeBinPath: string;
   correlationId?: string;

@@ -82,9 +82,10 @@ import { hasUnansweredPeerAsk, projectTask } from "./core/task-state.ts";
 import { ensureProjectRegistered, listProjectRegistrations, projectStateDir, projectNotebookPath, readProjectRegistration, resolveProject, writeProjectRegistration } from "./core/project.ts";
 import type { LeadRotationState, ProjectRegistration } from "./core/project.ts";
 import { loadLanes, saveLanes } from "./core/lanes.ts";
-import { buildSeatKickoffPacket } from "./core/preflight.ts";
+import { buildSeatKickoffPacket, summarizeActiveStoreRelease } from "./core/preflight.ts";
+import { resolveStoreReleaseCapability } from "./core/store-release-capability.ts";
 import { taskWorktreeBranch, taskWorktreePath } from "./core/workspace.ts";
-import { inferRoleFromProviderId } from "./roles.ts";
+import { inferRoleFromProviderId, isPiSeat } from "./roles.ts";
 import {
   ackLeadMail as appendMailAcked,
   deliverLeadMail as appendMailDelivered,
@@ -155,6 +156,27 @@ const DEGRADED_HANDOFF_COMPLETION_REASONS: Record<"extraction-send-failed" | "ex
  * mail; a stale `attentionReason === "error"` from an earlier failed turn never
  * freezes the mailbox.
  */
+const LEAD_COMPACTION_SAFE_STORE_RELEASE_REMINDER = [
+  "Store Release discipline reminder (compaction-safe):",
+  "- Never run `release-lab` or ad-hoc store upload scripts in a shell or Peer; use `lead_store_release({ action: \"probe\" | \"stage\" | \"submit\" | \"resume\" })` (then immediately end your turn for async runs) and `lead_record_store_note({ target: \"lessons\" | \"app\", content, appKey? })` (without dirtying `<project-root>`).",
+  "- Two-route failure policy: `app-repo` -> bounded Peer repair wave (<= 2 attempts) through Gate; `tool-bug` / `account-policy` -> halt immediately, never work around the runner, confirm `Upstream issue`, and report via `lead_report_to_supervisor`.",
+  "- On a `Hole` pause, relay `runId`, `phase`, `holeKind`, options, and any **Console handoff guide** (numbered steps, URLs, copy values, questionnaire answers, `Done by API`, anti-rejection warnings, `CONSOLE_GUIDE.md` path) verbatim via `lead_report_to_supervisor` and end your turn.",
+].join("\n");
+
+const SUPERVISOR_COMPACTION_SAFE_HOLE_REMINDER = [
+  "Store Release Hole relay reminder (compaction-safe):",
+  "- If this report carries a **Console handoff guide**, relay its numbered steps, deep-links (URLs), pre-filled copy values and questionnaire answers, `Done by API` items, anti-rejection warnings, and `CONSOLE_GUIDE.md` path verbatim to the Owner in chat (never paraphrasing away exact URLs, values, or answers) and tell the Owner how to confirm in chat once done.",
+  "- When the Owner confirms resolution (or approves production), resume via `supervisor_dispatch_lead({ message, storeRelease: { target, resumeRunId, resolution } })` (using `target: \"production\"` only with explicit Owner approval). Record any store rejections in the Store notebook via `supervisor_record_store_note`.",
+].join("\n");
+
+function isStoreReleaseRunnerWakeupText(text: string): boolean {
+  return /\[Store release (?:failed|paused at Hole|completed|internal error)\]/i.test(text);
+}
+
+function isStoreReleaseHoleReportText(text: string): boolean {
+  return /Console handoff guide|CONSOLE_GUIDE\.md|day0-store-init|price-conflict|final-release-approval|holeKind|Store release paused|\bHole\b/i.test(text);
+}
+
 export function isBlockedByAttention(agent: SurfaceAgentSnapshot): boolean {
   return agent.requiresAttention === true && agent.attentionReason === "permission";
 }
@@ -269,7 +291,7 @@ export interface LeadMailRuntime {
   notifyPeer(input: { task: string; kind: "verdict" | "needs_human" | "peer_challenge"; text: string; projectSlug?: string }): Promise<void>;
   enqueueLeadMail(
     slug: string,
-    mail: { to?: MailRecipient; from: LeadMailFrom; kind: LeadMailKind; task?: string; text: string },
+    mail: { to?: MailRecipient; from: LeadMailFrom; kind: LeadMailKind; task?: string; storeRelease?: boolean; text: string },
   ): Promise<{ mailId: string }>;
   pumpProjectLead(slug: string): Promise<void>;
   pumpProjectSupervisor(slug: string): Promise<void>;
@@ -576,7 +598,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
 
   const enqueueLeadMail = (
     slug: string,
-    mail: { to?: MailRecipient; from: LeadMailFrom; kind: LeadMailKind; task?: string; text: string },
+    mail: { to?: MailRecipient; from: LeadMailFrom; kind: LeadMailKind; task?: string; storeRelease?: boolean; text: string },
   ): Promise<{ mailId: string }> =>
     projectLane(slug, async () => {
       const queued = queueMail(slug, mail);
@@ -744,7 +766,20 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     // verdict is in the queued batch or already acked), so waking the successor
     // here can no longer race a running Peer into a double spawn.
     if (state.queued.length === 0 && pendingHandoff === undefined) return;
-    const mailPrompt = state.queued.length === 0 ? "" : renderMailPrompt(state.queued);
+    const reg = readProjectRegistration(deps.stateDir, slug);
+    const baseMailPrompt = state.queued.length === 0 ? "" : renderMailPrompt(state.queued);
+    const needsLeadStoreReminder =
+      state.queued.length > 0 &&
+      isPiSeat(lead.provider, "lead", deps.stateDir, slug) &&
+      resolveStoreReleaseCapability({
+        projectRoot: reg?.root ?? lead.cwd ?? "",
+        stateDir: deps.stateDir,
+        projectSlug: slug,
+      }).leadEnabled &&
+      state.queued.some((item) => item.storeRelease === true || isStoreReleaseRunnerWakeupText(item.text));
+    const mailPrompt = needsLeadStoreReminder
+      ? `${baseMailPrompt}\n\n${LEAD_COMPACTION_SAFE_STORE_RELEASE_REMINDER}`
+      : baseMailPrompt;
     const body = pendingHandoff !== undefined ? (mailPrompt === "" ? pendingHandoff : `${pendingHandoff}\n\n${mailPrompt}`) : mailPrompt;
     const isFirstTurn = !hasSeatReceivedFirstTurn(lead);
     const prompt = await prependKickoffPacketIfFirstTurn("lead", slug, lead, body, daemon);
@@ -765,7 +800,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
   const prependKickoffPacketIfFirstTurn = async (
     role: "supervisor" | "lead",
     slug: string,
-    agent: { id: string; cwd?: string | null; lastUserMessageAt?: string | null },
+    agent: { id: string; provider?: string | null; cwd?: string | null; lastUserMessageAt?: string | null },
     prompt: string,
     daemon: SurfaceDaemonApi,
   ): Promise<string> => {
@@ -773,6 +808,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     const reg = readProjectRegistration(deps.stateDir, slug);
     const loadedLanes = loadLanes(deps.stateDir, slug);
     const lanes = loadedLanes.ok ? await normalizeLanesWithDaemon(daemon, loadedLanes.lanes) : undefined;
+    const includeDynamicStoreReleaseContract = isPiSeat(agent.provider, role, deps.stateDir, slug);
     const kickoff = buildSeatKickoffPacket({
       role,
       projectSlug: slug,
@@ -790,6 +826,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       // dynamic repository preflight facts, never a second copy of the linked
       // design specification, helper MCP roster, or wave laws.
       omitSystemPromptDuplicates: true,
+      ...(includeDynamicStoreReleaseContract ? { includeDynamicStoreReleaseContract: true } : {}),
     });
     return `${kickoff}\n${prompt}`;
   };
@@ -828,7 +865,23 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     }
     if (!isSeatReadyForMail(supervisor)) return;
     const isFirstTurn = !hasSeatReceivedFirstTurn(supervisor);
-    const prompt = await prependKickoffPacketIfFirstTurn("supervisor", slug, supervisor, renderSupervisorMailBatch(state.supervisorQueued), daemon);
+    const reg = readProjectRegistration(deps.stateDir, slug);
+    const baseBatch = renderSupervisorMailBatch(state.supervisorQueued);
+    const capability = resolveStoreReleaseCapability({
+      projectRoot: reg?.root ?? supervisor.cwd ?? "",
+      stateDir: deps.stateDir,
+      projectSlug: slug,
+    });
+    const hasLeadReport = state.supervisorQueued.some((item) => item.from === "lead");
+    const hasHoleReport =
+      capability.supervisorTier === "full" &&
+      isPiSeat(supervisor.provider, "supervisor", deps.stateDir, slug) &&
+      (state.supervisorQueued.some((item) => item.from === "lead" && isStoreReleaseHoleReportText(item.text)) ||
+        (hasLeadReport &&
+          (summarizeActiveStoreRelease(projectOwnAndTaskEventsOf(slug, reg?.root ?? supervisor.cwd ?? undefined))?.includes("status=paused") ??
+            false)));
+    const batch = hasHoleReport ? `${baseBatch}\n\n${SUPERVISOR_COMPACTION_SAFE_HOLE_REMINDER}` : baseBatch;
+    const prompt = await prependKickoffPacketIfFirstTurn("supervisor", slug, supervisor, batch, daemon);
     await daemon.agents.ref(supervisor.id).send(prompt);
     if (isFirstTurn) {
       failedFirstTurnAgentIds.delete(supervisor.id);
@@ -1727,7 +1780,8 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
             directive: request.message,
           });
         }
-        if (request.storeRelease !== undefined && from !== "peer") {
+        const isStoreReleaseDispatch = request.storeRelease !== undefined && from !== "peer";
+        if (isStoreReleaseDispatch && request.storeRelease !== undefined) {
           setStoreReleaseRequest(deps.stateDir, slug, {
             target: request.storeRelease.target,
             ...(request.storeRelease.platforms !== undefined ? { platforms: request.storeRelease.platforms } : {}),
@@ -1744,7 +1798,14 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
         // mislabeled `needs_human` (that Ledger fact is the Lead's alone to
         // record through `lead_needs_human`).
         const kind = from === "peer" ? "peer_challenge" : "directive";
-        const queued = queueMail(slug, { ...(from === "peer" ? { to: "lead" as const } : {}), from, kind, ...(from === "peer" && blockerTask !== undefined ? { task: blockerTask } : {}), text: request.message });
+        const queued = queueMail(slug, {
+          ...(from === "peer" ? { to: "lead" as const } : {}),
+          from,
+          kind,
+          ...(from === "peer" && blockerTask !== undefined ? { task: blockerTask } : {}),
+          ...(isStoreReleaseDispatch ? { storeRelease: true } : {}),
+          text: request.message,
+        });
         return { ok: true, agentId: ensured.agentId, mailId: queued.mailId };
       },
     );

@@ -865,7 +865,7 @@ export default function contribute(server: PluginServerContext) {
     registry,
     gateQueue,
     storeReleaseNotify: async ({ slug, text }) => {
-      await leadMail.enqueueLeadMail(slug, { from: "system", kind: "report", text });
+      await leadMail.enqueueLeadMail(slug, { from: "system", kind: "report", storeRelease: true, text });
       await leadMail.pumpProjectLead(slug);
     },
   });

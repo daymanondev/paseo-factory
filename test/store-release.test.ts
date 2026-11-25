@@ -805,6 +805,10 @@ test("releaseProject and Spool release reply signal storeReleaseAutoStaging when
   if (spoolMob.ok) {
     assert.equal((spoolMob as { storeReleaseAutoStaging?: boolean }).storeReleaseAutoStaging, true);
     assert.match(spoolMob.summary ?? "", /auto-staging.*lead_store_release/i);
+    assert.match(spoolMob.summary ?? "", /lead_record_store_note/);
+    assert.match(spoolMob.summary ?? "", /app-repo/);
+    assert.match(spoolMob.summary ?? "", /tool-bug|account-policy/);
+    assert.match(spoolMob.summary ?? "", /Console handoff guide/);
   }
 
   // Non-mobile project even with auto-staging stays clean (no storeReleaseAutoStaging)

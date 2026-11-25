@@ -10,7 +10,7 @@ import { setProjectReleaseSettings, setProjectStoreReleaseSettings } from "../sr
 import { storeMemoryDir } from "../src/vault-materialization.ts";
 import { execFileSync } from "node:child_process";
 import { FactoryError } from "../src/errors.ts";
-import { LEAD_WAVE_LAWS, SUPERVISOR_OUTCOME_BOUNDARY } from "../src/roles-contract.ts";
+import { LEAD_STORE_RELEASE_LAW, LEAD_WAVE_LAWS, SUPERVISOR_OUTCOME_BOUNDARY, SUPERVISOR_STORE_RELEASE_BOUNDARY, SUPERVISOR_STORE_RELEASE_OFF_HINT } from "../src/roles-contract.ts";
 import type { LedgerEvent } from "../src/events.ts";
 
 test("kickoff packets report present and absent project memory", t => {
@@ -127,7 +127,7 @@ test('the Lead kickoff packet is byte-identical to the pre-0.12.4 render (Superv
     '- Build/Test commands: package.json scripts (test: `node --test`, typecheck: `tsc --noEmit`)',
     '- Active lanes: agent=claude',
     '- Ledger tasks: none (clean slate)',
-    '- Role MCP tools (paseo_factory): `lead_set_contract`, `lead_dispatch_agent`, `lead_read_ledger`, `lead_verify`, `lead_merge`, `lead_release`, `lead_store_release`, `lead_record_store_note`, `lead_report_to_supervisor`',
+    '- Role MCP tools (paseo_factory): `lead_set_contract`, `lead_dispatch_agent`, `lead_read_ledger`, `lead_verify`, `lead_merge`, `lead_release`, `lead_report_to_supervisor`',
     '- Law: Fire-and-End-Turn: orient within <= 3 small boundary reads (dispatch a read-only `scout` or `architect` Peer first whenever deeper repo/design discovery is needed), outline the serial-wave roadmap, call `lead_set_contract` then `lead_dispatch_agent` (or `factory contract` + `factory run`) for the current wave only, and IMMEDIATELY end your turn — never poll, never sleep, never grep raw `ledger.jsonl` or `~/.paseo/plugins/**`, and never edit product source code on `<project-root>`.',
     '--- [end seat kickoff packet] ---',
     '',
@@ -283,8 +283,8 @@ test('the kickoff packet renders the SLP MCP tool table and the Project notebook
     const packet = buildSeatKickoffPacket({ role, projectSlug: "repo", projectRoot: root, ledgerEvents: [], stateDir });
     const lines = new Set(packet.split("\n"));
     const tools = role === "supervisor"
-      ? "`supervisor_dispatch_lead`, `supervisor_read_ledger`, `supervisor_record_store_note`, `supervisor_end_cycle`"
-      : "`lead_set_contract`, `lead_dispatch_agent`, `lead_read_ledger`, `lead_verify`, `lead_merge`, `lead_release`, `lead_store_release`, `lead_record_store_note`, `lead_report_to_supervisor`";
+      ? "`supervisor_dispatch_lead`, `supervisor_read_ledger`, `supervisor_end_cycle`"
+      : "`lead_set_contract`, `lead_dispatch_agent`, `lead_read_ledger`, `lead_verify`, `lead_merge`, `lead_release`, `lead_report_to_supervisor`";
     assert.ok(lines.has(`- Role MCP tools (paseo_factory): ${tools}`), `${role} renders the SLP MCP tool table`);
     assert.doesNotMatch(packet, /scrum/i, `${role} packet carries no Scrum vocabulary`);
     // Every deterministic repo preflight line and the Project notebook ride the packet.
@@ -496,20 +496,23 @@ test("seat kickoff packet includes Store release mode, Vault readiness booleans,
   disposeDir(t, plainRoot);
   writeFileSync(join(plainRoot, "README.md"), "plain\n");
 
-  // 1. Non-mobile Project stays clean (no Store release / Store notebook lines)
-  const plainPacket = buildSeatKickoffPacket({
-    role: "lead",
-    projectSlug: "plain-proj",
-    projectRoot: plainRoot,
-    ledgerEvents: [],
-    stateDir,
-    paseoHome: home,
-    omitSystemPromptDuplicates: true,
-  });
-  assert.doesNotMatch(plainPacket, /^- Store release:/m);
-  assert.doesNotMatch(plainPacket, /^- Store notebook/m);
+  // 1. Non-mobile Project stays clean across both Lead and Supervisor (no Store release tools/lines/prose)
+  for (const role of ["lead", "supervisor"] as const) {
+    const plainPacket = buildSeatKickoffPacket({
+      role,
+      projectSlug: "plain-proj",
+      projectRoot: plainRoot,
+      ledgerEvents: [],
+      stateDir,
+      paseoHome: home,
+      omitSystemPromptDuplicates: true,
+    });
+    assert.doesNotMatch(plainPacket, /^- Store release:/m);
+    assert.doesNotMatch(plainPacket, /^- Store notebook/m);
+    assert.doesNotMatch(plainPacket, /lead_store_release|lead_record_store_note|supervisor_record_store_note|Store Release Hint/);
+  }
 
-  // 2. Mobile Project (android + ios markers) with Vault env secrets present
+  // 2. Mobile Project (android + ios markers) with Vault env secrets present and mode=auto-staging
   const mobileRoot = makeTempDir("store-kickoff-mobile-");
   disposeDir(t, mobileRoot);
   mkdirSync(join(mobileRoot, "android", "app"), { recursive: true });
@@ -545,24 +548,149 @@ test("seat kickoff packet includes Store release mode, Vault readiness booleans,
       packet.includes(`- Store notebook (read-only): ${storeMemoryDir(home)}`),
       `${role} packet includes read-only Store notebook path`,
     );
+    if (role === "lead") {
+      assert.match(packet, /lead_store_release/);
+      assert.match(packet, /lead_record_store_note/);
+    } else {
+      assert.match(packet, /supervisor_record_store_note/);
+    }
     assert.equal(packet.includes(secretSentinel), false, "never leak secret values");
     assert.equal(packet.includes("/tmp/synth-asc.p8"), false, "never leak secret paths");
   }
 
-  // 3. Project with .store-release/manifest.json only (no native dirs) also surfaces Store release facts
+  // 3. Project with .store-release/manifest.json and mode=off:
+  //    Lead omits Store release tools/lines/notebook completely; Supervisor shows strictly the 1-sentence off-hint.
   const manifestOnlyRoot = makeTempDir("store-kickoff-manifest-");
   disposeDir(t, manifestOnlyRoot);
   mkdirSync(join(manifestOnlyRoot, ".store-release"), { recursive: true });
   writeFileSync(join(manifestOnlyRoot, ".store-release", "manifest.json"), JSON.stringify({ appKey: "demo-app" }));
-  const manifestPacket = buildSeatKickoffPacket({
+  const manifestLeadOff = buildSeatKickoffPacket({
     role: "lead",
     projectSlug: "manifest-proj",
     projectRoot: manifestOnlyRoot,
     ledgerEvents: [],
     stateDir,
+    paseoHome: home,
   });
-  assert.match(manifestPacket, /^- Store release: mode=off, platforms=\[none\], vault=\{ascKey=true, appleTeamId=true, gplayJson=false\}$/m);
-  assert.ok(manifestPacket.includes(`- Store notebook (read-only): ${storeMemoryDir(home)}`));
+  assert.doesNotMatch(manifestLeadOff, /Store release|Store Release|Store notebook|lead_store_release|lead_record_store_note/);
+
+  const manifestSupOff = buildSeatKickoffPacket({
+    role: "supervisor",
+    projectSlug: "manifest-proj",
+    projectRoot: manifestOnlyRoot,
+    ledgerEvents: [],
+    stateDir,
+    paseoHome: home,
+  });
+  assert.ok(manifestSupOff.includes(SUPERVISOR_STORE_RELEASE_OFF_HINT), "mobile off Supervisor emits the 1-sentence off-hint");
+  assert.doesNotMatch(manifestSupOff, /Store notebook|supervisor_record_store_note|\bHole\b|Console handoff guide/);
+});
+
+test("buildSeatKickoffPacket includeDynamicStoreReleaseContract injects capability-gated Store Release laws across omitSystemPromptDuplicates for Pi seats (ADR 0071)", (t) => {
+  const home = makeTempDir("store-kickoff-dynamic-home-");
+  disposeDir(t, home);
+  const stateDir = join(home, "plugin-state", "paseo-factory");
+  const plainRoot = makeTempDir("store-kickoff-dynamic-plain-");
+  disposeDir(t, plainRoot);
+  writeFileSync(join(plainRoot, "README.md"), "plain\n");
+
+  const mobileRoot = makeTempDir("store-kickoff-dynamic-mobile-");
+  disposeDir(t, mobileRoot);
+  mkdirSync(join(mobileRoot, "ios", "Demo.xcodeproj"), { recursive: true });
+
+  // Non-mobile Project with includeDynamicStoreReleaseContract: zero Store Release laws/tools, zero base laws
+  for (const role of ["lead", "supervisor"] as const) {
+    const packet = buildSeatKickoffPacket({
+      role,
+      projectSlug: "plain-dyn",
+      projectRoot: plainRoot,
+      ledgerEvents: [],
+      stateDir,
+      paseoHome: home,
+      omitSystemPromptDuplicates: true,
+      includeDynamicStoreReleaseContract: true,
+    });
+    assert.doesNotMatch(packet, /Store Release|Store release|Store notebook|lead_store_release|lead_record_store_note|supervisor_record_store_note/);
+    assert.ok(!packet.includes(LEAD_WAVE_LAWS[0]!));
+    assert.ok(!packet.includes(SUPERVISOR_OUTCOME_BOUNDARY));
+  }
+
+  // Mobile Project with mode=off: Lead stays clean; Supervisor gets only the 1-sentence off-hint once
+  const offLead = buildSeatKickoffPacket({
+    role: "lead",
+    projectSlug: "mob-dyn",
+    projectRoot: mobileRoot,
+    ledgerEvents: [],
+    stateDir,
+    paseoHome: home,
+    omitSystemPromptDuplicates: true,
+    includeDynamicStoreReleaseContract: true,
+  });
+  assert.doesNotMatch(offLead, /Store Release|Store release|Store notebook|lead_store_release|lead_record_store_note/);
+
+  const offSup = buildSeatKickoffPacket({
+    role: "supervisor",
+    projectSlug: "mob-dyn",
+    projectRoot: mobileRoot,
+    ledgerEvents: [],
+    stateDir,
+    paseoHome: home,
+    omitSystemPromptDuplicates: true,
+    includeDynamicStoreReleaseContract: true,
+  });
+  assert.equal(offSup.split(SUPERVISOR_STORE_RELEASE_OFF_HINT).length - 1, 1, "off-hint appears exactly once");
+  assert.doesNotMatch(offSup, /Store notebook|supervisor_record_store_note|Console handoff guide/);
+
+  // Mobile Project with mode=on-request: dynamic Store Release law/boundary emitted without duplicating base laws
+  setProjectStoreReleaseSettings(stateDir, "mob-dyn", { mode: "on-request" });
+  const activeLead = buildSeatKickoffPacket({
+    role: "lead",
+    projectSlug: "mob-dyn",
+    projectRoot: mobileRoot,
+    ledgerEvents: [],
+    stateDir,
+    paseoHome: home,
+    omitSystemPromptDuplicates: true,
+    includeDynamicStoreReleaseContract: true,
+  });
+  assert.ok(activeLead.includes(`- Law: ${LEAD_STORE_RELEASE_LAW}`), "Lead receives dynamic LEAD_STORE_RELEASE_LAW");
+  assert.ok(!activeLead.includes(LEAD_WAVE_LAWS[0]!), "Lead still omits static LEAD_WAVE_LAWS");
+
+  const activeSup = buildSeatKickoffPacket({
+    role: "supervisor",
+    projectSlug: "mob-dyn",
+    projectRoot: mobileRoot,
+    ledgerEvents: [],
+    stateDir,
+    paseoHome: home,
+    omitSystemPromptDuplicates: true,
+    includeDynamicStoreReleaseContract: true,
+  });
+  assert.ok(activeSup.includes(`- Law: ${SUPERVISOR_STORE_RELEASE_BOUNDARY}`), "Supervisor receives dynamic SUPERVISOR_STORE_RELEASE_BOUNDARY");
+  assert.ok(!activeSup.includes(SUPERVISOR_OUTCOME_BOUNDARY), "Supervisor still omits static SUPERVISOR_OUTCOME_BOUNDARY");
+
+  // Non-Pi omitSystemPromptDuplicates without includeDynamicStoreReleaseContract keeps Store Release law omitted
+  const nonPiLead = buildSeatKickoffPacket({
+    role: "lead",
+    projectSlug: "mob-dyn",
+    projectRoot: mobileRoot,
+    ledgerEvents: [],
+    stateDir,
+    paseoHome: home,
+    omitSystemPromptDuplicates: true,
+  });
+  assert.ok(!nonPiLead.includes(LEAD_STORE_RELEASE_LAW));
+
+  const nonPiSup = buildSeatKickoffPacket({
+    role: "supervisor",
+    projectSlug: "mob-dyn",
+    projectRoot: mobileRoot,
+    ledgerEvents: [],
+    stateDir,
+    paseoHome: home,
+    omitSystemPromptDuplicates: true,
+  });
+  assert.ok(!nonPiSup.includes(SUPERVISOR_STORE_RELEASE_BOUNDARY));
 });
 
 test("summarizeActiveStoreRelease tracks running, paused Holes, completion/failure suppression, and latest unresolved run", () => {

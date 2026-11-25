@@ -3714,7 +3714,7 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
       return {
         id: request.id,
         ok: true,
-        summary: `Released ${res.tag} on ${res.branch} (${res.commit.slice(0, 7)})${res.url ? ` — ${res.url}` : ""}${res.storeReleaseAutoStaging ? ' · Store release mode is auto-staging: call lead_store_release({ action: "stage" }) next.' : ""}`,
+        summary: `Released ${res.tag} on ${res.branch} (${res.commit.slice(0, 7)})${res.url ? ` — ${res.url}` : ""}${res.storeReleaseAutoStaging ? ' · Store release mode is auto-staging: call lead_store_release({ action: "stage" }) next and immediately end your turn (compaction-safe reminder: never run release-lab or store upload scripts in a shell; on app-repo failures run <= 2 Peer repair waves through Gate; on tool-bug/account-policy halt and report to Supervisor; on Hole pauses relay any Console handoff guide verbatim; record outcomes via lead_record_store_note).' : ""}`,
         version: res.version,
         tag: res.tag,
         commit: res.commit,

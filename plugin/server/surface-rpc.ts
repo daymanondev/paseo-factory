@@ -85,7 +85,7 @@ import { createSelfUpdate, type RemoteTagsReply } from "./self-update.ts";
 import { checkDaemonPluginUpdates, cleanupDaemonWorkspacesAndProjectsViaWs, getCachedPluginUpdateStatus, installDaemonPlugin, isPaseoWorkspaceArchivedOnDisk, listDaemonPlugins, manageDaemonPlugin, prunePaseoProjectRegistry, reloadDaemonConfigViaWs, restoreDaemonWorkspaceViaWs } from "./daemon-cli.ts";
 import type { DaemonPluginAction, DaemonPluginItem, DaemonPluginSourceStatus, DaemonPluginUpdateRow, DaemonReply } from "./daemon-cli.ts";
 import { effectiveLanesForReconcile, reconcilePaseoRoleProviders } from "./core/role-providers.ts";
-import { FACTORY_SEAT_PROVIDER_IDS, SEAT_TITLES, inferRoleFromProviderId, isSupervisorCandidate, resolveEffectiveProviderFamily } from "./roles.ts";
+import { FACTORY_SEAT_PROVIDER_IDS, SEAT_TITLES, inferRoleFromProviderId, isPiSeat, isSupervisorCandidate, resolveEffectiveProviderFamily } from "./roles.ts";
 import type { SeatName } from "./roles.ts";
 import { ensureProjectRegistered, isProjectSeat, registerLaneSlug, resolveTargetProject, seatCannotRegisterMessage, writeProjectRegistration } from "./projects.ts";
 import type { FactoryRegistry } from "./projects.ts";
@@ -1736,6 +1736,9 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       ...(lanes !== undefined ? { lanes } : {}),
       stateDir: deps.stateDir,
       omitSystemPromptDuplicates: true,
+      ...(isPiSeat(agent.provider, "supervisor", deps.stateDir, project.slug)
+        ? { includeDynamicStoreReleaseContract: true }
+        : {}),
     });
     try {
       await daemon.agents.ref(agent.id).send(kickoff);
@@ -2113,6 +2116,9 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
               lanes: normalizeLanesWithProviders(lanes.lanes, providers),
               stateDir: deps.stateDir,
               omitSystemPromptDuplicates: true,
+              ...(isPiSeat(agent.provider, "supervisor", deps.stateDir, project.slug)
+                ? { includeDynamicStoreReleaseContract: true }
+                : {}),
             })}\n${message}`
           : message;
       try {

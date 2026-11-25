@@ -403,3 +403,30 @@ test('Supervisor succession kickoff packet surfaces Project-own active/paused st
     /^- Active store release: runId=sr-sup-1, action=stage, platforms=\[android, ios\], status=paused, phase=preflight, holeKind=day0-store-init, guide=\/tmp\/GUIDE\.md$/m,
   );
 });
+
+test('Supervisor succession kickoff packet injects dynamic Store Release boundary for Pi successors and omits it for non-Pi successors (ADR 0071)', async t => {
+  const { setProjectStoreReleaseSettings } = await import('../plugin/server/core/project-settings.ts');
+  const { SUPERVISOR_STORE_RELEASE_BOUNDARY, SUPERVISOR_OUTCOME_BOUNDARY } = await import('../plugin/server/core/roles-contract.ts');
+
+  // 1. Pi successor on enabled mobile Project receives SUPERVISOR_STORE_RELEASE_BOUNDARY
+  {
+    const f = fixture(t);
+    mkdirSync(join(f.root, 'ios', 'App.xcodeproj'), { recursive: true });
+    setProjectStoreReleaseSettings(f.stateDir, f.slug, { mode: 'on-request' });
+    await f.surface.handoff({ projectRoot: f.root, seat: 'supervisor' }, 'replaceNow');
+    const kickoff = f.sent.find(s => s.id === 'successor-1')?.text ?? '';
+    assert.ok(kickoff.includes(SUPERVISOR_STORE_RELEASE_BOUNDARY), 'Pi Supervisor successor gets dynamic SUPERVISOR_STORE_RELEASE_BOUNDARY');
+    assert.ok(!kickoff.includes(SUPERVISOR_OUTCOME_BOUNDARY), 'Pi Supervisor successor still omits static SUPERVISOR_OUTCOME_BOUNDARY');
+  }
+
+  // 2. Non-Pi successor (claude/opus-4-8) on enabled mobile Project omits duplicated SUPERVISOR_STORE_RELEASE_BOUNDARY
+  {
+    const f = fixture(t);
+    mkdirSync(join(f.root, 'ios', 'App.xcodeproj'), { recursive: true });
+    setProjectStoreReleaseSettings(f.stateDir, f.slug, { mode: 'on-request' });
+    await f.surface.lanesSet({ projectRoot: f.root, lane: 'supervisor', value: 'claude/opus-4-8' });
+    await f.runtime.onLeadTurnEnded({ agentId: 'old', outcome: { kind: 'completed' }, timeline: [{ type: 'assistant_message', text: '## Owner goals\nShip' }] });
+    const kickoff = f.sent.find(s => s.id === 'successor-1')?.text ?? '';
+    assert.ok(!kickoff.includes(SUPERVISOR_STORE_RELEASE_BOUNDARY), 'non-Pi Supervisor successor omits duplicate SUPERVISOR_STORE_RELEASE_BOUNDARY');
+  }
+});

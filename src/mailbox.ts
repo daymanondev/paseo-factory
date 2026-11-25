@@ -42,6 +42,7 @@ export type LeadMailboxEvent =
       from: LeadMailFrom;
       kind: LeadMailKind;
       task?: string;
+      storeRelease?: boolean;
       text: string;
     }
   | {
@@ -86,6 +87,7 @@ export interface LeadMailItem {
   from: LeadMailFrom;
   kind: LeadMailKind;
   task?: string;
+  storeRelease?: boolean;
   text: string;
   status: "queued" | "delivered" | "acked";
   deliveryId?: string;
@@ -158,6 +160,7 @@ export function foldLeadMailboxEvents(events: readonly LeadMailboxEvent[]): Lead
           from: evt.from,
           kind: evt.kind,
           ...(evt.task === undefined ? {} : { task: evt.task }),
+          ...(evt.storeRelease === undefined ? {} : { storeRelease: evt.storeRelease }),
           text: evt.text,
           ...(evt.requestId === undefined ? {} : { requestId: evt.requestId }),
           status: "queued",
@@ -233,6 +236,7 @@ export function foldLeadMailboxEvents(events: readonly LeadMailboxEvent[]): Lead
               from: item.from,
               kind: item.kind,
               ...(item.task === undefined ? {} : { task: item.task }),
+              ...(item.storeRelease === undefined ? {} : { storeRelease: item.storeRelease }),
               text: item.text,
             ...(item.requestId === undefined ? {} : { requestId: item.requestId }),
               status: "queued",
@@ -251,6 +255,7 @@ export function foldLeadMailboxEvents(events: readonly LeadMailboxEvent[]): Lead
             from: item.from,
             kind: item.kind,
             ...(item.task === undefined ? {} : { task: item.task }),
+            ...(item.storeRelease === undefined ? {} : { storeRelease: item.storeRelease }),
             text: item.text,
             ...(item.requestId === undefined ? {} : { requestId: item.requestId }),
             status: "queued",
@@ -281,7 +286,7 @@ export function readLeadMailbox(path: string): LeadMailboxState {
 /** Appends `mail_queued` — the one ingress verb; `mailId` generated, `seq` prior-max+1, `ts` ISO now. */
 export function enqueueLeadMail(
   path: string,
-  mail: { requestId?: string; to?: MailRecipient; from: LeadMailFrom; kind: LeadMailKind; task?: string; text: string},
+  mail: { requestId?: string; to?: MailRecipient; from: LeadMailFrom; kind: LeadMailKind; task?: string; storeRelease?: boolean; text: string},
 ): QueuedEvent {
   if (mail.requestId) {
     const previous = readMailboxEvents(path).find(e => e.type === "mail_queued" && e.requestId === mail.requestId);
@@ -295,6 +300,7 @@ export function enqueueLeadMail(
     from: mail.from,
     kind: mail.kind,
     ...(mail.task === undefined ? {} : { task: mail.task }),
+    ...(mail.storeRelease === undefined ? {} : { storeRelease: mail.storeRelease }),
     text: mail.text,
   });
 }
@@ -522,6 +528,7 @@ function shapeIsValid(evt: LeadMailboxEvent, prevSeq: number): boolean {
         FROMS.includes(asRecord.from as string) &&
         KINDS.includes(asRecord.kind as string) &&
         (asRecord.task === undefined || typeof asRecord.task === "string") &&
+        (asRecord.storeRelease === undefined || typeof asRecord.storeRelease === "boolean") &&
         typeof asRecord.text === "string"
       );
     case "mail_delivered":

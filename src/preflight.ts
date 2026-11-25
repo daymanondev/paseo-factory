@@ -14,9 +14,16 @@ import { projectMemoryPresence } from "./project-memory.ts";
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { LEAD_WAVE_LAWS, SUPERVISOR_OUTCOME_BOUNDARY } from "./roles-contract.ts";
+import {
+  LEAD_STORE_RELEASE_LAW,
+  LEAD_WAVE_LAWS,
+  SUPERVISOR_OUTCOME_BOUNDARY,
+  SUPERVISOR_STORE_RELEASE_BOUNDARY,
+  SUPERVISOR_STORE_RELEASE_OFF_HINT,
+} from "./roles-contract.ts";
 import { projectNotebookPath, readProjectNotebook } from "./project.ts";
-import { readReleaseSettings, readStoreReleaseSettings } from "./project-settings.ts";
+import { readReleaseSettings } from "./project-settings.ts";
+import { resolveStoreReleaseCapability } from "./store-release-capability.ts";
 import { derivePaseoHomeFromStateDir, detectMobilePlatforms } from "./store-release-probe.ts";
 import { readVaultStoreReadiness, storeMemoryDir } from "./vault-materialization.ts";
 import type { LedgerEvent } from "./events.ts";
@@ -69,6 +76,13 @@ export interface SeatKickoffPacketInput {
    * complete self-contained packet.
    */
   omitSystemPromptDuplicates?: boolean;
+  /**
+   * Emits the Project-gated Store Release law/hint block even when
+   * `omitSystemPromptDuplicates: true` (ADR 0071). Set for Pi seats on Turn 1
+   * and post-`Handoff` successor kickoffs because shared `Pi harness home`
+   * `APPEND_SYSTEM.md` stays Project-agnostic without Store Release rules.
+   */
+  includeDynamicStoreReleaseContract?: boolean;
 }
 
 function runGitFast(cwd: string, args: readonly string[]): string {
@@ -309,10 +323,20 @@ export function buildSeatKickoffPacket(input: SeatKickoffPacketInput): string {
           .join(", ")
       : "default";
 
+  const capability = resolveStoreReleaseCapability({
+    projectRoot: input.projectRoot,
+    stateDir: input.stateDir,
+    projectSlug: input.projectSlug,
+  });
+
   const roleTools =
     input.role === "supervisor"
-      ? "`supervisor_dispatch_lead`, `supervisor_read_ledger`, `supervisor_record_store_note`, `supervisor_end_cycle`"
-      : "`lead_set_contract`, `lead_dispatch_agent`, `lead_read_ledger`, `lead_verify`, `lead_merge`, `lead_release`, `lead_store_release`, `lead_record_store_note`, `lead_report_to_supervisor`";
+      ? capability.supervisorTier === "full"
+        ? "`supervisor_dispatch_lead`, `supervisor_read_ledger`, `supervisor_record_store_note`, `supervisor_end_cycle`"
+        : "`supervisor_dispatch_lead`, `supervisor_read_ledger`, `supervisor_end_cycle`"
+      : capability.leadEnabled
+        ? "`lead_set_contract`, `lead_dispatch_agent`, `lead_read_ledger`, `lead_verify`, `lead_merge`, `lead_release`, `lead_store_release`, `lead_record_store_note`, `lead_report_to_supervisor`"
+        : "`lead_set_contract`, `lead_dispatch_agent`, `lead_read_ledger`, `lead_verify`, `lead_merge`, `lead_release`, `lead_report_to_supervisor`";
 
   const fireAndEndTurn =
     input.role === "supervisor"
@@ -343,10 +367,9 @@ export function buildSeatKickoffPacket(input: SeatKickoffPacketInput): string {
   }
 
   const activeStoreRelease = summarizeActiveStoreRelease(input.ledgerEvents);
-  const detectedPlatforms = detectMobilePlatforms(input.projectRoot);
-  const hasStoreManifest = input.projectRoot !== "" && existsSync(join(input.projectRoot, ".store-release", "manifest.json"));
-  if (detectedPlatforms.length > 0 || hasStoreManifest) {
-    const storeMode = input.stateDir !== undefined ? readStoreReleaseSettings(input.stateDir, input.projectSlug).mode : "off";
+  const fullStoreInfo = isSupervisor ? capability.supervisorTier === "full" : capability.leadEnabled;
+  if (fullStoreInfo) {
+    const detectedPlatforms = detectMobilePlatforms(input.projectRoot);
     const effectivePaseoHome = resolveKickoffPaseoHome(input.paseoHome, input.stateDir);
     const vault = effectivePaseoHome !== undefined
       ? readVaultStoreReadiness(effectivePaseoHome)
@@ -356,17 +379,32 @@ export function buildSeatKickoffPacket(input: SeatKickoffPacketInput): string {
       : "<paseoHome>/vault-runtime/store-memory";
     const platformsLabel = detectedPlatforms.length > 0 ? detectedPlatforms.join(", ") : "none";
     releaseLines.push(
-      `- Store release: mode=${storeMode}, platforms=[${platformsLabel}], vault={ascKey=${vault.ascKey}, appleTeamId=${vault.appleTeamId}, gplayJson=${vault.gplayJson}}`,
+      `- Store release: mode=${capability.mode}, platforms=[${platformsLabel}], vault={ascKey=${vault.ascKey}, appleTeamId=${vault.appleTeamId}, gplayJson=${vault.gplayJson}}`,
     );
     if (activeStoreRelease !== undefined) releaseLines.push(activeStoreRelease);
     releaseLines.push(
       `- Store notebook (read-only): ${storeNotebookDir} (lessons.md, apps/<canonical-app>.md)`,
     );
-  } else if (activeStoreRelease !== undefined) {
-    releaseLines.push(activeStoreRelease);
+  } else {
+    if (isSupervisor && capability.supervisorTier === "off-hint") {
+      releaseLines.push(`- ${SUPERVISOR_STORE_RELEASE_OFF_HINT}`);
+    }
+    if (activeStoreRelease !== undefined) {
+      releaseLines.push(activeStoreRelease);
+    }
   }
 
   const roleLines = [`- Role MCP tools (paseo_factory): ${roleTools}`, `- Law: ${fireAndEndTurn}`];
+  const emitStoreReleaseLaw = !omitDuplicates || input.includeDynamicStoreReleaseContract === true;
+  const dynamicStoreReleaseLawLines = emitStoreReleaseLaw
+    ? input.role === "lead"
+      ? capability.leadEnabled
+        ? [`- Law: ${LEAD_STORE_RELEASE_LAW}`]
+        : []
+      : capability.supervisorTier === "full"
+        ? [`- Law: ${SUPERVISOR_STORE_RELEASE_BOUNDARY}`]
+        : []
+    : [];
 
   return [
     `--- [paseo-factory seat kickoff packet · role=${input.role} · project=${input.projectSlug}] ---`,
@@ -393,6 +431,7 @@ export function buildSeatKickoffPacket(input: SeatKickoffPacketInput): string {
       : input.role === "lead"
         ? LEAD_WAVE_LAWS.map((law) => `- Law: ${law}`)
         : [`- Law: ${SUPERVISOR_OUTCOME_BOUNDARY}`]),
+    ...dynamicStoreReleaseLawLines,
     `--- [end seat kickoff packet] ---`,
     "",
   ].join("\n");
