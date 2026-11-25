@@ -67,13 +67,18 @@ export { provisionPiAgentHome, renderRoleAppendSystem } from "./pi-home.ts";
 export type { PiAgentRole, ProvisionPiHomeOptions } from "./pi-home.ts";
 export {
   FOOTER_MARK,
+  LEAD_STORE_RELEASE_LAW,
   ROLE_SKILL_INDEX,
   SEAT_TITLES,
+  SUPERVISOR_STORE_RELEASE_BOUNDARY,
+  SUPERVISOR_STORE_RELEASE_OFF_HINT,
   renderRoleContract,
   renderSeatBootstrapPrompt,
   skillFooter,
 } from "./roles-contract.ts";
-export type { ProjectIdentity, RoleContractOptions, RoleName, SeatBootstrapInput, SeatName } from "./roles-contract.ts";
+export type { ProjectIdentity, RoleContractOptions, RoleName, SeatBootstrapInput, SeatName, StoreReleaseContractGate } from "./roles-contract.ts";
+export { resolveStoreReleaseCapability } from "./store-release-capability.ts";
+export type { ResolveStoreReleaseCapabilityInput, StoreReleaseCapability, StoreReleaseSupervisorTier } from "./store-release-capability.ts";
 export { ensureFactorySkill, ensureFactorySkillRootsSafe, ensureFactorySkillSafe, factorySkillPath, factorySkillRoots, renderFactorySkill } from "./skill.ts";
 export type { FactorySkillInput } from "./skill.ts";
 export {

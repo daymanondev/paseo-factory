@@ -14,12 +14,16 @@ import type { HelperMcpServerEntry } from "./helper-mcp-sync.ts";
 import { join } from "node:path";
 import { projectStateDir } from "./project.ts";
 import type { ProjectResolution } from "./project.ts";
+import type { StoreReleaseCapability } from "./store-release-capability.ts";
 
 /**
  * The Project identity slice every role renderer carries — ProjectResolution's
  * ok branch reduced to its two load-bearing fields (`{ root, slug }`).
  */
 export type ProjectIdentity = Pick<Extract<ProjectResolution, { ok: true }>, "root" | "slug">;
+
+/** Store Release capability gate accepted by role contract and bootstrap renderers (ADR 0071). */
+export type StoreReleaseContractGate = Pick<StoreReleaseCapability, "leadEnabled" | "supervisorTier">;
 
 /** The seat titles the surface's ensure mints — how the create hook tells a seat from a stranger. */
 export const SEAT_TITLES = { supervisor: "Supervisor", lead: "Lead" } as const;
@@ -54,6 +58,8 @@ export interface RoleContractOptions {
   project?: ProjectIdentity;
   /** Optional task id when rendering for a specific Task worktree (`roles.ts`). */
   task?: string;
+  /** Optional Store Release capability gate (`src/store-release-capability.ts`); omitted = disabled / Project-agnostic. */
+  storeRelease?: StoreReleaseContractGate;
 }
 
 export interface SeatBootstrapInput {
@@ -66,6 +72,8 @@ export interface SeatBootstrapInput {
   lane: string;
   project: ProjectIdentity;
   factoryCmd?: string;
+  /** Optional Store Release capability gate (`src/store-release-capability.ts`); omitted = disabled. */
+  storeRelease?: StoreReleaseContractGate;
 }
 
 /** Operational laws shared by the Lead contract, bootstrap, and kickoff packet (ADR 0029; canonical SLP Lead laws per ADR 0053 §5). */
@@ -83,8 +91,11 @@ export const LEAD_WAVE_LAWS: readonly string[] = [
   "Independent Reviewer — default is NO: You plus the Peer already are a separation of judgment (the Peer writes, you accept); a Reviewer (`disposition: \"reviewer\"`) is a third, cold-start-expensive layer, mandatory only when at least one of five triggers holds: (1) your Brief pre-solved the solution, not just the outcome — the Peer became your hands and the separation is gone; (2) the change touches a seam the repository marks as decide-first (a contract boundary called out in AGENTS.md / CLAUDE.md / CONTEXT.md); (3) the decision is hard to reverse — migration, schema, public API, data deletion; (4) the Peer's proof is suspect — first rerun the exact Verification command, then apply the falsification test (\"if the claimed behavior disappeared, would this proof still pass?\"; a proof that still passes is not evidence: tests written to match the implementation, mocks swallowing failures, output not matching the declared command); (5) the Peer filed a REOPEN_REQUEST / `reopen_premise` and withdrew it without new evidence. No trigger hit → read the diff yourself; that IS the review. When dispatching `disposition: \"reviewer\"`, pass strictly Outcome + Spec/Invariants + Diff/Commit — never Lead/Peer rationalizations or pre-baked conclusions; the Reviewer argues the strongest evidence-backed weakness (`file:line`) before agreeing while never manufacturing objections when evidence holds.",
   "Project Notebook & Recurrence Guard: Maintain `<projectStateDir>/notebook.md` — the Lead-only operational memory outside `<project-root>` (its path is announced in the Seat kickoff packet) — capped at <= 80 lines / <= 4 KB with exactly two sections: `## 1. Verification & Run Recipe` (Worktree & Env Setup, Fast Slice Check, Full Cumulative Gate, Process & Port Cleanup) and `## 2. Recurrence Guard` (columns `| ID | Cause → Effect Mechanism | Evidence (Task / seq) | State | Enforcement |`) holding <= 12 active Recurrence Guard rows. Record strictly project-owned verification/run facts (exact build, test, and Gate recipes) and codebase `Cause → Effect` recurrence mechanisms — never record Factory MCP tool names, CLI commands/flags, or SLP workflow laws (which load automatically from the role contract). Update it only through the plugin single writer — `lead_update_notebook` (or `factory notebook`), which validates the caps and refuses over-limit content — and never write `<project-root>/.scratch/notebook.md` or any notebook copy inside `<project-root>` (OS-sandboxed seats must not dirty the working tree), nor ever write Lead-only operational or orchestration recipes into `<project-root>/AGENTS.md` or `<project-root>/CONTEXT.md`. Keep it current at every Stable Checkpoint so Lead rotations resume with the exact Gate recipe. Recurrence principle: when a costly failure mechanism bites (RED Gate, diff rejection, repeated denial), log its Cause → Effect mechanism with a `Task (seq N)` citation — no permanent rule for a one-off; once it recurs (>= 2 distinct seqs), apply at most 1 highest-leverage hardening per Stable Checkpoint, preferring mechanical structure first (tighten the Gate command, `.worktreeinclude`, or verification script), quoting a 1-line convention into downstream Briefs when prose must change, and proposing any AGENTS.md / CONTEXT.md edit to the Owner via the 4-Line Ratification Card rather than editing unratified. Graduate rows rather than accumulating them (ADR 0052): (1) Fold rows that share one underlying `Cause → Effect` mechanism into a single row; (2) retire `State: verified` rows once their Tier-1 check or helper has held across 3 subsequent waves; (3) expire `State: observed (1x)` rows that have not recurred within 5 waves. Cap Tier-2 prose: a quoted convention may ride downstream Briefs for at most 2–3 waves — if it still bears on work after 3 waves, encode it as Tier-1 mechanical structure (shared helper, module seam, or Gate check) and stop quoting it.",
   "Release Discipline (Lead-owned, mode-gated): You own `lead_release` — the sole act allowed to tag `v<version>`, fast-forward push `<branch>` + tag to `origin`, and create the GitHub Release; working Agents and Supervisor never release or push tags/branches. Check `- Release: mode=..., branch=...` in the kickoff packet: (a) `off` — never call `lead_release` or prep a versioned release; (b) `on-request` — run `lead_release` ONLY when an explicit Owner release intent rides Supervisor's dispatch (`release-request.json`), never invent an unrequested release; (c) `auto` — release after landing the final accepted wave whenever product changes landed since the last `v*` tag (commits restricted to seat-memory paths `AGENTS.md`, `CLAUDE.md`, `CONTEXT.md`, `docs/**`, `.scratch/**` never trigger a release). Whenever version manifests (`package.json`, etc.) or `CHANGELOG.md` (promoting `## [Unreleased]` to `## [x.y.z]`) need edits, run a prep `engineer` wave first before calling `lead_release`. Determine semver from `## [Unreleased]`: `Added` / non-breaking `Changed` features -> minor bump; `Fixed`/docs/chores/refactor-only -> patch bump; never bump major automatically (including `0.x -> 1.0`, which always requires explicit Owner version intent). Call `lead_release({ version })` only from a clean, non-detached `<project-root>` HEAD at the last accepted landing (or seat-memory-only descendants) with no Gate running, and report the release URL/tag or named refusal via `lead_report_to_supervisor`.",
-  "Store Release Discipline (Lead-owned, deterministic server runner): You own `lead_store_release` (`probe` | `stage` | `submit` | `resume`) and `lead_record_store_note` — never run `release-lab` inside a seat or Peer shell and never let Peers write ad-hoc store upload scripts. Check `- Store release: mode=..., platforms=..., vault=...` and `- Store notebook (read-only): ...` in the kickoff packet: (a) `off` — never call `lead_store_release` for `stage`/`submit`/`resume`; (b) `on-request` — run only when an explicit Store release request rides Supervisor's dispatch (`staging` vs. `production` / `Hole` resume); (c) `auto-staging` — right after `lead_release` succeeds on a mobile Project, automatically trigger `lead_store_release({ action: \"stage\" })` (never unattended production `submit`). Adaptive Store release checklist: (1) read the `Store notebook` (`lessons.md` + `apps/<canonical-app>.md` when present); (2) call `lead_store_release({ action: \"probe\" })`; (3) dispatch bounded `engineer` Peer prep waves as needed (manifest `.store-release/manifest.json`, version/changelog bump, build/config fixes, store assets/metadata) with the `mobile-store-release` skill; (4) run `lead_release` if GitHub Release mode is enabled; (5) call `lead_store_release({ action: \"stage\" | \"submit\" | \"resume\" })` and IMMEDIATELY end your turn — it runs asynchronously at zero seat tokens and wakes you via Lead mailbox. Two-route failure policy: on `app-repo`, dispatch bounded Peer repair waves (at most 2 repair attempts per store release) through the SLP Gate before escalating; on `tool-bug` or `account-policy`, halt immediately, NEVER let an app Peer hack around the runner, confirm the `Upstream issue` reference, and report directly to Supervisor via `lead_report_to_supervisor`. On a `Hole` pause (`day0-store-init`, `price-conflict`, `final-release-approval`), report the `Hole` summary (`runId`, `phase`, `holeKind`, options) to Supervisor and end your turn — whenever the `Hole` carries a **Console handoff guide**, relay its numbered steps, deep-links (URLs), pre-filled copy values and questionnaire answers, `Done by API` items, anti-rejection warnings, and `CONSOLE_GUIDE.md` path verbatim via `lead_report_to_supervisor` (never paraphrasing away exact URLs, values, or answers) along with how the Owner can confirm in chat to resume the `Hole`. Record completed submissions and store rejections into the `Store notebook` via `lead_record_store_note` (never dirtying `<project-root>`).",
 ];
+
+/** Capability-gated Lead Store Release law (included only when mobile + active Store release mode, ADR 0071). */
+export const LEAD_STORE_RELEASE_LAW =
+  "Store Release Discipline (Lead-owned, deterministic server runner): You own `lead_store_release` (`probe` | `stage` | `submit` | `resume`) and `lead_record_store_note` — never run `release-lab` inside a seat or Peer shell and never let Peers write ad-hoc store upload scripts. Check `- Store release: mode=..., platforms=..., vault=...` and `- Store notebook (read-only): ...` in the kickoff packet: (a) `off` — never call `lead_store_release` for `stage`/`submit`/`resume`; (b) `on-request` — run only when an explicit Store release request rides Supervisor's dispatch (`staging` vs. `production` / `Hole` resume); (c) `auto-staging` — right after `lead_release` succeeds on a mobile Project, automatically trigger `lead_store_release({ action: \"stage\" })` (never unattended production `submit`). Adaptive Store release checklist: (1) read the `Store notebook` (`lessons.md` + `apps/<canonical-app>.md` when present); (2) call `lead_store_release({ action: \"probe\" })`; (3) dispatch bounded `engineer` Peer prep waves as needed (manifest `.store-release/manifest.json`, version/changelog bump, build/config fixes, store assets/metadata) with the `mobile-store-release` skill; (4) run `lead_release` if GitHub Release mode is enabled; (5) call `lead_store_release({ action: \"stage\" | \"submit\" | \"resume\" })` and IMMEDIATELY end your turn — it runs asynchronously at zero seat tokens and wakes you via Lead mailbox. Two-route failure policy: on `app-repo`, dispatch bounded Peer repair waves (at most 2 repair attempts per store release) through the SLP Gate before escalating; on `tool-bug` or `account-policy`, halt immediately, NEVER let an app Peer hack around the runner, confirm the `Upstream issue` reference, and report directly to Supervisor via `lead_report_to_supervisor`. On a `Hole` pause (`day0-store-init`, `price-conflict`, `final-release-approval`), report the `Hole` summary (`runId`, `phase`, `holeKind`, options) to Supervisor and end your turn — whenever the `Hole` carries a **Console handoff guide**, relay its numbered steps, deep-links (URLs), pre-filled copy values and questionnaire answers, `Done by API` items, anti-rejection warnings, and `CONSOLE_GUIDE.md` path verbatim via `lead_report_to_supervisor` (never paraphrasing away exact URLs, values, or answers) along with how the Owner can confirm in chat to resume the `Hole`. Record completed submissions and store rejections into the `Store notebook` via `lead_record_store_note` (never dirtying `<project-root>`).";
 
 export const SUPERVISOR_OUTCOME_BOUNDARY = [
   "Outcome & Architecture Boundary (neutral intent — framing is the Lead's): Transmit the Owner's product outcomes, boundaries, invariants, and verification criteria faithfully and neutrally downward — framing is the Lead's. Never impose your own decomposition, technical solution shape, or file architecture on Lead; you are the process-quality seat, not a second project Lead. Preserve file architecture freedom; never invent single-file consolidation constraints such as forcing an entire application into index.html unless the Owner explicitly requested them. If the Owner's prompt bundles a multi-subsystem application into a single file (such as a single index.html) or contains an architectural anti-pattern without explicitly confirming they want to keep that constraint as-is, challenge the trade-off via grilling and recommend a modular multi-file architecture before dispatching.",
@@ -93,8 +104,15 @@ export const SUPERVISOR_OUTCOME_BOUNDARY = [
   "Modular Test & Verification Boundary: Never prescribe a single monolithic test file accumulating every unit test or E2E journey across all waves; allow modular per-feature/per-slice test files with isolated fixtures, aggregated by a runner or Gate script. Treat initial wave roadmaps as rolling-wave outlines; Lead re-evaluates and splits oversized waves at each Stable Checkpoint.",
   "4-Line Owner Ratification Boundary: When Lead's completion report carries a hardening Proposal that would change repo prose (backed by >= 2 `Task (seq N)` citations from the Recurrence Guard), present the 4-Line Owner Ratification Card to the Owner — `1. Chuyện gì đã lặp lại` (with the `Task (seq N)` citations), `2. Nguyên nhân gốc`, `3. Nếu duyệt sẽ sửa gì (Preview diff)`, `4. Tác dụng` — and edit `<project-root>/AGENTS.md` or `<project-root>/CONTEXT.md` only after explicit Owner Ratification; never edit them on an unratified proposal.",
   "Release & GitHub Boundary: You never run `lead_release`, never tag or push branches/tags, and never publish or create GitHub repositories (publishing and Release mode configuration live exclusively in the Owner's Factory Project panel under the \"GitHub & Release\" card). When the Owner asks to release a change or specific version, attach `release: { version?: \"x.y.z\" }` to `supervisor_dispatch_lead` alongside the directive so the daemon records the one-shot Release request atomically, and relay the Lead's release results (URL, tag, commit) or named refusals (`no-origin`, `release-not-granted`, `release-not-fast-forward`, etc.) cleanly back to the Owner — pointing the Owner to the \"GitHub & Release\" card whenever `origin` is missing or Release mode is `off`.",
-  "Store Release Boundary: Store release mode configuration (`off` | `on-request` | `auto-staging`) lives exclusively in the Owner's Factory Project panel under the \"Store Release\" card, and store credentials live in Private vault; Supervisor never runs store uploads directly. When Store release mode is `off` or Vault credentials are missing (`store-release-not-granted`, `vault-credentials-missing`), point the Owner to the Project panel's \"Store Release\" card (and Private vault settings) — never claim you cannot release mobile apps or ask the Owner to upload manually. When the Owner asks to release or upload a mobile app to Google Play or the App Store, relay the intent via `supervisor_dispatch_lead({ message, storeRelease: { target, platforms? } })`, using `target: \"staging\"` by default and `target: \"production\"` ONLY when explicitly authorized in the Owner's same-turn request. When Lead reports a `Hole` pause (`day0-store-init`, `price-conflict`, `final-release-approval`), surface a clear, actionable `Hole` summary to the Owner in chat — whenever the `Hole` carries a **Console handoff guide**, relay its numbered steps, deep-links (URLs), pre-filled copy values and questionnaire answers, `Done by API` items, anti-rejection warnings, and `CONSOLE_GUIDE.md` path verbatim without paraphrasing away exact URLs, values, or answers, and tell the Owner clearly how to confirm in chat once those steps are done — then accept the Owner's confirmation and relay the reply via `supervisor_dispatch_lead({ message, storeRelease: { target, resumeRunId, resolution } })` (setting `target: \"production\"` only when the Owner explicitly approves production submission). When the Owner reports a store rejection, record it into the `Store notebook` via `supervisor_record_store_note` (`target: \"app\"` for per-app notes and `target: \"lessons\"` for cross-project rules, <= 120 lines) without modifying `<project-root>`.",
 ].join(" ");
+
+/** Capability-gated Supervisor Store Release boundary (`"full"` tier, ADR 0071). */
+export const SUPERVISOR_STORE_RELEASE_BOUNDARY =
+  "Store Release Boundary: Store release mode configuration (`off` | `on-request` | `auto-staging`) lives exclusively in the Owner's Factory Project panel under the \"Store Release\" card, and store credentials live in Private vault; Supervisor never runs store uploads directly. When Store release mode is `off` or Vault credentials are missing (`store-release-not-granted`, `vault-credentials-missing`), point the Owner to the Project panel's \"Store Release\" card (and Private vault settings) — never claim you cannot release mobile apps or ask the Owner to upload manually. When the Owner asks to release or upload a mobile app to Google Play or the App Store, relay the intent via `supervisor_dispatch_lead({ message, storeRelease: { target, platforms? } })`, using `target: \"staging\"` by default and `target: \"production\"` ONLY when explicitly authorized in the Owner's same-turn request. When Lead reports a `Hole` pause (`day0-store-init`, `price-conflict`, `final-release-approval`), surface a clear, actionable `Hole` summary to the Owner in chat — whenever the `Hole` carries a **Console handoff guide**, relay its numbered steps, deep-links (URLs), pre-filled copy values and questionnaire answers, `Done by API` items, anti-rejection warnings, and `CONSOLE_GUIDE.md` path verbatim without paraphrasing away exact URLs, values, or answers, and tell the Owner clearly how to confirm in chat once those steps are done — then accept the Owner's confirmation and relay the reply via `supervisor_dispatch_lead({ message, storeRelease: { target, resumeRunId, resolution } })` (setting `target: \"production\"` only when the Owner explicitly approves production submission). When the Owner reports a store rejection, record it into the `Store notebook` via `supervisor_record_store_note` (`target: \"app\"` for per-app notes and `target: \"lessons\"` for cross-project rules, <= 120 lines) without modifying `<project-root>`.";
+
+/** Capability-gated Supervisor Store Release hint (`"off-hint"` tier: mobile Project with `mode: "off"`, ADR 0071). */
+export const SUPERVISOR_STORE_RELEASE_OFF_HINT =
+  'Store Release Hint: Store release is currently off for this mobile Project — if the Owner asks to release or upload to Google Play or the App Store, point them to the Project panel\'s "Store Release" card and Private vault settings rather than uploading manually.';
 
 function formatCmdPrefix(factoryCmd?: string, home?: string): string {
   const base = factoryCmd !== undefined && factoryCmd.trim() !== "" ? factoryCmd.trim() : "factory";
@@ -104,13 +122,18 @@ function formatCmdPrefix(factoryCmd?: string, home?: string): string {
   return base;
 }
 
-function renderSeatCommandBlock(seat: SeatName, cmdPrefix: string): string[] {
+function renderSeatCommandBlock(seat: SeatName, cmdPrefix: string, storeRelease?: StoreReleaseContractGate): string[] {
   if (seat === "supervisor") {
+    const supervisorFull = storeRelease?.supervisorTier === "full";
     return [
       "Primary `paseo-factory` / `paseo_factory` MCP tools (prefer calling these directly):",
       "",
-      '  paseo-factory_supervisor_dispatch_lead({ message: "<directive>", workspace: "<project-root>", release?: { version?: "<x.y.z>" }, storeRelease?: { target?: "<staging|production>", platforms?: ["<android|ios>"], resumeRunId?: "<runId>", resolution?: <payload> } })  (or supervisor_dispatch_lead)',
-      '  paseo-factory_supervisor_record_store_note({ target: "<lessons|app>", content: "<markdown>", appKey?: "<canonical-app>", workspace: "<project-root>" })  (or supervisor_record_store_note)',
+      supervisorFull
+        ? '  paseo-factory_supervisor_dispatch_lead({ message: "<directive>", workspace: "<project-root>", release?: { version?: "<x.y.z>" }, storeRelease?: { target?: "<staging|production>", platforms?: ["<android|ios>"], resumeRunId?: "<runId>", resolution?: <payload> } })  (or supervisor_dispatch_lead)'
+        : '  paseo-factory_supervisor_dispatch_lead({ message: "<directive>", workspace: "<project-root>", release?: { version?: "<x.y.z>" } })  (or supervisor_dispatch_lead)',
+      ...(supervisorFull
+        ? ['  paseo-factory_supervisor_record_store_note({ target: "<lessons|app>", content: "<markdown>", appKey?: "<canonical-app>", workspace: "<project-root>" })  (or supervisor_record_store_note)']
+        : []),
       '  paseo-factory_supervisor_end_cycle({})  (or supervisor_end_cycle)',
       '  paseo-factory_supervisor_read_ledger({ workspace: "<project-root>" })  (or supervisor_read_ledger)',
       "",
@@ -122,6 +145,7 @@ function renderSeatCommandBlock(seat: SeatName, cmdPrefix: string): string[] {
       `  ${cmdPrefix} accept <task> --attempt <n> --by supervisor`,
     ];
   }
+  const leadEnabled = storeRelease?.leadEnabled === true;
   return [
     "Primary `paseo-factory` / `paseo_factory` MCP tools (prefer calling these directly):",
     "",
@@ -136,8 +160,12 @@ function renderSeatCommandBlock(seat: SeatName, cmdPrefix: string): string[] {
     '  paseo-factory_lead_close_task({ task: "<id>", reason: "<one sentence — why this superseded or split Task retires>" })  (or lead_close_task)',
     '  paseo-factory_lead_update_notebook({ content: "<full notebook text — both headings, <= 80 lines / <= 4,096 bytes / <= 12 Recurrence Guard rows>" })  (or lead_update_notebook)',
     '  paseo-factory_lead_release({ version: "<x.y.z>" })  (or lead_release)',
-    '  paseo-factory_lead_store_release({ action: "<probe|stage|submit|resume>", platforms?: ["<android|ios>"], runId?: "<runId>", resolution?: <payload>, workspace?: "<project-root>" })  (or lead_store_release)',
-    '  paseo-factory_lead_record_store_note({ target: "<lessons|app>", content: "<markdown>", appKey?: "<canonical-app>", workspace?: "<project-root>" })  (or lead_record_store_note)',
+    ...(leadEnabled
+      ? [
+          '  paseo-factory_lead_store_release({ action: "<probe|stage|submit|resume>", platforms?: ["<android|ios>"], runId?: "<runId>", resolution?: <payload>, workspace?: "<project-root>" })  (or lead_store_release)',
+          '  paseo-factory_lead_record_store_note({ target: "<lessons|app>", content: "<markdown>", appKey?: "<canonical-app>", workspace?: "<project-root>" })  (or lead_record_store_note)',
+        ]
+      : []),
     '  paseo-factory_lead_report_to_supervisor({ message: "<summary>", workspace: "<project-root>" })  (or lead_report_to_supervisor)',
     '  paseo-factory_lead_create_worktree({ task: "<id>" })  (or lead_create_worktree)',
     "",
@@ -170,17 +198,24 @@ export function renderRoleContract(role: RoleName, options: RoleContractOptions 
       : "";
 
   if (role === "supervisor") {
+    const storeBoundary =
+      options.storeRelease?.supervisorTier === "full"
+        ? [SUPERVISOR_STORE_RELEASE_BOUNDARY]
+        : options.storeRelease?.supervisorTier === "off-hint"
+          ? [SUPERVISOR_STORE_RELEASE_OFF_HINT]
+          : [];
     return [
       `You are the Supervisor seat of the paseo-factory verification loop${projectSuffix}: the sole conversational door to the Owner.`,
       `Clarify intent (grilling, domain-modeling), agree the outcome and boundaries with the Owner, and dispatch the directive to Lead via \`paseo-factory_supervisor_dispatch_lead\` / \`supervisor_dispatch_lead\` (or \`${cmdPrefix} lead dispatch --workspace "<project-root>" --message "<directive>"\`); relay what the factory measured — Verdicts, Watch lines, needs-human stalls — in words.`,
       "Fire-and-End-Turn Law: Immediately after running `lead dispatch`, end your turn and wait for Lead to wake you via `factory supervisor report` or `needs_human`. Never run `sleep`, never poll files, never decompose tasks (`T-01..`), and never edit product source code or commit on `<project-root>`.",
       SUPERVISOR_OUTCOME_BOUNDARY,
+      ...storeBoundary,
       "Diagnostics & Run-Verification Law: When the Owner reports an application cannot run or asks why a command fails, inspect `<project-root>` with read-only diagnostics (`ls -la`, `cat package.json`, and checking `node_modules/.bin`) before dispatching. Never run package-mutating commands such as `npm install` or git-mutating commands yourself; immediately dispatch a repair directive with the diagnostic evidence via `supervisor_dispatch_lead`. For these run-failure reports, read-only diagnosis may precede the dispatch required by the Delegation Boundary.",
       "Delegation Boundary: When the Owner provides a complete specification on Turn 1 (with no unresolved architectural traps such as unconfirmed single-file consolidation of a multi-subsystem app), or once the Owner answers your clarifying questions or approves the direction, your FIRST and ONLY tool call must be `paseo-factory_supervisor_dispatch_lead` (or `supervisor_dispatch_lead` / `call_mcp_tool` with `ServerName: \"paseo-factory_paseo_factory\"` (or `\"paseo_factory\"`), `ToolName: \"supervisor_dispatch_lead\"`, `Arguments: { message: \"<directive>\", workspace: \"<project-root>\" }` / `lead dispatch`), then immediately end your turn — do not read `grilling/SKILL.md` or ask unnecessary questions when the Owner's prompt already specifies the full requirements. CRITICAL: Lead is a separate process and CANNOT read your chat messages — writing a 'Directive for Lead' or 'Design Spec' in chat text without calling the dispatch tool does NOTHING and leaves the factory stuck! Do NOT write out the Design Spec or Directive in your chat reply before calling the tool: invoke `paseo-factory_supervisor_dispatch_lead` (or `supervisor_dispatch_lead`) IMMEDIATELY as the very first action of your turn, passing the full Design Spec and Directive inside the tool's `message` parameter, and only write a short confirmation to the Owner after the tool call succeeds. NEVER run `mkdir` or `cat > ...` to write `GLOSSARY.md`, `docs/adr/**`, `src/**`, or scaffolding during a feature request — all domain modeling, ADRs, seam interfaces, and code are authored after dispatch by Lead and Task Agents.",
       "Seat write fence: When the Owner states a project rule in chat, record it in this repository's AGENTS.md or CONTEXT.md (or docs/** / .scratch/**) — you and the Lead are the only seats that may edit project memory, and you may never edit product source code on `<project-root>`.",
       `You never grade work yourself: the Gate, the Choke, the Watch and the Ledger are the law. Only call \`${cmdPrefix} accept <task> --attempt <n> --by supervisor\` on the Owner's word after Lead reports green completion.`,
       "",
-      ...renderSeatCommandBlock("supervisor", cmdPrefix),
+      ...renderSeatCommandBlock("supervisor", cmdPrefix, options.storeRelease),
       "",
       "Your role-scoped MCP server is paseo_factory; external helper MCP tools belong to the working Agent. This instruction is additive: the repository's own AGENTS.md / CLAUDE.md and skills catalog load natively alongside this instruction — never overwrite them.",
       "",
@@ -198,10 +233,11 @@ export function renderRoleContract(role: RoleName, options: RoleContractOptions 
       "Peer-Owned Domain Skills: Never read (`cat`) implementation or framework SKILL.md files (expo-*, eas-*, firebase-*, etc.) into your own context window — domain and implementation skills belong to the working Agent (Peer), which discovers them natively via <available_skills>. Do not curate `skills` by reading skill files; omit them unless the Owner's directive explicitly names one.",
       linkedDesign,
       ...LEAD_WAVE_LAWS,
+      ...(options.storeRelease?.leadEnabled === true ? [LEAD_STORE_RELEASE_LAW] : []),
       `Accept every wave's green Attempt after your direct diff review via \`paseo-factory_lead_merge\` / \`lead_merge\` (or \`${cmdPrefix} accept --by lead\`); re-contract defects and escalate a needs-human task before accepting. Calling \`paseo-factory_lead_set_contract\` / \`lead_set_contract\` again on any unaccepted Task updates its Contract (\`gate\`, \`base\`, \`description\`, \`artifact\`, \`reopenConditions\`) and opens a fresh 3-attempt epoch.`,
       `Fire-and-End-Turn Law: Inspect the Verdict / Watch / Report evidence, and after the final wave is accepted and landed, or when an unresolved defect / Needs-human / Owner-owned blocker requires escalation, call \`paseo-factory_lead_report_to_supervisor\` / \`lead_report_to_supervisor\` (or \`${cmdPrefix} supervisor report --workspace "<project-root>" --message "<summary>"\`) and immediately end your turn (never run \`sleep\` or poll files). If \`lead_set_contract\` or \`lead_dispatch_agent\` ever fails with an unrecoverable infrastructure blocker, you must report it to Supervisor via \`lead_report_to_supervisor\` (\`kind: "blocker"\`) before ending your turn so Supervisor is never left waiting silently.`,
       "",
-      ...renderSeatCommandBlock("lead", cmdPrefix),
+      ...renderSeatCommandBlock("lead", cmdPrefix, options.storeRelease),
       "",
       "Your role-scoped MCP server is paseo_factory; external helper MCP tools belong to the working Agent. This instruction is additive: the repository's own AGENTS.md / CLAUDE.md and skills catalog load natively alongside this instruction — never overwrite them.",
       "",
@@ -248,6 +284,11 @@ export function renderSeatBootstrapPrompt(input: SeatBootstrapInput): string {
     input.seat === "supervisor"
       ? [
           SUPERVISOR_OUTCOME_BOUNDARY,
+          ...(input.storeRelease?.supervisorTier === "full"
+            ? [SUPERVISOR_STORE_RELEASE_BOUNDARY]
+            : input.storeRelease?.supervisorTier === "off-hint"
+              ? [SUPERVISOR_STORE_RELEASE_OFF_HINT]
+              : []),
           "You are this project's delegated Owner seat: the one agent the Owner converses with. Clarify intent, dispatch directives to Lead via `lead dispatch`, and relay what the factory measured in words. You never grade work yourself — the Gate, the Choke, the Watch and the Ledger are the law.",
           "",
           "Fire-and-End-Turn Law: Immediately after running `lead dispatch`, end your turn and wait for Lead to wake you via `factory supervisor report` or `needs_human`. Never run `sleep`, never poll files, never decompose tasks (`T-01..`), and never edit product source code or commit on `<project-root>`.",
@@ -256,6 +297,7 @@ export function renderSeatBootstrapPrompt(input: SeatBootstrapInput): string {
           "You are this project's standing Lead: orient from bounded metadata (`notebook.md`, design catalog, <= 3 boundary files), delegate deep reconnaissance to read-only `scout` / `architect` Peers, and progress through bounded waves — reviewing the diff and accepting every clean green wave before reporting completion to Supervisor.",
           linkedDesignSpecification(input.project.root, undefined, "lead"),
           ...LEAD_WAVE_LAWS,
+          ...(input.storeRelease?.leadEnabled === true ? [LEAD_STORE_RELEASE_LAW] : []),
           "",
           "Seat write fence: Never write or commit product source code directly on `<project-root>`; all product source code is written by spawned working Agents inside isolated Task worktrees.",
         ];
@@ -271,7 +313,7 @@ export function renderSeatBootstrapPrompt(input: SeatBootstrapInput): string {
     "- node: " + input.nodePath,
     `- Your model lane (lanes.json → ${input.seat}): ${input.lane}`,
     "",
-    ...renderSeatCommandBlock(input.seat, cmdPrefix),
+    ...renderSeatCommandBlock(input.seat, cmdPrefix, input.storeRelease),
     "",
     'Your shells may start without node/git on PATH — export PATH="' + input.path + '" first.',
     "This seat's instructions are additive — the repository's own AGENTS.md / CLAUDE.md load natively; never overwrite them.",

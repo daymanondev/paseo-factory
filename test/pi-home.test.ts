@@ -166,6 +166,22 @@ test("interactive roles carry managed APPEND_SYSTEM.md; headless never does; onl
   for (const forbidden of ["contract --task", "factory contract", "factory run", "run <task>"]) {
     assert.ok(!ROLE_PROMPTS.supervisor.includes(forbidden), `ROLE_PROMPTS.supervisor never lists \`${forbidden}\``);
   }
+  for (const storeTerm of [
+    "Store Release",
+    "Store release",
+    "Store notebook",
+    "Console handoff guide",
+    "CONSOLE_GUIDE.md",
+    "storeRelease",
+    "supervisor_record_store_note",
+    "lead_store_release",
+    "lead_record_store_note",
+    "day0-store-init",
+  ]) {
+    assert.ok(!ROLE_PROMPTS.supervisor.includes(storeTerm), `shared Pi supervisor APPEND_SYSTEM.md omits \`${storeTerm}\``);
+    assert.ok(!ROLE_PROMPTS.lead.includes(storeTerm), `shared Pi lead APPEND_SYSTEM.md omits \`${storeTerm}\``);
+    assert.ok(!ROLE_PROMPTS.agent.includes(storeTerm), `shared Pi agent APPEND_SYSTEM.md omits \`${storeTerm}\``);
+  }
   for (const cmd of [
     "factory --home",
     "contract --task",

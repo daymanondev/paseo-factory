@@ -49,6 +49,7 @@ const sections = [
   ["src/scope-policy.ts", "plugin/bin/agy-pre-tool-hook.mjs", "GENERATED SCOPE POLICY", "scopePolicy"],
   ["src/process-policy.ts", "plugin/bin/agy-pre-tool-hook.mjs", "GENERATED PROCESS TARGET POLICY", "processTargetPolicy"],
   ["src/ledger-project.ts", "plugin/bin/bridge.mjs", "GENERATED LEDGER PROJECT POLICY", "ledgerProject"],
+  ["src/store-release-capability.ts", "plugin/bin/bridge.mjs", "GENERATED STORE RELEASE CAPABILITY POLICY", "storeReleaseCapability"],
   ["src/ledger-project.ts", "plugin/bin/agy-pre-tool-hook.mjs", "GENERATED LEDGER PROJECT POLICY", "ledgerProject"],
   ["src/agy-mcp-schema-heal.ts", "plugin/bin/agy-pre-tool-hook.mjs", "GENERATED AGY MCP SCHEMA HEAL POLICY", "agyMcpSchemaHeal"],
 ];

@@ -23,6 +23,8 @@ import { resolveOrBootstrapProject, resolveProject } from "./core/project.ts";
 import { parseLedgerJsonl } from "./core/ledger-validation.ts";
 import { projectTask } from "./core/task-state.ts";
 import { readProjectSettings } from "./core/project-settings.ts";
+import { resolveStoreReleaseCapability } from "./core/store-release-capability.ts";
+import type { StoreReleaseCapability } from "./core/store-release-capability.ts";
 import { provisionPiAgentHome } from "./core/pi-home.ts";
 import {
   FOOTER_MARK,
@@ -56,8 +58,19 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 // ---- the role contracts (the system-prompt channel) ----------------------------------------
 
 /** The role law each seat runs under — appended to `config.systemPrompt`, never written to disk. */
-export function renderSeatContract(seat: SeatName, project: ProjectIdentity): string {
-  return renderRoleContract(seat, { factoryCmd: "factory", project });
+export function renderSeatContract(
+  seat: SeatName,
+  project: ProjectIdentity,
+  options?: { stateDir?: string; storeRelease?: StoreReleaseCapability },
+): string {
+  const storeRelease =
+    options?.storeRelease ??
+    resolveStoreReleaseCapability({
+      projectRoot: project.root,
+      stateDir: options?.stateDir,
+      projectSlug: project.slug,
+    });
+  return renderRoleContract(seat, { factoryCmd: "factory", project, storeRelease });
 }
 
 /** The working Agent's law — appended to its task-worktree agent's system prompt. */
@@ -688,6 +701,14 @@ export function injectRoleOnCreate<R extends AgentCreateRequest>(
       target.promptProject.slug,
     );
     const isLiveContract = options?.liveRoleContract === true && effectiveFamily !== "pi";
+    const storeRelease =
+      target.role === "supervisor" || target.role === "lead"
+        ? resolveStoreReleaseCapability({
+            projectRoot: target.promptProject.root,
+            stateDir,
+            projectSlug: target.promptProject.slug,
+          })
+        : undefined;
     const fencedConfig = applyProviderExecutionFence(
       {
         ...request.config,
@@ -702,6 +723,7 @@ export function injectRoleOnCreate<R extends AgentCreateRequest>(
                   ...(target.task !== undefined ? { task: target.task } : {}),
                   project: target.promptProject,
                   helperMcps: discoverHelperMcps({ stateDir, userHome }).servers,
+                  ...(storeRelease !== undefined ? { storeRelease } : {}),
                 }),
               ),
             }),
@@ -926,11 +948,20 @@ function renderLiveRoleContract(
   input: { stateDir: string; project: ProjectIdentity; task?: string; userHome?: string },
 ): string {
   const helperMcps = discoverHelperMcps({ stateDir: input.stateDir, userHome: input.userHome }).servers;
+  const storeRelease =
+    role === "supervisor" || role === "lead"
+      ? resolveStoreReleaseCapability({
+          projectRoot: input.project.root,
+          stateDir: input.stateDir,
+          projectSlug: input.project.slug,
+        })
+      : undefined;
   const basePrompt = buildRoleKickoffPrompt(role, {
     factoryCmd: "factory",
     project: input.project,
     ...(input.task !== undefined ? { task: input.task } : {}),
     helperMcps,
+    ...(storeRelease !== undefined ? { storeRelease } : {}),
   });
   if (role !== "agent") return basePrompt;
   const peerSkills = peerSkillContext(

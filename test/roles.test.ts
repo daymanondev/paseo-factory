@@ -4,7 +4,8 @@ import { execFileSync } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import { buildRoleKickoffPrompt, LEAD_WAVE_LAWS, renderRoleAppendSystem, renderRoleContract, renderSeatBootstrapPrompt, SUPERVISOR_OUTCOME_BOUNDARY } from "../src/roles-contract.ts";
+import { buildRoleKickoffPrompt, LEAD_STORE_RELEASE_LAW, LEAD_WAVE_LAWS, renderRoleAppendSystem, renderRoleContract, renderSeatBootstrapPrompt, SUPERVISOR_OUTCOME_BOUNDARY, SUPERVISOR_STORE_RELEASE_BOUNDARY, SUPERVISOR_STORE_RELEASE_OFF_HINT } from "../src/roles-contract.ts";
+import { setProjectStoreReleaseSettings } from "../src/project-settings.ts";
 import { buildSeatKickoffPacket } from "../src/preflight.ts";
 import { repokeCompletionFooter } from "../src/disposition-prompt.ts";
 import { ROLE_PROMPTS } from "../src/pi-home.ts";
@@ -2150,78 +2151,208 @@ test("Lead and Supervisor role laws teach three-mode Release ownership, semver r
   assert.doesNotMatch(supContract, /lead_release\(/);
 });
 
-test("Lead and Supervisor role laws teach Store release contracts, Hole relay, 2-route failure policy, auto-staging, and Store notebook recording", () => {
-  const project = { root: "/workspace/repo", slug: "repo" };
-  const supInput = {
+test("Lead and Supervisor role contracts gate Store release laws and commands by capability while keeping shared Pi APPEND_SYSTEM.md Project-agnostic (ADR 0071)", (t) => {
+  const dir = makeTempDir("roles-store-gated-");
+  disposeDir(t, dir);
+  const stateDir = join(dir, "state");
+  const userHome = join(dir, "home");
+
+  const nonMobileRoot = makeGitRepo(join(dir, "web"));
+  const nonMobileProj = resolveProject(nonMobileRoot);
+  assert.ok(nonMobileProj.ok);
+
+  const mobileRoot = makeGitRepo(join(dir, "mobile"));
+  mkdirSync(join(mobileRoot, "ios"), { recursive: true });
+  writeFileSync(join(mobileRoot, "ios", "Podfile"), "platform :ios, '15.0'\n");
+  const mobileProj = resolveProject(mobileRoot);
+  assert.ok(mobileProj.ok);
+
+  const supInputBase = {
     seat: "supervisor" as const,
     home: "/trial",
-    stateDir: "/trial/state",
+    stateDir,
     nodePath: process.execPath,
     path: "/usr/bin",
     lane: "codex",
-    project,
+    project: { root: nonMobileRoot, slug: nonMobileProj.slug },
   };
-  const supContract = renderRoleContract("supervisor");
+  const leadInputBase = { ...supInputBase, seat: "lead" as const };
+
+  // 1. Extracted constants carry the Store Release laws & single-sentence off-hint
+  assert.match(SUPERVISOR_STORE_RELEASE_BOUNDARY, /Console handoff guide/);
+  assert.match(SUPERVISOR_STORE_RELEASE_BOUNDARY, /supervisor_record_store_note/);
+  assert.match(LEAD_STORE_RELEASE_LAW, /lead_store_release/);
+  assert.match(LEAD_STORE_RELEASE_LAW, /lead_record_store_note/);
+
+  assert.match(SUPERVISOR_STORE_RELEASE_OFF_HINT, /Store Release/);
+  assert.match(SUPERVISOR_STORE_RELEASE_OFF_HINT, /Private vault/);
+  assert.doesNotMatch(SUPERVISOR_STORE_RELEASE_OFF_HINT, /\bHole\b|Console handoff guide|CONSOLE_GUIDE\.md|Store notebook|storeRelease|supervisor_record_store_note/);
+
+  // 2. Shared Pi APPEND_SYSTEM.md, base wave laws, and omitted-capability renders are 100% free of Store Release rules & tools
   for (const surface of [
     SUPERVISOR_OUTCOME_BOUNDARY,
-    supContract,
-    renderSeatContract("supervisor", project),
-    ROLE_PROMPTS.supervisor,
-    renderSeatBootstrapPrompt(supInput),
-    buildSeatKickoffPacket({ role: "supervisor", projectSlug: project.slug, projectRoot: project.root, ledgerEvents: [] }),
-  ]) {
-    assert.match(surface, /Store Release/);
-    assert.match(surface, /storeRelease/);
-    assert.match(surface, /target.*"staging"/);
-    assert.match(surface, /"production"/);
-    assert.match(surface, /resumeRunId/);
-    assert.match(surface, /resolution/);
-    assert.match(surface, /Hole/);
-    assert.match(surface, /supervisor_record_store_note/);
-    assert.match(surface, /Store notebook/);
-    assert.match(surface, /Store release mode.*off|Vault credentials/i);
-    assert.match(surface, /Console handoff guide/);
-    assert.match(surface, /verbatim/);
-    assert.match(surface, /anti-rejection warnings/);
-    assert.match(surface, /CONSOLE_GUIDE\.md/);
-    assert.match(surface, /confirm in chat/i);
-  }
-  assert.match(supContract, /paseo-factory_supervisor_record_store_note/);
-  assert.doesNotMatch(supContract, /lead_release\(/);
-  assert.doesNotMatch(supContract, /lead_store_release\(/);
-  assert.doesNotMatch(supContract, /lead_record_store_note/);
-
-  const leadInput = { ...supInput, seat: "lead" as const };
-  const leadContract = renderRoleContract("lead");
-  for (const surface of [
     LEAD_WAVE_LAWS.join("\n"),
-    leadContract,
-    renderSeatContract("lead", project),
+    ROLE_PROMPTS.supervisor,
     ROLE_PROMPTS.lead,
-    renderSeatBootstrapPrompt(leadInput),
-    buildSeatKickoffPacket({ role: "lead", projectSlug: project.slug, projectRoot: project.root, ledgerEvents: [] }),
+    renderRoleContract("supervisor"),
+    renderRoleContract("lead"),
+    renderSeatBootstrapPrompt(supInputBase),
+    renderSeatBootstrapPrompt(leadInputBase),
+    renderSeatContract("supervisor", { root: nonMobileRoot, slug: nonMobileProj.slug }, { stateDir }),
+    renderSeatContract("lead", { root: nonMobileRoot, slug: nonMobileProj.slug }, { stateDir }),
   ]) {
-    assert.match(surface, /Store notebook/);
-    assert.match(surface, /lessons\.md/);
-    assert.match(surface, /lead_store_release/);
-    assert.match(surface, /probe/);
-    assert.match(surface, /mobile-store-release/);
-    assert.match(surface, /auto-staging/);
-    assert.match(surface, /app-repo/);
-    assert.match(surface, /(?:<=|at most|max)\s*2/i);
-    assert.match(surface, /tool-bug/);
-    assert.match(surface, /account-policy/);
-    assert.match(surface, /Upstream issue/);
-    assert.match(surface, /lead_record_store_note/);
-    assert.match(surface, /never.*hack around/i);
-    assert.match(surface, /Console handoff guide/);
-    assert.match(surface, /verbatim/);
-    assert.match(surface, /anti-rejection warnings/);
-    assert.match(surface, /CONSOLE_GUIDE\.md/);
-    assert.match(surface, /confirm in chat/i);
+    assert.doesNotMatch(surface, /Store Release|Store release|Store notebook|Console handoff guide|CONSOLE_GUIDE\.md|storeRelease|supervisor_record_store_note|lead_store_release|lead_record_store_note|\bHole\b/);
   }
-  assert.match(leadContract, /paseo-factory_lead_store_release/);
-  assert.match(leadContract, /paseo-factory_lead_record_store_note/);
+
+  // 3. Mobile Project with mode="off": Lead stays clean; Supervisor receives strictly the 1-sentence off-hint
+  const mobileLeadOff = renderSeatContract("lead", { root: mobileRoot, slug: mobileProj.slug }, { stateDir });
+  assert.doesNotMatch(mobileLeadOff, /Store Release|Store release|Store notebook|Console handoff guide|lead_store_release|lead_record_store_note|\bHole\b/);
+
+  const mobileSupOff = renderSeatContract("supervisor", { root: mobileRoot, slug: mobileProj.slug }, { stateDir });
+  assert.ok(mobileSupOff.includes(SUPERVISOR_STORE_RELEASE_OFF_HINT), "mobile off Supervisor gets the 1-sentence off-hint");
+  assert.doesNotMatch(mobileSupOff, /\bHole\b|Console handoff guide|CONSOLE_GUIDE\.md|Store notebook|storeRelease|supervisor_record_store_note/);
+
+  // 4. Mobile Project with mode="on-request" or "auto-staging": full Store Release laws & commands across contracts & live/create hooks
+  for (const mode of ["on-request", "auto-staging"] as const) {
+    setProjectStoreReleaseSettings(stateDir, mobileProj.slug, { mode });
+    const fullGate = { leadEnabled: true, supervisorTier: "full" as const };
+
+    for (const surface of [
+      renderRoleContract("supervisor", { storeRelease: fullGate }),
+      renderSeatContract("supervisor", { root: mobileRoot, slug: mobileProj.slug }, { stateDir }),
+      renderSeatBootstrapPrompt({ ...supInputBase, project: { root: mobileRoot, slug: mobileProj.slug }, storeRelease: fullGate }),
+    ]) {
+      assert.match(surface, /Store Release/);
+      assert.match(surface, /storeRelease/);
+      assert.match(surface, /target.*"staging"/);
+      assert.match(surface, /"production"/);
+      assert.match(surface, /resumeRunId/);
+      assert.match(surface, /resolution/);
+      assert.match(surface, /Hole/);
+      assert.match(surface, /supervisor_record_store_note/);
+      assert.match(surface, /Store notebook/);
+      assert.match(surface, /Console handoff guide/);
+      assert.match(surface, /verbatim/);
+      assert.match(surface, /anti-rejection warnings/);
+      assert.match(surface, /CONSOLE_GUIDE\.md/);
+      assert.match(surface, /confirm in chat/i);
+      assert.doesNotMatch(surface, /lead_release\(/);
+      assert.doesNotMatch(surface, /lead_store_release\(/);
+      assert.doesNotMatch(surface, /lead_record_store_note/);
+    }
+    assert.match(renderRoleContract("supervisor", { storeRelease: fullGate }), /paseo-factory_supervisor_record_store_note/);
+
+    for (const surface of [
+      renderRoleContract("lead", { storeRelease: fullGate }),
+      renderSeatContract("lead", { root: mobileRoot, slug: mobileProj.slug }, { stateDir }),
+      renderSeatBootstrapPrompt({ ...leadInputBase, project: { root: mobileRoot, slug: mobileProj.slug }, storeRelease: fullGate }),
+    ]) {
+      assert.match(surface, /Store notebook/);
+      assert.match(surface, /lessons\.md/);
+      assert.match(surface, /lead_store_release/);
+      assert.match(surface, /probe/);
+      assert.match(surface, /mobile-store-release/);
+      assert.match(surface, /auto-staging/);
+      assert.match(surface, /app-repo/);
+      assert.match(surface, /(?:<=|at most|max)\s*2/i);
+      assert.match(surface, /tool-bug/);
+      assert.match(surface, /account-policy/);
+      assert.match(surface, /Upstream issue/);
+      assert.match(surface, /lead_record_store_note/);
+      assert.match(surface, /never.*hack around/i);
+      assert.match(surface, /Console handoff guide/);
+      assert.match(surface, /verbatim/);
+      assert.match(surface, /anti-rejection warnings/);
+      assert.match(surface, /CONSOLE_GUIDE\.md/);
+      assert.match(surface, /confirm in chat/i);
+    }
+    assert.match(renderRoleContract("lead", { storeRelease: fullGate }), /paseo-factory_lead_store_release/);
+    assert.match(renderRoleContract("lead", { storeRelease: fullGate }), /paseo-factory_lead_record_store_note/);
+  }
+
+  // 5. Session open (renderLiveRoleContract via injectSessionEnv >=0.17.1) and legacy create (injectRoleOnCreate <0.17.1)
+  // 5a. Non-mobile Project: zero Store Release across both open and create
+  setProjectStoreReleaseSettings(stateDir, nonMobileProj.slug, { mode: "on-request" });
+  const webLegacyLead = injectRoleOnCreate<AgentCreateRequest>(
+    { config: { provider: "codex/gpt-5.4", cwd: nonMobileRoot, title: "Lead — web" } },
+    stateDir,
+    userHome,
+    { liveRoleContract: false },
+  );
+  assert.doesNotMatch(webLegacyLead?.config.systemPrompt ?? "", /lead_store_release|Store Release|Store notebook/);
+
+  const webLiveSup = injectRoleOnCreate<AgentCreateRequest>(
+    { config: { provider: "codex/gpt-5.4", cwd: nonMobileRoot, title: "Supervisor — web" } },
+    stateDir,
+    userHome,
+    { liveRoleContract: true },
+  );
+  const webLiveSupOpen = injectSessionEnv(
+    { agentId: "web-sup-live", cwd: nonMobileRoot, provider: "codex/gpt-5.4", reason: "create", purpose: "interactive", env: { ...(webLiveSup?.env ?? {}) } },
+    stateDir,
+    userHome,
+    { liveRoleContract: true },
+  );
+  assert.doesNotMatch(webLiveSupOpen?.appendSystemPrompt?.[0] ?? "", /Store Release|storeRelease|supervisor_record_store_note|\bHole\b/);
+
+  // 5b. Mobile Project mode="off": Lead clean, Supervisor off-hint only
+  setProjectStoreReleaseSettings(stateDir, mobileProj.slug, { mode: "off" });
+  const mobileLiveLead = injectRoleOnCreate<AgentCreateRequest>(
+    { config: { provider: "codex/gpt-5.4", cwd: mobileRoot, title: "Lead — mobile" } },
+    stateDir,
+    userHome,
+    { liveRoleContract: true },
+  );
+  const mobileLeadOffOpen = injectSessionEnv(
+    { agentId: "mob-lead-off", cwd: mobileRoot, provider: "codex/gpt-5.4", reason: "create", purpose: "interactive", env: { ...(mobileLiveLead?.env ?? {}) } },
+    stateDir,
+    userHome,
+    { liveRoleContract: true },
+  );
+  assert.doesNotMatch(mobileLeadOffOpen?.appendSystemPrompt?.[0] ?? "", /lead_store_release|Store Release|Store notebook/);
+
+  const mobileLiveSup = injectRoleOnCreate<AgentCreateRequest>(
+    { config: { provider: "codex/gpt-5.4", cwd: mobileRoot, title: "Supervisor — mobile" } },
+    stateDir,
+    userHome,
+    { liveRoleContract: true },
+  );
+  const mobileSupOffOpen = injectSessionEnv(
+    { agentId: "mob-sup-off", cwd: mobileRoot, provider: "codex/gpt-5.4", reason: "create", purpose: "interactive", env: { ...(mobileLiveSup?.env ?? {}) } },
+    stateDir,
+    userHome,
+    { liveRoleContract: true },
+  );
+  assert.ok((mobileSupOffOpen?.appendSystemPrompt?.[0] ?? "").includes(SUPERVISOR_STORE_RELEASE_OFF_HINT));
+  assert.doesNotMatch(mobileSupOffOpen?.appendSystemPrompt?.[0] ?? "", /\bHole\b|Console handoff guide|storeRelease|supervisor_record_store_note/);
+
+  // 5c. Mobile Project mode="on-request": live open & legacy create expose full Store Release contracts
+  setProjectStoreReleaseSettings(stateDir, mobileProj.slug, { mode: "on-request" });
+  const mobileLeadOnOpen = injectSessionEnv(
+    { agentId: "mob-lead-on", cwd: mobileRoot, provider: "codex/gpt-5.4", reason: "resume", purpose: "interactive", env: { ...(mobileLiveLead?.env ?? {}) } },
+    stateDir,
+    userHome,
+    { liveRoleContract: true },
+  );
+  assert.match(mobileLeadOnOpen?.appendSystemPrompt?.[0] ?? "", /paseo-factory_lead_store_release/);
+  assert.match(mobileLeadOnOpen?.appendSystemPrompt?.[0] ?? "", /paseo-factory_lead_record_store_note/);
+
+  const mobileSupOnOpen = injectSessionEnv(
+    { agentId: "mob-sup-on", cwd: mobileRoot, provider: "codex/gpt-5.4", reason: "resume", purpose: "interactive", env: { ...(mobileLiveSup?.env ?? {}) } },
+    stateDir,
+    userHome,
+    { liveRoleContract: true },
+  );
+  assert.match(mobileSupOnOpen?.appendSystemPrompt?.[0] ?? "", /paseo-factory_supervisor_record_store_note/);
+  assert.match(mobileSupOnOpen?.appendSystemPrompt?.[0] ?? "", /storeRelease\?:/);
+
+  const mobileLegacyLeadCreate = injectRoleOnCreate<AgentCreateRequest>(
+    { config: { provider: "antigravity/gemini-2.5-pro", cwd: mobileRoot, title: "Lead — mobile legacy" } },
+    stateDir,
+    userHome,
+    { liveRoleContract: false },
+  );
+  assert.match(mobileLegacyLeadCreate?.config.systemPrompt ?? "", /paseo-factory_lead_store_release/);
 });
 
 test("provisionAgyPlugin writes global mcp_config.json only when perSessionMcp is false and removes stale mcp_config.json when perSessionMcp is true (ADR 0067)", async (t) => {
@@ -3035,4 +3166,92 @@ test("injectSessionEnv strips paseo from mcpServers across Factory seats and bac
     { perSessionAgyMcp: true, liveRoleContract: true },
   );
   assert.equal(strangerOpen, undefined, "unbound personal Antigravity chat is never modified");
+});
+
+test("resolveStoreReleaseCapability derives mobile eligibility and Store release mode across non-mobile, manifest-only, off, on-request, and auto-staging Projects (ADR 0071)", async (t) => {
+  const { resolveStoreReleaseCapability } = await import("../src/index.ts");
+  const { setProjectStoreReleaseSettings } = await import("../src/project-settings.ts");
+
+  // 1. Empty/missing inputs default safely to hidden/disabled
+  assert.deepEqual(resolveStoreReleaseCapability({}), {
+    isMobile: false,
+    mode: "off",
+    isActive: false,
+    leadEnabled: false,
+    supervisorTier: "hidden",
+  });
+
+  const dir = makeTempDir("store-cap-");
+  disposeDir(t, dir);
+  const stateDir = join(dir, "state");
+  const webRoot = join(dir, "web-app");
+  mkdirSync(webRoot, { recursive: true });
+  writeFileSync(join(webRoot, "package.json"), JSON.stringify({ name: "web-app", dependencies: { react: "19.0.0" } }));
+
+  // 2. Non-mobile project stays hidden even if project-settings has storeRelease mode set
+  setProjectStoreReleaseSettings(stateDir, "web-app-111111", { mode: "on-request" });
+  assert.deepEqual(
+    resolveStoreReleaseCapability({ projectRoot: webRoot, stateDir, projectSlug: "web-app-111111" }),
+    {
+      isMobile: false,
+      mode: "on-request",
+      isActive: false,
+      leadEnabled: false,
+      supervisorTier: "hidden",
+    },
+  );
+
+  // 3. Mobile project via native markers (or .store-release/manifest.json only) defaults to off-hint
+  const mobileRoot = join(dir, "mobile-app");
+  mkdirSync(join(mobileRoot, "ios"), { recursive: true });
+  writeFileSync(join(mobileRoot, "ios", "Podfile"), "platform :ios, '15.0'\n");
+  assert.deepEqual(
+    resolveStoreReleaseCapability({ projectRoot: mobileRoot, stateDir, projectSlug: "mobile-app-222222" }),
+    {
+      isMobile: true,
+      mode: "off",
+      isActive: false,
+      leadEnabled: false,
+      supervisorTier: "off-hint",
+    },
+  );
+
+  const manifestOnlyRoot = join(dir, "manifest-only");
+  mkdirSync(join(manifestOnlyRoot, ".store-release"), { recursive: true });
+  writeFileSync(join(manifestOnlyRoot, ".store-release", "manifest.json"), JSON.stringify({ appKey: "demo" }));
+  assert.deepEqual(
+    resolveStoreReleaseCapability({ projectRoot: manifestOnlyRoot }),
+    {
+      isMobile: true,
+      mode: "off",
+      isActive: false,
+      leadEnabled: false,
+      supervisorTier: "off-hint",
+    },
+  );
+
+  // 4. Active modes ("on-request" and "auto-staging") unlock Lead + Supervisor full tier
+  setProjectStoreReleaseSettings(stateDir, "mobile-app-222222", { mode: "on-request" });
+  assert.deepEqual(
+    resolveStoreReleaseCapability({ projectRoot: mobileRoot, stateDir, projectSlug: "mobile-app-222222" }),
+    {
+      isMobile: true,
+      mode: "on-request",
+      isActive: true,
+      leadEnabled: true,
+      supervisorTier: "full",
+    },
+  );
+
+  setProjectStoreReleaseSettings(stateDir, "mobile-app-222222", { mode: "auto-staging" });
+  assert.deepEqual(
+    resolveStoreReleaseCapability({ projectRoot: mobileRoot, stateDir, projectSlug: "mobile-app-222222" }),
+    {
+      isMobile: true,
+      mode: "auto-staging",
+      isActive: true,
+      leadEnabled: true,
+      supervisorTier: "full",
+    },
+  );
 });
