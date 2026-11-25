@@ -1122,11 +1122,12 @@ async function recordAndNotifyStoreReleaseFailure(params: {
   failureClass: StoreReleaseFailureClass;
   code: string;
   detail: string;
+  hint?: string;
   upstreamIssuePath?: string;
   diagnosticTail?: string;
   keystoreWriteBackNote?: string;
 }): Promise<void> {
-  const { input, action, runId, failureClass, code, detail, upstreamIssuePath, diagnosticTail, keystoreWriteBackNote } = params;
+  const { input, action, runId, failureClass, code, detail, hint, upstreamIssuePath, diagnosticTail, keystoreWriteBackNote } = params;
   await input.factory.history.runOperation(() => {
     input.factory.ledger.append({
       event: "store_release_failed",
@@ -1143,12 +1144,14 @@ async function recordAndNotifyStoreReleaseFailure(params: {
     failureClass === "app-repo"
       ? "Policy: app-repo — dispatch a bounded Peer repair wave (max 2 repair attempts per store release) through Gate before retrying."
       : `Policy: ${failureClass} — halt immediately, do NOT dispatch an app Peer to work around the runner, and report directly to Supervisor.`;
+  const normalizedHint = typeof hint === "string" ? hint.trim() : "";
 
   await input.notifyLead?.({
     slug: input.projectSlug,
     text: [
       `[Store release failed] action=${action} runId=${runId} failureClass=${failureClass} code=${code}`,
       `Detail: ${detail}`,
+      ...(normalizedHint !== "" ? [`Hint: ${normalizedHint}`] : []),
       ...(upstreamIssuePath !== undefined ? [`Upstream issue: ${upstreamIssuePath}`] : []),
       ...(diagnosticTail !== undefined && diagnosticTail !== "" ? [`Diagnostic tail:\n${diagnosticTail}`] : []),
       ...(keystoreWriteBackNote ? [`Vault write-back: ${keystoreWriteBackNote}`] : []),
@@ -1329,6 +1332,7 @@ async function settleStoreReleaseRun(params: {
     (typeof stdoutObj?.error === "string" && stdoutObj.error.trim() !== "" ? stdoutObj.error.trim() : undefined) ??
     (typeof stderrObj?.error === "string" && stderrObj.error.trim() !== "" ? stderrObj.error.trim() : undefined) ??
     (trimDiagnosticTail(out.stderr) || `release-lab ${action} exited with code ${out.exitCode}`);
+  const hint = failure?.hint;
   const upstreamIssuePath = failure?.upstreamIssuePath;
   const diagnosticTail = failure?.logTail ?? trimDiagnosticTail(out.stderr || out.stdout);
 
@@ -1339,6 +1343,7 @@ async function settleStoreReleaseRun(params: {
     failureClass,
     code,
     detail,
+    ...(hint !== undefined ? { hint } : {}),
     ...(upstreamIssuePath !== undefined ? { upstreamIssuePath } : {}),
     diagnosticTail,
     ...(keystoreWriteBackNote !== undefined ? { keystoreWriteBackNote } : {}),
