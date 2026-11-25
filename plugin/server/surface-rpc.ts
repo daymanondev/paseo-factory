@@ -8,6 +8,7 @@ import type { HandoffProgress, HandoffAction, HandoffRequest, HandoffReply } fro
 import { clearReleaseRequest, clearStoreReleaseRequest, readProjectSettings, readReleaseRequest, readReleaseSettings, readStoreReleaseRequest, readStoreReleaseSettings, setProjectReleaseSettings, setProjectSkillPacks, setProjectStoreReleaseSettings, resetProjectSkillPacks } from "./core/project-settings.ts";
 import type { ProjectReleaseMode, ProjectStoreReleaseMode } from "./core/project-settings.ts";
 import { detectMobilePlatforms, readLatestStoreReleaseRun } from "./core/store-release-probe.ts";
+import { resolveStoreReleaseCapability } from "./core/store-release-capability.ts";
 import { resolveReleaseLabWithDaemon } from "./store-release.ts";
 import { linkedPreviewBundle } from "./core/open-design/preview-bundle.ts";
 import { serveLinkedPreview } from "./core/open-design/preview-server.ts";
@@ -408,6 +409,8 @@ export interface SurfaceDeps {
   clearPluginArchive?: (input: { agentId: string }) => void;
   /** Notify LeadMailRuntime when ensureSeat dispatches an explicit initial message to a seat (v0.0.28, ADR 0018 §2). */
   onSeatKickoffSent?: (input: { slug: string; seat: "supervisor" | "lead"; agentId: string }) => void;
+  /** Whether a seat has already received its initial user/kickoff turn. */
+  isSeatStarted?: (agent: { id: string; lastUserMessageAt?: string | null }) => boolean;
   /** Reset in-memory mailbox state for a project on Owner-only Project reset (v0.0.24). */
   resetProjectMailbox?: (slug: string) => void;
   /**
@@ -5473,12 +5476,71 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       const target = resolveActTarget(input, "update store release settings");
       if (!target.ok) return target;
       try {
+        const beforeCapability = resolveStoreReleaseCapability({
+          projectRoot: target.project.root,
+          stateDir: deps.stateDir,
+          projectSlug: target.project.slug,
+        });
         const hadPending = readStoreReleaseRequest(deps.stateDir, target.project.slug) !== undefined;
         setProjectStoreReleaseSettings(deps.stateDir, target.project.slug, { mode: input.mode });
         const droppedPendingRequest = hadPending && readStoreReleaseRequest(deps.stateDir, target.project.slug) === undefined;
+        const afterCapability = resolveStoreReleaseCapability({
+          projectRoot: target.project.root,
+          stateDir: deps.stateDir,
+          projectSlug: target.project.slug,
+        });
+        const capabilityBoundaryChanged =
+          beforeCapability.leadEnabled !== afterCapability.leadEnabled ||
+          (beforeCapability.supervisorTier !== afterCapability.supervisorTier &&
+            (beforeCapability.supervisorTier === "full" || afterCapability.supervisorTier === "full"));
+        const refreshedSeats: SeatName[] = [];
+        let supervisorNeedsHandoff = false;
+        if (capabilityBoundaryChanged) {
+          const daemon = resolveDaemon(context);
+          const isStarted = (agent: SurfaceAgentSnapshot): boolean =>
+            deps.isSeatStarted?.(agent) ??
+            (typeof agent.lastUserMessageAt === "string" && agent.lastUserMessageAt.trim() !== "");
+          const isSeatIdleOrClosed = (agent: SurfaceAgentSnapshot): boolean =>
+            (agent.status === "idle" || agent.status === "closed") &&
+            !(agent.requiresAttention === true && agent.attentionReason === "permission");
+          for (const seat of ["supervisor", "lead"] as const) {
+            let liveSeat: SurfaceAgentSnapshot | undefined;
+            try {
+              liveSeat = await seatOf(daemon, seat, target.project.slug);
+            } catch (err) {
+              log(`store-release: cannot inspect ${seat} seat for ${target.project.slug} (${messageOf(err)})`);
+              continue;
+            }
+            if (liveSeat === undefined) continue;
+            if (!isStarted(liveSeat) && isSeatIdleOrClosed(liveSeat)) {
+              const retired = await retireSeat(seat, target.project.slug, target.project.root, context);
+              if (retired.ok) refreshedSeats.push(seat);
+              else log(`store-release: could not retire unstarted ${seat} seat for ${target.project.slug} (${retired.code}: ${retired.error})`);
+            } else if (seat === "supervisor") {
+              supervisorNeedsHandoff = true;
+            } else if (seat === "lead" && deps.handoff !== undefined) {
+              const handoffReply = await deps.handoff({
+                slug: target.project.slug,
+                seat: "lead",
+                action: "start",
+                reason: "owner",
+                quietPoint: true,
+              });
+              if (!handoffReply.ok && handoffReply.code !== "handoff-in-progress") {
+                log(`store-release: could not schedule Lead handoff for ${target.project.slug} (${handoffReply.code}: ${handoffReply.error})`);
+              }
+            }
+          }
+        }
         const settings = await readStoreReleaseViewForProject(target.project);
         log(`store-release: ${target.project.slug} mode=${settings.mode}`);
-        return { ok: true as const, droppedPendingRequest, settings };
+        return {
+          ok: true as const,
+          droppedPendingRequest,
+          settings,
+          refreshedSeats,
+          supervisorNeedsHandoff,
+        };
       } catch (err) {
         return failure(codeOf(err), messageOf(err));
       }

@@ -367,6 +367,8 @@ export interface LeadMailRuntime {
    * turn (v0.0.28, ADR 0018 §2).
    */
   markKickoffSent(agentId: string): void;
+  /** Whether a seat has already received its initial user/kickoff turn. */
+  isSeatStarted(agent: { id: string; lastUserMessageAt?: string | null }): boolean;
   /**
    * Clears all active handoff extraction timers on shutdown (v0.0.28, ADR 0018 §3).
    */
@@ -2347,7 +2349,20 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
       }
       writeRotationState(input.slug, reg.root, { rotationState: "rotation_pending" });
       if (input.action === "replaceNow") await completeHandoff(input.slug, reg.root, { agentId: reg.lead ?? "", outcome: { kind: "failed" }, timeline: [], fuseReason: "extraction-send-failed" });
-      else if (input.reason === "provider-change" && await projectPeerInFlight(input.slug)) {
+      else if (input.quietPoint === true) {
+        const peersHolding = await projectPeerInFlight(input.slug);
+        const lead = await liveLeadAgent(resolveDaemon(), input.slug).catch(() => undefined);
+        if (peersHolding || (lead !== undefined && lead.status !== "error" && !isSeatReadyForMail(lead))) {
+          if (peersHolding) {
+            const live = await liveAgentsById();
+            updateProgress(input.slug, { state: "scheduled", waitingPeers: countWaitingPeers(input.slug, projectStreamOf(input.slug), live) });
+          } else {
+            updateProgress(input.slug, { state: "scheduled", waitingPeers: undefined });
+          }
+        } else {
+          await beginHandoff(input.slug, reg.root);
+        }
+      } else if (input.reason === "provider-change" && await projectPeerInFlight(input.slug)) {
         const live = await liveAgentsById(); updateProgress(input.slug, { waitingPeers: countWaitingPeers(input.slug, projectStreamOf(input.slug), live) });
       } else await beginHandoff(input.slug, reg.root);
       return { ok: true, progress: progressOf(input.slug) };
@@ -2376,13 +2391,14 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     resetProjectMailbox,
     rotateProjectMailbox,
     markKickoffSent,
+    isSeatStarted: hasSeatReceivedFirstTurn,
     stop,
   };
   // v0.6.1 review fix: the archive markers run SYNCHRONOUSLY — the surface
   // sets a marker right before its archive call flies and clears it inside a
   // failure path nobody awaits, so both effects must land before control
   // returns (the markKickoffSent precedent).
-  const sync = new Set(["startupRecovery", "settleLeadRotation", "resetProjectMailbox", "rotateProjectMailbox", "markKickoffSent", "markPluginArchive", "clearPluginArchive", "hasPendingHandoff"]);
+  const sync = new Set(["startupRecovery", "settleLeadRotation", "resetProjectMailbox", "rotateProjectMailbox", "markKickoffSent", "isSeatStarted", "markPluginArchive", "clearPluginArchive", "hasPendingHandoff"]);
   return new Proxy(runtime, { get(target, key, receiver) {
     const value = Reflect.get(target, key, receiver);
     if (typeof value !== "function" || key === "stop") return value;

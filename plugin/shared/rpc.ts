@@ -863,6 +863,8 @@ export const storeReleaseWrite = defineRpc({
       ok: z.literal(true),
       droppedPendingRequest: z.boolean(),
       settings: StoreReleaseViewSchema,
+      refreshedSeats: z.array(z.enum(["supervisor", "lead"])).optional(),
+      supervisorNeedsHandoff: z.boolean().optional(),
     }),
     Failure,
   ]),

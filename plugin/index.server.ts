@@ -529,6 +529,7 @@ export default function contribute(server: PluginServerContext) {
     handoffPending: slug => leadMail.hasPendingHandoff(slug),
     onLeadRetired: (input) => leadMail.settleLeadRotation(input.slug),
     onSeatKickoffSent: (input) => leadMail.markKickoffSent(input.agentId),
+    isSeatStarted: (agent) => leadMail.isSeatStarted(agent),
     markPluginArchive: (input) => leadMail.markPluginArchive(input.agentId),
     clearPluginArchive: (input) => leadMail.clearPluginArchive(input.agentId),
     resetProjectMailbox: (slug) => leadMail.resetProjectMailbox(slug),

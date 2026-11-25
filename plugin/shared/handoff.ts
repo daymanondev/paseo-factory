@@ -25,6 +25,8 @@ export interface HandoffRequest {
   toLane?: string;
   /** Optional Owner choice for a Peer successor. */
   lane?: string;
+  /** When true on action: "start", hold in rotation_pending until Lead is seat-ready and no Peer is in flight. */
+  quietPoint?: boolean;
 }
 export type HandoffReply =
   | { ok: true; progress: HandoffProgress | null; text?: string; source?: "extracted" | "substitute" }

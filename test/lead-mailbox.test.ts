@@ -150,6 +150,7 @@ function makeSpooledRuntime(t: TestContext, agents: FakeAgent[] = [], options?: 
     handoff: (input) => leadMail.handoff(input),
     onLeadRetired: (input) => leadMail.settleLeadRotation(input.slug),
     onSeatKickoffSent: (input) => leadMail.markKickoffSent(input.agentId),
+    isSeatStarted: (agent) => leadMail.isSeatStarted(agent),
     markPluginArchive: (input) => leadMail.markPluginArchive(input.agentId),
     clearPluginArchive: (input) => leadMail.clearPluginArchive(input.agentId),
     leadDispatch: (request) => leadMail.dispatchLead(request),
@@ -4215,4 +4216,129 @@ test("Pi Lead and Supervisor receive unconditional compaction-safe Store Release
     assert.doesNotMatch(f.fake.sent.find((s) => s.agentId === "pi-sup-off")!.text, /supervisor_record_store_note/);
   }
 });
+
+test("ADR 0071 (Issue 04): handoff with quietPoint holds in rotation_pending while Lead is mid-turn even with zero Peers in flight", async (t) => {
+  const f = makeSpooledRuntime(t);
+  f.fake.agents.push({
+    id: "lead-busy",
+    status: "running",
+    labels: { seat: "lead", project: f.slug },
+    cwd: f.projectRoot,
+    lastUserMessageAt: "2026-11-25T10:00:00.000Z",
+  });
+  writeProjectRegistration(f.stateDir, f.slug, { root: f.projectRoot, lead: "lead-busy" });
+
+  const started = await f.leadMail.handoff({ slug: f.slug, action: "start", reason: "owner", quietPoint: true });
+  assert.ok(started.ok, JSON.stringify(started));
+  assert.equal(started.progress?.state, "scheduled");
+  assert.equal(readProjectRegistration(f.stateDir, f.slug)?.rotationState, "rotation_pending");
+  assert.equal(f.fake.sent.length, 0, "mid-turn Lead must not be interrupted with extraction prompt");
+
+  // Mid-turn pump must still hold
+  await f.leadMail.pumpProjectLead(f.slug);
+  assert.equal(f.fake.sent.length, 0, "pumpProjectLead must still hold while Lead is running");
+
+  // Once Lead turn ends, extraction starts
+  f.fake.agents.find((a) => a.id === "lead-busy")!.status = "idle";
+  await f.leadMail.onLeadTurnEnded({ agentId: "lead-busy", outcome: { kind: "completed" } });
+  const extracting = await f.leadMail.handoff({ slug: f.slug, action: "handover" });
+  assert.ok(extracting.ok);
+  assert.equal(extracting.progress?.state, "handing-over");
+  assert.equal(f.fake.sent.filter((s) => s.agentId === "lead-busy").length, 1);
+
+  await f.leadMail.onLeadTurnEnded({
+    agentId: "lead-busy",
+    outcome: { kind: "completed" },
+    timeline: [{ type: "assistant_message", text: "# Lead continuity\nFinished current turn cleanly." }],
+  });
+  const done = await f.leadMail.handoff({ slug: f.slug, action: "handover" });
+  assert.ok(done.ok);
+  assert.equal(done.progress?.state, "done");
+  assert.equal(f.fake.created.length, 1);
+});
+
+test("ADR 0071 (Issue 04): handoff with quietPoint waits for BOTH Lead turn end and in-flight Peer settlement, and starts immediately when idle with no Peers", async (t) => {
+  // 1. Lead mid-turn + Peer in flight -> Lead finishes first -> stays rotation_pending until Peer settles
+  {
+    const f = makeSpooledRuntime(t);
+    f.factory.setContract({ task: "T-qp-1", workspace: f.projectRoot, gate: "true" });
+    const cwd = taskWorktreePath(f.stateDir, f.slug, "T-qp-1");
+    f.factory.requestSpawn({ task: "T-qp-1", provider: "pi/model", arity: 1, worktree: cwd });
+    f.fake.agents.push(
+      { id: "lead-qp-1", status: "running", labels: { seat: "lead", project: f.slug }, cwd: f.projectRoot, lastUserMessageAt: "2026-11-25T10:00:00.000Z" },
+      { id: "peer-qp-1", status: "running", labels: { task: "T-qp-1", project: f.slug }, cwd },
+    );
+    writeProjectRegistration(f.stateDir, f.slug, { root: f.projectRoot, lead: "lead-qp-1" });
+
+    const started = await f.leadMail.handoff({ slug: f.slug, action: "start", reason: "owner", quietPoint: true });
+    assert.ok(started.ok);
+    assert.equal(started.progress?.state, "scheduled");
+    assert.equal(started.progress?.waitingPeers, 1);
+    assert.equal(f.fake.sent.length, 0);
+
+    // Lead finishes first while Peer still runs -> still rotation_pending
+    f.fake.agents.find((a) => a.id === "lead-qp-1")!.status = "idle";
+    await f.leadMail.onLeadTurnEnded({ agentId: "lead-qp-1", outcome: { kind: "completed" } });
+    assert.equal(readProjectRegistration(f.stateDir, f.slug)?.rotationState, "rotation_pending");
+    assert.equal(f.fake.sent.length, 0, "must still hold while Peer is in flight");
+
+    // Now Peer settles -> begins extraction
+    f.fake.agents.find((a) => a.id === "peer-qp-1")!.status = "closed";
+    f.factory.ledger.append({ event: "gate_finished", task: "T-qp-1", attempt: 1, verdict: "green", exit: 0, note: "ok" });
+    await f.leadMail.notifyPeer({ task: "T-qp-1", kind: "verdict", text: "GREEN T-qp-1" });
+    assert.equal(readProjectRegistration(f.stateDir, f.slug)?.rotationState, "handing_over");
+    assert.equal(f.fake.sent.filter((s) => s.agentId === "lead-qp-1").length, 1);
+  }
+
+  // 2. Lead mid-turn + Peer in flight -> Peer settles first -> stays rotation_pending until Lead turn ends
+  {
+    const f = makeSpooledRuntime(t);
+    f.factory.setContract({ task: "T-qp-2", workspace: f.projectRoot, gate: "true" });
+    const cwd = taskWorktreePath(f.stateDir, f.slug, "T-qp-2");
+    f.factory.requestSpawn({ task: "T-qp-2", provider: "pi/model", arity: 1, worktree: cwd });
+    f.fake.agents.push(
+      { id: "lead-qp-2", status: "running", labels: { seat: "lead", project: f.slug }, cwd: f.projectRoot, lastUserMessageAt: "2026-11-25T10:00:00.000Z" },
+      { id: "peer-qp-2", status: "running", labels: { task: "T-qp-2", project: f.slug }, cwd },
+    );
+    writeProjectRegistration(f.stateDir, f.slug, { root: f.projectRoot, lead: "lead-qp-2" });
+
+    const started = await f.leadMail.handoff({ slug: f.slug, action: "start", reason: "owner", quietPoint: true });
+    assert.ok(started.ok);
+    assert.equal(started.progress?.state, "scheduled");
+
+    // Peer settles while Lead is still running -> still rotation_pending
+    f.fake.agents.find((a) => a.id === "peer-qp-2")!.status = "closed";
+    f.factory.ledger.append({ event: "gate_finished", task: "T-qp-2", attempt: 1, verdict: "green", exit: 0, note: "ok" });
+    await f.leadMail.notifyPeer({ task: "T-qp-2", kind: "verdict", text: "GREEN T-qp-2" });
+    assert.equal(readProjectRegistration(f.stateDir, f.slug)?.rotationState, "rotation_pending");
+    assert.equal(f.fake.sent.length, 0, "must still hold while Lead is mid-turn");
+
+    // Now Lead finishes -> begins extraction
+    f.fake.agents.find((a) => a.id === "lead-qp-2")!.status = "idle";
+    await f.leadMail.onLeadTurnEnded({ agentId: "lead-qp-2", outcome: { kind: "completed" } });
+    assert.equal(readProjectRegistration(f.stateDir, f.slug)?.rotationState, "handing_over");
+    assert.equal(f.fake.sent.filter((s) => s.agentId === "lead-qp-2").length, 1);
+  }
+
+  // 3. Lead already idle + zero Peers in flight -> begins handoff immediately
+  {
+    const f = makeSpooledRuntime(t);
+    f.fake.agents.push({
+      id: "lead-qp-idle",
+      status: "idle",
+      labels: { seat: "lead", project: f.slug },
+      cwd: f.projectRoot,
+      lastUserMessageAt: "2026-11-25T10:00:00.000Z",
+    });
+    writeProjectRegistration(f.stateDir, f.slug, { root: f.projectRoot, lead: "lead-qp-idle" });
+
+    const started = await f.leadMail.handoff({ slug: f.slug, action: "start", reason: "owner", quietPoint: true });
+    assert.ok(started.ok);
+    assert.equal(started.progress?.state, "handing-over");
+    assert.equal(readProjectRegistration(f.stateDir, f.slug)?.rotationState, "handing_over");
+    assert.equal(f.fake.sent.filter((s) => s.agentId === "lead-qp-idle").length, 1);
+  }
+});
+
+
 

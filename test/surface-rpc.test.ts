@@ -36,7 +36,7 @@ import { foldCompanions, foldCorePlugin, foldTasks } from "../plugin/server/view
 import { factoryEnvFor, injectRoleOnCreate, injectSessionEnv, renderAgentContract, renderSeatBootstrap, renderSeatContract } from "../plugin/server/roles.ts";
 import type { AgentCreateRequest } from "../plugin/server/roles.ts";
 import { discoverProjects, listProjectRegistrations, readProjectRegistration, writeProjectRegistration } from "../plugin/server/projects.ts";
-import { readProjectSettings, readReleaseRequest, readReleaseSettings, readStoreReleaseRequest, readStoreReleaseSettings, setReleaseRequest, setStoreReleaseRequest, writeProjectSettings } from "../plugin/server/core/project-settings.ts";
+import { readProjectSettings, readReleaseRequest, readReleaseSettings, readStoreReleaseRequest, readStoreReleaseSettings, setProjectStoreReleaseSettings, setReleaseRequest, setStoreReleaseRequest, writeProjectSettings } from "../plugin/server/core/project-settings.ts";
 import { builtinVaultRunner, clearGhAuthCache } from "../plugin/server/core/vault-transport.ts";
 import { DatabaseSync } from "node:sqlite";
 import { lanesPath, loadLanes, saveLanes } from "../src/lanes.ts";
@@ -44,6 +44,7 @@ import { CORE_FACTORY_SKILLS } from "../plugin/server/core/companion-tools.ts";
 import { FACTORY_ROLE_PROVIDERS } from "../src/role-providers.ts";
 import { prepareTaskWorktree } from "../src/workspace.ts";
 import { readHandoffProgress, writeHandoffProgress } from "../plugin/server/handoff-progress.ts";
+import { storeReleaseWrite } from "../plugin/shared/rpc.ts";
 import { deliverLeadMail, enqueueLeadMail } from "../src/mailbox.ts";
 import { disposeDir, gitCommitAll, makeTempDir, writeLanes } from "./helpers.ts";
 
@@ -77,6 +78,7 @@ interface FakeAgent {
   lastUsage?: { contextWindowUsedTokens?: number; contextWindowMaxTokens?: number } | null;
   /** The Paseo Workspace the agent's session lives in (v0.0.31, ADR 0017 §5). */
   workspaceId?: string | null;
+  lastUserMessageAt?: string | null;
   updatedAt?: string;
   persistence?: { nativeHandle?: string; sessionId?: string };
 }
@@ -132,6 +134,7 @@ function fakeDaemon(agents: FakeAgent[]) {
               cwd: agent.cwd ?? "/tmp",
               ...(agent.parentAgentId === undefined ? {} : { parentAgentId: agent.parentAgentId }),
               ...(agent.workspaceId === undefined ? {} : { workspaceId: agent.workspaceId }),
+              ...(agent.lastUserMessageAt === undefined ? {} : { lastUserMessageAt: agent.lastUserMessageAt }),
               ...(agent.lastUsage === undefined ? {} : { lastUsage: agent.lastUsage }),
               ...(agent.persistence === undefined ? {} : { persistence: agent.persistence }),
             },
@@ -271,6 +274,10 @@ function makeRotateSurface(t: TestContext, agents: FakeAgent[] = [], options: { 
       return { ok: true };
     },
     onLeadRetired: (input) => leadMail.settleLeadRotation(input.slug),
+    handoff: (input) => leadMail.handoff(input),
+    handoffPending: (slug) => leadMail.hasPendingHandoff(slug),
+    onSeatKickoffSent: (input) => leadMail.markKickoffSent(input.agentId),
+    isSeatStarted: (agent) => leadMail.isSeatStarted(agent),
     rotateProjectMailbox: (slug) => leadMail.rotateProjectMailbox(slug),
     ...(options.vaultRunner === undefined ? {} : { vaultRunner: options.vaultRunner }),
     ...(options.listPlugins === undefined ? {} : { listPlugins: options.listPlugins }),
@@ -9666,3 +9673,363 @@ test("ADR 0068 (Ticket 05): overview snapshot, PanelView queue projection, and G
   assert.ok(changes.includes("gateQueueConcurrency"));
   assert.ok(changes.includes("gateQueueCancel"));
 });
+
+test("ADR 0071 (Issue 04): storeReleaseWrite off <-> on retires unstarted 0-turn idle/closed seats at zero tokens", async (t) => {
+  const dir = makeTempDir("surface-store-release-refresh-0turn-");
+  disposeDir(t, dir);
+  const mobileRepo = join(dir, "mobile-repo");
+  mkdirSync(join(mobileRepo, "ios", "DemoApp.xcodeproj"), { recursive: true });
+  writeFileSync(join(mobileRepo, "ios", "Podfile"), "platform :ios, '15.0'\n");
+  gitCommitAll(mobileRepo);
+
+  const project = resolveProject(mobileRepo);
+  assert.ok(project.ok);
+  if (!project.ok) return;
+
+  const agents: FakeAgent[] = [
+    {
+      id: "sup-0turn",
+      status: "idle",
+      labels: { seat: "supervisor", project: project.slug },
+      cwd: project.root,
+      lastUserMessageAt: null,
+    },
+    {
+      id: "lead-0turn",
+      status: "closed",
+      labels: { seat: "lead", project: project.slug },
+      cwd: project.root,
+      lastUserMessageAt: null,
+    },
+  ];
+  const { stateDir, handlers, fake } = makeRotateSurface(t, agents);
+  writeProjectRegistration(stateDir, project.slug, {
+    root: project.root,
+    supervisor: "sup-0turn",
+    lead: "lead-0turn",
+  });
+
+  // off -> on-request retires both 0-turn seats without sending any prompt
+  const raw = await handlers.storeReleaseWrite({ projectRoot: mobileRepo, mode: "on-request" });
+  const parsed = storeReleaseWrite.output.parse(raw);
+  assert.ok(parsed.ok, JSON.stringify(parsed));
+  assert.equal(parsed.supervisorNeedsHandoff, false);
+  assert.deepEqual([...(parsed.refreshedSeats ?? [])].sort(), ["lead", "supervisor"]);
+  assert.deepEqual([...fake.archived].sort(), ["lead-0turn", "sup-0turn"]);
+  assert.equal(fake.sent.length, 0, "unstarted seats must retire at zero tokens");
+  const regAfterOn = readProjectRegistration(stateDir, project.slug);
+  assert.equal(regAfterOn?.supervisor, undefined);
+  assert.equal(regAfterOn?.lead, undefined);
+
+  // Re-seat an unstarted closed Supervisor and flip on-request -> off -> retires cleanly too
+  agents.push({
+    id: "sup-0turn-2",
+    status: "closed",
+    labels: { seat: "supervisor", project: project.slug },
+    cwd: project.root,
+    lastUserMessageAt: null,
+  });
+  writeProjectRegistration(stateDir, project.slug, { root: project.root, supervisor: "sup-0turn-2" });
+  const rawOff = await handlers.storeReleaseWrite({ projectRoot: mobileRepo, mode: "off" });
+  const parsedOff = storeReleaseWrite.output.parse(rawOff);
+  assert.ok(parsedOff.ok);
+  assert.equal(parsedOff.supervisorNeedsHandoff, false);
+  assert.deepEqual(parsedOff.refreshedSeats, ["supervisor"]);
+  assert.ok(fake.archived.includes("sup-0turn-2"));
+});
+
+test("ADR 0071 (Issue 04): storeReleaseWrite off <-> on triggers immediate or quiet-point Lead Handoff for started Lead seats", async (t) => {
+  // 1. Started idle Lead (no Peers in flight) -> immediate handing-over
+  {
+    const dir = makeTempDir("surface-sr-lead-idle-");
+    disposeDir(t, dir);
+    const mobileRepo = join(dir, "mobile-repo");
+    mkdirSync(join(mobileRepo, "android", "app"), { recursive: true });
+    writeFileSync(join(mobileRepo, "android", "app", "build.gradle"), "android {}\n");
+    gitCommitAll(mobileRepo);
+    const project = resolveProject(mobileRepo);
+    assert.ok(project.ok);
+    if (!project.ok) return;
+
+    const agents: FakeAgent[] = [
+      {
+        id: "lead-started-idle",
+        status: "idle",
+        labels: { seat: "lead", project: project.slug },
+        cwd: project.root,
+        lastUserMessageAt: "2026-11-25T10:00:00.000Z",
+      },
+    ];
+    const { stateDir, handlers, fake, leadMail } = makeRotateSurface(t, agents);
+    writeProjectRegistration(stateDir, project.slug, { root: project.root, lead: "lead-started-idle" });
+
+    const res = storeReleaseWrite.output.parse(await handlers.storeReleaseWrite({ projectRoot: mobileRepo, mode: "on-request" }));
+    assert.ok(res.ok);
+    assert.deepEqual(res.refreshedSeats, []);
+    assert.equal(res.supervisorNeedsHandoff, false);
+    assert.equal(readHandoffProgress(stateDir, project.slug, "lead")?.state, "handing-over");
+    assert.equal(fake.sent.filter((s) => s.agentId === "lead-started-idle").length, 1);
+
+    await leadMail.onLeadTurnEnded({
+      agentId: "lead-started-idle",
+      outcome: { kind: "completed" },
+      timeline: [{ type: "assistant_message", text: "# Lead continuity\nReloaded with Store Release." }],
+    });
+    assert.equal(readHandoffProgress(stateDir, project.slug, "lead")?.state, "done");
+    assert.equal(fake.created.length, 1);
+  }
+
+  // 2. Started busy Lead (status: running, 0 Peers in flight) -> rotation_pending until Lead turn ends
+  {
+    const dir = makeTempDir("surface-sr-lead-busy-");
+    disposeDir(t, dir);
+    const mobileRepo = join(dir, "mobile-repo");
+    mkdirSync(join(mobileRepo, "android", "app"), { recursive: true });
+    writeFileSync(join(mobileRepo, "android", "app", "build.gradle"), "android {}\n");
+    gitCommitAll(mobileRepo);
+    const project = resolveProject(mobileRepo);
+    assert.ok(project.ok);
+    if (!project.ok) return;
+
+    const agents: FakeAgent[] = [
+      {
+        id: "lead-started-busy",
+        status: "running",
+        labels: { seat: "lead", project: project.slug },
+        cwd: project.root,
+        lastUserMessageAt: "2026-11-25T10:00:00.000Z",
+      },
+    ];
+    const { stateDir, handlers, fake, leadMail } = makeRotateSurface(t, agents);
+    writeProjectRegistration(stateDir, project.slug, { root: project.root, lead: "lead-started-busy" });
+
+    const res = storeReleaseWrite.output.parse(await handlers.storeReleaseWrite({ projectRoot: mobileRepo, mode: "auto-staging" }));
+    assert.ok(res.ok);
+    assert.deepEqual(res.refreshedSeats, []);
+    assert.equal(res.supervisorNeedsHandoff, false);
+    assert.equal(readProjectRegistration(stateDir, project.slug)?.rotationState, "rotation_pending");
+    assert.equal(readHandoffProgress(stateDir, project.slug, "lead")?.state, "scheduled");
+    assert.equal(fake.sent.length, 0);
+
+    agents[0]!.status = "idle";
+    await leadMail.onLeadTurnEnded({ agentId: "lead-started-busy", outcome: { kind: "completed" } });
+    assert.equal(readHandoffProgress(stateDir, project.slug, "lead")?.state, "handing-over");
+    assert.equal(fake.sent.filter((s) => s.agentId === "lead-started-busy").length, 1);
+  }
+
+  // 3. Started idle Lead with in-flight Peer -> rotation_pending until Peer settles
+  {
+    const dir = makeTempDir("surface-sr-lead-peer-");
+    disposeDir(t, dir);
+    const mobileRepo = join(dir, "mobile-repo");
+    mkdirSync(join(mobileRepo, "ios", "DemoApp.xcodeproj"), { recursive: true });
+    writeFileSync(join(mobileRepo, "ios", "Podfile"), "platform :ios, '15.0'\n");
+    gitCommitAll(mobileRepo);
+    const project = resolveProject(mobileRepo);
+    assert.ok(project.ok);
+    if (!project.ok) return;
+
+    const agents: FakeAgent[] = [
+      {
+        id: "lead-with-peer",
+        status: "idle",
+        labels: { seat: "lead", project: project.slug },
+        cwd: project.root,
+        lastUserMessageAt: "2026-11-25T10:00:00.000Z",
+      },
+    ];
+    const { stateDir, handlers, fake, leadMail, factory } = makeRotateSurface(t, agents);
+    const peerCwd = join(stateDir, "projects", project.slug, "worktrees", "T-sr-peer");
+    factory.setContract({ task: "T-sr-peer", workspace: project.root, gate: "true" });
+    factory.requestSpawn({ task: "T-sr-peer", provider: "pi/model", arity: 1, worktree: peerCwd });
+    agents.push({
+      id: "peer-sr-active",
+      status: "running",
+      labels: { task: "T-sr-peer", project: project.slug },
+      cwd: peerCwd,
+    });
+    writeProjectRegistration(stateDir, project.slug, { root: project.root, lead: "lead-with-peer" });
+
+    // Enable first so we test on -> off as well
+    setProjectStoreReleaseSettings(stateDir, project.slug, { mode: "on-request" });
+    const res = storeReleaseWrite.output.parse(await handlers.storeReleaseWrite({ projectRoot: mobileRepo, mode: "off" }));
+    assert.ok(res.ok);
+    assert.deepEqual(res.refreshedSeats, []);
+    assert.equal(readProjectRegistration(stateDir, project.slug)?.rotationState, "rotation_pending");
+    assert.equal(readHandoffProgress(stateDir, project.slug, "lead")?.state, "scheduled");
+    assert.equal(fake.sent.length, 0);
+
+    agents[1]!.status = "closed";
+    factory.ledger.append({ event: "gate_finished", task: "T-sr-peer", attempt: 1, verdict: "green", exit: 0, note: "ok" });
+    await leadMail.notifyPeer({ task: "T-sr-peer", kind: "verdict", text: "GREEN T-sr-peer" });
+    assert.equal(readHandoffProgress(stateDir, project.slug, "lead")?.state, "handing-over");
+    assert.equal(fake.sent.filter((s) => s.agentId === "lead-with-peer").length, 1);
+  }
+});
+
+test("ADR 0071 (Issue 04): storeReleaseWrite off <-> on never interrupts a started Supervisor chat and returns supervisorNeedsHandoff: true", async (t) => {
+  const dir = makeTempDir("surface-sr-sup-started-");
+  disposeDir(t, dir);
+  const mobileRepo = join(dir, "mobile-repo");
+  mkdirSync(join(mobileRepo, "android", "app"), { recursive: true });
+  writeFileSync(join(mobileRepo, "android", "app", "build.gradle"), "android {}\n");
+  gitCommitAll(mobileRepo);
+  const project = resolveProject(mobileRepo);
+  assert.ok(project.ok);
+  if (!project.ok) return;
+
+  // 1. Started Supervisor (lastUserMessageAt set) + 0-turn Lead -> retires Lead, keeps Supervisor untouched, supervisorNeedsHandoff: true
+  {
+    const agents: FakeAgent[] = [
+      {
+        id: "sup-started",
+        status: "idle",
+        labels: { seat: "supervisor", project: project.slug },
+        cwd: project.root,
+        lastUserMessageAt: "2026-11-25T10:00:00.000Z",
+      },
+      {
+        id: "lead-0turn",
+        status: "idle",
+        labels: { seat: "lead", project: project.slug },
+        cwd: project.root,
+        lastUserMessageAt: null,
+      },
+    ];
+    const { stateDir, handlers, fake, stopped } = makeRotateSurface(t, agents);
+    writeProjectRegistration(stateDir, project.slug, { root: project.root, supervisor: "sup-started", lead: "lead-0turn" });
+
+    const res = storeReleaseWrite.output.parse(await handlers.storeReleaseWrite({ projectRoot: mobileRepo, mode: "on-request" }));
+    assert.ok(res.ok);
+    assert.equal(res.supervisorNeedsHandoff, true);
+    assert.deepEqual(res.refreshedSeats, ["lead"]);
+    assert.equal(fake.archived.includes("sup-started"), false, "started Supervisor must never be archived");
+    assert.equal(stopped.includes("sup-started"), false, "started Supervisor must never be canceled");
+    assert.equal(fake.sent.filter((s) => s.agentId === "sup-started").length, 0, "started Supervisor must not receive handoff prompt");
+    assert.equal(readHandoffProgress(stateDir, project.slug, "supervisor"), null);
+    assert.equal(readProjectRegistration(stateDir, project.slug)?.supervisor, "sup-started");
+  }
+
+  // 2. Supervisor started via kickoffSent (even if fake daemon didn't set lastUserMessageAt) -> detected via isSeatStarted
+  {
+    const agents: FakeAgent[] = [
+      {
+        id: "sup-kickoff-started",
+        status: "idle",
+        labels: { seat: "supervisor", project: project.slug },
+        cwd: project.root,
+        lastUserMessageAt: null,
+      },
+    ];
+    const { stateDir, handlers, fake, leadMail } = makeRotateSurface(t, agents);
+    writeProjectRegistration(stateDir, project.slug, { root: project.root, supervisor: "sup-kickoff-started" });
+    setProjectStoreReleaseSettings(stateDir, project.slug, { mode: "on-request" });
+    leadMail.markKickoffSent("sup-kickoff-started");
+
+    const res = storeReleaseWrite.output.parse(await handlers.storeReleaseWrite({ projectRoot: mobileRepo, mode: "off" }));
+    assert.ok(res.ok);
+    assert.equal(res.supervisorNeedsHandoff, true);
+    assert.deepEqual(res.refreshedSeats, []);
+    assert.equal(fake.archived.length, 0);
+  }
+});
+
+test("ADR 0071 (Issue 04): storeReleaseWrite on-request <-> auto-staging, non-mobile projects, and same-mode writes trigger zero seat churn", async (t) => {
+  // 1. Mobile Project: on-request <-> auto-staging with both 0-turn and started seats
+  {
+    const dir = makeTempDir("surface-sr-no-churn-");
+    disposeDir(t, dir);
+    const mobileRepo = join(dir, "mobile-repo");
+    mkdirSync(join(mobileRepo, "android", "app"), { recursive: true });
+    writeFileSync(join(mobileRepo, "android", "app", "build.gradle"), "android {}\n");
+    gitCommitAll(mobileRepo);
+    const project = resolveProject(mobileRepo);
+    assert.ok(project.ok);
+    if (!project.ok) return;
+
+    const agents: FakeAgent[] = [
+      {
+        id: "sup-live",
+        status: "idle",
+        labels: { seat: "supervisor", project: project.slug },
+        cwd: project.root,
+        lastUserMessageAt: "2026-11-25T10:00:00.000Z",
+      },
+      {
+        id: "lead-live",
+        status: "idle",
+        labels: { seat: "lead", project: project.slug },
+        cwd: project.root,
+        lastUserMessageAt: "2026-11-25T10:00:00.000Z",
+      },
+    ];
+    const { stateDir, handlers, fake } = makeRotateSurface(t, agents);
+    writeProjectRegistration(stateDir, project.slug, { root: project.root, supervisor: "sup-live", lead: "lead-live" });
+    setProjectStoreReleaseSettings(stateDir, project.slug, { mode: "on-request" });
+
+    const toAuto = storeReleaseWrite.output.parse(await handlers.storeReleaseWrite({ projectRoot: mobileRepo, mode: "auto-staging" }));
+    assert.ok(toAuto.ok);
+    assert.deepEqual(toAuto.refreshedSeats, []);
+    assert.equal(toAuto.supervisorNeedsHandoff, false);
+    assert.equal(fake.archived.length, 0);
+    assert.equal(fake.sent.length, 0);
+    assert.equal(readHandoffProgress(stateDir, project.slug, "lead"), null);
+
+    const toOnRequest = storeReleaseWrite.output.parse(await handlers.storeReleaseWrite({ projectRoot: mobileRepo, mode: "on-request" }));
+    assert.ok(toOnRequest.ok);
+    assert.deepEqual(toOnRequest.refreshedSeats, []);
+    assert.equal(toOnRequest.supervisorNeedsHandoff, false);
+    assert.equal(fake.archived.length, 0);
+    assert.equal(fake.sent.length, 0);
+    assert.equal(readHandoffProgress(stateDir, project.slug, "lead"), null);
+
+    const sameMode = storeReleaseWrite.output.parse(await handlers.storeReleaseWrite({ projectRoot: mobileRepo, mode: "on-request" }));
+    assert.ok(sameMode.ok);
+    assert.deepEqual(sameMode.refreshedSeats, []);
+    assert.equal(sameMode.supervisorNeedsHandoff, false);
+    assert.equal(fake.archived.length, 0);
+  }
+
+  // 2. Non-mobile Project: off -> on-request causes zero seat refreshes or handoffs
+  {
+    const dir = makeTempDir("surface-sr-nonmobile-");
+    disposeDir(t, dir);
+    const webRepo = join(dir, "web-repo");
+    mkdirSync(webRepo, { recursive: true });
+    writeFileSync(join(webRepo, "package.json"), JSON.stringify({ name: "web-app" }));
+    gitCommitAll(webRepo);
+    const project = resolveProject(webRepo);
+    assert.ok(project.ok);
+    if (!project.ok) return;
+
+    const agents: FakeAgent[] = [
+      {
+        id: "sup-web",
+        status: "idle",
+        labels: { seat: "supervisor", project: project.slug },
+        cwd: project.root,
+        lastUserMessageAt: "2026-11-25T10:00:00.000Z",
+      },
+      {
+        id: "lead-web",
+        status: "idle",
+        labels: { seat: "lead", project: project.slug },
+        cwd: project.root,
+        lastUserMessageAt: null,
+      },
+    ];
+    const { stateDir, handlers, fake } = makeRotateSurface(t, agents);
+    writeProjectRegistration(stateDir, project.slug, { root: project.root, supervisor: "sup-web", lead: "lead-web" });
+
+    const res = storeReleaseWrite.output.parse(await handlers.storeReleaseWrite({ projectRoot: webRepo, mode: "on-request" }));
+    assert.ok(res.ok);
+    assert.deepEqual(res.refreshedSeats, []);
+    assert.equal(res.supervisorNeedsHandoff, false);
+    assert.equal(fake.archived.length, 0);
+    assert.equal(fake.sent.length, 0);
+  }
+});
+
+
+
+
