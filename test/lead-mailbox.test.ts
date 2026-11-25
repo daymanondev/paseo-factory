@@ -4339,6 +4339,3 @@ test("ADR 0071 (Issue 04): handoff with quietPoint waits for BOTH Lead turn end 
     assert.equal(f.fake.sent.filter((s) => s.agentId === "lead-qp-idle").length, 1);
   }
 });
-
-
-

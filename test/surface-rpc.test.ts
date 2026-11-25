@@ -10029,7 +10029,3 @@ test("ADR 0071 (Issue 04): storeReleaseWrite on-request <-> auto-staging, non-mo
     assert.equal(fake.sent.length, 0);
   }
 });
-
-
-
-
