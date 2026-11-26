@@ -10,6 +10,7 @@ import {
   Ledger,
   hydrateVaultDirect,
   loadVaultConfig,
+  parseEnvelope,
   pullVault,
   readVaultStatus,
   readLedgerImports,
@@ -333,6 +334,10 @@ test("vault refuses bad usage through fail(): exit 2, usage on stderr, nothing o
     [["--home", dir, "vault", "bogus"], /vault: unknown subcommand "bogus"/],
     [["--home", dir, "vault", "status", "extra"], /vault status: unexpected positional "extra"/],
     [["--home", dir, "vault", "status", "--repo", "a/b"], /vault status: --repo is not a status option/],
+    [["--home", dir, "vault", "status", "--env-local", source], /vault status: --env-local is not a status option/],
+    [["--home", dir, "vault", "hydrate", "--env-local", source], /vault hydrate: --env-local is not a hydrate option/],
+    [["--home", dir, "vault", "import", "--env-local"], /--env-local/],
+    [["--home", dir, "vault", "import", "--app", "patigame", "--env-local", join(dir, "missing.env.local")], /vault-import-file-not-found/],
     [["--home", dir, "vault", "hydrate", "extra"], /vault hydrate: unexpected positional "extra"/],
     [["--home", dir, "vault", "seal"], /vault seal: a file is required/],
     [["--home", dir, "vault", "seal", source], /vault seal: --to <vaultPath> is required/],
@@ -352,7 +357,7 @@ test("vault refuses bad usage through fail(): exit 2, usage on stderr, nothing o
   const first = await runFactory(["--home", dir, "vault"]);
   assert.match(first.stderr, /vault status/);
   assert.match(first.stderr, /vault sync \[--repo <owner\/repo>\] \[--branch <branch>\] \[--passphrase <pass>\] \[--overwrite-configs\]/);
-  assert.match(first.stderr, /vault import \[--asc-key <path>\]/);
+  assert.match(first.stderr, /vault import \[--asc-key <path>\].*\[--env-local <path>\]/);
   assert.match(first.stderr, /vault hydrate \[--repo <owner\/repo>\] \[--ref <ref>\]/);
   assert.match(first.stderr, /vault pull/);
   assert.match(first.stderr, /vault push \[--include-ledger\]/);
@@ -363,7 +368,7 @@ test("vault refuses bad usage through fail(): exit 2, usage on stderr, nothing o
   const help = await runFactory(["--help"]);
   assert.equal(help.status, 0, help.stderr);
   assert.match(help.stdout, /vault sync \[--repo <owner\/repo>\]/);
-  assert.match(help.stdout, /vault import \[--asc-key <path>\]/);
+  assert.match(help.stdout, /vault import \[--asc-key <path>\].*\[--env-local <path>\]/);
   assert.match(help.stdout, /vault seal <file> --to <vaultPath> \[--passphrase <pass>\]/);
 });
 
@@ -1150,4 +1155,393 @@ test("factory vault CLI imports store-defaults.json (0o600), writes back Day-0 k
   const overRes = await runFactory(["--home", home, "vault", "store-note", "--file", overSrc]);
   assert.equal(overRes.status, 2);
   assert.match(overRes.stderr, /store-notebook-limit-exceeded/);
+});
+
+test("factory vault import --env-local seals on remote (obfuscated & aes-256-gcm) and vault pull / hydrate materialize 0o600 .env.local cleanly", async (t) => {
+  const envLocalBody = "EXPO_PUBLIC_API=https://cli.example.invalid\nCLI_ENV_SECRET=sk-cli-env-local-54321\n";
+  const srcDir = makeTempDir();
+  disposeDir(t, srcDir);
+  const envLocalSrc = join(srcDir, ".env.local");
+  writeFileSync(envLocalSrc, envLocalBody);
+
+  for (const passphrase of [undefined, "cli-env-passphrase"]) {
+    const bare = makeBareRemote(t);
+    seedBareRemote(t, bare, { "README.md": "vault\n" });
+
+    const parent = makeTempDir("paseo-factory-cli-env-local-");
+    disposeDir(t, parent);
+    const appDir1 = join(parent, "machine-1", "patigame");
+    mkdirSync(appDir1, { recursive: true });
+    writeFileSync(join(appDir1, "README.md"), "patigame\n");
+    gitCommitAll(appDir1);
+    const resolved1 = resolveProject(appDir1);
+    assert.ok(resolved1.ok);
+
+    const home1 = makeTempDir();
+    disposeDir(t, home1);
+    saveVaultConfig(home1, { repo: bare, nodeId: "cli-node-1" });
+    writeProjectRegistration(join(home1, "plugin-state", "paseo-factory"), resolved1.slug, { root: appDir1 });
+
+    const envVars: Record<string, string> = passphrase ? { FACTORY_VAULT_PASSPHRASE: passphrase } : {};
+    const importRes = await runFactory(
+      ["--home", home1, "vault", "import", "--app", "patigame", "--env-local", envLocalSrc],
+      envVars,
+    );
+    assert.equal(importRes.status, 0, importRes.stderr);
+    const importJson = JSON.parse(importRes.stdout);
+    assert.equal(importJson.ok, true);
+    assert.equal(importJson.pushed, true);
+    assert.deepEqual(importJson.importedFiles, ["secrets/apps/patigame/.env.local"]);
+
+    assert.equal(readFileSync(join(appDir1, ".env.local"), "utf8"), envLocalBody);
+    assert.equal(statSync(join(appDir1, ".env.local")).mode & 0o777, 0o600);
+    assert.equal(runGit(["status", "--porcelain"], appDir1), "");
+
+    // Remote holds sealed VaultEnvelope, never raw plaintext
+    const probe = makeTempDir();
+    disposeDir(t, probe);
+    runGit(["clone", bare, probe]);
+    const remoteRaw = readFileSync(join(probe, "secrets/apps/patigame/.env.local"));
+    assert.equal(parseEnvelope(remoteRaw)?.mode, passphrase ? "aes-256-gcm" : "obfuscated");
+    assert.ok(!remoteRaw.toString("utf8").includes("sk-cli-env-local-54321"));
+    assert.equal(unsealVaultBuffer(remoteRaw, passphrase).toString("utf8"), envLocalBody);
+
+    // Second home via `factory vault pull`
+    const appDir2 = join(parent, "machine-2", "patigame");
+    mkdirSync(dirname(appDir2), { recursive: true });
+    runGit(["clone", "-q", appDir1, appDir2]);
+    const resolved2 = resolveProject(appDir2);
+    assert.ok(resolved2.ok);
+
+    const home2 = makeTempDir();
+    disposeDir(t, home2);
+    saveVaultConfig(home2, { repo: bare, nodeId: "cli-node-2" });
+    writeProjectRegistration(join(home2, "plugin-state", "paseo-factory"), resolved2.slug, { root: appDir2 });
+
+    const pullRes = await runFactory(["--home", home2, "vault", "pull"], envVars);
+    assert.equal(pullRes.status, 0, pullRes.stderr);
+    const pullJson = JSON.parse(pullRes.stdout);
+    assert.equal(pullJson.ok, true);
+    assert.ok(pullJson.hydratedFiles.includes("secrets/apps/patigame/.env.local"));
+    assert.equal(readFileSync(join(appDir2, ".env.local"), "utf8"), envLocalBody);
+    assert.equal(statSync(join(appDir2, ".env.local")).mode & 0o777, 0o600);
+    assert.equal(runGit(["status", "--porcelain"], appDir2), "");
+
+    // Third home via `factory vault hydrate` (tarball shim from sealed remote)
+    const appDir3 = join(parent, "machine-3", "patigame");
+    mkdirSync(dirname(appDir3), { recursive: true });
+    runGit(["clone", "-q", appDir1, appDir3]);
+    const resolved3 = resolveProject(appDir3);
+    assert.ok(resolved3.ok);
+
+    const home3 = makeTempDir();
+    disposeDir(t, home3);
+    saveVaultConfig(home3, { repo: "owner/factory-vault", nodeId: "cli-node-3" });
+    writeProjectRegistration(join(home3, "plugin-state", "paseo-factory"), resolved3.slug, { root: appDir3 });
+
+    const top = "owner-factory-vault-abc1234";
+    const manifestRaw = readFileSync(join(probe, "vault.manifest.json"));
+    const tarball = buildTarball([
+      { path: `${top}/vault.manifest.json`, data: manifestRaw },
+      { path: `${top}/secrets/apps/patigame/.env.local`, data: remoteRaw },
+    ], top);
+    const { binDir } = makeGhShim(t, tarball);
+    const hydrateRes = await runFactory(
+      ["--home", home3, "vault", "hydrate"],
+      { ...envVars, PATH: `${binDir}:${process.env.PATH ?? ""}` },
+    );
+    assert.equal(hydrateRes.status, 0, hydrateRes.stderr);
+    const hydrateJson = JSON.parse(hydrateRes.stdout);
+    assert.equal(hydrateJson.ok, true);
+    assert.equal(hydrateJson.mode, "direct");
+    assert.ok(hydrateJson.hydratedFiles.includes("secrets/apps/patigame/.env.local"));
+    assert.equal(readFileSync(join(appDir3, ".env.local"), "utf8"), envLocalBody);
+    assert.equal(statSync(join(appDir3, ".env.local")).mode & 0o777, 0o600);
+    assert.equal(runGit(["status", "--porcelain"], appDir3), "");
+  }
+});
+
+test("factory vault import --app <bad> --env-local rejects multi-segment, traversal, backslash, and blank/whitespace appKeys (exit 2, empty stdout, runtime/remote untouched)", async (t) => {
+  const srcDir = makeTempDir();
+  disposeDir(t, srcDir);
+  const envLocalSrc = join(srcDir, ".env.local");
+  writeFileSync(envLocalSrc, "TOP_SECRET_TOKEN=leaked_in_plaintext\n");
+
+  for (const badAppKey of ["org/patigame", "../escape", "foo\\bar", ".", "..", "", "   "]) {
+    const bare = makeBareRemote(t);
+    seedBareRemote(t, bare, { "README.md": "vault\n" });
+    const initialHead = bareHead(bare);
+
+    const home = makeTempDir();
+    disposeDir(t, home);
+    saveVaultConfig(home, { repo: bare, nodeId: "cli-node" });
+
+    const res = await runFactory([
+      "--home", home, "vault", "import",
+      "--app", badAppKey,
+      "--env-local", envLocalSrc,
+    ]);
+    assert.equal(res.status, 2, `${JSON.stringify(badAppKey)}: expected exit 2, got ${res.status}\nstderr: ${res.stderr}`);
+    assert.equal(res.stdout, "", `${JSON.stringify(badAppKey)}: expected empty stdout`);
+    assert.match(res.stderr, /vault-invalid-path/, `${JSON.stringify(badAppKey)}: expected vault-invalid-path`);
+    assert.equal(existsSync(join(home, "vault-runtime")), false, `${JSON.stringify(badAppKey)}: must not create vault-runtime`);
+    assert.equal(bareHead(bare), initialHead, `${JSON.stringify(badAppKey)}: must not push to remote`);
+  }
+});
+
+test("factory vault keystore-writeback --app <bad> rejects multi-segment, traversal, backslash, and blank/whitespace appKeys (exit 2, empty stdout, runtime/remote untouched)", async (t) => {
+  const workDir = makeTempDir();
+  disposeDir(t, workDir);
+  const ksPath = join(workDir, "release.keystore");
+  writeFileSync(ksPath, randomBytes(256));
+
+  const projectDir = join(workDir, "cli-ks-repo");
+  mkdirSync(projectDir, { recursive: true });
+  writeFileSync(join(projectDir, "README.md"), "cli keystore repo\n");
+  gitCommitAll(projectDir);
+
+  for (const badAppKey of ["org/patigame", "../escape", "foo\\bar", ".", "..", "", "   "]) {
+    const bare = makeBareRemote(t);
+    seedBareRemote(t, bare, { "README.md": "vault\n" });
+    const initialHead = bareHead(bare);
+
+    const home = makeTempDir();
+    disposeDir(t, home);
+    saveVaultConfig(home, { repo: bare, nodeId: "cli-node" });
+
+    const res = await runFactory([
+      "--home", home, "vault", "keystore-writeback",
+      "--project", projectDir,
+      "--keystore", ksPath,
+      "--app", badAppKey,
+    ]);
+    assert.equal(res.status, 2, `${JSON.stringify(badAppKey)}: expected exit 2, got ${res.status}\nstderr: ${res.stderr}`);
+    assert.equal(res.stdout, "", `${JSON.stringify(badAppKey)}: expected empty stdout`);
+    assert.match(res.stderr, /vault-invalid-path/, `${JSON.stringify(badAppKey)}: expected vault-invalid-path`);
+    assert.equal(existsSync(join(home, "vault-runtime")), false, `${JSON.stringify(badAppKey)}: must not create vault-runtime`);
+    assert.equal(bareHead(bare), initialHead, `${JSON.stringify(badAppKey)}: must not push to remote`);
+  }
+});
+
+test("factory vault hydrate rejects incompatible --runtime-only / --project / --app combinations with exit 2 and empty stdout without invoking gh", async (t) => {
+  const home = makeTempDir();
+  disposeDir(t, home);
+  saveVaultConfig(home, { repo: "owner/factory-vault", nodeId: "cli-node" });
+
+  const workDir = makeTempDir();
+  disposeDir(t, workDir);
+  const gitDir = join(workDir, "valid-repo");
+  mkdirSync(gitDir, { recursive: true });
+  writeFileSync(join(gitDir, "README.md"), "repo\n");
+  gitCommitAll(gitDir);
+
+  const nonGitDir = makeTempDir();
+  disposeDir(t, nonGitDir);
+
+  const tar = buildTarball([{ path: "owner-factory-vault-abc1234/config/lanes.json", data: "{}\n" }]);
+  const { binDir, argvPath } = makeGhShim(t, tar);
+  const env = { PATH: `${binDir}:${process.env.PATH ?? ""}` };
+
+  const cases: Array<[string[], RegExp]> = [
+    [["--home", home, "vault", "hydrate", "--runtime-only", "--merge-ledgers"], /--runtime-only.*--merge-ledgers/],
+    [["--home", home, "vault", "hydrate", "--runtime-only", "--overwrite-configs"], /--runtime-only.*--overwrite-configs/],
+    [["--home", home, "vault", "hydrate", "--app", "patigame"], /--app.*requires --project/],
+    [["--home", home, "vault", "hydrate", "--project", ""], /--project.*must not be empty/],
+    [["--home", home, "vault", "hydrate", "--project", "   "], /--project.*must not be empty/],
+    [["--home", home, "vault", "hydrate", "--project", gitDir, "--app", ""], /vault-invalid-path/],
+    [["--home", home, "vault", "hydrate", "--project", gitDir, "--app", "   "], /vault-invalid-path/],
+    [["--home", home, "vault", "hydrate", "--project", nonGitDir], /vault-project-not-git/],
+    [["--home", home, "vault", "hydrate", "--project", gitDir, "--app", "../escape"], /vault-invalid-path/],
+    [["--home", home, "vault", "hydrate", "--project", gitDir, "--app", "org/patigame"], /vault-invalid-path/],
+    [["--home", home, "vault", "hydrate", "--project", gitDir, "--app", "foo\\bar"], /vault-invalid-path/],
+  ];
+
+  for (const [args, expected] of cases) {
+    const res = await runFactory(args, env);
+    assert.equal(res.status, 2, `${args.join(" ")}: expected exit 2, got ${res.status}\nstderr: ${res.stderr}`);
+    assert.equal(res.stdout, "", `${args.join(" ")}: expected empty stdout`);
+    assert.match(res.stderr, expected, args.join(" "));
+  }
+  assert.equal(existsSync(argvPath), false, "gh shim must not be invoked on invalid hydrate options");
+});
+
+test("factory vault hydrate --runtime-only --project [--app] succeeds under live LedgerAdmission lock, isolates unrelated clones, and emits structured JSON", async (t) => {
+  const home = makeTempDir();
+  disposeDir(t, home);
+  saveVaultConfig(home, { repo: "owner/factory-vault", nodeId: "runner-mac" });
+  const stateDir = join(home, "plugin-state", "paseo-factory");
+  const configPath = join(stateDir, "vault-config.json");
+  const configBefore = readFileSync(configPath);
+
+  const workDir = makeTempDir();
+  disposeDir(t, workDir);
+  const regClone = join(workDir, "registered", "patigame");
+  mkdirSync(regClone, { recursive: true });
+  writeFileSync(join(regClone, "README.md"), "registered\n");
+  gitCommitAll(regClone);
+  const regResolved = resolveProject(regClone);
+  assert.ok(regResolved.ok);
+  writeProjectRegistration(stateDir, regResolved.slug, { root: regClone });
+
+  const runnerDir = join(workDir, "ci-runner", "workspace");
+  mkdirSync(runnerDir, { recursive: true });
+  writeFileSync(join(runnerDir, "README.md"), "runner\n");
+  gitCommitAll(runnerDir);
+  runGit(["remote", "add", "origin", "https://github.com/daymanondev/patigame.git"], runnerDir);
+
+  const customDir = join(workDir, "ci-runner", "explicit-target");
+  mkdirSync(customDir, { recursive: true });
+  writeFileSync(join(customDir, "README.md"), "custom\n");
+  gitCommitAll(customDir);
+
+  const { createFactory } = await import("../plugin/server/core/factory.ts");
+  const factory = createFactory({ stateDir, writerId: "local" });
+  t.after(() => factory.history.stop());
+  factory.history.start();
+  const ownerPath = join(stateDir, "ledger-owner.json");
+  const ownerBefore = readFileSync(ownerPath, "utf8");
+
+  const top = "owner-factory-vault-abc1234";
+  const ksBytes = randomBytes(256);
+  const tarball = buildTarball([
+    {
+      path: `${top}/vault.manifest.json`,
+      data: JSON.stringify({ patigame: { repoBasename: "patigame", gitRemote: "git@github.com:daymanondev/patigame.git" } }),
+    },
+    { path: `${top}/secrets/shared/asc-credentials.json`, data: '{"keyId":"K_CLI","issuerId":"I_CLI","teamId":"T_CLI"}\n' },
+    { path: `${top}/secrets/apps/patigame/.env.local`, data: "CLI_ENV=runner\n" },
+    { path: `${top}/secrets/apps/patigame/release.keystore`, data: ksBytes },
+    { path: `${top}/secrets/apps/patigame/signing.json`, data: JSON.stringify({ storePassword: "pw", keyAlias: "upload" }) },
+    { path: `${top}/secrets/apps/patigame/google-services.json`, data: '{"project_info":{"project_id":"p1"}}\n' },
+    { path: `${top}/secrets/apps/patigame/GoogleService-Info.plist`, data: "<plist/>\n" },
+    { path: `${top}/config/lanes.json`, data: '{"worker":"pi"}\n' },
+  ], top);
+  const { binDir } = makeGhShim(t, tarball);
+  const env = { PATH: `${binDir}:${process.env.PATH ?? ""}` };
+
+  // Standard `vault hydrate` (without --runtime-only) still fails closed with vault-owner-required
+  const standardRes = await runFactory(["--home", home, "vault", "hydrate"], env);
+  assert.equal(standardRes.status, 2);
+  assert.equal(standardRes.stdout, "");
+  assert.match(standardRes.stderr, /vault-owner-required/);
+
+  // `--runtime-only` without `--project` succeeds under live lock and emits empty materializedProjectFiles
+  const noProjectRes = await runFactory(["--home", home, "vault", "hydrate", "--runtime-only"], env);
+  assert.equal(noProjectRes.status, 0, noProjectRes.stderr);
+  const noProjectPayload = JSON.parse(noProjectRes.stdout);
+  assert.equal(noProjectPayload.ok, true);
+  assert.equal(noProjectPayload.mode, "direct");
+  assert.deepEqual(noProjectPayload.materializedProjectFiles, []);
+  assert.equal(existsSync(join(regClone, ".env.local")), false);
+
+  // `--runtime-only --project <runnerDir>` succeeds under live lock
+  const runtimeRes = await runFactory(
+    ["--home", home, "vault", "hydrate", "--runtime-only", "--project", runnerDir],
+    env,
+  );
+  assert.equal(runtimeRes.status, 0, runtimeRes.stderr);
+  const payload = JSON.parse(runtimeRes.stdout);
+  assert.equal(payload.ok, true);
+  assert.equal(payload.mode, "direct");
+  assert.equal(payload.repo, "owner/factory-vault");
+  assert.equal(payload.ref, "main");
+  assert.ok(payload.hydratedFiles.includes("secrets/apps/patigame/.env.local"));
+  assert.deepEqual(payload.materializedProjectFiles, [
+    "android/app/release.keystore",
+    "android/keystore.properties",
+    "android/app/google-services.json",
+    "ios/GoogleService-Info.plist",
+    ".env.local",
+  ]);
+  assert.deepEqual(payload.vault, readVaultStatus(home));
+
+  for (const rel of payload.materializedProjectFiles) {
+    assert.equal(statSync(join(runnerDir, rel)).mode & 0o777, 0o600);
+  }
+  assert.equal(readFileSync(join(runnerDir, ".env.local"), "utf8"), "CLI_ENV=runner\n");
+  assert.equal(runGit(["status", "--porcelain"], runnerDir), "");
+  assert.equal(statSync(join(home, "vault-runtime", "env.json")).mode & 0o777, 0o600);
+  assert.equal(JSON.parse(readFileSync(join(home, "vault-runtime", "env.json"), "utf8")).ASC_KEY_ID, "K_CLI");
+
+  // Unrelated registered clone, vault-config.json, lanes.json, and ledger-owner.json stay untouched
+  assert.equal(existsSync(join(regClone, ".env.local")), false);
+  assert.equal(existsSync(join(regClone, "android")), false);
+  assert.deepEqual(readFileSync(configPath), configBefore);
+  assert.equal(existsSync(join(stateDir, "lanes.json")), false);
+  assert.equal(readFileSync(ownerPath, "utf8"), ownerBefore);
+
+  // Explicit `--app patigame` materializes unmatched customDir cleanly
+  const explicitRes = await runFactory(
+    ["--home", home, "vault", "hydrate", "--runtime-only", "--project", customDir, "--app", "patigame"],
+    env,
+  );
+  assert.equal(explicitRes.status, 0, explicitRes.stderr);
+  const explicitPayload = JSON.parse(explicitRes.stdout);
+  assert.deepEqual(explicitPayload.materializedProjectFiles, payload.materializedProjectFiles);
+  assert.equal(readFileSync(join(customDir, ".env.local"), "utf8"), "CLI_ENV=runner\n");
+  assert.equal(statSync(join(customDir, ".env.local")).mode & 0o777, 0o600);
+  assert.equal(runGit(["status", "--porcelain"], customDir), "");
+});
+
+test("CLI vault import, keystore-writeback, hydrate, and store-note reject prototype keys (constructor, __proto__, prototype) with exit 2 and empty stdout", async (t) => {
+  const workDir = makeTempDir();
+  disposeDir(t, workDir);
+  const envLocalSrc = join(workDir, ".env.local");
+  writeFileSync(envLocalSrc, "SECRET=proto-cli-guard\n");
+  const ksPath = join(workDir, "release.keystore");
+  writeFileSync(ksPath, randomBytes(128));
+  const noteSrc = join(workDir, "note.md");
+  writeFileSync(noteSrc, "# App Note\n");
+
+  const projectDir = join(workDir, "proto-cli-repo");
+  mkdirSync(projectDir, { recursive: true });
+  writeFileSync(join(projectDir, "README.md"), "repo\n");
+  gitCommitAll(projectDir);
+
+  const tar = buildTarball([{ path: "owner-factory-vault-abc1234/config/lanes.json", data: "{}\n" }]);
+  const { binDir, argvPath } = makeGhShim(t, tar);
+  const ghEnv = { PATH: `${binDir}:${process.env.PATH ?? ""}` };
+
+  for (const protoKey of ["constructor", "__proto__", "prototype"]) {
+    const bare = makeBareRemote(t);
+    seedBareRemote(t, bare, { "README.md": "vault\n" });
+    const initialHead = bareHead(bare);
+
+    const home = makeTempDir();
+    disposeDir(t, home);
+    saveVaultConfig(home, { repo: bare, nodeId: "cli-node" });
+
+    const importRes = await runFactory(["--home", home, "vault", "import", "--app", protoKey, "--env-local", envLocalSrc]);
+    assert.equal(importRes.status, 2, `import --app ${protoKey}: expected exit 2`);
+    assert.equal(importRes.stdout, "");
+    assert.match(importRes.stderr, /vault-invalid-path/);
+    assert.equal(existsSync(join(home, "vault-runtime")), false);
+    assert.equal(bareHead(bare), initialHead);
+
+    const wbRes = await runFactory([
+      "--home", home, "vault", "keystore-writeback",
+      "--project", projectDir,
+      "--keystore", ksPath,
+      "--app", protoKey,
+    ]);
+    assert.equal(wbRes.status, 2, `keystore-writeback --app ${protoKey}: expected exit 2`);
+    assert.equal(wbRes.stdout, "");
+    assert.match(wbRes.stderr, /vault-invalid-path/);
+    assert.equal(existsSync(join(home, "vault-runtime")), false);
+    assert.equal(bareHead(bare), initialHead);
+
+    const hydrateRes = await runFactory(
+      ["--home", home, "vault", "hydrate", "--runtime-only", "--project", projectDir, "--app", protoKey],
+      ghEnv,
+    );
+    assert.equal(hydrateRes.status, 2, `hydrate --app ${protoKey}: expected exit 2`);
+    assert.equal(hydrateRes.stdout, "");
+    assert.match(hydrateRes.stderr, /vault-invalid-path/);
+
+    const noteRes = await runFactory(["--home", home, "vault", "store-note", "--app", protoKey, "--file", noteSrc, "--no-sync"]);
+    assert.equal(noteRes.status, 2, `store-note --app ${protoKey}: expected exit 2`);
+    assert.equal(noteRes.stdout, "");
+    assert.match(noteRes.stderr, /vault-invalid-path/);
+  }
+  assert.equal(existsSync(argvPath), false, "gh shim must not be invoked for unsafe prototype appKeys");
 });

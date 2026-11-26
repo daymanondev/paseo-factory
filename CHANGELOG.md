@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-11-26
+
+**Pull-only `Private vault` runner hydration (`--runtime-only --project <dir> [--app <key>]`) and per-app sealed `.env.local` support (ADR 0072).**
+
+### Added
+
+- **Per-app sealed `.env.local` in `Private vault` (`src/vault-materialization.ts`, `src/vault-secrets.ts`, `plugin/bin/factory.mjs`):** Added `.env.local` to `APP_FILE_TARGETS` (materialized at `0o600` under `secrets/apps/<canonicalAppKey>/.env.local` and registered in `<gitCommonDir>/info/exclude` plus `<projectRoot>/.worktreeinclude`), extended `importVaultSecrets()` and `factory vault import --env-local <path>`, and enforced single-segment `assertSafeVaultAppKey`.
+- **Daemon-lock-safe `--runtime-only` & `--project` hydration (`src/vault.ts`, `plugin/bin/factory.mjs`, `plugin/bin/vault.mjs`):** Added `--runtime-only`, `--project <dir>`, and `--app <key>` flags to `factory vault hydrate` (`hydrateVaultDirect`) with atomic `vault-runtime/` writes and `inspectProjectRootFacts` git validation, bypassing `LedgerAdmission` locks and `plugin-state/paseo-factory/` writes so pull-only CI runners (including alongside Paseo Relay) hydrate secrets cleanly into unregistered `$GITHUB_WORKSPACE` checkouts.
+
+### Documentation
+
+- **ADR 0072 & `CONTEXT.md`:** Added `docs/adr/0072-vault-remote-runner-hydration-and-env-local.md` (amending ADR 0014) and updated `Private vault` in `CONTEXT.md` (`test/vault.test.ts`, `test/vault-cli.test.ts`).
+
 ## [0.25.0] - 2026-11-25
 
 **Capability-gated Store Release role contracts, dynamic `Role-scoped MCP bridge` exposure with `listChanged`, safe `storeReleaseWrite` live mode-flip refresh, compaction-safe Pi reminders, and `Release lab` `failure.hint` relay (ADR 0071).**

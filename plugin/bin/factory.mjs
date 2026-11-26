@@ -391,15 +391,16 @@ commands:
                                  Project secrets and machine configs, reconcile
                                  multi-node ledgers, then collect local state
                                  and push any changes + ledger snapshots back
-             vault import [--asc-key <path>] [--asc-key-id <id>] [--asc-issuer <id>] [--team-id <id>] [--gplay-key <path>] [--eye-config <path>] [--store-defaults <path>] [--app <key>] [--keystore <path>] [--store-pass <pass>] [--key-alias <alias>] [--no-sync]
+             vault import [--asc-key <path>] [--asc-key-id <id>] [--asc-issuer <id>] [--team-id <id>] [--gplay-key <path>] [--eye-config <path>] [--store-defaults <path>] [--app <key>] [--keystore <path>] [--store-pass <pass>] [--key-alias <alias>] [--env-local <path>] [--no-sync]
                                  stage shared credentials (ASC .p8 + Key ID /
                                  Issuer ID, Google Play service account JSON,
-                                 eye.json) and/or per-app signing (Android
-                                 release.keystore + signing.json) into
-                                 <paseoHome>/vault-runtime, rebuild env.json,
-                                 materialize into registered Projects, and run
-                                 a full vault sync unless --no-sync is set
-             vault hydrate [--repo <owner/repo>] [--ref <ref>] [--merge-ledgers] [--overwrite-configs]
+                                 eye.json) and/or per-app signing & env (Android
+                                 release.keystore + signing.json, .env.local)
+                                 into <paseoHome>/vault-runtime, rebuild
+                                 env.json, materialize into registered Projects,
+                                 and run a full vault sync unless --no-sync is
+                                 set
+             vault hydrate [--repo <owner/repo>] [--ref <ref>] [--merge-ledgers] [--overwrite-configs] [--runtime-only] [--project <dir>] [--app <key>]
                                  Direct hydrate (zero-clone): stream the repo
                                  tarball through the machine's gh api
                                  session, unseal envelopes in memory, write
@@ -408,13 +409,18 @@ commands:
                                  and materialize per-Project secrets and
                                  machine configs (--overwrite-configs replaces
                                  existing lanes.json / profiles.json files;
-                                 --merge-ledgers reconciles multi-node ledgers)
+                                 --merge-ledgers reconciles multi-node ledgers;
+                                 --runtime-only updates vault-runtime/ and
+                                 env.json atomically without touching daemon
+                                 locks or plugin-state/; --project <dir>
+                                 materializes only that git checkout, with
+                                 optional --app <key> canonical override)
                                  — no .git checkout is left behind. --repo
                                  defaults to the saved config's repo (and on
                                  a home with no saved config it is persisted
-                                 as the config of record), --ref to the
-                                 configured branch (main); a locked
-                                 (aes-256-gcm) envelope unseals through
+                                 as the config of record, unless --runtime-only
+                                 is set), --ref to the configured branch (main);
+                                 a locked (aes-256-gcm) envelope unseals through
                                  FACTORY_VAULT_PASSPHRASE or the saved config
              vault pull [--merge-ledgers] [--overwrite-configs]
                                  Vault pull: clone (or git pull --rebase
@@ -1819,6 +1825,7 @@ if (command === "vault") {
     "include-ledger": { type: "boolean" },
     "merge-ledgers": { type: "boolean" },
     "overwrite-configs": { type: "boolean" },
+    "runtime-only": { type: "boolean" },
     "asc-key": { type: "string" },
     "asc-key-id": { type: "string" },
     "asc-issuer": { type: "string" },
@@ -1835,6 +1842,7 @@ if (command === "vault") {
     "firebase-project-id": { type: "string" },
     "google-services-json": { type: "string" },
     "google-service-info-plist": { type: "string" },
+    "env-local": { type: "string" },
     "store-defaults": { type: "string" },
     file: { type: "string" },
     "no-sync": { type: "boolean" },
@@ -1861,14 +1869,51 @@ if (command === "vault") {
 
     if (sub === "hydrate") {
       if (parsed.positionals.length > 1) fail(`vault hydrate: unexpected positional "${parsed.positionals[1]}"`);
-      refuseOptions("hydrate", ["repo", "ref", "merge-ledgers", "overwrite-configs"]);
+      refuseOptions("hydrate", ["repo", "ref", "merge-ledgers", "overwrite-configs", "runtime-only", "project", "app"]);
+      const runtimeOnly = values["runtime-only"] === true;
+      const mergeLedgers = values["merge-ledgers"] === true;
+      const overwriteConfigs = values["overwrite-configs"] === true;
+      const hasProject = values.project !== undefined;
+      const projectRaw = typeof values.project === "string" ? values.project.trim() : "";
+      const hasApp = values.app !== undefined;
+      const appRaw = typeof values.app === "string" ? values.app.trim() : "";
+
+      if (runtimeOnly && mergeLedgers) {
+        fail("vault hydrate: --runtime-only cannot be combined with --merge-ledgers");
+      }
+      if (runtimeOnly && overwriteConfigs) {
+        fail("vault hydrate: --runtime-only cannot be combined with --overwrite-configs");
+      }
+      if (hasProject && projectRaw === "") {
+        fail("vault hydrate: --project <dir> must not be empty");
+      }
+      if (hasApp && !hasProject) {
+        fail("vault hydrate: --app <key> requires --project <dir>");
+      }
+      if (hasApp && appRaw === "") {
+        fail("vault hydrate: vault-invalid-path: --app <key> must not be empty");
+      }
+
       const result = await vault.hydrateVaultDirect(home, {
         ...(typeof values.repo === "string" && values.repo.trim() !== "" ? { repo: values.repo.trim() } : {}),
         ...(typeof values.ref === "string" && values.ref.trim() !== "" ? { ref: values.ref.trim() } : {}),
-        ...(values["merge-ledgers"] ? { mergeLedgers: true } : {}),
-        ...(values["overwrite-configs"] ? { overwriteConfigs: true } : {}),
+        ...(mergeLedgers ? { mergeLedgers: true } : {}),
+        ...(overwriteConfigs ? { overwriteConfigs: true } : {}),
+        ...(runtimeOnly ? { runtimeOnly: true } : {}),
+        ...(hasProject ? { projectDir: resolvePath(projectRaw) } : {}),
+        ...(hasApp ? { appKey: appRaw } : {}),
       });
-      await writeJsonAndExit({ ok: true, mode: "direct", repo: result.repo, ref: result.ref, hydratedFiles: result.hydratedFiles, historyImports: result.historyImports, materialization: result.materialization, vault: vault.readVaultStatus(home) });
+      await writeJsonAndExit({
+        ok: true,
+        mode: "direct",
+        repo: result.repo,
+        ref: result.ref,
+        hydratedFiles: result.hydratedFiles,
+        materializedProjectFiles: result.materializedProjectFiles ?? [],
+        ...(result.historyImports === undefined ? {} : { historyImports: result.historyImports }),
+        ...(result.materialization === undefined ? {} : { materialization: result.materialization }),
+        vault: vault.readVaultStatus(home),
+      });
     }
 
     if (sub === "pull") {
@@ -1916,6 +1961,7 @@ if (command === "vault") {
         "firebase-project-id",
         "google-services-json",
         "google-service-info-plist",
+        "env-local",
         "store-defaults",
         "no-sync",
       ]);
@@ -1926,7 +1972,7 @@ if (command === "vault") {
         ...(typeof values["team-id"] === "string" && values["team-id"].trim() !== "" ? { teamId: values["team-id"].trim() } : {}),
         ...(typeof values["gplay-key"] === "string" && values["gplay-key"].trim() !== "" ? { gplayKeyPath: resolvePath(values["gplay-key"].trim()) } : {}),
         ...(typeof values["eye-config"] === "string" && values["eye-config"].trim() !== "" ? { eyeConfigPath: resolvePath(values["eye-config"].trim()) } : {}),
-        ...(typeof values.app === "string" && values.app.trim() !== "" ? { appKey: values.app.trim() } : {}),
+        ...(typeof values.app === "string" ? { appKey: values.app.trim() !== "" ? values.app.trim() : values.app } : {}),
         ...(typeof values.keystore === "string" && values.keystore.trim() !== "" ? { keystorePath: resolvePath(values.keystore.trim()) } : {}),
         ...(typeof values["store-pass"] === "string" && values["store-pass"] !== "" ? { storePass: values["store-pass"] } : {}),
         ...(typeof values["key-alias"] === "string" && values["key-alias"].trim() !== "" ? { keyAlias: values["key-alias"].trim() } : {}),
@@ -1941,6 +1987,9 @@ if (command === "vault") {
           : {}),
         ...(typeof values["store-defaults"] === "string" && values["store-defaults"].trim() !== ""
           ? { storeDefaultsPath: resolvePath(values["store-defaults"].trim()) }
+          : {}),
+        ...(typeof values["env-local"] === "string" && values["env-local"].trim() !== ""
+          ? { envLocalPath: resolvePath(values["env-local"].trim()) }
           : {}),
         ...(values["no-sync"] ? { syncAfterImport: false } : {}),
       });
@@ -1991,7 +2040,7 @@ if (command === "vault") {
         ...(typeof values["keystore-properties"] === "string" && values["keystore-properties"].trim() !== ""
           ? { keystorePropertiesPath: resolvePath(values["keystore-properties"].trim()) }
           : {}),
-        ...(typeof values.app === "string" && values.app.trim() !== "" ? { appKey: values.app.trim() } : {}),
+        ...(typeof values.app === "string" ? { appKey: values.app.trim() !== "" ? values.app.trim() : values.app } : {}),
         ...(typeof values["store-pass"] === "string" && values["store-pass"] !== "" ? { storePass: values["store-pass"] } : {}),
         ...(typeof values["key-pass"] === "string" && values["key-pass"] !== "" ? { keyPass: values["key-pass"] } : {}),
         ...(typeof values["key-alias"] === "string" && values["key-alias"].trim() !== "" ? { keyAlias: values["key-alias"].trim() } : {}),

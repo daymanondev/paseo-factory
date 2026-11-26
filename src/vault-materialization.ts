@@ -12,9 +12,26 @@ import type { VaultRuntimeEnv, VaultStoreDefaults } from "./vault-config.ts";
 import { unsealVaultBuffer, resolveVaultPassphrase } from "./vault-envelope.ts";
 import { expandImportPath } from "./vault-secrets.ts";
 import { buildVaultPath } from "./vault-transport.ts";
+import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { readFileSync, mkdirSync, chmodSync, writeFileSync, readdirSync, existsSync, copyFileSync, statSync } from "node:fs";
+import { readFileSync, mkdirSync, chmodSync, writeFileSync, readdirSync, existsSync, copyFileSync, statSync, renameSync, rmSync } from "node:fs";
 import { join, basename, isAbsolute, resolve as resolvePath, dirname } from "node:path";
+
+function writeAtomicRuntimeFile(target: string, data: Buffer | string, mode: number): void {
+  const temp = `${target}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(temp, data, { mode });
+    chmodSync(temp, mode);
+    renameSync(temp, target);
+  } catch (err) {
+    try {
+      rmSync(temp, { force: true });
+    } catch {
+      // best-effort temp cleanup
+    }
+    throw err;
+  }
+}
 
 /** Hydrates `<paseoHome>/vault-runtime/` from a vault tree on disk (the sync-mode checkout). */
 export function hydrateRuntimeFromTree(paseoHome: string, treeRoot: string, passphrase: string | undefined): string[] {
@@ -43,11 +60,13 @@ export function writeRuntimeFile(paseoHome: string, vaultPath: string, data: Buf
     if (insidePrivate) chmodSync(acc, 0o700);
   }
   const target = join(runtimeRoot, vaultPath);
-  // Existing read-only files (0o400) under store-memory/ must become owner-writable before overwriting.
-  if (existsSync(target)) chmodSync(target, 0o600);
-  writeFileSync(target, data);
-  const mode = segments[0] === "store-memory" ? 0o400 : segments[0] === "secrets" || vaultPath === STORE_DEFAULTS_FILE ? 0o600 : 0o644;
-  chmodSync(target, mode);
+  const mode =
+    segments[0] === "store-memory"
+      ? 0o400
+      : segments[0] === "secrets" || vaultPath === STORE_DEFAULTS_FILE || vaultPath === "env.json"
+        ? 0o600
+        : 0o644;
+  writeAtomicRuntimeFile(target, data, mode);
 }
 
 /** A vault path is `/`-separated relative segments, none of them `.`/`..`/empty — archive traversal is refused, not written. */
@@ -59,6 +78,27 @@ export function assertSafeVaultPath(vaultPath: string): void {
   if (segments.some((segment) => segment === "" || segment === "." || segment === "..")) {
     throw new FactoryError("vault-invalid-path", `refusing unsafe vault path "${vaultPath}"`);
   }
+}
+
+const UNSAFE_VAULT_APP_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+
+export function assertSafeVaultAppKey(appKey: string): void {
+  const trimmed = appKey.trim();
+  if (
+    trimmed === "" ||
+    appKey === "." ||
+    appKey === ".." ||
+    trimmed === "." ||
+    trimmed === ".." ||
+    appKey.includes("/") ||
+    appKey.includes("\\") ||
+    appKey.includes("\0") ||
+    UNSAFE_VAULT_APP_KEYS.has(appKey) ||
+    UNSAFE_VAULT_APP_KEYS.has(trimmed)
+  ) {
+    throw new FactoryError("vault-invalid-path", `refusing unsafe vault app key "${appKey}"`);
+  }
+  assertSafeVaultPath(`secrets/apps/${appKey}`);
 }
 
 /** Every file under `root` as `/`-separated relative paths (sorted), skipping any `.git` directory and `skip` matches. */
@@ -124,12 +164,15 @@ export function parseVaultManifest(raw: string): VaultManifest {
   }
   const manifest: VaultManifest = {};
   for (const [key, value] of Object.entries(parsed)) {
+    if (UNSAFE_VAULT_APP_KEYS.has(key) || UNSAFE_VAULT_APP_KEYS.has(key.trim())) {
+      throw new FactoryError("corrupted-vault-manifest", `vault.manifest.json entry "${key}" uses a reserved prototype key`);
+    }
     if (typeof value !== "object" || value === null || Array.isArray(value)) {
       throw new FactoryError("corrupted-vault-manifest", `vault.manifest.json entry "${key}" must be an object`);
     }
     const entry: VaultManifestEntry = {};
     for (const leg of ["repoBasename", "gitRemote", "bundleId", "packageName"] as const) {
-      const field = (value as Record<string, unknown>)[leg];
+      const field = Object.hasOwn(value, leg) ? (value as Record<string, unknown>)[leg] : undefined;
       if (field === undefined) continue;
       if (typeof field !== "string") {
         throw new FactoryError("corrupted-vault-manifest", `vault.manifest.json entry "${key}" field "${leg}" must be a string`);
@@ -188,6 +231,7 @@ export function collectCandidateProjectRoots(paseoHome: string): string[] {
 }
 
 export function inspectProjectRootFacts(root: string): RootFacts | null {
+  if (root.trim() === "") return null;
   const resolved = resolveProject(root);
   if (!resolved.ok) return null;
   const storeManifest = readJsonFile(join(resolved.root, ".store-release", "manifest.json"));
@@ -216,7 +260,8 @@ export function resolveVaultApps(paseoHome: string, manifest: VaultManifest): Re
 
   const out: ResolvedVaultApp[] = [];
   for (const canonicalAppKey of Object.keys(manifest).sort()) {
-    const entry = manifest[canonicalAppKey]!;
+    const entry = Object.hasOwn(manifest, canonicalAppKey) ? manifest[canonicalAppKey] : undefined;
+    if (entry === undefined) continue;
     let matched: RootFacts | null = null;
     for (const root of candidateRoots) {
       const facts = factsOf(root);
@@ -237,7 +282,8 @@ export function resolveVaultApps(paseoHome: string, manifest: VaultManifest): Re
 /** Finds the first canonical app key in `manifest` matching `facts`, or null. */
 export function matchManifestAppKey(manifest: VaultManifest, facts: RootFacts): string | null {
   for (const key of Object.keys(manifest).sort()) {
-    if (entryMatches(manifest[key]!, facts)) return key;
+    const entry = Object.hasOwn(manifest, key) ? manifest[key] : undefined;
+    if (entry !== undefined && entryMatches(entry, facts)) return key;
   }
   return null;
 }
@@ -313,20 +359,20 @@ export function readJsonFile(path: string): Record<string, unknown> | null {
 
 /** A string field of a JSON object, or null. */
 export function jsonStringField(record: Record<string, unknown> | null, field: string): string | null {
-  const value = record?.[field];
+  const value = record !== null && Object.hasOwn(record, field) ? record[field] : undefined;
   return typeof value === "string" && value !== "" ? value : null;
 }
 
 /** An array field of a JSON object as objects, or empty — malformed entries are skipped, never fatal. */
 export function arrayField(record: Record<string, unknown> | null, field: string): Array<Record<string, unknown>> {
-  const value = record?.[field];
+  const value = record !== null && Object.hasOwn(record, field) ? record[field] : undefined;
   if (!Array.isArray(value)) return [];
   return value.filter((entry): entry is Record<string, unknown> => typeof entry === "object" && entry !== null && !Array.isArray(entry));
 }
 
 /** A nested two-key string field (`project_info.project_id`), or null. */
 export function nestedJsonStringField(record: Record<string, unknown> | null, path: readonly [string, string]): string | null {
-  if (record === null) return null;
+  if (record === null || !Object.hasOwn(record, path[0])) return null;
   const inner = record[path[0]];
   if (typeof inner !== "object" || inner === null || Array.isArray(inner)) return null;
   return jsonStringField(inner as Record<string, unknown>, path[1]);
@@ -383,10 +429,12 @@ export const APP_FILE_TARGETS: ReadonlyArray<{ vaultFile: string; projectRel: st
   { vaultFile: "signing.json", projectRel: "android/keystore.properties" },
   { vaultFile: "google-services.json", projectRel: "android/app/google-services.json" },
   { vaultFile: "GoogleService-Info.plist", projectRel: "ios/GoogleService-Info.plist" },
+  { vaultFile: ".env.local", projectRel: ".env.local" },
 ];
 
 /** Materializes one canonical app's per-app files from `vault-runtime` into its resolved local checkout (`0o600`). */
 export function materializeVaultAppFiles(paseoHome: string, canonicalAppKey: string, projectRoot: string): string[] {
+  assertSafeVaultAppKey(canonicalAppKey);
   const appSecrets = join(paseoHome, "vault-runtime", "secrets", "apps", canonicalAppKey);
   const written: string[] = [];
   for (const target of APP_FILE_TARGETS) {
@@ -402,9 +450,35 @@ export function materializeVaultAppFiles(paseoHome: string, canonicalAppKey: str
     }
     const dest = join(projectRoot, target.projectRel);
     mkdirSync(dirname(dest), { recursive: true });
-    writeFileSync(dest, data, { mode: 0o600 });
-    chmodSync(dest, 0o600);
+    writeAtomicRuntimeFile(dest, data, 0o600);
     written.push(target.projectRel);
+  }
+  return written;
+}
+
+/** Materializes only the matched (or explicit) app's per-app files into a single git checkout (`facts.root`) without touching unrelated clones. */
+export function materializeProjectVaultFiles(paseoHome: string, projectDir: string, appKey?: string): string[] {
+  if (projectDir.trim() === "") {
+    throw new FactoryError("vault-project-not-git", `${projectDir} does not resolve to a git checkout`);
+  }
+  const facts = inspectProjectRootFacts(projectDir);
+  if (facts === null) {
+    throw new FactoryError("vault-project-not-git", `${projectDir} does not resolve to a git checkout`);
+  }
+  let canonicalAppKey: string | null = null;
+  if (appKey !== undefined) {
+    const trimmed = appKey.trim();
+    assertSafeVaultAppKey(trimmed === "" ? appKey : trimmed);
+    canonicalAppKey = trimmed;
+  } else {
+    const manifest = readVaultManifestAt(join(paseoHome, "vault-runtime"));
+    canonicalAppKey = matchManifestAppKey(manifest, facts);
+    if (canonicalAppKey === null) return [];
+    assertSafeVaultAppKey(canonicalAppKey);
+  }
+  const written = materializeVaultAppFiles(paseoHome, canonicalAppKey, facts.root);
+  if (written.length > 0) {
+    ensureLocalGitExcludeAndWorktreeInclude(facts.root, written);
   }
   return written;
 }
@@ -695,6 +769,7 @@ export function collectLocalStateIntoRuntime(paseoHome: string, options?: { user
       canonicalAppKey = jsonStringField(storeManifestObj, "appKey") ?? facts.basename;
     }
     if (canonicalAppKey === null) canonicalAppKey = facts.basename;
+    assertSafeVaultAppKey(canonicalAppKey);
 
     if (hasStoreManifest) {
       writeRuntimeFile(paseoHome, `config/apps/${canonicalAppKey}/store-manifest.json`, readFileSync(storeManifestPath));
@@ -702,7 +777,7 @@ export function collectLocalStateIntoRuntime(paseoHome: string, options?: { user
     if (hasProjectLanes) {
       writeRuntimeFile(paseoHome, `config/apps/${canonicalAppKey}/lanes.json`, readFileSync(projectLanes));
     }
-    const priorEntry = manifest[canonicalAppKey] ?? {};
+    const priorEntry = Object.hasOwn(manifest, canonicalAppKey) ? manifest[canonicalAppKey]! : {};
     manifest[canonicalAppKey] = {
       ...priorEntry,
       repoBasename: facts.basename,
@@ -830,25 +905,30 @@ export function materializeConfigsFromRuntime(
 export function applyVaultHydration(
   paseoHome: string,
   overwriteConfigs = false,
-  options?: { userHome?: string },
-): void {
-  const manifest = readVaultManifestAt(join(paseoHome, "vault-runtime"));
-  for (const app of resolveVaultApps(paseoHome, manifest)) {
-    if (app.projectRoot === null) continue; // no local checkout behind this canonical key on this machine
-    const written = materializeVaultAppFiles(paseoHome, app.canonicalAppKey, app.projectRoot);
-    if (written.length > 0) ensureLocalGitExcludeAndWorktreeInclude(app.projectRoot, written);
+  options?: { userHome?: string; projectDir?: string; appKey?: string },
+): string[] {
+  let materializedProjectFiles: string[] = [];
+  if (options?.projectDir !== undefined) {
+    materializedProjectFiles = materializeProjectVaultFiles(paseoHome, options.projectDir, options.appKey);
+  } else {
+    const manifest = readVaultManifestAt(join(paseoHome, "vault-runtime"));
+    for (const app of resolveVaultApps(paseoHome, manifest)) {
+      if (app.projectRoot === null) continue; // no local checkout behind this canonical key on this machine
+      const written = materializeVaultAppFiles(paseoHome, app.canonicalAppKey, app.projectRoot);
+      if (written.length > 0) ensureLocalGitExcludeAndWorktreeInclude(app.projectRoot, written);
+    }
   }
   materializeConfigsFromRuntime(paseoHome, overwriteConfigs, options);
   writeVaultRuntimeEnv(paseoHome);
+  return materializedProjectFiles;
 }
 
 /** Writes the `VaultRuntimeEnv` pointer index at `<paseoHome>/vault-runtime/env.json`, `0o600`. */
 export function writeVaultRuntimeEnv(paseoHome: string): void {
   const runtimeRoot = join(paseoHome, "vault-runtime");
   mkdirSync(runtimeRoot, { recursive: true });
-  const path = join(runtimeRoot, "env.json");
-  writeFileSync(path, `${JSON.stringify(buildVaultRuntimeEnv(paseoHome), null, 2)}\n`, { mode: 0o600 });
-  chmodSync(path, 0o600);
+  const target = join(runtimeRoot, "env.json");
+  writeAtomicRuntimeFile(target, `${JSON.stringify(buildVaultRuntimeEnv(paseoHome), null, 2)}\n`, 0o600);
 }
 
 /**
@@ -998,7 +1078,7 @@ export function storeLessonsPath(paseoHome: string): string {
 
 export function storeAppNotebookPath(paseoHome: string, canonicalAppKey: string): string {
   const key = canonicalAppKey.trim();
-  if (key === "" || key.includes("/") || key.includes("\\")) {
+  if (key === "" || key === "." || key === ".." || key.includes("/") || key.includes("\\") || key.includes("\0") || UNSAFE_VAULT_APP_KEYS.has(key)) {
     throw new FactoryError("vault-invalid-path", `refusing unsafe store notebook app key "${canonicalAppKey}"`);
   }
   const vaultRel = `${STORE_MEMORY_DIR}/apps/${key}.md`;

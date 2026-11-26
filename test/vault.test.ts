@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import type { TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { cpSync, chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { cpSync, chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { gzipSync } from "node:zlib";
 import {
@@ -16,6 +16,8 @@ import {
   hydrateVaultDirect,
   importVaultSecrets,
   loadVaultConfig,
+  materializeProjectVaultFiles,
+  parseEnvelope,
   parseVaultManifest,
   prepareTaskWorktree,
   probeGhAuth,
@@ -48,7 +50,7 @@ import type {
   VaultStatusView,
 } from "../src/index.ts";
 import { disposeDir, factoryErrorCode, gitCommitAll, makeTempDir } from "./helpers.ts";
-import { applyVaultHydration, collectLocalStateIntoRuntime } from "../src/vault-materialization.ts";
+import { applyVaultHydration, collectLocalStateIntoRuntime, matchManifestAppKey, readVaultManifestAt, storeAppNotebookPath, writeRuntimeFile, writeVaultRuntimeEnv } from "../src/vault-materialization.ts";
 import { defaultLanes, projectLanesPath, saveLaneProfile } from "../src/lanes.ts";
 import type { LaneProfilesFile } from "../src/lanes.ts";
 
@@ -2418,4 +2420,669 @@ test("Store notebook (store-memory/lessons.md <= 120 lines + apps/<canonical-app
   // App repo git tree remained untouched throughout
   assert.equal(runGit(["status", "--porcelain"], appRepo), "");
   assert.equal(runGit(["rev-parse", "HEAD"], appRepo), headBefore);
+});
+
+test("importVaultSecrets with envLocalPath seals .env.local on remote (obfuscated & aes-256-gcm), materializes 0o600 with clean git hygiene, and rides prepareTaskWorktree without .env.local.bak", async (t) => {
+  const envLocalBody = "EXPO_PUBLIC_API_URL=https://api.example.invalid\nSECRET_API_TOKEN=sk-test-env-local-98765\n";
+  const srcDir = makeTempDir();
+  disposeDir(t, srcDir);
+  const envLocalPath = join(srcDir, ".env.local");
+  writeFileSync(envLocalPath, envLocalBody);
+
+  // 1. Zero-passphrase (obfuscated) mode
+  const barePlain = makeBareRemote(t);
+  seedBareRemote(t, barePlain, { "README.md": "vault\n" });
+
+  const parent = makeProjectParent(t);
+  const patigame = join(parent, "machine-a", "patigame");
+  mkdirSync(patigame, { recursive: true });
+  writeFileSync(join(patigame, "README.md"), "patigame\n");
+  const head = gitCommitAll(patigame);
+  const resolvedA = resolveProject(patigame);
+  assert.ok(resolvedA.ok);
+
+  const home1 = makeTempDir();
+  disposeDir(t, home1);
+  saveVaultConfig(home1, { repo: barePlain, nodeId: "mac-studio" });
+  writeProjectRegistration(join(home1, "plugin-state", "paseo-factory"), resolvedA.slug, { root: patigame });
+
+  const imported = await withVaultEnv(undefined, () =>
+    importVaultSecrets(home1, { appKey: "patigame", envLocalPath }),
+  );
+  assert.deepEqual(imported.importedFiles, ["secrets/apps/patigame/.env.local"]);
+  assert.equal(imported.synced?.pushed, true);
+
+  const runtimeEnvLocal = join(home1, "vault-runtime", "secrets", "apps", "patigame", ".env.local");
+  assert.equal(readFileSync(runtimeEnvLocal, "utf8"), envLocalBody);
+  assert.equal(modeOf(runtimeEnvLocal), 0o600);
+
+  const projectEnvLocal = join(patigame, ".env.local");
+  assert.equal(readFileSync(projectEnvLocal, "utf8"), envLocalBody);
+  assert.equal(modeOf(projectEnvLocal), 0o600);
+
+  const excludeLines = readFileSync(join(resolvedA.gitCommonDir, "info", "exclude"), "utf8").split("\n");
+  const includeLines = readFileSync(join(patigame, ".worktreeinclude"), "utf8").split("\n");
+  assert.ok(excludeLines.includes(".env.local"));
+  assert.ok(excludeLines.includes(".worktreeinclude"));
+  assert.ok(includeLines.includes(".env.local"));
+  assert.equal(runGit(["status", "--porcelain"], patigame), "");
+  assert.deepEqual(await checkCleanAt(patigame, head), { ok: true });
+
+  // Bare remote holds a sealed obfuscated VaultEnvelope, never raw plaintext
+  const probePlain = makeTempDir();
+  disposeDir(t, probePlain);
+  runGit(["clone", barePlain, probePlain]);
+  const remoteObfRaw = readFileSync(join(probePlain, "secrets", "apps", "patigame", ".env.local"));
+  assert.equal(parseEnvelope(remoteObfRaw)?.mode, "obfuscated");
+  assert.ok(!remoteObfRaw.toString("utf8").includes("sk-test-env-local-98765"), "raw .env.local secret must never hit remote");
+  assert.equal(unsealVaultBuffer(remoteObfRaw).toString("utf8"), envLocalBody);
+
+  // Worktree carries .env.local, and does NOT carry an ignored .env.local.bak sibling
+  writeFileSync(join(patigame, ".env.local.bak"), "BACKUP_SECRET=should-not-copy\n");
+  const excludePath = join(resolvedA.gitCommonDir, "info", "exclude");
+  writeFileSync(excludePath, `${readFileSync(excludePath, "utf8")}.env.local.bak\n`);
+  assert.equal(runGit(["status", "--porcelain"], patigame), "");
+  const worktree = prepareTaskWorktree({
+    stateDir: join(home1, "plugin-state", "paseo-factory"),
+    workspace: patigame,
+    task: "env-local-ride",
+  });
+  assert.ok(worktree.ok, `worktree failed: ${worktree.ok ? "" : worktree.reason}`);
+  assert.equal(readFileSync(join(worktree.path, ".env.local"), "utf8"), envLocalBody);
+  assert.equal(existsSync(join(worktree.path, ".env.local.bak")), false, ".env.local.bak must not match exact .env.local rule");
+  assert.equal(runGit(["status", "--porcelain"], worktree.path), "");
+
+  // 2. Passphrase-backed (aes-256-gcm) mode + pull onto a second machine
+  const bareEnc = makeBareRemote(t);
+  seedBareRemote(t, bareEnc, { "README.md": "vault\n" });
+  const homeEnc1 = makeTempDir();
+  disposeDir(t, homeEnc1);
+  saveVaultConfig(homeEnc1, { repo: bareEnc, nodeId: "mac-studio", passphrase: "correct-horse-battery" });
+  writeProjectRegistration(join(homeEnc1, "plugin-state", "paseo-factory"), resolvedA.slug, { root: patigame });
+
+  const importedEnc = await withVaultEnv(undefined, () =>
+    importVaultSecrets(homeEnc1, { appKey: "patigame", envLocalPath }),
+  );
+  assert.equal(importedEnc.synced?.pushed, true);
+
+  const probeEnc = makeTempDir();
+  disposeDir(t, probeEnc);
+  runGit(["clone", bareEnc, probeEnc]);
+  const remoteEncRaw = readFileSync(join(probeEnc, "secrets", "apps", "patigame", ".env.local"));
+  assert.equal(parseEnvelope(remoteEncRaw)?.mode, "aes-256-gcm");
+  assert.ok(!remoteEncRaw.toString("utf8").includes("sk-test-env-local-98765"));
+  assert.throws(() => unsealVaultBuffer(remoteEncRaw), factoryErrorCode("vault-passphrase-required"));
+  assert.equal(unsealVaultBuffer(remoteEncRaw, "correct-horse-battery").toString("utf8"), envLocalBody);
+
+  const patigameB = join(parent, "machine-b", "patigame");
+  mkdirSync(dirname(patigameB), { recursive: true });
+  runGit(["clone", "-q", patigame, patigameB]);
+  const resolvedB = resolveProject(patigameB);
+  assert.ok(resolvedB.ok);
+
+  const homeEnc2 = makeTempDir();
+  disposeDir(t, homeEnc2);
+  saveVaultConfig(homeEnc2, { repo: bareEnc, nodeId: "runner-mac", passphrase: "correct-horse-battery" });
+  writeProjectRegistration(join(homeEnc2, "plugin-state", "paseo-factory"), resolvedB.slug, { root: patigameB });
+  await withVaultEnv(undefined, () => pullVault(homeEnc2));
+  assert.equal(readFileSync(join(patigameB, ".env.local"), "utf8"), envLocalBody);
+  assert.equal(modeOf(join(patigameB, ".env.local")), 0o600);
+  assert.equal(runGit(["status", "--porcelain"], patigameB), "");
+});
+
+test("pushVault auto-seals runtime secrets/apps/<app>/.env.local idempotently without double-sealing or empty-commit churn", async (t) => {
+  for (const passphrase of [undefined, "vault-pass-env-local"]) {
+    const bare = makeBareRemote(t);
+    seedBareRemote(t, bare, { "README.md": "vault\n" });
+    const home = makeTempDir();
+    disposeDir(t, home);
+    saveVaultConfig(home, { repo: bare, nodeId: "mac-studio", ...(passphrase ? { passphrase } : {}) });
+
+    const runtimeEnvLocal = join(home, "vault-runtime", "secrets", "apps", "patigame", ".env.local");
+    mkdirSync(dirname(runtimeEnvLocal), { recursive: true });
+    const plainV1 = "API_URL=https://v1.example.invalid\nSECRET=s3cr3t-v1\n";
+    writeFileSync(runtimeEnvLocal, plainV1, { mode: 0o600 });
+
+    const firstPush = await withVaultEnv(undefined, () => pushVault(home));
+    assert.equal(firstPush.pushed, true);
+    const headAfterFirst = bareHead(bare);
+
+    const probe = makeTempDir();
+    disposeDir(t, probe);
+    runGit(["clone", bare, probe]);
+    const remoteRaw = readFileSync(join(probe, "secrets", "apps", "patigame", ".env.local"));
+    assert.equal(parseEnvelope(remoteRaw)?.mode, passphrase ? "aes-256-gcm" : "obfuscated");
+    assert.ok(!remoteRaw.toString("utf8").includes("s3cr3t-v1"));
+    assert.equal(unsealVaultBuffer(remoteRaw, passphrase).toString("utf8"), plainV1);
+
+    // No-op pull -> push cycle leaves remote tip unchanged
+    await withVaultEnv(undefined, () => pullVault(home));
+    const noopPush = await withVaultEnv(undefined, () => pushVault(home));
+    assert.equal(noopPush.pushed, false);
+    assert.equal(bareHead(bare), headAfterFirst);
+
+    // Pre-sealed envelope in vault-runtime is never double-sealed
+    const preSealed = Buffer.from(`${JSON.stringify(sealVaultBuffer(Buffer.from(plainV1, "utf8"), passphrase))}\n`, "utf8");
+    writeFileSync(runtimeEnvLocal, preSealed, { mode: 0o600 });
+    const preSealedPush = await withVaultEnv(undefined, () => pushVault(home));
+    assert.equal(preSealedPush.pushed, false);
+    assert.equal(bareHead(bare), headAfterFirst);
+
+    // Updated plaintext re-seals cleanly
+    const plainV2 = "API_URL=https://v2.example.invalid\nSECRET=s3cr3t-v2\n";
+    writeFileSync(runtimeEnvLocal, plainV2, { mode: 0o600 });
+    const secondPush = await withVaultEnv(undefined, () => pushVault(home));
+    assert.equal(secondPush.pushed, true);
+    const probe2 = makeTempDir();
+    disposeDir(t, probe2);
+    runGit(["clone", bare, probe2]);
+    const remoteRaw2 = readFileSync(join(probe2, "secrets", "apps", "patigame", ".env.local"));
+    assert.equal(parseEnvelope(remoteRaw2)?.mode, passphrase ? "aes-256-gcm" : "obfuscated");
+    assert.equal(unsealVaultBuffer(remoteRaw2, passphrase).toString("utf8"), plainV2);
+  }
+});
+
+test("importVaultSecrets and writeBackAndroidKeystore reject multi-segment, traversal, backslash, and blank/whitespace appKeys with vault-invalid-path without writing or pushing", async (t) => {
+  const srcDir = makeTempDir();
+  disposeDir(t, srcDir);
+  const envLocalPath = join(srcDir, ".env.local");
+  writeFileSync(envLocalPath, "TOP_SECRET_TOKEN=must-never-hit-remote\n");
+  const ksPath = join(srcDir, "release.keystore");
+  writeFileSync(ksPath, randomBytes(128));
+
+  const appRepo = join(makeProjectParent(t), "safe-repo");
+  mkdirSync(appRepo, { recursive: true });
+  writeFileSync(join(appRepo, "README.md"), "safe-repo\n");
+  gitCommitAll(appRepo);
+
+  const { writeBackAndroidKeystore } = await import("../src/vault.ts");
+
+  for (const badAppKey of ["org/patigame", "../escape", "foo\\bar", ".", "..", "", "   "]) {
+    const bare = makeBareRemote(t);
+    seedBareRemote(t, bare, { "README.md": "vault\n" });
+    const initialHead = bareHead(bare);
+
+    const home = makeTempDir();
+    disposeDir(t, home);
+    saveVaultConfig(home, { repo: bare, nodeId: "mac-studio" });
+
+    await assert.rejects(
+      () => withVaultEnv(undefined, () => importVaultSecrets(home, { appKey: badAppKey, envLocalPath })),
+      factoryErrorCode("vault-invalid-path"),
+    );
+    assert.equal(existsSync(join(home, "vault-runtime")), false, `importVaultSecrets must not create vault-runtime for ${JSON.stringify(badAppKey)}`);
+    assert.equal(bareHead(bare), initialHead, `importVaultSecrets must not push to remote for ${JSON.stringify(badAppKey)}`);
+
+    await assert.rejects(
+      () =>
+        withVaultEnv(undefined, () =>
+          writeBackAndroidKeystore(home, { projectRoot: appRepo, keystorePath: ksPath, appKey: badAppKey }),
+        ),
+      factoryErrorCode("vault-invalid-path"),
+    );
+    assert.equal(existsSync(join(home, "vault-runtime")), false, `writeBackAndroidKeystore must not create vault-runtime for ${JSON.stringify(badAppKey)}`);
+    assert.equal(bareHead(bare), initialHead, `writeBackAndroidKeystore must not push to remote for ${JSON.stringify(badAppKey)}`);
+  }
+
+  // Also reject unsafe appKey sourced from .store-release/manifest.json when input.appKey is omitted
+  for (const badManifestKey of ["org/patigame", "../escape", "foo\\bar", ".", "..", "   "]) {
+    const badManifestRepo = join(makeProjectParent(t), "manifest-bad-key");
+    mkdirSync(join(badManifestRepo, ".store-release"), { recursive: true });
+    writeFileSync(join(badManifestRepo, "README.md"), "manifest-bad-key\n");
+    writeFileSync(join(badManifestRepo, ".store-release", "manifest.json"), JSON.stringify({ appKey: badManifestKey }));
+    gitCommitAll(badManifestRepo);
+
+    const bare2 = makeBareRemote(t);
+    seedBareRemote(t, bare2, { "README.md": "vault\n" });
+    const initialHead2 = bareHead(bare2);
+    const home2 = makeTempDir();
+    disposeDir(t, home2);
+    saveVaultConfig(home2, { repo: bare2, nodeId: "mac-studio" });
+
+    await assert.rejects(
+      () =>
+        withVaultEnv(undefined, () =>
+          writeBackAndroidKeystore(home2, { projectRoot: badManifestRepo, keystorePath: ksPath }),
+        ),
+      factoryErrorCode("vault-invalid-path"),
+    );
+    assert.equal(existsSync(join(home2, "vault-runtime")), false);
+    assert.equal(bareHead(bare2), initialHead2);
+  }
+});
+
+test("collectLocalStateIntoRuntime and importVaultSecrets({ ascKeyPath }) reject unsafe .store-release/manifest.json appKeys with vault-invalid-path without pushing", async (t) => {
+  const srcDir = makeTempDir();
+  disposeDir(t, srcDir);
+  const ascKeyPath = join(srcDir, "AuthKey_TEST.p8");
+  writeFileSync(ascKeyPath, "-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----\n");
+
+  for (const badManifestKey of ["org/patigame", "../escape", "foo\\bar", ".", "..", "   "]) {
+    const repo = join(makeProjectParent(t), "unsafe-manifest-collect");
+    mkdirSync(join(repo, ".store-release"), { recursive: true });
+    writeFileSync(join(repo, "README.md"), "unsafe manifest\n");
+    writeFileSync(join(repo, ".store-release", "manifest.json"), JSON.stringify({ appKey: badManifestKey }));
+    gitCommitAll(repo);
+    const resolved = resolveProject(repo);
+    assert.ok(resolved.ok);
+
+    // 1. Direct collectLocalStateIntoRuntime must reject before writing config/apps or vault.manifest.json
+    const homeDirect = makeTempDir();
+    disposeDir(t, homeDirect);
+    writeProjectRegistration(join(homeDirect, "plugin-state", "paseo-factory"), resolved.slug, { root: repo });
+    assert.throws(
+      () => collectLocalStateIntoRuntime(homeDirect),
+      factoryErrorCode("vault-invalid-path"),
+    );
+    assert.equal(existsSync(join(homeDirect, "vault-runtime", "config", "apps")), false, `config/apps must not be written for ${JSON.stringify(badManifestKey)}`);
+    assert.equal(existsSync(join(homeDirect, "vault-runtime", "vault.manifest.json")), false, `vault.manifest.json must not be written for ${JSON.stringify(badManifestKey)}`);
+
+    // 2. importVaultSecrets({ ascKeyPath }) (triggers syncVault -> collectLocalStateIntoRuntime) must reject and leave remote untouched
+    const bare = makeBareRemote(t);
+    seedBareRemote(t, bare, { "README.md": "vault\n" });
+    const initialHead = bareHead(bare);
+
+    const homeImport = makeTempDir();
+    disposeDir(t, homeImport);
+    saveVaultConfig(homeImport, { repo: bare, nodeId: "mac-studio" });
+    writeProjectRegistration(join(homeImport, "plugin-state", "paseo-factory"), resolved.slug, { root: repo });
+
+    await assert.rejects(
+      () => withVaultEnv(undefined, () => importVaultSecrets(homeImport, { ascKeyPath })),
+      factoryErrorCode("vault-invalid-path"),
+    );
+    assert.equal(bareHead(bare), initialHead, `importVaultSecrets({ ascKeyPath }) must not push unsafe manifest appKey ${JSON.stringify(badManifestKey)}`);
+  }
+});
+
+function listAllFilesRecursive(root: string): string[] {
+  if (!existsSync(root)) return [];
+  const out: string[] = [];
+  const visit = (dir: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) visit(full);
+      else out.push(full);
+    }
+  };
+  visit(root);
+  return out;
+}
+
+test("writeRuntimeFile and writeVaultRuntimeEnv write atomically with exact modes and zero leftover temp files", (t) => {
+  const home = makeTempDir();
+  disposeDir(t, home);
+
+  writeRuntimeFile(home, "store-memory/lessons.md", Buffer.from("# v1\n", "utf8"));
+  const lessonsPath = join(home, "vault-runtime", "store-memory", "lessons.md");
+  assert.equal(modeOf(lessonsPath), 0o400);
+
+  // Overwrite pre-existing 0o400 file without EACCES
+  writeRuntimeFile(home, "store-memory/lessons.md", Buffer.from("# v2\n", "utf8"));
+  assert.equal(readFileSync(lessonsPath, "utf8"), "# v2\n");
+  assert.equal(modeOf(lessonsPath), 0o400);
+
+  writeRuntimeFile(home, "secrets/shared/asc-credentials.json", Buffer.from('{"keyId":"K1","issuerId":"I1"}\n', "utf8"));
+  assert.equal(modeOf(join(home, "vault-runtime", "secrets", "shared", "asc-credentials.json")), 0o600);
+
+  writeRuntimeFile(home, "store-defaults.json", Buffer.from('{"organizationName":"Synth"}\n', "utf8"));
+  assert.equal(modeOf(join(home, "vault-runtime", "store-defaults.json")), 0o600);
+
+  writeRuntimeFile(home, "config/lanes.json", Buffer.from('{"worker":"pi"}\n', "utf8"));
+  assert.equal(modeOf(join(home, "vault-runtime", "config", "lanes.json")), 0o644);
+
+  writeVaultRuntimeEnv(home);
+  const envPath = join(home, "vault-runtime", "env.json");
+  assert.equal(modeOf(envPath), 0o600);
+  assert.equal(JSON.parse(readFileSync(envPath, "utf8")).ASC_KEY_ID, "K1");
+
+  const leftoverTmp = listAllFilesRecursive(join(home, "vault-runtime")).filter((p) => p.endsWith(".tmp"));
+  assert.deepEqual(leftoverTmp, []);
+});
+
+test("materializeProjectVaultFiles and hydrateVaultDirect({ projectDir, appKey }) isolate target checkout, resolve subdirs/symlinks, and fail closed before runner", async (t) => {
+  const parent = makeProjectParent(t);
+  const regClone = join(parent, "registered", "patigame");
+  mkdirSync(regClone, { recursive: true });
+  writeFileSync(join(regClone, "README.md"), "registered patigame\n");
+  gitCommitAll(regClone);
+  const regResolved = resolveProject(regClone);
+  assert.ok(regResolved.ok);
+
+  // Unregistered runner checkout matching via gitRemote
+  const unregDir = join(parent, "runner-workspace", "work-checkout");
+  mkdirSync(unregDir, { recursive: true });
+  writeFileSync(join(unregDir, "README.md"), "runner checkout\n");
+  gitCommitAll(unregDir);
+  runGit(["remote", "add", "origin", "https://github.com/daymanondev/patigame.git"], unregDir);
+
+  // Unmatched checkout for explicit appKey & unmatched omission test
+  const customDir = join(parent, "custom-workspace", "unrelated-name");
+  mkdirSync(customDir, { recursive: true });
+  writeFileSync(join(customDir, "README.md"), "custom checkout\n");
+  gitCommitAll(customDir);
+
+  const subDir = join(unregDir, "packages", "mobile");
+  mkdirSync(subDir, { recursive: true });
+  const symlinkDir = join(parent, "runner-symlink");
+  symlinkSync(unregDir, symlinkDir);
+
+  const home = makeTempDir();
+  disposeDir(t, home);
+  saveVaultConfig(home, { repo: "owner/factory-vault", nodeId: "runner-mac" });
+  writeProjectRegistration(join(home, "plugin-state", "paseo-factory"), regResolved.slug, { root: regClone });
+
+  const ksBytes = randomBytes(128);
+  const tar = buildTarball([
+    {
+      path: "owner-factory-vault-abc1234/vault.manifest.json",
+      data: JSON.stringify({ patigame: { repoBasename: "patigame", gitRemote: "git@github.com:daymanondev/patigame.git" } }),
+    },
+    { path: "owner-factory-vault-abc1234/secrets/apps/patigame/.env.local", data: "APP_ENV=runner\n" },
+    { path: "owner-factory-vault-abc1234/secrets/apps/patigame/release.keystore", data: ksBytes },
+    { path: "owner-factory-vault-abc1234/secrets/apps/patigame/signing.json", data: JSON.stringify({ storePassword: "pw", keyAlias: "upload" }) },
+    { path: "owner-factory-vault-abc1234/secrets/apps/patigame/google-services.json", data: '{"project_info":{"project_id":"p1"}}\n' },
+    { path: "owner-factory-vault-abc1234/secrets/apps/patigame/GoogleService-Info.plist", data: "<plist/>\n" },
+    { path: "owner-factory-vault-abc1234/config/lanes.json", data: "{}\n" },
+  ]);
+
+  // Non-git, empty projectDir, and unsafe appKey fail BEFORE runner is invoked
+  const nonGitDir = makeTempDir();
+  disposeDir(t, nonGitDir);
+  let runnerCalls = 0;
+  const countingRunner: VaultRunner = async () => {
+    runnerCalls += 1;
+    return tar;
+  };
+  for (const badProject of [nonGitDir, "", "   "]) {
+    await assert.rejects(
+      () => hydrateVaultDirect(home, { projectDir: badProject, runner: countingRunner }),
+      factoryErrorCode("vault-project-not-git"),
+    );
+  }
+  for (const badAppKey of ["../escape", "org/app", "foo\\bar", ".", "..", "", "   "]) {
+    await assert.rejects(
+      () => hydrateVaultDirect(home, { projectDir: customDir, appKey: badAppKey, runner: countingRunner }),
+      factoryErrorCode("vault-invalid-path"),
+    );
+  }
+  assert.equal(runnerCalls, 0, "validation failures must occur before calling runner");
+
+  // Unmatched checkout with omitted appKey returns []
+  const unmatchedRes = await hydrateVaultDirect(home, { projectDir: customDir, runner: countingRunner });
+  assert.deepEqual(unmatchedRes.materializedProjectFiles, []);
+  assert.equal(existsSync(join(customDir, ".env.local")), false);
+
+  // Hydrate via subdirectory -> resolves to canonical unregDir root and leaves regClone untouched
+  const subRes = await hydrateVaultDirect(home, { projectDir: subDir, runner: countingRunner });
+  assert.deepEqual(subRes.materializedProjectFiles, [
+    "android/app/release.keystore",
+    "android/keystore.properties",
+    "android/app/google-services.json",
+    "ios/GoogleService-Info.plist",
+    ".env.local",
+  ]);
+  for (const rel of subRes.materializedProjectFiles!) {
+    assert.equal(modeOf(join(unregDir, rel)), 0o600);
+  }
+  assert.equal(runGit(["status", "--porcelain"], unregDir), "");
+  assert.equal(existsSync(join(regClone, ".env.local")), false, "unrelated registered clone must remain untouched");
+  assert.equal(existsSync(join(regClone, "android")), false, "unrelated registered clone must not receive android secrets");
+
+  // Symlink path also resolves cleanly to unregDir
+  const symFiles = materializeProjectVaultFiles(home, symlinkDir);
+  assert.deepEqual(symFiles, subRes.materializedProjectFiles);
+
+  // Explicit appKey materializes into unmatched customDir
+  const explicitRes = await hydrateVaultDirect(home, { projectDir: customDir, appKey: "  patigame  ", runner: countingRunner });
+  assert.deepEqual(explicitRes.materializedProjectFiles, subRes.materializedProjectFiles);
+  assert.equal(readFileSync(join(customDir, ".env.local"), "utf8"), "APP_ENV=runner\n");
+  assert.equal(modeOf(join(customDir, ".env.local")), 0o600);
+  assert.equal(runGit(["status", "--porcelain"], customDir), "");
+  assert.equal(existsSync(join(regClone, ".env.local")), false);
+});
+
+test("hydrateVaultDirect runtimeOnly bypasses live LedgerAdmission lock and writes zero plugin-state files while standard hydrate still refuses", async (t) => {
+  const parent = makeProjectParent(t);
+  const runnerCheckout = join(parent, "runner-repo");
+  mkdirSync(runnerCheckout, { recursive: true });
+  writeFileSync(join(runnerCheckout, "README.md"), "runner\n");
+  gitCommitAll(runnerCheckout);
+
+  const home = makeTempDir();
+  disposeDir(t, home);
+  saveVaultConfig(home, { repo: "owner/factory-vault", nodeId: "runner-mac" });
+  const stateDir = join(home, "plugin-state", "paseo-factory");
+  const configPath = join(stateDir, "vault-config.json");
+  const configBefore = readFileSync(configPath);
+
+  // Live holder process owning ledger-owner.json (distinct PID -> assertAvailable detects live owner)
+  const holder = spawn(process.execPath, ["-e", "process.stdin.resume()"], { stdio: ["pipe", "ignore", "ignore"] });
+  t.after(() => {
+    try {
+      holder.kill("SIGKILL");
+    } catch {
+      // ignore if already exited
+    }
+  });
+  const ownerPath = join(stateDir, "ledger-owner.json");
+  const ownerPayload = JSON.stringify({
+    version: 1,
+    pid: holder.pid,
+    token: "live-daemon-token",
+    target: join(stateDir, "ledger.jsonl"),
+    startedAt: new Date().toISOString(),
+  });
+  writeFileSync(ownerPath, ownerPayload);
+
+  const tar = buildTarball([
+    { path: "owner-factory-vault-abc1234/secrets/shared/asc-credentials.json", data: '{"keyId":"K_RUN","issuerId":"I_RUN","teamId":"T_RUN"}\n' },
+    { path: "owner-factory-vault-abc1234/secrets/apps/patigame/.env.local", data: "RUNNER_SECRET=ok\n" },
+    { path: "owner-factory-vault-abc1234/store-memory/lessons.md", data: "# Runtime lesson\n" },
+    { path: "owner-factory-vault-abc1234/config/lanes.json", data: '{"worker":"pi"}\n' },
+  ]);
+  let runnerCalls = 0;
+  const countingRunner: VaultRunner = async () => {
+    runnerCalls += 1;
+    return tar;
+  };
+
+  // Incompatible combinations fail BEFORE calling runner
+  await assert.rejects(
+    () => hydrateVaultDirect(home, { runtimeOnly: true, mergeLedgers: true, runner: countingRunner }),
+    factoryErrorCode("vault-incompatible-options"),
+  );
+  await assert.rejects(
+    () => hydrateVaultDirect(home, { runtimeOnly: true, overwriteConfigs: true, runner: countingRunner }),
+    factoryErrorCode("vault-incompatible-options"),
+  );
+  await assert.rejects(
+    () => hydrateVaultDirect(home, { runtimeOnly: true, appKey: "patigame", runner: countingRunner }),
+    factoryErrorCode("vault-incompatible-options"),
+  );
+  assert.equal(runnerCalls, 0);
+
+  // Standard hydrateVaultDirect still fails closed with vault-owner-required
+  await assert.rejects(
+    () => hydrateVaultDirect(home, { runner: countingRunner }),
+    factoryErrorCode("vault-owner-required"),
+  );
+
+  // runtimeOnly succeeds under the active lock, writes runtime + env.json + projectDir, and touches zero plugin-state files
+  const res = await hydrateVaultDirect(home, {
+    runtimeOnly: true,
+    projectDir: runnerCheckout,
+    appKey: "patigame",
+    runner: countingRunner,
+  });
+  assert.equal(res.repo, "owner/factory-vault");
+  assert.equal(res.ref, "main");
+  assert.deepEqual(res.materializedProjectFiles, [".env.local"]);
+  assert.equal(readFileSync(join(runnerCheckout, ".env.local"), "utf8"), "RUNNER_SECRET=ok\n");
+  assert.equal(modeOf(join(runnerCheckout, ".env.local")), 0o600);
+  assert.equal(runGit(["status", "--porcelain"], runnerCheckout), "");
+  assert.equal(modeOf(join(home, "vault-runtime", "store-memory", "lessons.md")), 0o400);
+  assert.equal(modeOf(join(home, "vault-runtime", "env.json")), 0o600);
+  assert.equal(JSON.parse(readFileSync(join(home, "vault-runtime", "env.json"), "utf8")).ASC_KEY_ID, "K_RUN");
+  assert.deepEqual(readFileSync(configPath), configBefore, "vault-config.json must stay byte-identical");
+  assert.equal(readFileSync(ownerPath, "utf8"), ownerPayload, "ledger-owner.json must stay intact");
+  assert.equal(existsSync(join(stateDir, "lanes.json")), false);
+  assert.equal(existsSync(join(stateDir, "imports")), false);
+  assert.deepEqual(
+    readdirSync(stateDir).sort(),
+    ["ledger-owner.json", "vault-config.json"],
+    "plugin-state must receive zero writes during runtimeOnly",
+  );
+
+  // Fresh home with no vault-config.json + explicit repo + active lock: succeeds and does NOT create vault-config.json
+  const freshHome = makeTempDir();
+  disposeDir(t, freshHome);
+  const freshState = join(freshHome, "plugin-state", "paseo-factory");
+  mkdirSync(freshState, { recursive: true });
+  writeFileSync(join(freshState, "ledger-owner.json"), ownerPayload);
+  const freshRes = await hydrateVaultDirect(freshHome, {
+    repo: "owner/factory-vault",
+    runtimeOnly: true,
+    runner: countingRunner,
+  });
+  assert.deepEqual(freshRes.materializedProjectFiles, []);
+  assert.equal(existsSync(join(freshState, "vault-config.json")), false, "runtimeOnly must not create vault-config.json");
+});
+
+test("prototype-key collision guard rejects __proto__, constructor, and prototype across appKey entry points and manifest lookups", async (t) => {
+  const protoKeys = ["constructor", "__proto__", "prototype", "  constructor  "] as const;
+  const srcDir = makeTempDir();
+  disposeDir(t, srcDir);
+  const envLocalPath = join(srcDir, ".env.local");
+  writeFileSync(envLocalPath, "SECRET_TOKEN=proto-guard\n");
+  const ksPath = join(srcDir, "release.keystore");
+  writeFileSync(ksPath, randomBytes(128));
+
+  const safeRepo = join(makeProjectParent(t), "proto-safe-repo");
+  mkdirSync(safeRepo, { recursive: true });
+  writeFileSync(join(safeRepo, "README.md"), "safe\n");
+  gitCommitAll(safeRepo);
+
+  const { writeBackAndroidKeystore } = await import("../src/vault.ts");
+
+  let runnerCalls = 0;
+  const countingRunner: VaultRunner = async () => {
+    runnerCalls += 1;
+    return buildTarball([{ path: "owner-factory-vault-abc1234/config/lanes.json", data: "{}\n" }]);
+  };
+
+  for (const protoKey of protoKeys) {
+    const bare = makeBareRemote(t);
+    seedBareRemote(t, bare, { "README.md": "vault\n" });
+    const initialHead = bareHead(bare);
+
+    const home = makeTempDir();
+    disposeDir(t, home);
+    saveVaultConfig(home, { repo: bare, nodeId: "mac-studio" });
+
+    // 1. importVaultSecrets rejects with vault-invalid-path and writes nothing
+    await assert.rejects(
+      () => withVaultEnv(undefined, () => importVaultSecrets(home, { appKey: protoKey, envLocalPath })),
+      factoryErrorCode("vault-invalid-path"),
+      `importVaultSecrets must reject ${JSON.stringify(protoKey)}`,
+    );
+    assert.equal(existsSync(join(home, "vault-runtime")), false);
+    assert.equal(bareHead(bare), initialHead);
+
+    // 2. writeBackAndroidKeystore rejects with vault-invalid-path and writes nothing
+    await assert.rejects(
+      () =>
+        withVaultEnv(undefined, () =>
+          writeBackAndroidKeystore(home, { projectRoot: safeRepo, keystorePath: ksPath, appKey: protoKey }),
+        ),
+      factoryErrorCode("vault-invalid-path"),
+      `writeBackAndroidKeystore must reject ${JSON.stringify(protoKey)}`,
+    );
+    assert.equal(existsSync(join(home, "vault-runtime")), false);
+    assert.equal(bareHead(bare), initialHead);
+
+    // 3. hydrateVaultDirect and materializeProjectVaultFiles reject before calling runner
+    await assert.rejects(
+      () => hydrateVaultDirect(home, { projectDir: safeRepo, appKey: protoKey, runner: countingRunner }),
+      factoryErrorCode("vault-invalid-path"),
+      `hydrateVaultDirect must reject ${JSON.stringify(protoKey)}`,
+    );
+    assert.throws(
+      () => materializeProjectVaultFiles(home, safeRepo, protoKey),
+      factoryErrorCode("vault-invalid-path"),
+      `materializeProjectVaultFiles must reject ${JSON.stringify(protoKey)}`,
+    );
+
+    // 4. storeAppNotebookPath rejects reserved prototype keys
+    assert.throws(
+      () => storeAppNotebookPath(home, protoKey),
+      factoryErrorCode("vault-invalid-path"),
+      `storeAppNotebookPath must reject ${JSON.stringify(protoKey)}`,
+    );
+  }
+  assert.equal(runnerCalls, 0, "unsafe prototype appKeys must fail before invoking runner");
+
+  // 5. collectLocalStateIntoRuntime & writeBackAndroidKeystore reject prototype keys from .store-release/manifest.json and repo basename
+  for (const rawKey of ["constructor", "__proto__", "prototype"] as const) {
+    // (a) .store-release/manifest.json appKey
+    const manifestRepo = join(makeProjectParent(t), `manifest-${rawKey === "__proto__" ? "proto" : rawKey}`);
+    mkdirSync(join(manifestRepo, ".store-release"), { recursive: true });
+    writeFileSync(join(manifestRepo, "README.md"), "repo\n");
+    writeFileSync(join(manifestRepo, ".store-release", "manifest.json"), JSON.stringify({ appKey: rawKey }));
+    gitCommitAll(manifestRepo);
+    const resolvedManifest = resolveProject(manifestRepo);
+    assert.ok(resolvedManifest.ok);
+
+    const homeCollect = makeTempDir();
+    disposeDir(t, homeCollect);
+    writeProjectRegistration(join(homeCollect, "plugin-state", "paseo-factory"), resolvedManifest.slug, { root: manifestRepo });
+    assert.throws(() => collectLocalStateIntoRuntime(homeCollect), factoryErrorCode("vault-invalid-path"));
+    assert.equal(existsSync(join(homeCollect, "vault-runtime", "vault.manifest.json")), false);
+
+    // (b) repo directory literally named constructor / __proto__ / prototype (basename fallback)
+    const namedParent = makeProjectParent(t);
+    const namedRepo = join(namedParent, rawKey);
+    mkdirSync(join(namedRepo, ".store-release"), { recursive: true });
+    writeFileSync(join(namedRepo, "README.md"), "named repo\n");
+    writeFileSync(join(namedRepo, ".store-release", "manifest.json"), JSON.stringify({ bundleId: "com.example.proto" }));
+    gitCommitAll(namedRepo);
+    const resolvedNamed = resolveProject(namedRepo);
+    assert.ok(resolvedNamed.ok);
+
+    const homeNamed = makeTempDir();
+    disposeDir(t, homeNamed);
+    writeProjectRegistration(join(homeNamed, "plugin-state", "paseo-factory"), resolvedNamed.slug, { root: namedRepo });
+    assert.throws(() => collectLocalStateIntoRuntime(homeNamed), factoryErrorCode("vault-invalid-path"));
+
+    const homeWb = makeTempDir();
+    disposeDir(t, homeWb);
+    await assert.rejects(
+      () => withVaultEnv(undefined, () => writeBackAndroidKeystore(homeWb, { projectRoot: namedRepo, keystorePath: ksPath, syncAfterWriteBack: false })),
+      factoryErrorCode("vault-invalid-path"),
+    );
+    assert.equal(existsSync(join(homeWb, "vault-runtime")), false);
+
+    // 6. parseVaultManifest rejects poisoned vault.manifest.json entries without polluting Object.prototype
+    const poisonedJson = `{"${rawKey}": {"repoBasename": "evil"}}`;
+    assert.throws(() => parseVaultManifest(poisonedJson), factoryErrorCode("corrupted-vault-manifest"));
+    assert.equal(Object.hasOwn(Object.prototype, "repoBasename"), false);
+  }
+
+  // 7. Direct manifest lookup helpers never collide with Object.prototype keys on an empty manifest
+  const emptyHome = makeTempDir();
+  disposeDir(t, emptyHome);
+  const emptyManifest = readVaultManifestAt(emptyHome);
+  assert.deepEqual(emptyManifest, {});
+  assert.deepEqual(resolveVaultApps(emptyHome, emptyManifest), []);
+  assert.equal(
+    matchManifestAppKey(emptyManifest, {
+      root: safeRepo,
+      slug: "safe",
+      basename: "constructor",
+      originUrl: null,
+      bundleId: null,
+      packageName: null,
+    }),
+    null,
+  );
 });

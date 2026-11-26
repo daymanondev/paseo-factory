@@ -211,7 +211,8 @@ export function stageRuntimeFileIntoCheckout(runtimePath: string, target: string
     (forceSeal ||
       relPath === "secrets/shared/gplay-service-account.json" ||
       relPath === "secrets/shared/eye.json" ||
-      relPath === "secrets/shared/mcp-oauth.json") &&
+      relPath === "secrets/shared/mcp-oauth.json" ||
+      (relPath !== undefined && /^secrets\/apps\/[^/]+\/\.env\.local$/.test(relPath))) &&
     parseEnvelope(runtimeBytes) === null;
   if (shouldSeal) {
     const sealed = Buffer.from(`${JSON.stringify(sealVaultBuffer(runtimeBytes, passphrase))}\n`, "utf8");

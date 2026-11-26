@@ -6,7 +6,20 @@ import type { VaultConfig, VaultStoreDefaults } from "./vault-config.ts";
 import { loadVaultConfig, stampVaultConfig, nowIso, requiredVaultConfig, vaultStateDir, saveVaultConfig, withConfigDefaults } from "./vault-config.ts";
 import { resolveVaultPassphrase, unsealVaultBuffer, stageRuntimeFileIntoCheckout } from "./vault-envelope.ts";
 import { snapshotVaultLedger, refreshVaultImports, stageFetchedVaultHistory, listDirNames } from "./vault-history.ts";
-import { isProjectDesignVaultPath, writeRuntimeFile, applyVaultHydration, assertSafeVaultPath, collectLocalStateIntoRuntime, walkFiles, resolveVaultApps, readVaultManifestAt } from "./vault-materialization.ts";
+import {
+  isProjectDesignVaultPath,
+  writeRuntimeFile,
+  applyVaultHydration,
+  assertSafeVaultPath,
+  assertSafeVaultAppKey,
+  inspectProjectRootFacts,
+  materializeProjectVaultFiles,
+  writeVaultRuntimeEnv,
+  collectLocalStateIntoRuntime,
+  walkFiles,
+  resolveVaultApps,
+  readVaultManifestAt,
+} from "./vault-materialization.ts";
 import { githubRepoSlug, builtinVaultRunner, parseTarEntries, vaultPathFromArchivePath, isEmptyOrUnbornPullError, ensureVaultCheckout, probeGhAuth, ensureRemoteVaultRepo } from "./vault-transport.ts";
 import type { VaultRunner } from "./vault-transport.ts";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
@@ -57,7 +70,7 @@ export type { VaultManifest } from "./vault-materialization.ts";
 export type { ResolvedVaultApp } from "./vault-materialization.ts";
 export { parseVaultManifest } from "./vault-materialization.ts";
 export { resolveVaultApps } from "./vault-materialization.ts";
-export { ensureLocalGitExcludeAndWorktreeInclude } from "./vault-materialization.ts";
+export { ensureLocalGitExcludeAndWorktreeInclude, materializeProjectVaultFiles } from "./vault-materialization.ts";
 export type { VaultLedgerSource } from "./vault-history.ts";
 export { reconcileVaultLedgers } from "./vault-history.ts";
 
@@ -80,6 +93,12 @@ export interface HydrateVaultDirectOptions extends VaultTransportOptions {
   mergeLedgers?: boolean;
   /** Overwrite existing local `lanes.json` files with the vault's copies (default false). */
   overwriteConfigs?: boolean;
+  /** Hydrate only `<paseoHome>/vault-runtime/`, `env.json`, and optional `projectDir` without acquiring `LedgerAdmission` locks or writing `plugin-state/`. */
+  runtimeOnly?: boolean;
+  /** Materialize per-app files solely into this git checkout instead of scanning all registered clones. */
+  projectDir?: string;
+  /** Explicit canonical app key override when `projectDir` is supplied. */
+  appKey?: string;
 }
 
 export interface PullVaultOptions extends VaultTransportOptions {
@@ -141,6 +160,7 @@ export interface ImportVaultSecretsInput extends VaultTransportOptions {
   firebaseProjectId?: string;
   googleServicesJsonPath?: string;
   googleServiceInfoPlistPath?: string;
+  envLocalPath?: string;
   storeDefaultsPath?: string;
   storeDefaults?: VaultStoreDefaults;
   syncAfterImport?: boolean;
@@ -179,6 +199,8 @@ export interface VaultHydrationResult {
   ref?: string;
   /** The vault-relative paths written under `<paseoHome>/vault-runtime/`, sorted. */
   hydratedFiles: string[];
+  /** The checkout-relative per-app paths materialized when `projectDir` was supplied. */
+  materializedProjectFiles?: string[];
 }
 
 export interface VaultPushResult {
@@ -198,6 +220,22 @@ export interface VaultPushResult {
  * is never touched — no `.git` checkout exists on disk after this call.
  */
 export async function hydrateVaultDirect(paseoHome: string, options: HydrateVaultDirectOptions = {}): Promise<VaultHydrationResult & { repo: string; ref: string }> {
+  if (options.runtimeOnly === true && (options.mergeLedgers === true || options.overwriteConfigs === true)) {
+    throw new FactoryError("vault-incompatible-options", "--runtime-only cannot be combined with --merge-ledgers or --overwrite-configs");
+  }
+  if (options.appKey !== undefined && options.projectDir === undefined) {
+    throw new FactoryError("vault-incompatible-options", "--app requires --project");
+  }
+  if (options.projectDir !== undefined && inspectProjectRootFacts(options.projectDir) === null) {
+    throw new FactoryError("vault-project-not-git", `${options.projectDir} does not resolve to a git checkout`);
+  }
+  let normalizedAppKey: string | undefined;
+  if (options.appKey !== undefined) {
+    const trimmed = options.appKey.trim();
+    assertSafeVaultAppKey(trimmed === "" ? options.appKey : trimmed);
+    normalizedAppKey = trimmed;
+  }
+
   const config = loadVaultConfig(paseoHome);
   const repo = options.repo ?? config?.repo;
   if (repo === undefined || repo.trim() === "") {
@@ -221,8 +259,17 @@ export async function hydrateVaultDirect(paseoHome: string, options: HydrateVaul
     assertSafeVaultPath(path);
     files.set(path, unsealVaultBuffer(entry.data, resolveVaultPassphrase(config?.passphrase)));
   }
-  return { repo, ref, ...await materializeFetchedVault(paseoHome, files, options, () => stampVaultConfig(paseoHome, config, repo, { lastHydratedAt: nowIso(), lastHydrateMode: "direct" })) };
-
+  const resolvedOptions: HydrateVaultDirectOptions = {
+    ...options,
+    ...(normalizedAppKey === undefined ? {} : { appKey: normalizedAppKey }),
+  };
+  return {
+    repo,
+    ref,
+    ...(await materializeFetchedVault(paseoHome, files, resolvedOptions, () =>
+      stampVaultConfig(paseoHome, config, repo, { lastHydratedAt: nowIso(), lastHydrateMode: "direct" }),
+    )),
+  };
 }
 
 /**
@@ -407,16 +454,44 @@ export async function syncVault(paseoHome: string, options: SyncVaultOptions = {
 }
 
 /** Fetch/staging is independent; this lease covers only associated local mutations. */
-async function materializeFetchedVault(paseoHome: string, files: ReadonlyMap<string, Buffer>, options: Pick<HydrateVaultDirectOptions, "mergeLedgers" | "overwriteConfigs">, stamp: () => void): Promise<VaultHydrationResult> {
+async function materializeFetchedVault(
+  paseoHome: string,
+  files: ReadonlyMap<string, Buffer>,
+  options: Pick<HydrateVaultDirectOptions, "mergeLedgers" | "overwriteConfigs" | "runtimeOnly" | "projectDir" | "appKey">,
+  stamp: () => void,
+): Promise<VaultHydrationResult> {
+  if (options.runtimeOnly === true) {
+    for (const [path, bytes] of files) writeRuntimeFile(paseoHome, path, bytes);
+    writeVaultRuntimeEnv(paseoHome);
+    const materializedProjectFiles =
+      options.projectDir !== undefined
+        ? materializeProjectVaultFiles(paseoHome, options.projectDir, options.appKey)
+        : [];
+    return {
+      hydratedFiles: [...files.keys()].sort(),
+      materializedProjectFiles,
+      historyImports: [],
+      materialization: { status: "applied", diagnostics: [] },
+    };
+  }
   const historyImports = options.mergeLedgers === true ? stageFetchedVaultHistory(paseoHome, files) : [];
   try {
+    let materializedProjectFiles: string[] = [];
     await LedgerAdmission.withStateMaintenance(vaultStateDir(paseoHome), () => {
       for (const [path, bytes] of files) writeRuntimeFile(paseoHome, path, bytes);
-      applyVaultHydration(paseoHome, options.overwriteConfigs ?? false);
+      materializedProjectFiles = applyVaultHydration(paseoHome, options.overwriteConfigs ?? false, {
+        ...(options.projectDir === undefined ? {} : { projectDir: options.projectDir }),
+        ...(options.appKey === undefined ? {} : { appKey: options.appKey }),
+      });
       stamp();
       updateImportMaterialization(historyImports, { status: "applied", diagnostics: ["associated Vault files materialized by the owner maintenance boundary"] });
     });
-    return { hydratedFiles: [...files.keys()].sort(), historyImports: refreshVaultImports(historyImports), materialization: { status: "applied", diagnostics: [] } };
+    return {
+      hydratedFiles: [...files.keys()].sort(),
+      ...(options.projectDir !== undefined ? { materializedProjectFiles } : {}),
+      historyImports: refreshVaultImports(historyImports),
+      materialization: { status: "applied", diagnostics: [] },
+    };
   } catch (error) {
     const materialization: ImportMaterialization = { status: "refused", diagnostics: [error instanceof Error ? error.message : String(error)] };
     updateImportMaterialization(historyImports, materialization);

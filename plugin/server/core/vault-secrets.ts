@@ -2,13 +2,15 @@ import { FactoryError } from "./errors.ts";
 import { LedgerAdmission } from "./history-admission.ts";
 import { vaultStateDir, loadVaultConfig, SHARED_SECRET_FILES, STORE_DEFAULTS_FILE } from "./vault-config.ts";
 import { sealVaultBuffer, resolveVaultPassphrase, unsealVaultBuffer } from "./vault-envelope.ts";
-import { writeRuntimeFile, readJsonFile, collectCandidateProjectRoots, inspectProjectRootFacts, assertSafeVaultPath, readVaultManifestAt, applyVaultHydration, parseStoreDefaults, matchManifestAppKey, ensureLocalGitExcludeAndWorktreeInclude, jsonStringField, APP_FILE_TARGETS } from "./vault-materialization.ts";
+import { writeRuntimeFile, readJsonFile, collectCandidateProjectRoots, inspectProjectRootFacts, assertSafeVaultAppKey, readVaultManifestAt, applyVaultHydration, parseStoreDefaults, matchManifestAppKey, ensureLocalGitExcludeAndWorktreeInclude, jsonStringField, APP_FILE_TARGETS } from "./vault-materialization.ts";
 import { probeGhAuth } from "./vault-transport.ts";
 import { pullVault, pushVault, syncVault } from "./vault.ts";
 import type { ImportVaultSecretsInput, ImportVaultSecretsResult, SyncVaultResult, WriteBackAndroidKeystoreInput, WriteBackAndroidKeystoreResult } from "./vault.ts";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
+
+export { assertSafeVaultAppKey };
 
 export function expandImportPath(rawPath: string): string {
   const trimmed = rawPath.trim();
@@ -50,6 +52,7 @@ export async function importVaultSecrets(
     input.firebaseProjectId,
     input.googleServicesJsonPath,
     input.googleServiceInfoPlistPath,
+    input.envLocalPath,
     input.storeDefaultsPath,
   ];
   const hasExplicit =
@@ -70,6 +73,12 @@ export async function importVaultSecrets(
       ? process.env.GPLAY_KEY_PATH.trim()
       : undefined;
   const eyeConfigPath = input.eyeConfigPath?.trim() || undefined;
+  let explicitAppKey: string | undefined;
+  if (input.appKey !== undefined) {
+    const trimmed = input.appKey.trim();
+    assertSafeVaultAppKey(trimmed === "" ? input.appKey : trimmed);
+    explicitAppKey = trimmed;
+  }
 
   const config = loadVaultConfig(paseoHome);
   const passphrase = resolveVaultPassphrase(config?.passphrase);
@@ -121,6 +130,7 @@ export async function importVaultSecrets(
     const firebaseProjectId = input.firebaseProjectId?.trim() || undefined;
     const googleServicesJsonPath = input.googleServicesJsonPath?.trim() || undefined;
     const googleServiceInfoPlistPath = input.googleServiceInfoPlistPath?.trim() || undefined;
+    const envLocalPath = input.envLocalPath?.trim() || undefined;
 
     const hasAppInputs =
       keystorePath !== undefined ||
@@ -128,16 +138,17 @@ export async function importVaultSecrets(
       keyAlias !== undefined ||
       firebaseProjectId !== undefined ||
       googleServicesJsonPath !== undefined ||
-      googleServiceInfoPlistPath !== undefined;
+      googleServiceInfoPlistPath !== undefined ||
+      envLocalPath !== undefined;
 
     if (hasAppInputs) {
-      let appKey = input.appKey?.trim() ?? "";
-      if (appKey === "") {
+      let appKey = explicitAppKey;
+      if (appKey === undefined) {
         const roots = collectCandidateProjectRoots(paseoHome);
         const firstFacts = roots.map(inspectProjectRootFacts).find((f) => f !== null) ?? null;
         appKey = firstFacts?.basename ?? "default";
       }
-      assertSafeVaultPath(`secrets/apps/${appKey}`);
+      assertSafeVaultAppKey(appKey);
 
       importFile(keystorePath, "Android release keystore", `secrets/apps/${appKey}/release.keystore`);
 
@@ -176,11 +187,12 @@ export async function importVaultSecrets(
       }
 
       importFile(googleServiceInfoPlistPath, "GoogleService-Info.plist", `secrets/apps/${appKey}/GoogleService-Info.plist`);
+      importFile(envLocalPath, ".env.local", `secrets/apps/${appKey}/.env.local`);
 
       const manifest = existsSync(join(runtimeRoot, "vault.manifest.json"))
         ? readVaultManifestAt(runtimeRoot)
         : readVaultManifestAt(join(paseoHome, "vault"));
-      if (manifest[appKey] === undefined) {
+      if (!Object.hasOwn(manifest, appKey)) {
         manifest[appKey] = { repoBasename: appKey };
         writeRuntimeFile(paseoHome, "vault.manifest.json", Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`, "utf8"));
       }
@@ -288,6 +300,12 @@ export async function writeBackAndroidKeystore(
   const storePassword = input.storePass?.trim() || propsSigning.storePassword;
   const keyPassword = input.keyPass?.trim() || propsSigning.keyPassword || storePassword;
   const keyAlias = input.keyAlias?.trim() || propsSigning.keyAlias;
+  let explicitAppKey: string | undefined;
+  if (input.appKey !== undefined) {
+    const trimmed = input.appKey.trim();
+    assertSafeVaultAppKey(trimmed === "" ? input.appKey : trimmed);
+    explicitAppKey = trimmed;
+  }
 
   const config = loadVaultConfig(paseoHome);
   const passphrase = resolveVaultPassphrase(config?.passphrase);
@@ -301,7 +319,7 @@ export async function writeBackAndroidKeystore(
     ? readVaultManifestAt(runtimeRoot)
     : readVaultManifestAt(join(paseoHome, "vault"));
 
-  let canonicalAppKey = input.appKey?.trim() || "";
+  let canonicalAppKey = explicitAppKey ?? "";
   if (canonicalAppKey === "") {
     canonicalAppKey = matchManifestAppKey(manifest, facts) ?? "";
   }
@@ -309,7 +327,7 @@ export async function writeBackAndroidKeystore(
     const storeManifest = readJsonFile(join(facts.root, ".store-release", "manifest.json"));
     canonicalAppKey = jsonStringField(storeManifest, "appKey") ?? facts.basename;
   }
-  assertSafeVaultPath(`secrets/apps/${canonicalAppKey}`);
+  assertSafeVaultAppKey(canonicalAppKey);
 
   const keystoreRel = `secrets/apps/${canonicalAppKey}/release.keystore`;
   const signingRel = `secrets/apps/${canonicalAppKey}/signing.json`;
@@ -332,7 +350,7 @@ export async function writeBackAndroidKeystore(
       written.push(signingRel);
     }
 
-    const priorEntry = manifest[canonicalAppKey] ?? {};
+    const priorEntry = Object.hasOwn(manifest, canonicalAppKey) ? manifest[canonicalAppKey]! : {};
     manifest[canonicalAppKey] = {
       ...priorEntry,
       repoBasename: facts.basename,

@@ -2203,7 +2203,7 @@ function stageRuntimeFileIntoCheckout(runtimePath, target, passphrase, relPath, 
       return;
     }
   }
-  const shouldSeal = (forceSeal || relPath === "secrets/shared/gplay-service-account.json" || relPath === "secrets/shared/eye.json" || relPath === "secrets/shared/mcp-oauth.json") && parseEnvelope(runtimeBytes) === null;
+  const shouldSeal = (forceSeal || relPath === "secrets/shared/gplay-service-account.json" || relPath === "secrets/shared/eye.json" || relPath === "secrets/shared/mcp-oauth.json" || relPath !== void 0 && /^secrets\/apps\/[^/]+\/\.env\.local$/.test(relPath)) && parseEnvelope(runtimeBytes) === null;
   if (shouldSeal) {
     const sealed = Buffer.from(`${JSON.stringify(sealVaultBuffer(runtimeBytes, passphrase))}
 `, "utf8");
@@ -3424,6 +3424,7 @@ async function importVaultSecrets(paseoHome, input = {}) {
     input.firebaseProjectId,
     input.googleServicesJsonPath,
     input.googleServiceInfoPlistPath,
+    input.envLocalPath,
     input.storeDefaultsPath
   ];
   const hasExplicit = explicitFields.some((val) => val !== void 0 && val.trim() !== "") || input.storeDefaults !== void 0;
@@ -3433,6 +3434,12 @@ async function importVaultSecrets(paseoHome, input = {}) {
   const teamId = hasExplicit ? input.teamId?.trim() || void 0 : process.env.APPLE_TEAM_ID?.trim() || void 0;
   const gplayKeyPath = hasExplicit ? input.gplayKeyPath?.trim() || void 0 : process.env.GPLAY_KEY_PATH?.trim() && existsSync11(expandImportPath(process.env.GPLAY_KEY_PATH)) ? process.env.GPLAY_KEY_PATH.trim() : void 0;
   const eyeConfigPath = input.eyeConfigPath?.trim() || void 0;
+  let explicitAppKey;
+  if (input.appKey !== void 0) {
+    const trimmed = input.appKey.trim();
+    assertSafeVaultAppKey(trimmed === "" ? input.appKey : trimmed);
+    explicitAppKey = trimmed;
+  }
   const config = loadVaultConfig(paseoHome);
   const passphrase = resolveVaultPassphrase(config?.passphrase);
   const sortedImported = await LedgerAdmission.withStateMaintenance(vaultStateDir(paseoHome), () => {
@@ -3481,15 +3488,16 @@ async function importVaultSecrets(paseoHome, input = {}) {
     const firebaseProjectId = input.firebaseProjectId?.trim() || void 0;
     const googleServicesJsonPath = input.googleServicesJsonPath?.trim() || void 0;
     const googleServiceInfoPlistPath = input.googleServiceInfoPlistPath?.trim() || void 0;
-    const hasAppInputs = keystorePath !== void 0 || storePass !== void 0 || keyAlias !== void 0 || firebaseProjectId !== void 0 || googleServicesJsonPath !== void 0 || googleServiceInfoPlistPath !== void 0;
+    const envLocalPath = input.envLocalPath?.trim() || void 0;
+    const hasAppInputs = keystorePath !== void 0 || storePass !== void 0 || keyAlias !== void 0 || firebaseProjectId !== void 0 || googleServicesJsonPath !== void 0 || googleServiceInfoPlistPath !== void 0 || envLocalPath !== void 0;
     if (hasAppInputs) {
-      let appKey = input.appKey?.trim() ?? "";
-      if (appKey === "") {
+      let appKey = explicitAppKey;
+      if (appKey === void 0) {
         const roots = collectCandidateProjectRoots(paseoHome);
         const firstFacts = roots.map(inspectProjectRootFacts).find((f) => f !== null) ?? null;
         appKey = firstFacts?.basename ?? "default";
       }
-      assertSafeVaultPath(`secrets/apps/${appKey}`);
+      assertSafeVaultAppKey(appKey);
       importFile(keystorePath, "Android release keystore", `secrets/apps/${appKey}/release.keystore`);
       if (storePass !== void 0 || keyAlias !== void 0) {
         const rel = `secrets/apps/${appKey}/signing.json`;
@@ -3521,8 +3529,9 @@ async function importVaultSecrets(paseoHome, input = {}) {
         importedFiles.add(rel);
       }
       importFile(googleServiceInfoPlistPath, "GoogleService-Info.plist", `secrets/apps/${appKey}/GoogleService-Info.plist`);
+      importFile(envLocalPath, ".env.local", `secrets/apps/${appKey}/.env.local`);
       const manifest = existsSync11(join15(runtimeRoot, "vault.manifest.json")) ? readVaultManifestAt(runtimeRoot) : readVaultManifestAt(join15(paseoHome, "vault"));
-      if (manifest[appKey] === void 0) {
+      if (!Object.hasOwn(manifest, appKey)) {
         manifest[appKey] = { repoBasename: appKey };
         writeRuntimeFile(paseoHome, "vault.manifest.json", Buffer.from(`${JSON.stringify(manifest, null, 2)}
 `, "utf8"));
@@ -3607,6 +3616,12 @@ async function writeBackAndroidKeystore(paseoHome, input) {
   const storePassword = input.storePass?.trim() || propsSigning.storePassword;
   const keyPassword = input.keyPass?.trim() || propsSigning.keyPassword || storePassword;
   const keyAlias = input.keyAlias?.trim() || propsSigning.keyAlias;
+  let explicitAppKey;
+  if (input.appKey !== void 0) {
+    const trimmed = input.appKey.trim();
+    assertSafeVaultAppKey(trimmed === "" ? input.appKey : trimmed);
+    explicitAppKey = trimmed;
+  }
   const config = loadVaultConfig(paseoHome);
   const passphrase = resolveVaultPassphrase(config?.passphrase);
   const vaultConfigured = (config?.repo?.trim() ?? "") !== "";
@@ -3615,7 +3630,7 @@ async function writeBackAndroidKeystore(paseoHome, input) {
   }
   const runtimeRoot = join15(paseoHome, "vault-runtime");
   const manifest = existsSync11(join15(runtimeRoot, "vault.manifest.json")) ? readVaultManifestAt(runtimeRoot) : readVaultManifestAt(join15(paseoHome, "vault"));
-  let canonicalAppKey = input.appKey?.trim() || "";
+  let canonicalAppKey = explicitAppKey ?? "";
   if (canonicalAppKey === "") {
     canonicalAppKey = matchManifestAppKey(manifest, facts) ?? "";
   }
@@ -3623,7 +3638,7 @@ async function writeBackAndroidKeystore(paseoHome, input) {
     const storeManifest = readJsonFile(join15(facts.root, ".store-release", "manifest.json"));
     canonicalAppKey = jsonStringField(storeManifest, "appKey") ?? facts.basename;
   }
-  assertSafeVaultPath(`secrets/apps/${canonicalAppKey}`);
+  assertSafeVaultAppKey(canonicalAppKey);
   const keystoreRel = `secrets/apps/${canonicalAppKey}/release.keystore`;
   const signingRel = `secrets/apps/${canonicalAppKey}/signing.json`;
   const writtenVaultFiles = await LedgerAdmission.withStateMaintenance(vaultStateDir(paseoHome), () => {
@@ -3643,7 +3658,7 @@ async function writeBackAndroidKeystore(paseoHome, input) {
 `, "utf8"));
       written.push(signingRel);
     }
-    const priorEntry = manifest[canonicalAppKey] ?? {};
+    const priorEntry = Object.hasOwn(manifest, canonicalAppKey) ? manifest[canonicalAppKey] : {};
     manifest[canonicalAppKey] = {
       ...priorEntry,
       repoBasename: facts.basename,
@@ -3687,9 +3702,24 @@ async function writeBackAndroidKeystore(paseoHome, input) {
 }
 
 // src/vault-materialization.ts
+import { randomUUID as randomUUID5 } from "node:crypto";
 import { execFileSync as execFileSync3 } from "node:child_process";
-import { readFileSync as readFileSync15, mkdirSync as mkdirSync9, chmodSync as chmodSync3, writeFileSync as writeFileSync8, readdirSync as readdirSync8, existsSync as existsSync12, copyFileSync as copyFileSync3, statSync as statSync5 } from "node:fs";
+import { readFileSync as readFileSync15, mkdirSync as mkdirSync9, chmodSync as chmodSync3, writeFileSync as writeFileSync8, readdirSync as readdirSync8, existsSync as existsSync12, copyFileSync as copyFileSync3, statSync as statSync5, renameSync as renameSync3, rmSync as rmSync8 } from "node:fs";
 import { join as join16, basename as basename8, isAbsolute as isAbsolute7, resolve as resolvePath, dirname as dirname13 } from "node:path";
+function writeAtomicRuntimeFile(target, data, mode) {
+  const temp = `${target}.${process.pid}.${randomUUID5()}.tmp`;
+  try {
+    writeFileSync8(temp, data, { mode });
+    chmodSync3(temp, mode);
+    renameSync3(temp, target);
+  } catch (err) {
+    try {
+      rmSync8(temp, { force: true });
+    } catch {
+    }
+    throw err;
+  }
+}
 function writeRuntimeFile(paseoHome, vaultPath, data) {
   assertSafeVaultPath(vaultPath);
   if (isProjectDesignVaultPath(vaultPath)) throw new FactoryError("vault-project-design-excluded", "Project designs belong in the Project repository");
@@ -3706,10 +3736,8 @@ function writeRuntimeFile(paseoHome, vaultPath, data) {
     if (insidePrivate) chmodSync3(acc, 448);
   }
   const target = join16(runtimeRoot, vaultPath);
-  if (existsSync12(target)) chmodSync3(target, 384);
-  writeFileSync8(target, data);
-  const mode = segments[0] === "store-memory" ? 256 : segments[0] === "secrets" || vaultPath === STORE_DEFAULTS_FILE ? 384 : 420;
-  chmodSync3(target, mode);
+  const mode = segments[0] === "store-memory" ? 256 : segments[0] === "secrets" || vaultPath === STORE_DEFAULTS_FILE || vaultPath === "env.json" ? 384 : 420;
+  writeAtomicRuntimeFile(target, data, mode);
 }
 function isProjectDesignVaultPath(path) {
   return path.split("/").some((segment) => ["design", "mockups", ".od-frames"].includes(segment)) || /(?:^|\/)(?:design-manifest|open-design-link)\.json$/.test(path);
@@ -3719,6 +3747,14 @@ function assertSafeVaultPath(vaultPath) {
   if (segments.some((segment) => segment === "" || segment === "." || segment === "..")) {
     throw new FactoryError("vault-invalid-path", `refusing unsafe vault path "${vaultPath}"`);
   }
+}
+var UNSAFE_VAULT_APP_KEYS = /* @__PURE__ */ new Set(["__proto__", "constructor", "prototype"]);
+function assertSafeVaultAppKey(appKey) {
+  const trimmed = appKey.trim();
+  if (trimmed === "" || appKey === "." || appKey === ".." || trimmed === "." || trimmed === ".." || appKey.includes("/") || appKey.includes("\\") || appKey.includes("\0") || UNSAFE_VAULT_APP_KEYS.has(appKey) || UNSAFE_VAULT_APP_KEYS.has(trimmed)) {
+    throw new FactoryError("vault-invalid-path", `refusing unsafe vault app key "${appKey}"`);
+  }
+  assertSafeVaultPath(`secrets/apps/${appKey}`);
 }
 function walkFiles(root, skip) {
   const found = [];
@@ -3749,12 +3785,15 @@ function parseVaultManifest(raw) {
   }
   const manifest = {};
   for (const [key, value] of Object.entries(parsed)) {
+    if (UNSAFE_VAULT_APP_KEYS.has(key) || UNSAFE_VAULT_APP_KEYS.has(key.trim())) {
+      throw new FactoryError("corrupted-vault-manifest", `vault.manifest.json entry "${key}" uses a reserved prototype key`);
+    }
     if (typeof value !== "object" || value === null || Array.isArray(value)) {
       throw new FactoryError("corrupted-vault-manifest", `vault.manifest.json entry "${key}" must be an object`);
     }
     const entry = {};
     for (const leg of ["repoBasename", "gitRemote", "bundleId", "packageName"]) {
-      const field = value[leg];
+      const field = Object.hasOwn(value, leg) ? value[leg] : void 0;
       if (field === void 0) continue;
       if (typeof field !== "string") {
         throw new FactoryError("corrupted-vault-manifest", `vault.manifest.json entry "${key}" field "${leg}" must be a string`);
@@ -3784,6 +3823,7 @@ function collectCandidateProjectRoots(paseoHome) {
   return [...candidateRoots].sort();
 }
 function inspectProjectRootFacts(root) {
+  if (root.trim() === "") return null;
   const resolved = resolveProject(root);
   if (!resolved.ok) return null;
   const storeManifest = readJsonFile(join16(resolved.root, ".store-release", "manifest.json"));
@@ -3808,7 +3848,8 @@ function resolveVaultApps(paseoHome, manifest) {
   };
   const out = [];
   for (const canonicalAppKey of Object.keys(manifest).sort()) {
-    const entry = manifest[canonicalAppKey];
+    const entry = Object.hasOwn(manifest, canonicalAppKey) ? manifest[canonicalAppKey] : void 0;
+    if (entry === void 0) continue;
     let matched = null;
     for (const root of candidateRoots) {
       const facts = factsOf(root);
@@ -3825,7 +3866,8 @@ function resolveVaultApps(paseoHome, manifest) {
 }
 function matchManifestAppKey(manifest, facts) {
   for (const key of Object.keys(manifest).sort()) {
-    if (entryMatches(manifest[key], facts)) return key;
+    const entry = Object.hasOwn(manifest, key) ? manifest[key] : void 0;
+    if (entry !== void 0 && entryMatches(entry, facts)) return key;
   }
   return null;
 }
@@ -3882,16 +3924,16 @@ function readJsonFile(path) {
   }
 }
 function jsonStringField(record2, field) {
-  const value = record2?.[field];
+  const value = record2 !== null && Object.hasOwn(record2, field) ? record2[field] : void 0;
   return typeof value === "string" && value !== "" ? value : null;
 }
 function arrayField(record2, field) {
-  const value = record2?.[field];
+  const value = record2 !== null && Object.hasOwn(record2, field) ? record2[field] : void 0;
   if (!Array.isArray(value)) return [];
   return value.filter((entry) => typeof entry === "object" && entry !== null && !Array.isArray(entry));
 }
 function nestedJsonStringField(record2, path) {
-  if (record2 === null) return null;
+  if (record2 === null || !Object.hasOwn(record2, path[0])) return null;
   const inner = record2[path[0]];
   if (typeof inner !== "object" || inner === null || Array.isArray(inner)) return null;
   return jsonStringField(inner, path[1]);
@@ -3926,9 +3968,11 @@ var APP_FILE_TARGETS = [
   { vaultFile: "release.keystore", projectRel: "android/app/release.keystore" },
   { vaultFile: "signing.json", projectRel: "android/keystore.properties" },
   { vaultFile: "google-services.json", projectRel: "android/app/google-services.json" },
-  { vaultFile: "GoogleService-Info.plist", projectRel: "ios/GoogleService-Info.plist" }
+  { vaultFile: "GoogleService-Info.plist", projectRel: "ios/GoogleService-Info.plist" },
+  { vaultFile: ".env.local", projectRel: ".env.local" }
 ];
 function materializeVaultAppFiles(paseoHome, canonicalAppKey, projectRoot) {
+  assertSafeVaultAppKey(canonicalAppKey);
   const appSecrets = join16(paseoHome, "vault-runtime", "secrets", "apps", canonicalAppKey);
   const written = [];
   for (const target of APP_FILE_TARGETS) {
@@ -3944,9 +3988,33 @@ function materializeVaultAppFiles(paseoHome, canonicalAppKey, projectRoot) {
     }
     const dest = join16(projectRoot, target.projectRel);
     mkdirSync9(dirname13(dest), { recursive: true });
-    writeFileSync8(dest, data, { mode: 384 });
-    chmodSync3(dest, 384);
+    writeAtomicRuntimeFile(dest, data, 384);
     written.push(target.projectRel);
+  }
+  return written;
+}
+function materializeProjectVaultFiles(paseoHome, projectDir, appKey) {
+  if (projectDir.trim() === "") {
+    throw new FactoryError("vault-project-not-git", `${projectDir} does not resolve to a git checkout`);
+  }
+  const facts = inspectProjectRootFacts(projectDir);
+  if (facts === null) {
+    throw new FactoryError("vault-project-not-git", `${projectDir} does not resolve to a git checkout`);
+  }
+  let canonicalAppKey = null;
+  if (appKey !== void 0) {
+    const trimmed = appKey.trim();
+    assertSafeVaultAppKey(trimmed === "" ? appKey : trimmed);
+    canonicalAppKey = trimmed;
+  } else {
+    const manifest = readVaultManifestAt(join16(paseoHome, "vault-runtime"));
+    canonicalAppKey = matchManifestAppKey(manifest, facts);
+    if (canonicalAppKey === null) return [];
+    assertSafeVaultAppKey(canonicalAppKey);
+  }
+  const written = materializeVaultAppFiles(paseoHome, canonicalAppKey, facts.root);
+  if (written.length > 0) {
+    ensureLocalGitExcludeAndWorktreeInclude(facts.root, written);
   }
   return written;
 }
@@ -4182,13 +4250,14 @@ function collectLocalStateIntoRuntime(paseoHome, options) {
       canonicalAppKey = jsonStringField(storeManifestObj, "appKey") ?? facts.basename;
     }
     if (canonicalAppKey === null) canonicalAppKey = facts.basename;
+    assertSafeVaultAppKey(canonicalAppKey);
     if (hasStoreManifest) {
       writeRuntimeFile(paseoHome, `config/apps/${canonicalAppKey}/store-manifest.json`, readFileSync15(storeManifestPath));
     }
     if (hasProjectLanes) {
       writeRuntimeFile(paseoHome, `config/apps/${canonicalAppKey}/lanes.json`, readFileSync15(projectLanes));
     }
-    const priorEntry = manifest[canonicalAppKey] ?? {};
+    const priorEntry = Object.hasOwn(manifest, canonicalAppKey) ? manifest[canonicalAppKey] : {};
     manifest[canonicalAppKey] = {
       ...priorEntry,
       repoBasename: facts.basename,
@@ -4270,22 +4339,27 @@ function materializeConfigsFromRuntime(paseoHome, overwriteConfigs = false, opti
   }
 }
 function applyVaultHydration(paseoHome, overwriteConfigs = false, options) {
-  const manifest = readVaultManifestAt(join16(paseoHome, "vault-runtime"));
-  for (const app of resolveVaultApps(paseoHome, manifest)) {
-    if (app.projectRoot === null) continue;
-    const written = materializeVaultAppFiles(paseoHome, app.canonicalAppKey, app.projectRoot);
-    if (written.length > 0) ensureLocalGitExcludeAndWorktreeInclude(app.projectRoot, written);
+  let materializedProjectFiles = [];
+  if (options?.projectDir !== void 0) {
+    materializedProjectFiles = materializeProjectVaultFiles(paseoHome, options.projectDir, options.appKey);
+  } else {
+    const manifest = readVaultManifestAt(join16(paseoHome, "vault-runtime"));
+    for (const app of resolveVaultApps(paseoHome, manifest)) {
+      if (app.projectRoot === null) continue;
+      const written = materializeVaultAppFiles(paseoHome, app.canonicalAppKey, app.projectRoot);
+      if (written.length > 0) ensureLocalGitExcludeAndWorktreeInclude(app.projectRoot, written);
+    }
   }
   materializeConfigsFromRuntime(paseoHome, overwriteConfigs, options);
   writeVaultRuntimeEnv(paseoHome);
+  return materializedProjectFiles;
 }
 function writeVaultRuntimeEnv(paseoHome) {
   const runtimeRoot = join16(paseoHome, "vault-runtime");
   mkdirSync9(runtimeRoot, { recursive: true });
-  const path = join16(runtimeRoot, "env.json");
-  writeFileSync8(path, `${JSON.stringify(buildVaultRuntimeEnv(paseoHome), null, 2)}
-`, { mode: 384 });
-  chmodSync3(path, 384);
+  const target = join16(runtimeRoot, "env.json");
+  writeAtomicRuntimeFile(target, `${JSON.stringify(buildVaultRuntimeEnv(paseoHome), null, 2)}
+`, 384);
 }
 function buildVaultRuntimeEnv(paseoHome) {
   const shared = join16(paseoHome, "vault-runtime", "secrets", "shared");
@@ -4397,7 +4471,7 @@ function storeLessonsPath(paseoHome) {
 }
 function storeAppNotebookPath(paseoHome, canonicalAppKey) {
   const key = canonicalAppKey.trim();
-  if (key === "" || key.includes("/") || key.includes("\\")) {
+  if (key === "" || key === "." || key === ".." || key.includes("/") || key.includes("\\") || key.includes("\0") || UNSAFE_VAULT_APP_KEYS.has(key)) {
     throw new FactoryError("vault-invalid-path", `refusing unsafe store notebook app key "${canonicalAppKey}"`);
   }
   const vaultRel = `${STORE_MEMORY_DIR}/apps/${key}.md`;
@@ -4642,6 +4716,21 @@ import { existsSync as existsSync15, mkdirSync as mkdirSync12, readFileSync as r
 import { join as join19, dirname as dirname16 } from "node:path";
 import { gunzipSync } from "node:zlib";
 async function hydrateVaultDirect(paseoHome, options = {}) {
+  if (options.runtimeOnly === true && (options.mergeLedgers === true || options.overwriteConfigs === true)) {
+    throw new FactoryError("vault-incompatible-options", "--runtime-only cannot be combined with --merge-ledgers or --overwrite-configs");
+  }
+  if (options.appKey !== void 0 && options.projectDir === void 0) {
+    throw new FactoryError("vault-incompatible-options", "--app requires --project");
+  }
+  if (options.projectDir !== void 0 && inspectProjectRootFacts(options.projectDir) === null) {
+    throw new FactoryError("vault-project-not-git", `${options.projectDir} does not resolve to a git checkout`);
+  }
+  let normalizedAppKey;
+  if (options.appKey !== void 0) {
+    const trimmed = options.appKey.trim();
+    assertSafeVaultAppKey(trimmed === "" ? options.appKey : trimmed);
+    normalizedAppKey = trimmed;
+  }
   const config = loadVaultConfig(paseoHome);
   const repo = options.repo ?? config?.repo;
   if (repo === void 0 || repo.trim() === "") {
@@ -4663,7 +4752,20 @@ async function hydrateVaultDirect(paseoHome, options = {}) {
     assertSafeVaultPath(path);
     files.set(path, unsealVaultBuffer(entry.data, resolveVaultPassphrase(config?.passphrase)));
   }
-  return { repo, ref, ...await materializeFetchedVault(paseoHome, files, options, () => stampVaultConfig(paseoHome, config, repo, { lastHydratedAt: nowIso(), lastHydrateMode: "direct" })) };
+  const resolvedOptions = {
+    ...options,
+    ...normalizedAppKey === void 0 ? {} : { appKey: normalizedAppKey }
+  };
+  return {
+    repo,
+    ref,
+    ...await materializeFetchedVault(
+      paseoHome,
+      files,
+      resolvedOptions,
+      () => stampVaultConfig(paseoHome, config, repo, { lastHydratedAt: nowIso(), lastHydrateMode: "direct" })
+    )
+  };
 }
 async function pullVault(paseoHome, options = {}) {
   return pullConfiguredVault(paseoHome, requiredVaultConfig(paseoHome), options);
@@ -4800,15 +4902,35 @@ async function syncVault(paseoHome, options = {}) {
   };
 }
 async function materializeFetchedVault(paseoHome, files, options, stamp) {
+  if (options.runtimeOnly === true) {
+    for (const [path, bytes] of files) writeRuntimeFile(paseoHome, path, bytes);
+    writeVaultRuntimeEnv(paseoHome);
+    const materializedProjectFiles = options.projectDir !== void 0 ? materializeProjectVaultFiles(paseoHome, options.projectDir, options.appKey) : [];
+    return {
+      hydratedFiles: [...files.keys()].sort(),
+      materializedProjectFiles,
+      historyImports: [],
+      materialization: { status: "applied", diagnostics: [] }
+    };
+  }
   const historyImports = options.mergeLedgers === true ? stageFetchedVaultHistory(paseoHome, files) : [];
   try {
+    let materializedProjectFiles = [];
     await LedgerAdmission.withStateMaintenance(vaultStateDir(paseoHome), () => {
       for (const [path, bytes] of files) writeRuntimeFile(paseoHome, path, bytes);
-      applyVaultHydration(paseoHome, options.overwriteConfigs ?? false);
+      materializedProjectFiles = applyVaultHydration(paseoHome, options.overwriteConfigs ?? false, {
+        ...options.projectDir === void 0 ? {} : { projectDir: options.projectDir },
+        ...options.appKey === void 0 ? {} : { appKey: options.appKey }
+      });
       stamp();
       updateImportMaterialization(historyImports, { status: "applied", diagnostics: ["associated Vault files materialized by the owner maintenance boundary"] });
     });
-    return { hydratedFiles: [...files.keys()].sort(), historyImports: refreshVaultImports(historyImports), materialization: { status: "applied", diagnostics: [] } };
+    return {
+      hydratedFiles: [...files.keys()].sort(),
+      ...options.projectDir !== void 0 ? { materializedProjectFiles } : {},
+      historyImports: refreshVaultImports(historyImports),
+      materialization: { status: "applied", diagnostics: [] }
+    };
   } catch (error) {
     const materialization = { status: "refused", diagnostics: [error instanceof Error ? error.message : String(error)] };
     updateImportMaterialization(historyImports, materialization);
@@ -4831,6 +4953,7 @@ export {
   importVaultSecrets,
   isLocalCompanionGitSource,
   loadVaultConfig,
+  materializeProjectVaultFiles,
   normalizeCompanionGitRemote,
   parseEnvelope,
   parseStoreDefaults,
