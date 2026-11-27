@@ -134,6 +134,7 @@ export function useOnboardingRunTracker(options: OnboardingRunTrackerOptions): O
   activeFolderRef.current = options.activeFolder;
   const prevActiveFolderRef = useRef<string | null>(options.activeFolder);
   const watchedRunsRef = useRef<Map<string, WatchedRun>>(new Map());
+  const inFlightFoldersRef = useRef<Set<string>>(new Set());
 
   if (options.initialRun && options.initialRun.status === "running" && !watchedRunsRef.current.has(options.initialRun.runId)) {
     const folders = new Set<string>();
@@ -155,6 +156,7 @@ export function useOnboardingRunTracker(options: OnboardingRunTrackerOptions): O
     return () => {
       alive.current = false;
       watchedRunsRef.current.clear();
+      inFlightFoldersRef.current.clear();
     };
   }, []);
 
@@ -254,14 +256,12 @@ export function useOnboardingRunTracker(options: OnboardingRunTrackerOptions): O
         if (commitInput !== null) existing.commitInput = commitInput;
         addNormalizedFolder(existing.folders, run.folder);
         addNormalizedFolder(existing.folders, aliasFolder);
-        addNormalizedFolder(existing.folders, activeFolderRef.current);
         return existing;
       }
       const folders = new Set<string>();
       addNormalizedFolder(folders, run.folder);
       addNormalizedFolder(folders, commitInput?.folder);
       addNormalizedFolder(folders, aliasFolder);
-      addNormalizedFolder(folders, activeFolderRef.current);
       const entry: WatchedRun = {
         run,
         folders,
@@ -414,6 +414,9 @@ export function useOnboardingRunTracker(options: OnboardingRunTrackerOptions): O
 
   const startRun = useCallback(
     async (payload: CommitInput): Promise<void> => {
+      const lockKey = normalizeFolderPath(payload.folder) || "__default__";
+      if (inFlightFoldersRef.current.has(lockKey)) return;
+      inFlightFoldersRef.current.add(lockKey);
       setStarting(true);
       setStartError(null);
       setPollWarning(null);
@@ -439,6 +442,8 @@ export function useOnboardingRunTracker(options: OnboardingRunTrackerOptions): O
           setStartError(describeThrown(error));
           setStarting(false);
         }
+      } finally {
+        inFlightFoldersRef.current.delete(lockKey);
       }
     },
     [applyServerRun, isViewingFolder],
@@ -447,7 +452,14 @@ export function useOnboardingRunTracker(options: OnboardingRunTrackerOptions): O
   const retryRun = useCallback(
     async (payload: CommitInput): Promise<void> => {
       if (activeRun !== null && activeRun.status === "succeeded" && openWorkspace.status === "failed" && activeRun.result !== null) {
-        await runFinalize(activeRun.runId, activeRun.result, payload);
+        const lockKey = normalizeFolderPath(payload.folder || activeRun.folder) || "__default__";
+        if (inFlightFoldersRef.current.has(lockKey)) return;
+        inFlightFoldersRef.current.add(lockKey);
+        try {
+          await runFinalize(activeRun.runId, activeRun.result, payload);
+        } finally {
+          inFlightFoldersRef.current.delete(lockKey);
+        }
         return;
       }
       await startRun(payload);

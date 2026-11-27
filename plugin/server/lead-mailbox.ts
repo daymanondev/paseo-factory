@@ -169,6 +169,12 @@ const SUPERVISOR_COMPACTION_SAFE_HOLE_REMINDER = [
   "- When the Owner confirms resolution (or approves production), resume via `supervisor_dispatch_lead({ message, storeRelease: { target, resumeRunId, resolution } })` (using `target: \"production\"` only with explicit Owner approval). Record any store rejections in the Store notebook via `supervisor_record_store_note`.",
 ].join("\n");
 
+const SUPERVISOR_COMPACTION_SAFE_STORE_RELEASE_REMINDER = [
+  "Store Release capability reminder (compaction-safe):",
+  "- Use `supervisor_dispatch_lead({ message, storeRelease: { target, platforms?, resumeRunId?, resolution? } })` (`target: \"staging\"` by default, `target: \"production\"` only with explicit Owner approval) and `supervisor_record_store_note({ target: \"lessons\" | \"app\", content, appKey? })` (never modifying `<project-root>`).",
+  "- Relay any `Hole` **Console handoff guide** verbatim to the Owner in chat and pass their confirmation back via `resumeRunId` + `resolution`.",
+].join("\n");
+
 function isStoreReleaseRunnerWakeupText(text: string): boolean {
   return /\[Store release (?:failed|paused at Hole|completed|internal error)\]/i.test(text);
 }
@@ -291,8 +297,9 @@ export interface LeadMailRuntime {
   notifyPeer(input: { task: string; kind: "verdict" | "needs_human" | "peer_challenge"; text: string; projectSlug?: string }): Promise<void>;
   enqueueLeadMail(
     slug: string,
-    mail: { to?: MailRecipient; from: LeadMailFrom; kind: LeadMailKind; task?: string; storeRelease?: boolean; text: string },
+    mail: { requestId?: string; to?: MailRecipient; from: LeadMailFrom; kind: LeadMailKind; task?: string; storeRelease?: boolean; text: string },
   ): Promise<{ mailId: string }>;
+  notifySupervisorSetup(slug: string, requestId: string, text: string): Promise<{ mailId: string }>;
   pumpProjectLead(slug: string): Promise<void>;
   pumpProjectSupervisor(slug: string): Promise<void>;
   /**
@@ -600,12 +607,28 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
 
   const enqueueLeadMail = (
     slug: string,
-    mail: { to?: MailRecipient; from: LeadMailFrom; kind: LeadMailKind; task?: string; storeRelease?: boolean; text: string },
+    mail: { requestId?: string; to?: MailRecipient; from: LeadMailFrom; kind: LeadMailKind; task?: string; storeRelease?: boolean; text: string },
   ): Promise<{ mailId: string }> =>
     projectLane(slug, async () => {
       const queued = queueMail(slug, mail);
       return { mailId: queued.mailId };
     });
+
+  const notifySupervisorSetup = async (
+    slug: string,
+    requestId: string,
+    text: string,
+  ): Promise<{ mailId: string }> => {
+    const queued = await enqueueLeadMail(slug, {
+      requestId,
+      to: "supervisor",
+      from: "system",
+      kind: "report",
+      text,
+    });
+    await pumpProjectSupervisor(slug);
+    return queued;
+  };
 
   /**
    * The ADR 0017 §2 identity fallback: a seat spawned under its native role
@@ -877,12 +900,24 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     const hasLeadReport = state.supervisorQueued.some((item) => item.from === "lead");
     const hasHoleReport =
       capability.supervisorTier === "full" &&
-      isPiSeat(supervisor.provider, "supervisor", deps.stateDir, slug) &&
       (state.supervisorQueued.some((item) => item.from === "lead" && isStoreReleaseHoleReportText(item.text)) ||
         (hasLeadReport &&
           (summarizeActiveStoreRelease(projectOwnAndTaskEventsOf(slug, reg?.root ?? supervisor.cwd ?? undefined))?.includes("status=paused") ??
             false)));
-    const batch = hasHoleReport ? `${baseBatch}\n\n${SUPERVISOR_COMPACTION_SAFE_HOLE_REMINDER}` : baseBatch;
+    const hasStoreReleaseSignal =
+      capability.supervisorTier === "full" &&
+      !hasHoleReport &&
+      state.supervisorQueued.some(
+        (item) =>
+          item.storeRelease === true ||
+          isStoreReleaseRunnerWakeupText(item.text) ||
+          (item.from === "system" && typeof item.requestId === "string" && item.requestId.startsWith("setup-proposal:")),
+      );
+    const batch = hasHoleReport
+      ? `${baseBatch}\n\n${SUPERVISOR_COMPACTION_SAFE_HOLE_REMINDER}`
+      : hasStoreReleaseSignal
+        ? `${baseBatch}\n\n${SUPERVISOR_COMPACTION_SAFE_STORE_RELEASE_REMINDER}`
+        : baseBatch;
     const prompt = await prependKickoffPacketIfFirstTurn("supervisor", slug, supervisor, batch, daemon);
     await daemon.agents.ref(supervisor.id).send(prompt);
     if (isFirstTurn) {
@@ -2378,6 +2413,7 @@ export function createLeadMailRuntime(deps: LeadMailRuntimeDeps): LeadMailRuntim
     reportSupervisor,
     notifyPeer,
     enqueueLeadMail,
+    notifySupervisorSetup,
     pumpProjectLead,
     pumpProjectSupervisor,
     onLeadTurnEnded,

@@ -39,6 +39,7 @@ import { createLeadMailRuntime, type LeadTurnEndedInput } from "./server/lead-ma
 import { syncPeerHelpersBeforeCreate, injectRoleOnCreate, injectSessionEnv, sanitizeAgentCreateHookResult } from "./server/roles.ts";
 import { factoryRegistryFor } from "./server/projects.ts";
 import { listProjectRegistrations } from "./server/core/project.ts";
+import { FACTORY_SETUP_RECOVERED_APPLYING_ERROR, recoverInterruptedSetupProposal } from "./server/core/factory-setup.ts";
 import { migrateLegacyExecutionState } from "./server/core/project-settings.ts";
 // The one-time root-to-Project split & compact migration (v0.0.89, ADR 0045
 // §2): lands from src/ledger-migration.ts through the vendored core copy —
@@ -47,7 +48,7 @@ import { migrateLegacyExecutionState } from "./server/core/project-settings.ts";
 import { migrateLegacyRootState } from "./server/core/ledger-migration.ts";
 import { hasActiveStoreReleases, onStoreReleaseActivityChange } from "./server/store-release.ts";
 
-const SHELL_VERSION = "0.26.0";
+const SHELL_VERSION = "0.27.0";
 
 const log = (message: string) => console.log(`[${PLUGIN_ID}] ${message}`);
 
@@ -329,10 +330,25 @@ export default function contribute(server: PluginServerContext) {
     log(`recovered on open: attempt ${attempt} of task ${task} closed red — interrupted by a restart`);
   }
 
+  const activeSetupProposalRuns = new Map<string, string>();
+
   let booted = false;
   const initializeOrdinaryRuntime = (): void => {
     if (booted || pendingUpgradeFor(stateDir) !== undefined) return;
     factory.history.runSync(() => {
+      for (const reg of listProjectRegistrations(stateDir)) {
+        try {
+          const recovered = recoverInterruptedSetupProposal(stateDir, reg.slug, activeSetupProposalRuns);
+          if (
+            recovered?.status === "failed" &&
+            recovered.steps.some((step) => step.error === FACTORY_SETUP_RECOVERED_APPLYING_ERROR)
+          ) {
+            log(`setup-proposal: recovered interrupted applying proposal ${recovered.id} for ${reg.slug} -> failed`);
+          }
+        } catch (err) {
+          log(`setup-proposal: startup recovery skipped for ${reg.slug} — ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
       // The one-time v0.6.0 cleanup (ADR 0056): legacy execution records become
       // project-settings.json and every Scrum artefact is removed. Idempotent
       // and crash-convergent, so it simply runs at every ordinary boot.
@@ -510,6 +526,8 @@ export default function contribute(server: PluginServerContext) {
     registry,
     stateDir,
     home,
+    userHome: homedir(),
+    activeSetupProposalRuns,
     ...(pluginDir === undefined ? {} : { pluginDir }),
     daemon: () => paseoApi as never,
     usage,
@@ -540,6 +558,7 @@ export default function contribute(server: PluginServerContext) {
     // v0.6.1 (ADR 0057 §5): a newly bound Supervisor receives its Seat kickoff
     // packet plus every held report through the mailbox's own drain.
     pumpSupervisorMailbox: (slug) => leadMail.pumpProjectSupervisor(slug),
+    notifySupervisorSetup: (slug, requestId, text) => leadMail.notifySupervisorSetup(slug, requestId, text),
     onStateChange: ({ handler, projectSlug, projectRoot }) => {
       const target =
         projectSlug === undefined && projectRoot === undefined
@@ -860,6 +879,18 @@ export default function contribute(server: PluginServerContext) {
     // The accept path's worktree-record sweep targets the real daemon home —
     // never the PASEO_HOME-env fallback (v0.0.27, ADR 0017 §4).
     home,
+    userHome: homedir(),
+    activeSetupProposalRuns,
+    onStateChange: ({ handler, projectSlug, projectRoot }) => {
+      const target =
+        projectSlug === undefined && projectRoot === undefined
+          ? undefined
+          : {
+              ...(projectSlug !== undefined ? { projectSlug } : {}),
+              ...(projectRoot !== undefined ? { projectRoot } : {}),
+            };
+      stateHub.emit(handler.includes(".") ? handler : `surface.${handler}`, target);
+    },
     ...(pluginDir === undefined ? {} : { pluginDir }),
     // The Per-Project Factory registry (v0.0.89, ADR 0045 §1): every
     // Project-scoped command routes onto the target Project's own Factory.

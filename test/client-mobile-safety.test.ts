@@ -2058,3 +2058,84 @@ test("FactoryShell GitHub Publish modal stays open on error and closes on retry 
     });
   } finally { g.__factoryClientRpc = prior; }
 });
+
+test("Wave 3b: iOS and Android render Needs-you Setup Proposal read-only with zero buttons, Desktop hint, and zero setup_proposal RPCs", async () => {
+  const { FactoryShell } = await load("plugin/client/factory/shell.tsx");
+  const { testTheme } = await import("./client-markup.ts");
+  const { createElement } = await import("react");
+
+  for (const platform of ["ios", "android"] as const) {
+    for (const status of ["pending", "applying", "failed"] as const) {
+      const panel = modelPanelFixture();
+      panel.needsYou = [
+        {
+          key: "setup-proposal:prop-mobile",
+          kind: "setup-proposal",
+          title: status === "failed" ? "Setup Proposal failed" : status === "applying" ? "Applying Setup Proposal…" : "Setup Proposal awaiting approval",
+          detail: "Enable mobile store staging and GitHub helper MCP.",
+          action: { kind: "setup-proposal", label: status === "failed" ? "Retry" : status === "applying" ? "Applying…" : "Approve & Apply" },
+          setupProposal: {
+            id: "prop-mobile",
+            actionsHash: "hash-mobile",
+            status,
+            reason: "Enable mobile store staging and GitHub helper MCP.",
+            actions: [
+              { label: "Install factory-release-lab", status: status === "failed" ? "done" : "pending" },
+              { label: "Enable GitHub Helper MCP", machineWide: true, status: status === "failed" ? "failed" : "pending", ...(status === "failed" ? { error: "auth error" } : {}) },
+            ],
+            warnings: ["Missing Vault keys: ASC .p8"],
+          },
+        },
+      ];
+      const view = {
+        ...modelPickerFixture,
+        panel,
+        project: { root: "/project", slug: "my-app", missingRoot: false },
+        kpis: { running: 0, needsHuman: 1 },
+        companionTools: [],
+        corePlugin: {},
+        vault: {},
+        skillHub: { projectPacks: [] },
+        daemonError: null,
+      };
+      const calls: Array<{ method: string; input: unknown }> = [];
+      const g = globalThis as Record<string, any>;
+      const prior = g.__factoryClientRpc;
+      g.__factoryClientRpc = async (method: string, input: unknown) => {
+        calls.push({ method, input });
+        if (method === "factory.self.update.status") return { ok: true, current: "0.23.1", latest: "0.23.1", updateAvailable: false };
+        if (method === "factory.snapshot") return { ok: true, view };
+        return { ok: true };
+      };
+      try {
+        await mountUnderNativeWindow(async (createRoot, container, act) => {
+          const root = createRoot(container);
+          try {
+            await act(() => root.render(createElement(FactoryShell, { key: `${platform}-${status}`, theme: testTheme, dir: "/project", layout: { compact: true, platform } })));
+            const card = container.querySelector('[data-testid="factory-setup-proposal"]') as HTMLElement | null;
+            assert.ok(card, `${platform} (${status}) renders factory-setup-proposal`);
+            assert.equal(card.querySelectorAll("button").length, 0, `${platform} (${status}) renders zero buttons inside Setup Proposal`);
+            for (const hook of [
+              "factory-setup-proposal-approve",
+              "factory-setup-proposal-decline",
+              "factory-setup-proposal-retry",
+              "factory-setup-proposal-dismiss",
+            ]) {
+              assert.equal(container.querySelector(`[data-testid="${hook}"]`), null, `${platform} (${status}) omits ${hook}`);
+            }
+            assert.match(card.textContent ?? "", /Approve on Paseo Desktop\./);
+            assert.match(card.textContent ?? "", /Enable mobile store staging and GitHub helper MCP\./);
+            assert.ok(card.querySelector('[data-testid="factory-setup-proposal-action-0"]'));
+            assert.match(card.textContent ?? "", /machine-wide/);
+            assert.ok(card.querySelector('[data-testid="factory-setup-proposal-warning"]'));
+            assert.equal(calls.some((c) => c.method.startsWith("factory.setup_proposal.")), false, `${platform} (${status}) dispatches zero setup_proposal RPCs`);
+          } finally {
+            await act(() => root.unmount());
+          }
+        });
+      } finally {
+        g.__factoryClientRpc = prior;
+      }
+    }
+  }
+});

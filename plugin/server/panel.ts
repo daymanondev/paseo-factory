@@ -14,6 +14,7 @@ import { existsSync } from "node:fs";
 import type { AgentView, PanelGateQueueEntry, PanelNeedsYouItem, PanelOpenDesign, PanelPeerRow, PanelSeatRow, PanelSupervisorCandidateRow, PanelTone, PanelUsageWindow, PanelView, PanelProfile, ScopedLaneRef, SeatAllowedAction, ProjectView, TaskView } from "../shared/view.ts";
 import { foldProjectUsageSummary, type ModelUsageRow, type ProjectUsageFile, type UsageBuckets } from "./core/usage-status.ts";
 import { MAX_ATTEMPTS } from "./core/events.ts";
+import { formatSetupActionLabel, type SetupProposalRecord } from "./core/factory-setup.ts";
 import { openDesignBundleReady, readOpenDesignLink } from "./core/open-design/open-design-link-state.ts";
 import { readProjectSettings } from "./core/project-settings.ts";
 import { HANDOFF_EXTRACTION_MAX_SENDS, HANDOFF_EXTRACTION_TIMEOUT_MS, handoffMarkTokens } from "./handoff-limits.ts";
@@ -82,6 +83,7 @@ export interface PanelInput {
   seatLanes?: Record<"supervisor" | "lead" | "worker", ScopedLaneRef>;
   profile?: PanelProfile;
   gateQueue?: readonly PanelGateQueueEntry[];
+  setupProposal?: SetupProposalRecord | null;
   now: number;
 }
 
@@ -302,6 +304,37 @@ function needsYou(input: PanelInput): PanelNeedsYouItem[] {
   // The Owner decides through the Supervisor; the Lead is the fallback while no Supervisor lives.
   const deciderAction: PanelAction = input.supervisor !== null ? openSeatAction("supervisor", input.supervisor) : input.lead !== null ? openSeatAction("lead", input.lead) : START_SUPERVISOR_ACTION;
   const items: PanelNeedsYouItem[] = [];
+  if (input.setupProposal != null) {
+    const proposal = input.setupProposal;
+    items.push({
+      key: `setup-proposal:${proposal.id}`,
+      kind: "setup-proposal",
+      title:
+        proposal.status === "failed"
+          ? "Setup Proposal failed"
+          : proposal.status === "applying"
+            ? "Applying Setup Proposal…"
+            : "Setup Proposal awaiting approval",
+      detail: proposal.reason,
+      action: {
+        kind: "setup-proposal",
+        label: proposal.status === "failed" ? "Retry" : proposal.status === "applying" ? "Applying…" : "Approve & Apply",
+      },
+      setupProposal: {
+        id: proposal.id,
+        actionsHash: proposal.actionsHash,
+        status: proposal.status,
+        reason: proposal.reason,
+        actions: proposal.steps.map((step) => ({
+          label: formatSetupActionLabel(step.action),
+          ...(step.action.kind === "set_helper_mcp" ? { machineWide: true } : {}),
+          status: step.status,
+          ...(step.error !== undefined ? { error: step.error } : {}),
+        })),
+        warnings: proposal.warnings ? [...proposal.warnings] : [],
+      },
+    });
+  }
   for (const task of input.tasks) {
     if (task.status !== "needs-human") continue;
     items.push({ key: `needs-human:${task.task}`, kind: "needs-human", title: `${task.task} needs your decision`, detail: task.needsHumanReason === null ? null : (NEEDS_HUMAN_GLOSS[task.needsHumanReason] ?? task.needsHumanReason), action: deciderAction });

@@ -6,6 +6,11 @@ import { readHandoffProgress, laneRef } from "./handoff-progress.ts";
 import type { GateQueueAheadEntryView, GateQueueEntryView, GateQueueView, LastReleaseView, OverviewLatestGate, OverviewProjectEntry, PanelGateQueueEntry, PanelView, ReleaseOriginView, ReleaseSettingsView, ScopedLaneRef, StoreReleaseRunnerStatus, StoreReleaseView, TaskView } from "../shared/view.ts";
 import type { HandoffProgress, HandoffAction, HandoffRequest, HandoffReply } from "../shared/handoff.ts";
 import { clearReleaseRequest, clearStoreReleaseRequest, readProjectSettings, readReleaseRequest, readReleaseSettings, readStoreReleaseRequest, readStoreReleaseSettings, setProjectReleaseSettings, setProjectSkillPacks, setProjectStoreReleaseSettings, resetProjectSkillPacks } from "./core/project-settings.ts";
+import { appendSetupAudit, clearSetupAudit, clearSetupProposal, formatSetupActionLabel, recoverInterruptedSetupProposal, writeSetupProposal } from "./core/factory-setup.ts";
+import type { SetupProposalRecord } from "./core/factory-setup.ts";
+import { SUPERVISOR_STORE_RELEASE_BOUNDARY } from "./core/roles-contract.ts";
+import { applySetupProposalSteps } from "./factory-setup-runner.ts";
+import type { FactorySetupRunnerDeps } from "./factory-setup-runner.ts";
 import type { ProjectReleaseMode, ProjectStoreReleaseMode } from "./core/project-settings.ts";
 import { detectMobilePlatforms, readLatestStoreReleaseRun } from "./core/store-release-probe.ts";
 import { resolveStoreReleaseCapability } from "./core/store-release-capability.ts";
@@ -108,6 +113,7 @@ import {
   skillsImport, skillsTogglePack, skillsPackSave, skillsPackDelete, skillsPackReset,
   releaseSettingsRead, releaseSettingsWrite,
   storeReleaseRead, storeReleaseWrite,
+  setupProposalApprove, setupProposalDecline, setupProposalDismiss,
   githubPublishPreflight, githubPublish,
   pluginsInstall,
   pluginsManage,
@@ -458,6 +464,10 @@ export interface SurfaceDeps {
   gateQueue?: GateQueue | (() => GateQueue | undefined);
   /** Optional hook notified after a non-read surface handler completes. */
   onStateChange?: (event: { handler: string; projectSlug?: string; projectRoot?: string }) => void;
+  /** Shared in-flight setup proposal runs map (for single-flight lock + crash recovery). */
+  activeSetupProposalRuns?: Map<string, string>;
+  /** Optional Supervisor mailbox wakeup door fired after Setup Proposal approve/fail/decline. */
+  notifySupervisorSetup?: (projectSlug: string, requestId: string, text: string) => void | Promise<unknown>;
   /** Optional override for the `start-supervisor` watchdog timeout during async onboarding runs (defaults to 120s). */
   onboardingSupervisorTimeoutMs?: number;
   onLog?: (message: string) => void;
@@ -534,6 +544,16 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
   };
   const log = deps.onLog ?? (() => {});
   const failure = <C extends string>(code: C, error: string) => ({ ok: false as const, code, error });
+  const activeSetupProposalRuns = deps.activeSetupProposalRuns ?? new Map<string, string>();
+  const DYNAMIC_TOOLS_LIST_CHANGED_PROVIDERS: ReadonlySet<string> = new Set(["opencode", "pi"]);
+  const readRecoveredSetupProposal = (slug: string): SetupProposalRecord | null => {
+    try {
+      return recoverInterruptedSetupProposal(deps.stateDir, slug, activeSetupProposalRuns) ?? null;
+    } catch (err) {
+      log(`setup-proposal: could not read proposal for ${slug} (${messageOf(err)})`);
+      return null;
+    }
+  };
 
   // ---- the Per-Project routing half (v0.0.89, ADR 0045 §1) -------------------------------
   //
@@ -3282,6 +3302,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         handoffRequestedAt: registration.handoffRequestedAt ?? null,
         heldSupervisorMailCount,
         supervisorCandidates: [],
+        setupProposal: readRecoveredSetupProposal(registration.slug),
         now,
       });
       const workspaceId = registration.workspaceId ?? supervisorRaw?.workspaceId ?? leadRaw?.workspaceId ?? null;
@@ -3374,6 +3395,84 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
         gateQueue: gateQueueView,
         projects: overviewProjects,
       },
+    };
+  };
+
+  const applyStoreReleaseModeWrite = async (
+    targetProject: { slug: string; root: string },
+    mode: ProjectStoreReleaseMode,
+    context?: SurfaceCallContext,
+    options?: { skipSupervisorHandoffPrompt?: boolean },
+  ) => {
+    const beforeCapability = resolveStoreReleaseCapability({
+      projectRoot: targetProject.root,
+      stateDir: deps.stateDir,
+      projectSlug: targetProject.slug,
+    });
+    const hadPending = readStoreReleaseRequest(deps.stateDir, targetProject.slug) !== undefined;
+    setProjectStoreReleaseSettings(deps.stateDir, targetProject.slug, { mode });
+    const droppedPendingRequest = hadPending && readStoreReleaseRequest(deps.stateDir, targetProject.slug) === undefined;
+    const afterCapability = resolveStoreReleaseCapability({
+      projectRoot: targetProject.root,
+      stateDir: deps.stateDir,
+      projectSlug: targetProject.slug,
+    });
+    const capabilityBoundaryChanged =
+      beforeCapability.leadEnabled !== afterCapability.leadEnabled ||
+      (beforeCapability.supervisorTier !== afterCapability.supervisorTier &&
+        (beforeCapability.supervisorTier === "full" || afterCapability.supervisorTier === "full"));
+    const refreshedSeats: SeatName[] = [];
+    let supervisorNeedsHandoff = false;
+    let supervisorHandoffAgentId: string | undefined;
+    if (capabilityBoundaryChanged) {
+      const daemon = resolveDaemon(context);
+      const isStarted = (agent: SurfaceAgentSnapshot): boolean =>
+        deps.isSeatStarted?.(agent) ??
+        (typeof agent.lastUserMessageAt === "string" && agent.lastUserMessageAt.trim() !== "");
+      const isSeatIdleOrClosed = (agent: SurfaceAgentSnapshot): boolean =>
+        (agent.status === "idle" || agent.status === "closed") &&
+        !(agent.requiresAttention === true && agent.attentionReason === "permission");
+      for (const seat of ["supervisor", "lead"] as const) {
+        let liveSeat: SurfaceAgentSnapshot | undefined;
+        try {
+          liveSeat = await seatOf(daemon, seat, targetProject.slug);
+        } catch (err) {
+          log(`store-release: cannot inspect ${seat} seat for ${targetProject.slug} (${messageOf(err)})`);
+          continue;
+        }
+        if (liveSeat === undefined) continue;
+        if (!isStarted(liveSeat) && isSeatIdleOrClosed(liveSeat)) {
+          const retired = await retireSeat(seat, targetProject.slug, targetProject.root, context);
+          if (retired.ok) refreshedSeats.push(seat);
+          else log(`store-release: could not retire unstarted ${seat} seat for ${targetProject.slug} (${retired.code}: ${retired.error})`);
+        } else if (seat === "supervisor") {
+          if (options?.skipSupervisorHandoffPrompt !== true) {
+            supervisorNeedsHandoff = true;
+            supervisorHandoffAgentId = liveSeat.id;
+          }
+        } else if (seat === "lead" && deps.handoff !== undefined) {
+          const handoffReply = await deps.handoff({
+            slug: targetProject.slug,
+            seat: "lead",
+            action: "start",
+            reason: "owner",
+            quietPoint: true,
+          });
+          if (!handoffReply.ok && handoffReply.code !== "handoff-in-progress") {
+            log(`store-release: could not schedule Lead handoff for ${targetProject.slug} (${handoffReply.code}: ${handoffReply.error})`);
+          }
+        }
+      }
+    }
+    const settings = await readStoreReleaseViewForProject(targetProject);
+    log(`store-release: ${targetProject.slug} mode=${settings.mode}`);
+    return {
+      ok: true as const,
+      droppedPendingRequest,
+      settings,
+      refreshedSeats,
+      supervisorNeedsHandoff,
+      ...(supervisorHandoffAgentId !== undefined ? { supervisorHandoffAgentId } : {}),
     };
   };
 
@@ -3707,6 +3806,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
           handoffRequestedAt: panelRegistration?.handoffRequestedAt ?? null,
           heldSupervisorMailCount,
           supervisorCandidates,
+          setupProposal: enrichedProject === null ? null : readRecoveredSetupProposal(enrichedProject.slug),
           ...(panelGateQueue === undefined ? {} : { gateQueue: panelGateQueue }),
           now: Date.now(),
         },
@@ -4707,6 +4807,8 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       try {
         clearReleaseRequest(deps.stateDir, project.slug);
         clearStoreReleaseRequest(deps.stateDir, project.slug);
+        clearSetupProposal(deps.stateDir, project.slug);
+        clearSetupAudit(deps.stateDir, project.slug);
       } catch {
         // best-effort
       }
@@ -4886,6 +4988,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       deps.rotateProjectMailbox(project.slug);
       clearReleaseRequest(deps.stateDir, project.slug);
       clearStoreReleaseRequest(deps.stateDir, project.slug);
+      clearSetupProposal(deps.stateDir, project.slug);
 
       // 3. Lead first, then Supervisor — marked archives only. A failed retire stops here: the
       // mail and handovers are already dropped, and the reply says which seat is still bound.
@@ -4921,6 +5024,7 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       deps.rotateProjectMailbox(project.slug);
       clearReleaseRequest(deps.stateDir, project.slug);
       clearStoreReleaseRequest(deps.stateDir, project.slug);
+      clearSetupProposal(deps.stateDir, project.slug);
 
       const snap = await this.snapshot({ projectRoot: project.root }, context);
       const archivedText = archivedSeats.length === 0
@@ -5476,70 +5580,380 @@ export function createSurfaceHandlers(deps: SurfaceDeps) {
       const target = resolveActTarget(input, "update store release settings");
       if (!target.ok) return target;
       try {
-        const beforeCapability = resolveStoreReleaseCapability({
-          projectRoot: target.project.root,
-          stateDir: deps.stateDir,
-          projectSlug: target.project.slug,
+        const res = await applyStoreReleaseModeWrite(target.project, input.mode, context, {
+          skipSupervisorHandoffPrompt: false,
         });
-        const hadPending = readStoreReleaseRequest(deps.stateDir, target.project.slug) !== undefined;
-        setProjectStoreReleaseSettings(deps.stateDir, target.project.slug, { mode: input.mode });
-        const droppedPendingRequest = hadPending && readStoreReleaseRequest(deps.stateDir, target.project.slug) === undefined;
+        const { supervisorHandoffAgentId: _ignored, ...rpcRes } = res;
+        return rpcRes;
+      } catch (err) {
+        return failure(codeOf(err), messageOf(err));
+      }
+    },
+
+    async setupProposalApprove(
+      input: { projectRoot?: string; project?: string; proposalId: string; actionsHash?: string; seat?: string },
+      context?: SurfaceCallContext & { seat?: string },
+    ) {
+      const callerSeat = callerSeatOf(input, context);
+      if (isProjectSeat(callerSeat)) {
+        return failure(
+          "seat-cannot-grant",
+          `Seat ${callerSeat} cannot approve a Setup Proposal; Setup Proposal approval is Owner-only.`,
+        );
+      }
+      const target = resolveActTarget(input, "approve setup proposal");
+      if (!target.ok) return target;
+      const proposalId = typeof input?.proposalId === "string" ? input.proposalId.trim() : "";
+      if (proposalId === "") {
+        return failure("setup-proposal-stale", "Setup proposal ID is required.");
+      }
+
+      let existing: SetupProposalRecord | undefined;
+      try {
+        existing = recoverInterruptedSetupProposal(deps.stateDir, target.project.slug, activeSetupProposalRuns);
+      } catch (err) {
+        return failure(codeOf(err), messageOf(err));
+      }
+      if (existing === undefined || existing.id !== proposalId) {
+        return failure(
+          "setup-proposal-stale",
+          `Setup proposal "${proposalId}" is missing or has been superseded.`,
+        );
+      }
+      if (input.actionsHash !== undefined && input.actionsHash.trim() !== existing.actionsHash) {
+        return failure(
+          "setup-proposal-stale",
+          "Setup proposal contents changed before approval; review the latest proposal.",
+        );
+      }
+      if (existing.status === "applying" || activeSetupProposalRuns.has(target.project.slug)) {
+        return failure(
+          "setup-proposal-busy",
+          `Setup proposal "${existing.id}" is already being applied for ${target.project.slug}.`,
+        );
+      }
+
+      activeSetupProposalRuns.set(target.project.slug, existing.id);
+      try {
+        const applyingRecord: SetupProposalRecord = {
+          ...existing,
+          status: "applying",
+          updatedAt: new Date().toISOString(),
+        };
+        writeSetupProposal(deps.stateDir, target.project.slug, applyingRecord);
+        deps.onStateChange?.({
+          handler: "setupProposalApprove.applying",
+          projectSlug: target.project.slug,
+          projectRoot: target.project.root,
+        });
+
+        let liveSupervisor: SurfaceAgentSnapshot | undefined;
+        let supportsLiveToolsListChanged = false;
+        try {
+          liveSupervisor = await seatOf(resolveDaemon(context), "supervisor", target.project.slug);
+          if (liveSupervisor !== undefined) {
+            const family = resolveEffectiveProviderFamily(
+              liveSupervisor.provider,
+              "supervisor",
+              deps.stateDir,
+              target.project.slug,
+            );
+            supportsLiveToolsListChanged = DYNAMIC_TOOLS_LIST_CHANGED_PROVIDERS.has(family);
+          }
+        } catch (err) {
+          log(`setup-proposal: could not inspect Supervisor provider for ${target.project.slug} (${messageOf(err)})`);
+        }
+
+        let refreshedSeats: SeatName[] = [];
+        let supervisorNeedsHandoff = false;
+        let supervisorHandoffAgentId: string | undefined;
+        if (
+          existing.supervisorHandoffAgentId !== undefined &&
+          liveSupervisor !== undefined &&
+          liveSupervisor.id === existing.supervisorHandoffAgentId &&
+          !supportsLiveToolsListChanged
+        ) {
+          supervisorNeedsHandoff = true;
+          supervisorHandoffAgentId = existing.supervisorHandoffAgentId;
+        }
+
+        const runnerDeps: FactorySetupRunnerDeps = {
+          stateDir: deps.stateDir,
+          home: deps.home,
+          userHome: resolveSurfaceUserHome(),
+          factory: deps.factory,
+          ...(deps.registry !== undefined ? { registry: deps.registry } : {}),
+          daemon: () => resolveDaemon(context),
+          ...(deps.listPlugins !== undefined ? { listPlugins: deps.listPlugins } : {}),
+          ...(deps.installPlugin !== undefined ? { installPlugin: deps.installPlugin } : {}),
+          ...(deps.vaultRunner !== undefined ? { vaultRunner: deps.vaultRunner } : {}),
+          ...(deps.companionToolRunner !== undefined ? { companionToolRunner: deps.companionToolRunner } : {}),
+          activeProposalRuns: activeSetupProposalRuns,
+          onLog: log,
+        };
+
+        const applied = await applySetupProposalSteps(runnerDeps, target.project, applyingRecord, {
+          installCompanion: async ({ id }) => {
+            const res = await handlers.pluginsInstall({ target: id }, context);
+            if (!res.ok) throw new FactoryError(res.code, res.error);
+            return res.summary;
+          },
+          applyReleaseMode: async ({ project: p, mode, branch }) => {
+            const res = await handlers.releaseSettingsWrite(
+              {
+                projectRoot: p.root,
+                mode,
+                ...(branch !== undefined ? { branch } : {}),
+              },
+              context,
+            );
+            if (!res.ok) throw new FactoryError(res.code, res.error);
+            return `Set Release mode to ${res.settings.mode}${res.settings.branch ? ` (branch ${res.settings.branch})` : ""}`;
+          },
+          applyStoreReleaseMode: async ({ project: p, mode }) => {
+            const res = await applyStoreReleaseModeWrite(p, mode, context, {
+              skipSupervisorHandoffPrompt: supportsLiveToolsListChanged,
+            });
+            refreshedSeats = res.refreshedSeats;
+            supervisorNeedsHandoff = res.supervisorNeedsHandoff;
+            supervisorHandoffAgentId = res.supervisorHandoffAgentId;
+            return `Set Store release mode to ${res.settings.mode}`;
+          },
+          applySkillPack: async ({ project: p, pack, enabled }) => {
+            const res = await handlers.skillsTogglePack({ projectRoot: p.root, pack, enabled });
+            if (!res.ok) throw new FactoryError(res.code, res.error);
+            return res.summary;
+          },
+          applyHelperMcp: async ({ name, enabled }) => {
+            const res = await handlers.helperMcpsSetEnabled({ name, enabled });
+            if (!res.ok) throw new FactoryError(res.code, res.error);
+            return `Helper MCP ${name} ${enabled ? "enabled" : "disabled"} (machine-wide)`;
+          },
+        });
+
+        if (!applied.ok) {
+          const { supervisorHandoffAgentId: _staleSupervisorHandoffAgentId, ...failedBase } = applyingRecord;
+          const failedRecord: SetupProposalRecord = {
+            ...failedBase,
+            status: "failed",
+            ...(supervisorHandoffAgentId !== undefined ? { supervisorHandoffAgentId } : {}),
+            steps: applied.steps,
+            updatedAt: new Date().toISOString(),
+          };
+          writeSetupProposal(deps.stateDir, target.project.slug, failedRecord);
+          appendSetupAudit(deps.stateDir, target.project.slug, {
+            projectSlug: target.project.slug,
+            proposalId: existing.id,
+            actionsHash: existing.actionsHash,
+            tier: 2,
+            actor: "owner-approved",
+            reason: existing.reason,
+            steps: applied.steps,
+          });
+          const failedStep = applied.steps[applied.failedIndex];
+          const stepLabel = failedStep ? formatSetupActionLabel(failedStep.action) : `step ${applied.failedIndex + 1}`;
+          const completedLines = applied.steps
+            .filter((step) => step.status === "done")
+            .map((step) => `- [done] ${formatSetupActionLabel(step.action)}${step.summary ? `: ${step.summary}` : ""}`);
+          const failureNotice = [
+            `[Setup Proposal failed] proposalId=${existing.id} failedAt="${stepLabel}" (${applied.code}): ${applied.error}`,
+            ...(completedLines.length > 0 ? ["Completed before failure:", ...completedLines] : []),
+            "The Owner can click Retry (resuming from the failed step) or Dismiss in Needs you.",
+          ].join("\n");
+          try {
+            const failureRequestId = `setup-proposal:${existing.id}:failed:${applied.failedIndex}:${Date.now()}-${randomUUID().slice(0, 8)}`;
+            await deps.notifySupervisorSetup?.(target.project.slug, failureRequestId, failureNotice);
+          } catch (notifyErr) {
+            log(`setup-proposal: failed to notify Supervisor of failure for ${target.project.slug} (${messageOf(notifyErr)})`);
+          }
+          return failure(applied.code, applied.error);
+        }
+
+        clearSetupProposal(deps.stateDir, target.project.slug);
+        appendSetupAudit(deps.stateDir, target.project.slug, {
+          projectSlug: target.project.slug,
+          proposalId: existing.id,
+          actionsHash: existing.actionsHash,
+          tier: 2,
+          actor: "owner-approved",
+          reason: existing.reason,
+          steps: applied.steps,
+        });
+
         const afterCapability = resolveStoreReleaseCapability({
           projectRoot: target.project.root,
           stateDir: deps.stateDir,
           projectSlug: target.project.slug,
         });
-        const capabilityBoundaryChanged =
-          beforeCapability.leadEnabled !== afterCapability.leadEnabled ||
-          (beforeCapability.supervisorTier !== afterCapability.supervisorTier &&
-            (beforeCapability.supervisorTier === "full" || afterCapability.supervisorTier === "full"));
-        const refreshedSeats: SeatName[] = [];
-        let supervisorNeedsHandoff = false;
-        if (capabilityBoundaryChanged) {
-          const daemon = resolveDaemon(context);
-          const isStarted = (agent: SurfaceAgentSnapshot): boolean =>
-            deps.isSeatStarted?.(agent) ??
-            (typeof agent.lastUserMessageAt === "string" && agent.lastUserMessageAt.trim() !== "");
-          const isSeatIdleOrClosed = (agent: SurfaceAgentSnapshot): boolean =>
-            (agent.status === "idle" || agent.status === "closed") &&
-            !(agent.requiresAttention === true && agent.attentionReason === "permission");
-          for (const seat of ["supervisor", "lead"] as const) {
-            let liveSeat: SurfaceAgentSnapshot | undefined;
-            try {
-              liveSeat = await seatOf(daemon, seat, target.project.slug);
-            } catch (err) {
-              log(`store-release: cannot inspect ${seat} seat for ${target.project.slug} (${messageOf(err)})`);
-              continue;
-            }
-            if (liveSeat === undefined) continue;
-            if (!isStarted(liveSeat) && isSeatIdleOrClosed(liveSeat)) {
-              const retired = await retireSeat(seat, target.project.slug, target.project.root, context);
-              if (retired.ok) refreshedSeats.push(seat);
-              else log(`store-release: could not retire unstarted ${seat} seat for ${target.project.slug} (${retired.code}: ${retired.error})`);
-            } else if (seat === "supervisor") {
-              supervisorNeedsHandoff = true;
-            } else if (seat === "lead" && deps.handoff !== undefined) {
-              const handoffReply = await deps.handoff({
-                slug: target.project.slug,
-                seat: "lead",
-                action: "start",
-                reason: "owner",
-                quietPoint: true,
-              });
-              if (!handoffReply.ok && handoffReply.code !== "handoff-in-progress") {
-                log(`store-release: could not schedule Lead handoff for ${target.project.slug} (${handoffReply.code}: ${handoffReply.error})`);
-              }
-            }
-          }
+        const stepLines = applied.steps.map(
+          (step) => `- ${formatSetupActionLabel(step.action)}: ${step.summary ?? "done"}`,
+        );
+        const wakeupLines = [
+          `[Setup Proposal approved & applied] proposalId=${existing.id}`,
+          ...stepLines,
+        ];
+        if (afterCapability.supervisorTier === "full") {
+          wakeupLines.push(
+            "",
+            supervisorNeedsHandoff
+              ? "Unlocked capability status: Store release is active (static MCP client fallback: supervisorNeedsHandoff=true; the Owner can hand off Supervisor if cached tools do not appear, while Lead refreshes automatically)."
+              : supportsLiveToolsListChanged
+                ? "Unlocked capability status: Store release is now active live in this session (`supervisor_dispatch_lead({ message, storeRelease: { target, platforms?, resumeRunId?, resolution? } })` and `supervisor_record_store_note` unlocked via `notifications/tools/list_changed`)."
+                : "Unlocked capability status: Store release is active for this Project (no Supervisor handoff required; if a static MCP Supervisor session does not see Store release tools, hand off Supervisor).",
+            SUPERVISOR_STORE_RELEASE_BOUNDARY,
+          );
         }
-        const settings = await readStoreReleaseViewForProject(target.project);
-        log(`store-release: ${target.project.slug} mode=${settings.mode}`);
+        try {
+          await deps.notifySupervisorSetup?.(
+            target.project.slug,
+            `setup-proposal:${existing.id}:approved`,
+            wakeupLines.join("\n"),
+          );
+        } catch (notifyErr) {
+          log(`setup-proposal: failed to notify Supervisor of approval for ${target.project.slug} (${messageOf(notifyErr)})`);
+        }
+
+        const summary = `Applied Setup Proposal (${applied.steps.length} step(s)) for ${target.project.slug}.`;
+        log(`setup-proposal: approved and applied ${existing.id} for ${target.project.slug}`);
         return {
           ok: true as const,
-          droppedPendingRequest,
-          settings,
-          refreshedSeats,
+          project: target.project.slug,
+          projectRoot: target.project.root,
+          proposalId: existing.id,
+          actionsHash: existing.actionsHash,
+          applied: true as const,
+          steps: applied.steps,
+          ...(refreshedSeats.length > 0 ? { refreshedSeats } : {}),
           supervisorNeedsHandoff,
+          summary,
+        };
+      } catch (err) {
+        return failure(codeOf(err), messageOf(err));
+      } finally {
+        if (activeSetupProposalRuns.get(target.project.slug) === existing.id) {
+          activeSetupProposalRuns.delete(target.project.slug);
+        }
+      }
+    },
+
+    async setupProposalDecline(
+      input: { projectRoot?: string; project?: string; proposalId: string; seat?: string },
+      context?: SurfaceCallContext & { seat?: string },
+    ) {
+      const callerSeat = callerSeatOf(input, context);
+      if (isProjectSeat(callerSeat)) {
+        return failure(
+          "seat-cannot-grant",
+          `Seat ${callerSeat} cannot decline a Setup Proposal; Setup Proposal decisions are Owner-only.`,
+        );
+      }
+      const target = resolveActTarget(input, "decline setup proposal");
+      if (!target.ok) return target;
+      const proposalId = typeof input?.proposalId === "string" ? input.proposalId.trim() : "";
+      if (proposalId === "") {
+        return failure("setup-proposal-stale", "Setup proposal ID is required.");
+      }
+      try {
+        const existing = recoverInterruptedSetupProposal(deps.stateDir, target.project.slug, activeSetupProposalRuns);
+        if (existing === undefined || existing.id !== proposalId) {
+          return failure(
+            "setup-proposal-stale",
+            `Setup proposal "${proposalId}" is missing or has been superseded.`,
+          );
+        }
+        if (existing.status === "applying" || activeSetupProposalRuns.has(target.project.slug)) {
+          return failure(
+            "setup-proposal-busy",
+            `Setup proposal "${existing.id}" is currently applying for ${target.project.slug}.`,
+          );
+        }
+        clearSetupProposal(deps.stateDir, target.project.slug);
+        appendSetupAudit(deps.stateDir, target.project.slug, {
+          projectSlug: target.project.slug,
+          proposalId: existing.id,
+          actionsHash: existing.actionsHash,
+          tier: 2,
+          actor: "owner-declined",
+          reason: existing.reason,
+          steps: existing.steps,
+        });
+        const declineText = [
+          `[Setup Proposal declined] proposalId=${existing.id}`,
+          `Reason requested: ${existing.reason}`,
+          "The Owner declined this Setup Proposal in Needs you. Adjust your plan or ask the Owner how they want to proceed.",
+        ].join("\n");
+        try {
+          await deps.notifySupervisorSetup?.(
+            target.project.slug,
+            `setup-proposal:${existing.id}:declined`,
+            declineText,
+          );
+        } catch (notifyErr) {
+          log(`setup-proposal: failed to notify Supervisor of decline for ${target.project.slug} (${messageOf(notifyErr)})`);
+        }
+        const summary = `Declined Setup Proposal ${existing.id} for ${target.project.slug}.`;
+        log(`setup-proposal: declined ${existing.id} for ${target.project.slug}`);
+        return {
+          ok: true as const,
+          project: target.project.slug,
+          projectRoot: target.project.root,
+          proposalId: existing.id,
+          summary,
+        };
+      } catch (err) {
+        return failure(codeOf(err), messageOf(err));
+      }
+    },
+
+    async setupProposalDismiss(
+      input: { projectRoot?: string; project?: string; proposalId: string; seat?: string },
+      context?: SurfaceCallContext & { seat?: string },
+    ) {
+      const callerSeat = callerSeatOf(input, context);
+      if (isProjectSeat(callerSeat)) {
+        return failure(
+          "seat-cannot-grant",
+          `Seat ${callerSeat} cannot dismiss a Setup Proposal; Setup Proposal decisions are Owner-only.`,
+        );
+      }
+      const target = resolveActTarget(input, "dismiss setup proposal");
+      if (!target.ok) return target;
+      const proposalId = typeof input?.proposalId === "string" ? input.proposalId.trim() : "";
+      if (proposalId === "") {
+        return failure("setup-proposal-stale", "Setup proposal ID is required.");
+      }
+      try {
+        const existing = recoverInterruptedSetupProposal(deps.stateDir, target.project.slug, activeSetupProposalRuns);
+        if (existing === undefined || existing.id !== proposalId) {
+          return failure(
+            "setup-proposal-stale",
+            `Setup proposal "${proposalId}" is missing or has been superseded.`,
+          );
+        }
+        if (existing.status === "applying" || activeSetupProposalRuns.has(target.project.slug)) {
+          return failure(
+            "setup-proposal-busy",
+            `Setup proposal "${existing.id}" is currently applying for ${target.project.slug}.`,
+          );
+        }
+        clearSetupProposal(deps.stateDir, target.project.slug);
+        appendSetupAudit(deps.stateDir, target.project.slug, {
+          projectSlug: target.project.slug,
+          proposalId: existing.id,
+          actionsHash: existing.actionsHash,
+          tier: 2,
+          actor: "owner-dismissed",
+          reason: existing.reason,
+          steps: existing.steps,
+        });
+        const summary = `Dismissed Setup Proposal ${existing.id} for ${target.project.slug}.`;
+        log(`setup-proposal: dismissed ${existing.id} for ${target.project.slug}`);
+        return {
+          ok: true as const,
+          project: target.project.slug,
+          projectRoot: target.project.root,
+          proposalId: existing.id,
+          summary,
         };
       } catch (err) {
         return failure(codeOf(err), messageOf(err));
@@ -5857,6 +6271,9 @@ export function registerSurfaceRpc(
   server.handle(releaseSettingsWrite, (input, context) => handlers.releaseSettingsWrite(input, pass(context)));
   server.handle(storeReleaseRead, (input, context) => handlers.storeReleaseRead(input, pass(context)));
   server.handle(storeReleaseWrite, (input, context) => handlers.storeReleaseWrite(input, pass(context)));
+  server.handle(setupProposalApprove, (input, context) => handlers.setupProposalApprove(input, pass(context)));
+  server.handle(setupProposalDecline, (input, context) => handlers.setupProposalDecline(input, pass(context)));
+  server.handle(setupProposalDismiss, (input, context) => handlers.setupProposalDismiss(input, pass(context)));
   server.handle(githubPublishPreflight, (input, context) => handlers.githubPublishPreflight(input, pass(context)));
   server.handle(githubPublish, (input, context) => handlers.githubPublish(input, pass(context)));
 }

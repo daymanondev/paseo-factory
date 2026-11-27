@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.0] - 2026-11-27
+
+**`Supervisor` as Factory Operator: 3-tier capability provisioning, atomic `Setup Proposal` in `Needs you`, provider-aware live unlock, and single-screen **Quick Start** onboarding (ADR 0073).**
+
+### Added
+
+- **Core Setup Policy, Persistence & Audit (`src/factory-setup.ts`, `plugin/server/core/factory-setup.ts`):** Added typed `FactorySetupAction`, strict per-index boundary validation, `canonicalizeSetupActions`, deterministic SHA-256 `computeSetupActionsHash`, pure companion whitelist constants parity-tested against `plugin/shared/companions.ts`, Tier 1/Tier 2 classification, atomic `<projectStateDir>/setup-proposal.json` and append-only `<projectStateDir>/setup-audit.jsonl` persistence under `stateMutation` outside `ledger.jsonl`, boot recovery of interrupted `"applying"` proposals into `"failed"`, and cleanup wiring on `projectRotate` (`clearSetupProposal`) and `projectReset` (`clearSetupProposal` + `clearSetupAudit`) (`test/factory-setup.test.ts`).
+- **Supervisor-only MCP Tools, Spool, Schema Heal & Setup Runner (`src/mcp/shared.ts`, `src/agy-mcp-schema-heal.ts`, `plugin/server/spool.ts`, `plugin/server/factory-setup-runner.ts`, `plugin/bin/bridge.mjs`, `plugin/bin/agy-pre-tool-hook.mjs`, `src/roles-contract.ts`, `src/preflight.ts`):** Exposed Supervisor-only `supervisor_inspect_factory` (secret-free, context-bounded Tier 0 readiness) and flat-schema `supervisor_setup_factory` (sequential Tier 1 execution with strictly project-scoped `hydrateVaultDirect(..., { runtimeOnly: true, projectDir })`, atomic Tier 2 `Setup Proposal` persistence with `ghAuth`, mobile, helper-MCP, and Vault preflights), added `"factory_inspect"` / `"factory_setup"` Spool handlers (`seat === "supervisor"`), regenerated bridge/hook policies, and updated `Supervisor` role contracts (`test/factory-setup-runner.test.ts`, `test/bridge-mcp.test.ts`, `test/agy-mcp-schema-heal.test.ts`, `test/preflight.test.ts`).
+- **Owner Approval RPCs, Auto-Wake & Live Unlock (`plugin/shared/rpc.ts`, `plugin/shared/view.ts`, `plugin/server/surface-rpc.ts`, `plugin/server/lead-mailbox.ts`, `plugin/server/panel.ts`):** Added Owner-only `factory.setup_proposal.{approve,decline,dismiss}` RPCs with `!isProjectSeat` guard, required `proposalId` + `actionsHash` TOCTOU binding (`setup-proposal-stale`), single-flight `"applying"` lock outside `withProjectIngressLock`, fail-fast `Retry` with persisted `supervisorHandoffAgentId`, `Supervisor mailbox` auto-wake (`deps.notifySupervisorSetup`), compaction-safe Store Release reminders regardless of `isPiSeat`, provider-aware `skipSupervisorHandoffPrompt` with `notifications/tools/list_changed` and ADR 0071 `Lead` quiet-point refresh, and pure `PanelInput.setupProposal` projection across `snapshot`, `seatsDirectory`, and `overview` (`test/surface-rpc.test.ts`, `test/lead-mailbox.test.ts`, `test/surface-rpc-retired-doors.test.ts`).
+
+### Changed
+
+- **`Needs you` Setup Proposal Card & Single-Screen Quick Start Onboarding (`plugin/client/factory/project-panel.tsx`, `plugin/client/factory/shell.tsx`, `plugin/client/factory/onboarding-state.ts`, `plugin/client/factory/onboarding-wizard.tsx`, `plugin/client/factory/onboarding-screen.tsx`, `plugin/client/factory/onboarding-run-tracker.tsx`):** Rendered `Setup Proposal` at the top of `Needs you` with Desktop `Approve & Apply` / `Decline` / `Retry` / `Dismiss` actions, `"applying"` disabled state, synchronous `useRef` re-entry guard, `(machine-wide)` badge for `set_helper_mcp`, missing-key warnings, and mobile read-only Desktop hint; collapsed the 4-step `OnboardingWizard` into single-screen **Quick Start** (`Folder` + optional Git init, compact `Lane profile` selector with expandable `Customize models…`, and `Start Supervisor` with ADR 0065 live async checklist) preserving `factory.onboarding.start` / `factory.onboarding.commit` compatibility (`test/client-project-panel.test.ts`, `test/client-onboarding-wizard.test.ts`, `test/client-onboarding-screen.test.ts`, `test/client-mobile-safety.test.ts`).
+
+### Documentation
+
+- **ADR 0073 & `CONTEXT.md`:** Added `docs/adr/0073-supervisor-factory-operator-tiered-setup-and-quick-start-onboarding.md` (amending ADR 0006, ADR 0056, ADR 0061, ADR 0063, ADR 0065, ADR 0066, ADR 0071, and ADR 0072) and updated `CONTEXT.md` (`Setup Proposal` disambiguated from `Recurrence Guard` `Proposal`, `Supervisor` Factory Operator responsibilities, and single-screen `Quick Start`).
+
 ## [0.26.0] - 2026-11-26
 
 **Pull-only `Private vault` runner hydration (`--runtime-only --project <dir> [--app <key>]`) and per-app sealed `.env.local` support (ADR 0072).**

@@ -139,3 +139,14 @@ test("ADR 0068 (Ticket 05): overview and Gate queue control RPCs are registered 
     assert.equal(names.includes(retired), false, `${retired} must remain retired`);
   }
 });
+
+test("ADR 0073 wave 3a: setupProposalApprove, setupProposalDecline, and setupProposalDismiss are registered on the surface", (t) => {
+  const names = registeredMethods(t);
+  for (const expected of [
+    "factory.setup_proposal.approve",
+    "factory.setup_proposal.decline",
+    "factory.setup_proposal.dismiss",
+  ]) {
+    assert.ok(names.includes(expected), `${expected} must be registered`);
+  }
+});

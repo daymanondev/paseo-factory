@@ -4149,7 +4149,7 @@ test("Pi Lead and Supervisor receive unconditional compaction-safe Store Release
     assert.match(supSend.text, /supervisor_record_store_note/);
   }
 
-  // 2. Non-Pi seats (claude) and disabled (mode=off) mobile Projects do NOT receive Pi mailbox reminders
+  // 2. Non-Pi Lead stays without Pi Lead reminders, while non-Pi Supervisor receives compaction-safe Hole reminders when supervisorTier === "full" (ADR 0073)
   {
     const f = makeSpooledRuntime(t, [
       { id: "claude-lead-c", provider: "claude/claude-sonnet-4-6", status: "idle", lastUserMessageAt: "2026-11-25T10:00:00.000Z" },
@@ -4180,7 +4180,9 @@ test("Pi Lead and Supervisor receive unconditional compaction-safe Store Release
       project: f.slug,
       message: "Store release paused at Hole. Console handoff guide attached.",
     });
-    assert.doesNotMatch(f.fake.sent.find((s) => s.agentId === "claude-sup-c")!.text, /compaction-safe/);
+    const claudeSupText = f.fake.sent.find((s) => s.agentId === "claude-sup-c")!.text;
+    assert.match(claudeSupText, /compaction-safe/);
+    assert.match(claudeSupText, /Console handoff guide/);
   }
 
   {
@@ -4337,5 +4339,70 @@ test("ADR 0071 (Issue 04): handoff with quietPoint waits for BOTH Lead turn end 
     assert.equal(started.progress?.state, "handing-over");
     assert.equal(readProjectRegistration(f.stateDir, f.slug)?.rotationState, "handing_over");
     assert.equal(f.fake.sent.filter((s) => s.agentId === "lead-qp-idle").length, 1);
+  }
+});
+
+test("ADR 0073 wave 3a: notifySupervisorSetup wakes live Supervisor with system report, deduplicates requestId, and attaches compaction-safe Store Release reminder regardless of isPiSeat", async (t) => {
+  const { setProjectStoreReleaseSettings } = await import("../plugin/server/core/project-settings.ts");
+
+  // 1. Live non-Pi (opencode) Supervisor with supervisorTier === "full" gets system wakeup + compaction-safe Store Release reminder
+  {
+    const f = makeSpooledRuntime(t, [
+      {
+        id: "oc-sup-1",
+        provider: "opencode/claude-sonnet-4",
+        status: "idle",
+        lastUserMessageAt: "2026-11-26T10:00:00.000Z",
+      },
+    ]);
+    mkdirSync(join(f.projectRoot, "ios"), { recursive: true });
+    writeFileSync(join(f.projectRoot, "ios", "Podfile"), "platform :ios, '15.0'\n");
+    setProjectStoreReleaseSettings(f.stateDir, f.slug, { mode: "on-request" });
+    f.fake.agents[0]!.labels = { seat: "supervisor", project: f.slug };
+    f.fake.agents[0]!.cwd = f.projectRoot;
+    writeProjectRegistration(f.stateDir, f.slug, { root: f.projectRoot, supervisor: "oc-sup-1" });
+
+    const reqId = "setup-proposal:prop-wake-1:approved";
+    const first = await f.leadMail.notifySupervisorSetup(f.slug, reqId, "[Setup Proposal approved & applied] Store release unlocked.");
+    assert.ok(first.mailId);
+    assert.equal(f.fake.sent.filter((s) => s.agentId === "oc-sup-1").length, 1);
+    const deliveredText = f.fake.sent.at(-1)!.text;
+    assert.match(deliveredText, /from=system|system/i);
+    assert.match(deliveredText, /Setup Proposal approved/);
+    assert.match(deliveredText, /compaction-safe/);
+    assert.match(deliveredText, /supervisor_dispatch_lead/);
+    assert.match(deliveredText, /supervisor_record_store_note/);
+
+    // Duplicate requestId does not enqueue or re-send
+    await f.leadMail.onLeadTurnEnded({ agentId: "oc-sup-1", outcome: { kind: "completed" } });
+    const dup = await f.leadMail.notifySupervisorSetup(f.slug, reqId, "[Setup Proposal approved & applied] duplicate");
+    assert.equal(dup.mailId, first.mailId);
+    assert.equal(f.fake.sent.filter((s) => s.agentId === "oc-sup-1").length, 1);
+
+    // Distinct per-attempt requestId (e.g. Retry failure) IS delivered
+    await f.leadMail.notifySupervisorSetup(f.slug, "setup-proposal:prop-wake-1:failed:1:retry-2", "[Setup Proposal failed] step 2 failed.");
+    assert.equal(f.fake.sent.filter((s) => s.agentId === "oc-sup-1").length, 2);
+  }
+
+  // 2. mode === "off" does NOT attach compaction-safe Store Release reminder
+  {
+    const f = makeSpooledRuntime(t, [
+      {
+        id: "oc-sup-off",
+        provider: "opencode/claude-sonnet-4",
+        status: "idle",
+        lastUserMessageAt: "2026-11-26T10:00:00.000Z",
+      },
+    ]);
+    mkdirSync(join(f.projectRoot, "ios"), { recursive: true });
+    writeFileSync(join(f.projectRoot, "ios", "Podfile"), "platform :ios, '15.0'\n");
+    f.fake.agents[0]!.labels = { seat: "supervisor", project: f.slug };
+    f.fake.agents[0]!.cwd = f.projectRoot;
+    writeProjectRegistration(f.stateDir, f.slug, { root: f.projectRoot, supervisor: "oc-sup-off" });
+
+    await f.leadMail.notifySupervisorSetup(f.slug, "setup-proposal:prop-off:declined", "[Setup Proposal declined] Owner declined.");
+    const sent = f.fake.sent.find((s) => s.agentId === "oc-sup-off")!;
+    assert.match(sent.text, /Setup Proposal declined/);
+    assert.doesNotMatch(sent.text, /compaction-safe/);
   }
 });

@@ -9,7 +9,7 @@ import { openExternalUrl, useRpc } from "@getpaseo/plugin/client";
 import { Modal, ScrollView, useToast } from "@getpaseo/plugin/client/ui";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Text, View } from "react-native";
-import { skillsImport, skillsPackSave, skillsPackDelete, skillsPackReset, skillsTogglePack, lanesSet, lanesReset, lanesSetBatch, handoffStart, handoffReplaceNow, handoffCancel, handoffRetry, handoffHandover, onboardingInspect, onboardingStart, onboardingStatus, openDesignCatalog, openDesignSync, helperMcpsSyncAndProbe, helperMcpsSetEnabled, pluginsInstall, pluginsManage, pluginsCheckUpdates, releaseSettingsRead, releaseSettingsWrite, storeReleaseRead, storeReleaseWrite, githubPublishPreflight, githubPublish, selfUpdateApply, selfUpdateStatus, profilesApply, profilesDelete, profilesSave, projectDelete, projectReset, projectRotate, snapshot, stateUpdates, supervisorAdopt, supervisorStart, vaultConfigure, vaultHydrate, vaultImport, vaultSync, gateQueueCancel, gateQueueConcurrency } from "../../shared/rpc.ts";
+import { skillsImport, skillsPackSave, skillsPackDelete, skillsPackReset, skillsTogglePack, lanesSet, lanesReset, lanesSetBatch, handoffStart, handoffReplaceNow, handoffCancel, handoffRetry, handoffHandover, onboardingInspect, onboardingStart, onboardingStatus, openDesignSync, helperMcpsSyncAndProbe, helperMcpsSetEnabled, pluginsInstall, pluginsManage, pluginsCheckUpdates, releaseSettingsRead, releaseSettingsWrite, storeReleaseRead, storeReleaseWrite, githubPublishPreflight, githubPublish, selfUpdateApply, selfUpdateStatus, profilesApply, profilesDelete, profilesSave, projectDelete, projectReset, projectRotate, setupProposalApprove, setupProposalDecline, setupProposalDismiss, snapshot, stateUpdates, supervisorAdopt, supervisorStart, vaultConfigure, vaultHydrate, vaultImport, vaultSync, gateQueueCancel, gateQueueConcurrency } from "../../shared/rpc.ts";
 import { GH_LOGIN_CMD } from "./github-release-card.tsx";
 import type { GitHubPublishSubmitInput, ReleaseCardFeedback } from "./github-release-card.tsx";
 import type { StoreReleaseCardFeedback } from "./store-release-card.tsx";
@@ -81,11 +81,10 @@ export function FactoryShell({
   const handoffHandoverCall = useRpc(handoffHandover);
   const supervisorStartCall = useRpc(supervisorStart);
   const supervisorAdoptCall = useRpc(supervisorAdopt);
-  // The onboarding wizard's doors (ADR 0056 / ADR 0065): folder inspection, async run start/status, and Open Design catalog.
+  // Quick Start onboarding's doors (ADR 0073 / ADR 0065): folder inspection and async run start/status.
   const onboardingInspectCall = useRpc(onboardingInspect);
   const onboardingStartCall = useRpc(onboardingStart);
   const onboardingStatusCall = useRpc(onboardingStatus);
-  const openDesignCatalogCall = useRpc(openDesignCatalog);
   const openDesignSyncCall = useRpc(openDesignSync);
   const projectResetCall = useRpc(projectReset);
   const projectRotateCall = useRpc(projectRotate);
@@ -127,6 +126,9 @@ export function FactoryShell({
   const vaultImportCall = useRpc(vaultImport);
   const gateQueueCancelCall = useRpc(gateQueueCancel);
   const gateQueueConcurrencyCall = useRpc(gateQueueConcurrency);
+  const setupProposalApproveCall = useRpc(setupProposalApprove);
+  const setupProposalDeclineCall = useRpc(setupProposalDecline);
+  const setupProposalDismissCall = useRpc(setupProposalDismiss);
 
   const [busy, setBusy] = useState(false);
   const [handover, setHandover] = useState<{ seat: string; text: string; source: "extracted" | "substitute" } | null>(null);
@@ -151,6 +153,8 @@ export function FactoryShell({
   const [containerWidth, setContainerWidth] = useState<number>(0);
   const [gateQueueCancelError, setGateQueueCancelError] = useState<GateQueueCancelError | null>(null);
   const mountedRef = useRef(true);
+  const busyCountRef = useRef(0);
+  const setupProposalBusyRef = useRef(false);
   const scopeRootRef = useRef(dir);
   scopeRootRef.current = dir;
   const lastViewRef = useRef<FactoryView | null>(null);
@@ -513,6 +517,7 @@ export function FactoryShell({
   }, [panelHost, mobile, view?.pluginsCheckedAt, checkingUpdates, autoCheckedPlugins]);
 
   const act = async (name: string, run: () => Promise<{ ok: boolean; error?: string | null; summary?: string; historyImports?: VaultStatusView["historyImports"]; vault?: VaultStatusView }>): Promise<boolean> => {
+    busyCountRef.current += 1;
     setBusy(true);
     setBusyAct(name);
     const isVaultAct = isVaultActName(name);
@@ -538,8 +543,11 @@ export function FactoryShell({
       if (isVaultAct && vaultResponses.current.current(request)) setVaultNote({ text: `${name}: ${message}`, tone: "statusDanger" });
       return false;
     } finally {
-      setBusy(false);
-      setBusyAct(null);
+      busyCountRef.current = Math.max(0, busyCountRef.current - 1);
+      if (busyCountRef.current === 0) {
+        setBusy(false);
+        setBusyAct(null);
+      }
       refresh();
     }
   };
@@ -656,6 +664,28 @@ export function FactoryShell({
   };
   const cancelGateQueueItem = (id: string): void => {
     void cancelGateQueueItemAsync(id);
+  };
+  const runSetupProposalAct = (
+    name: string,
+    run: () => Promise<{ ok: boolean; error?: string | null; summary?: string }>,
+  ): void => {
+    if (setupProposalBusyRef.current) return;
+    setupProposalBusyRef.current = true;
+    void act(name, run).finally(() => {
+      setupProposalBusyRef.current = false;
+    });
+  };
+  const approveSetupProposal = (proposalId: string, actionsHash: string): void => {
+    if (projectRoot === undefined || mobile) return;
+    runSetupProposalAct("Apply Setup Proposal", () => setupProposalApproveCall({ projectRoot, proposalId, actionsHash }));
+  };
+  const declineSetupProposal = (proposalId: string): void => {
+    if (projectRoot === undefined || mobile) return;
+    runSetupProposalAct("Decline Setup Proposal", () => setupProposalDeclineCall({ projectRoot, proposalId }));
+  };
+  const dismissSetupProposal = (proposalId: string): void => {
+    if (projectRoot === undefined || mobile) return;
+    runSetupProposalAct("Dismiss Setup Proposal", () => setupProposalDismissCall({ projectRoot, proposalId }));
   };
   const incompleteTools = (view.companionTools ?? []).filter((t) => t.status !== "running" || t.error !== null);
   const isInstallingPrereqs = activePluginAct !== null && activePluginAct.kind === "install" && activePluginAct.target === "all";
@@ -1062,7 +1092,7 @@ export function FactoryShell({
             mobile={mobile}
             now={now}
             daemonError={view.daemonError}
-            actions={{ openAgent, installPrerequisites, handoffStart: startHandoff, handoffReplaceNow: replaceHandoff, handoffCancel: cancelHandoff, handoffRetry: retryHandoff, viewHandover, startSupervisor, syncOpenDesign, adoptSupervisor, saveSeatModel, setMachineDefault, applyProfile: applyProjectProfile, toggleSkillPack: toggleProjectSkillPack, resetSkillPacks: resetProjectSkillPacks, saveProfile: saveProjectProfile, resetProjectLanes, cancelGateQueueItem, manageSkillPacks: () => { if (!mobile) openSettings?.(); }, busy: busy || activePluginAct !== null }}
+            actions={{ openAgent, installPrerequisites, handoffStart: startHandoff, handoffReplaceNow: replaceHandoff, handoffCancel: cancelHandoff, handoffRetry: retryHandoff, viewHandover, startSupervisor, syncOpenDesign, adoptSupervisor, saveSeatModel, setMachineDefault, applyProfile: applyProjectProfile, toggleSkillPack: toggleProjectSkillPack, resetSkillPacks: resetProjectSkillPacks, saveProfile: saveProjectProfile, resetProjectLanes, cancelGateQueueItem, approveSetupProposal, declineSetupProposal, dismissSetupProposal, manageSkillPacks: () => { if (!mobile) openSettings?.(); }, busy: busy || activePluginAct !== null }}
             openDesignActions={
               !mobile && view.project !== null && view.project.missingRoot !== true ? (
                 <OpenDesignControl
@@ -1079,19 +1109,13 @@ export function FactoryShell({
               // Desktop only: the wizard cannot finish on mobile, which shows "set this Project up on Paseo Desktop".
               holdOnboardingWizard ? (
                 <OnboardingWizard
+                  key={onboardingFolder ?? "none"}
                   theme={theme}
                   view={view}
                   folder={onboardingFolder}
                   tracker={onboardingTracker}
                   actions={{
                     inspect: (folder) => onboardingInspectCall({ folder }),
-                    installPrerequisites: installPrerequisitesResult,
-                    listDesigns: async () => {
-                      const reply = await openDesignCatalogCall({});
-                      return reply.ok
-                        ? { ok: true as const, projects: reply.projects.map((p) => ({ projectId: p.projectId, projectName: p.projectName, screenCount: p.screenCount })) }
-                        : { ok: false as const, error: reply.error };
-                    },
                     start: startOnboardingRun,
                     status: (input) => onboardingStatusCall(input),
                   }}

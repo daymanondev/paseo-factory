@@ -907,6 +907,91 @@ export const githubPublish = defineRpc({
   ]),
 });
 
+export const SetupProposalActionSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("install_companion"), id: z.enum(["factory-skills-pack", "factory-release-lab"]) }),
+  z.object({ kind: z.literal("set_release_mode"), mode: ReleaseModeSchema, branch: z.string().nullable().optional() }),
+  z.object({ kind: z.literal("set_store_release_mode"), mode: StoreReleaseModeSchema }),
+  z.object({ kind: z.literal("set_skill_pack"), pack: z.string(), enabled: z.boolean() }),
+  z.object({ kind: z.literal("set_helper_mcp"), name: z.string(), enabled: z.boolean() }),
+  z.object({ kind: z.literal("sync_open_design"), projectId: z.string() }),
+  z.object({ kind: z.literal("vault_hydrate") }),
+]);
+
+export const SetupProposalStepSchema = z.object({
+  index: z.number().int().nonnegative(),
+  action: SetupProposalActionSchema,
+  tier: z.union([z.literal(1), z.literal(2)]),
+  status: z.enum(["pending", "done", "failed", "skipped"]),
+  summary: z.string().optional(),
+  error: z.string().optional(),
+});
+
+export const setupProposalApprove = defineRpc({
+  name: "factory.setup_proposal.approve",
+  input: z.object({
+    projectRoot: z.string().optional(),
+    project: z.string().optional(),
+    proposalId: z.string().min(1),
+    actionsHash: z.string().min(1).optional(),
+    seat: z.string().optional(),
+  }),
+  output: z.union([
+    z.object({
+      ok: z.literal(true),
+      project: z.string(),
+      projectRoot: z.string(),
+      proposalId: z.string(),
+      actionsHash: z.string(),
+      applied: z.literal(true),
+      steps: z.array(SetupProposalStepSchema),
+      refreshedSeats: z.array(z.enum(["supervisor", "lead"])).optional(),
+      supervisorNeedsHandoff: z.boolean().optional(),
+      summary: z.string(),
+    }),
+    Failure,
+  ]),
+});
+
+export const setupProposalDecline = defineRpc({
+  name: "factory.setup_proposal.decline",
+  input: z.object({
+    projectRoot: z.string().optional(),
+    project: z.string().optional(),
+    proposalId: z.string().min(1),
+    seat: z.string().optional(),
+  }),
+  output: z.union([
+    z.object({
+      ok: z.literal(true),
+      project: z.string(),
+      projectRoot: z.string(),
+      proposalId: z.string(),
+      summary: z.string(),
+    }),
+    Failure,
+  ]),
+});
+
+export const setupProposalDismiss = defineRpc({
+  name: "factory.setup_proposal.dismiss",
+  input: z.object({
+    projectRoot: z.string().optional(),
+    project: z.string().optional(),
+    proposalId: z.string().min(1),
+    seat: z.string().optional(),
+  }),
+  output: z.union([
+    z.object({
+      ok: z.literal(true),
+      project: z.string(),
+      projectRoot: z.string(),
+      proposalId: z.string(),
+      summary: z.string(),
+    }),
+    Failure,
+  ]),
+});
+
 const defineSubscriptionFn =
   typeof (paseoPlugin as { defineSubscription?: unknown }).defineSubscription === "function"
     ? (paseoPlugin as { defineSubscription: typeof paseoPlugin.defineSubscription }).defineSubscription

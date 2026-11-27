@@ -59,6 +59,9 @@ export interface ProjectPanelActions {
   resetSkillPacks?(): void;
   manageSkillPacks?(): void;
   cancelGateQueueItem?(id: string): void;
+  approveSetupProposal?: (proposalId: string, actionsHash: string) => void;
+  declineSetupProposal?: (proposalId: string) => void;
+  dismissSetupProposal?: (proposalId: string) => void;
   busy: boolean;
 }
 
@@ -95,6 +98,7 @@ const COL = { name: 150, status: 164, context: 170 } as const;
 
 /** Items the Owner must resolve themselves are red; items that wait on the Owner's attention are amber. */
 const NEEDS_YOU_TONE: Record<PanelNeedsYouItem["kind"], "wait" | "bad"> = {
+  "setup-proposal": "wait",
   "needs-human": "wait",
   "attempt-ceiling": "bad",
   "seat-stuck": "bad",
@@ -106,11 +110,19 @@ const NEEDS_YOU_TONE: Record<PanelNeedsYouItem["kind"], "wait" | "bad"> = {
   "open-design-broken": "bad",
 };
 
-/** What mobile says in place of a desktop-only act — a settings write, a seat start or a design sync cannot finish on a phone. */
-const DESKTOP_ONLY_HINT: Record<"install-prerequisites" | "start-supervisor" | "sync-open-design", string> = {
+function needsYouTone(item: PanelNeedsYouItem): "wait" | "bad" {
+  if (item.kind === "setup-proposal") {
+    return item.setupProposal?.status === "failed" ? "bad" : "wait";
+  }
+  return NEEDS_YOU_TONE[item.kind];
+}
+
+/** What mobile says in place of a desktop-only act — a settings write, a seat start, a design sync or a setup approval cannot finish on a phone. */
+const DESKTOP_ONLY_HINT: Record<"install-prerequisites" | "start-supervisor" | "sync-open-design" | "setup-proposal", string> = {
   "install-prerequisites": "Install them on Paseo Desktop.",
   "start-supervisor": "Start the Supervisor on Paseo Desktop.",
   "sync-open-design": "Sync the design again on Paseo Desktop.",
+  "setup-proposal": "Approve on Paseo Desktop.",
 };
 
 function toneColour(tone: PanelTone): Colour | undefined {
@@ -154,8 +166,72 @@ function Section({ theme, testID, divider = true, children }: { theme: PluginThe
 
 const alertActions = (children: ReactNode) => <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[1.5] }}>{children}</View>;
 
+function setupStepStatusColour(palette: ReturnType<typeof factoryPalette>, status: "pending" | "done" | "failed" | "skipped"): string {
+  if (status === "done") return palette.ok;
+  if (status === "failed") return palette.bad;
+  return palette.idle;
+}
+
+function SetupProposalCard({ theme, item, mobile, wide, actions }: { theme: PluginTheme; item: PanelNeedsYouItem; mobile: boolean; wide: boolean; actions: ProjectPanelActions }) {
+  const palette = factoryPalette(theme);
+  const sp = item.setupProposal;
+  const colour = palette[needsYouTone(item)];
+  const reasonText = sp?.reason ?? item.detail;
+  const controls = mobile ? (
+    <Text testID={`factory-panel-needs-you-hint-${item.key}`} style={text(theme, "meta")}>{DESKTOP_ONLY_HINT["setup-proposal"]}</Text>
+  ) : sp === undefined ? null : sp.status === "applying" ? (
+    <Btn theme={theme} small variant="primary" accentColour={colour} testID="factory-setup-proposal-approve" label="Applying…" disabled onPress={() => {}} />
+  ) : sp.status === "failed" ? (
+    <>
+      <Btn theme={theme} small variant="primary" accentColour={colour} testID="factory-setup-proposal-retry" label={actions.busy ? "Applying…" : "Retry"} disabled={actions.busy} onPress={() => actions.approveSetupProposal?.(sp.id, sp.actionsHash)} />
+      <Btn theme={theme} small variant="secondary" testID="factory-setup-proposal-dismiss" label="Dismiss" disabled={actions.busy} onPress={() => actions.dismissSetupProposal?.(sp.id)} />
+    </>
+  ) : (
+    <>
+      <Btn theme={theme} small variant="primary" accentColour={colour} testID="factory-setup-proposal-approve" label={actions.busy ? "Applying…" : "Approve & Apply"} disabled={actions.busy} onPress={() => actions.approveSetupProposal?.(sp.id, sp.actionsHash)} />
+      <Btn theme={theme} small variant="secondary" testID="factory-setup-proposal-decline" label="Decline" disabled={actions.busy} onPress={() => actions.declineSetupProposal?.(sp.id)} />
+    </>
+  );
+
+  return (
+    <AlertRow theme={theme} testID="factory-setup-proposal" colour={colour} title={item.title} wide={wide} actions={controls !== null ? alertActions(controls) : undefined}>
+      {reasonText !== null && reasonText !== "" ? <Text style={text(theme, "meta")}>{reasonText}</Text> : null}
+      {sp !== undefined && sp.actions.length > 0 ? (
+        <View style={{ gap: SPACING[1] }}>
+          {sp.actions.map((step, index) => (
+            <View key={`${index}-${step.label}`} testID={`factory-setup-proposal-action-${index}`} style={{ gap: SPACING[0.5] }}>
+              <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: SPACING[1.5] }}>
+                <Text style={{ ...text(theme, "label"), color: theme.colors.foreground, flexShrink: 1 }}>{`• ${step.label}`}</Text>
+                {step.machineWide === true ? <ToneBadge theme={theme} label="machine-wide" colour={palette.wait} dot={false} pill={false} /> : null}
+                <ToneBadge theme={theme} label={step.status} colour={setupStepStatusColour(palette, step.status)} dot={step.status === "done" || step.status === "failed"} pill={false} />
+              </View>
+              {step.error !== undefined && step.error !== "" ? <Text style={{ ...text(theme, "meta"), color: palette.bad }}>{step.error}</Text> : null}
+            </View>
+          ))}
+        </View>
+      ) : null}
+      {sp !== undefined && sp.warnings.length > 0 ? (
+        <View style={{ gap: SPACING[1] }}>
+          {sp.warnings.map((warning, index) => (
+            <View
+              key={`${index}-${warning}`}
+              testID="factory-setup-proposal-warning"
+              style={{ paddingHorizontal: SPACING[2], paddingVertical: SPACING[1], borderRadius: RADIUS.sm, borderWidth: 1, borderColor: tint(palette.wait, "55"), backgroundColor: tint(palette.wait, "14") }}
+            >
+              <Text style={{ ...text(theme, "meta"), color: palette.wait }}>{warning}</Text>
+            </View>
+          ))}
+        </View>
+      ) : null}
+    </AlertRow>
+  );
+}
+
 function NeedsYouRow({ theme, item, mobile, wide, actions }: { theme: PluginTheme; item: PanelNeedsYouItem; mobile: boolean; wide: boolean; actions: ProjectPanelActions }) {
-  const colour = factoryPalette(theme)[NEEDS_YOU_TONE[item.kind]];
+  if (item.kind === "setup-proposal") {
+    return <SetupProposalCard theme={theme} item={item} mobile={mobile} wide={wide} actions={actions} />;
+  }
+  const colour = factoryPalette(theme)[needsYouTone(item)];
   const action = item.action;
   const buttonId = `factory-panel-needs-you-action-${item.key}`;
   // The item's one action is its primary; mobile swaps a desktop-only act for a hint.
@@ -164,12 +240,13 @@ function NeedsYouRow({ theme, item, mobile, wide, actions }: { theme: PluginThem
     action.kind === "open-agent" ? primary(() => actions.openAgent(action.agentId), false)
     : action.kind === "handoff-supervisor" ? primary(() => actions.handoffStart("supervisor"))
     : action.kind === "retry-handoff" ? (mobile ? <Text style={text(theme, "meta")}>Try again on Paseo Desktop, or use Replace now below.</Text> : primary(() => actions.handoffRetry(action.seat)))
+    : action.kind === "setup-proposal" ? null
     : mobile ? <Text testID={`factory-panel-needs-you-hint-${item.key}`} style={text(theme, "meta")}>{DESKTOP_ONLY_HINT[action.kind]}</Text>
     : action.kind === "install-prerequisites" ? primary(actions.installPrerequisites)
     : action.kind === "start-supervisor" ? primary(() => actions.startSupervisor())
     : primary(actions.syncOpenDesign);
   return (
-    <AlertRow theme={theme} testID={`factory-panel-needs-you-${item.key}`} colour={colour} title={item.title} wide={wide} actions={alertActions(control)}>
+    <AlertRow theme={theme} testID={`factory-panel-needs-you-${item.key}`} colour={colour} title={item.title} wide={wide} actions={control !== null ? alertActions(control) : undefined}>
       {item.detail !== null ? <Text style={text(theme, "meta")}>{item.detail}</Text> : null}
     </AlertRow>
   );

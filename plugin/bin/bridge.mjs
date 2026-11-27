@@ -2366,6 +2366,83 @@ var sharedTools = {
       required: ["target", "content"]
     }
   },
+  supervisor_inspect_factory: {
+    name: "supervisor_inspect_factory",
+    description: "Inspect secret-free, context-bounded Factory readiness for the Project (isMobile, detectedPlatforms, hasOrigin, hasStoreManifest, companions, release, storeRelease, skillPacks, helperMcps, openDesign, boolean vault, ghAuth, and pending Setup Proposal summary). Context-triggered only \u2014 never call on clear Turn-1 implementation directives.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        workspace: { type: "string", description: "Optional Project root path (defaults to current project root)." }
+      }
+    }
+  },
+  supervisor_setup_factory: {
+    name: "supervisor_setup_factory",
+    description: "Validate, canonically order, and execute or propose Factory setup actions (Tier 1 local plumbing applied directly: vault_hydrate, factory-skills-pack, set_skill_pack, sync_open_design; Tier 2 external/daemon/machine-wide changes bundled into one atomic Setup Proposal for Owner approval in Needs you: factory-release-lab, set_release_mode, set_store_release_mode, set_helper_mcp).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        actions: {
+          type: "array",
+          description: "1..16 Factory setup actions. Each item is a flat object with `kind` and the fields required for that kind.",
+          items: {
+            type: "object",
+            properties: {
+              kind: {
+                type: "string",
+                enum: [
+                  "install_companion",
+                  "set_release_mode",
+                  "set_store_release_mode",
+                  "set_skill_pack",
+                  "set_helper_mcp",
+                  "sync_open_design",
+                  "vault_hydrate"
+                ],
+                description: "Setup action kind."
+              },
+              id: {
+                type: "string",
+                enum: ["factory-release-lab", "factory-skills-pack"],
+                description: "Companion ID for `install_companion` (`factory-skills-pack` is Tier 1; `factory-release-lab` is Tier 2)."
+              },
+              mode: {
+                type: "string",
+                description: "Mode for `set_release_mode` (`off` | `on-request` | `auto`) or `set_store_release_mode` (`off` | `on-request` | `auto-staging`)."
+              },
+              branch: {
+                type: "string",
+                description: "Optional safe git branch ref for `set_release_mode`."
+              },
+              pack: {
+                type: "string",
+                description: "Skill pack ID for `set_skill_pack`."
+              },
+              enabled: {
+                type: "boolean",
+                description: "Enable/disable flag for `set_skill_pack` or `set_helper_mcp`."
+              },
+              name: {
+                type: "string",
+                description: "Helper MCP name for `set_helper_mcp` (machine-wide, Tier 2)."
+              },
+              projectId: {
+                type: "string",
+                description: "Open Design project ID for `sync_open_design`."
+              }
+            },
+            required: ["kind"]
+          }
+        },
+        reason: {
+          type: "string",
+          description: "Single-paragraph reason (<= 500 chars) shown to the Owner on Setup Proposals and recorded in setup-audit.jsonl."
+        },
+        workspace: { type: "string", description: "Optional Project root path (defaults to current project root)." }
+      },
+      required: ["actions", "reason"]
+    }
+  },
   agent_claim: {
     name: "agent_claim",
     description: 'Submit a Claim for your bound Task in the Task worktree with the mandatory 6-Field Handoff (`outcome`, `scope`, `verification`, `unknowns`, optional `ownership`). For `outcome: "complete"`, validates clean tree, commit SHA, and handoff synchronously, queues automated Gate verification asynchronously (returning `queued` immediately so you end your turn and wait), or returns immediate synthetic `GREEN` for read-only empty gates. For `reopen`, `blocked`, or `partial`, delivers your handback directly without running the Gate or burning an Attempt.',
@@ -2451,7 +2528,7 @@ var sharedTools = {
   }
 };
 var sharedRoles = {
-  supervisor: ["supervisor_accept_task", "supervisor_dispatch_lead", "supervisor_read_ledger", "supervisor_record_store_note", "supervisor_end_cycle", "lead_close_task", "lead_retire_task"],
+  supervisor: ["supervisor_accept_task", "supervisor_dispatch_lead", "supervisor_read_ledger", "supervisor_record_store_note", "supervisor_inspect_factory", "supervisor_setup_factory", "supervisor_end_cycle", "lead_close_task", "lead_retire_task"],
   lead: ["lead_reply_peer", "lead_needs_human", "lead_create_worktree", "lead_set_contract", "lead_dispatch_agent", "lead_verify", "lead_merge", "lead_remove_worktree", "lead_release", "lead_store_release", "lead_record_store_note", "lead_report_to_supervisor", "lead_close_task", "lead_retire_task", "lead_update_notebook", "lead_read_ledger"],
   agent: ["agent_claim", "agent_ask"],
   unbound: ["factory_dispatch_supervisor", "factory_status"]
@@ -3414,6 +3491,46 @@ async function handleToolCall(name, rawArgs) {
     });
     if (!reply.ok) return toolResult(`${reply.code}: ${reply.message}`, true);
     return toolResult(reply.summary);
+  }
+
+  if (name === "supervisor_inspect_factory") {
+    const workspace =
+      typeof args.workspace === "string" && args.workspace.trim() !== ""
+        ? resolve(args.workspace.trim())
+        : ctx.projectRoot ?? ctx.workspace;
+    const reply = await roundTripSpool(ctx, {
+      id: randomId(),
+      kind: "factory_inspect",
+      ...(ctx.projectSlug !== undefined ? { projectSlug: ctx.projectSlug } : {}),
+      ...(workspace !== undefined && workspace !== null && workspace !== "" ? { workspace } : {}),
+      seat: "supervisor",
+    });
+    if (!reply.ok) return toolResult(`${reply.code}: ${reply.message}`, true);
+    return toolResult(JSON.stringify(reply.data ?? reply, null, 2));
+  }
+
+  if (name === "supervisor_setup_factory") {
+    if (!Array.isArray(args.actions)) {
+      return toolResult("supervisor_setup_factory requires `actions` (non-empty array of setup actions).", true);
+    }
+    if (typeof args.reason !== "string") {
+      return toolResult("supervisor_setup_factory requires `reason` (string).", true);
+    }
+    const workspace =
+      typeof args.workspace === "string" && args.workspace.trim() !== ""
+        ? resolve(args.workspace.trim())
+        : ctx.projectRoot ?? ctx.workspace;
+    const reply = await roundTripSpool(ctx, {
+      id: randomId(),
+      kind: "factory_setup",
+      actions: args.actions,
+      reason: args.reason,
+      ...(ctx.projectSlug !== undefined ? { projectSlug: ctx.projectSlug } : {}),
+      ...(workspace !== undefined && workspace !== null && workspace !== "" ? { workspace } : {}),
+      seat: "supervisor",
+    });
+    if (!reply.ok) return toolResult(`${reply.code}: ${reply.message}`, true);
+    return toolResult(JSON.stringify(reply.data ?? reply, null, 2));
   }
 
   if (name === "lead_spawn_agent") {

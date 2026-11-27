@@ -211,4 +211,47 @@ export type { UpgradeAction, UpgradeInput, UpgradeResult, UpgradePreflight } fro
 export { migrateLegacyRootState, compactedContractStub } from "./ledger-migration.ts";
 export type { LegacyRootMigrationOptions, LegacyRootMigrationProject, LegacyRootMigrationResult, LegacyRootMigrationExtras } from "./ledger-migration.ts";
 export { readLocalWriterIdentity, localWriterPath } from "./writer-identity.ts";
+export {
+  FACTORY_SETUP_CANONICAL_ORDER,
+  FACTORY_SETUP_COMPANION_IDS,
+  FACTORY_SETUP_MAX_ACTIONS,
+  FACTORY_SETUP_MAX_DIAGNOSTIC_CHARS,
+  FACTORY_SETUP_MAX_HELPER_MCP_NAME_CHARS,
+  FACTORY_SETUP_MAX_REASON_CHARS,
+  FACTORY_SETUP_RECOVERED_APPLYING_ERROR,
+  FACTORY_SETUP_TIER1_COMPANIONS,
+  FACTORY_SETUP_TIER2_COMPANIONS,
+  appendSetupAudit,
+  canonicalizeSetupActions,
+  classifySetupActionTier,
+  classifySetupBundleTier,
+  clearSetupAudit,
+  clearSetupProposal,
+  computeSetupActionsHash,
+  formatSetupActionLabel,
+  isValidGitBranchRef,
+  isValidSetupBranchName,
+  readSetupAudit,
+  readSetupProposal,
+  recoverInterruptedSetupProposal,
+  scrubSetupDiagnostic,
+  setupAuditPath,
+  setupProposalPath,
+  validateFactorySetupInput,
+  writeSetupProposal,
+} from "./factory-setup.ts";
+export type {
+  FactorySetupAction,
+  FactorySetupActionKind,
+  FactorySetupCompanionId,
+  FactorySetupTier,
+  SetupActionStepResult,
+  SetupActionStepStatus,
+  SetupAuditActor,
+  SetupAuditEntry,
+  SetupProposalRecord,
+  SetupProposalStatus,
+  ValidatedFactorySetupInput,
+} from "./factory-setup.ts";
+
 

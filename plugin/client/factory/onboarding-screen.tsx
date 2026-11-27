@@ -2,8 +2,8 @@
  * Global Onboarding screen (`paseo-factory-onboard`, ADR 0063) — desktop-only.
  * Offers 1-click selection of unregistered Paseo Projects from `paseo.projects.list()`
  * and a visual Folder Browser backed by read-only `onboardingBrowse`, then
- * mounts the shared 4-step `<OnboardingWizard />` inline without mutating disk
- * until Step 4 Start.
+ * mounts the shared single-screen Quick Start `<OnboardingWizard />` inline
+ * without mutating disk until you press Start Supervisor.
  *
  * Uses `usePaseo()` + `useRpc()` rather than `@getpaseo/plugin`'s `client-state`
  * hooks (`useProjects` / `useWorkspaces`), because `addScreen` surfaces run
@@ -24,8 +24,6 @@ import {
   onboardingInspect,
   onboardingStart,
   onboardingStatus,
-  openDesignCatalog,
-  pluginsInstall,
   seatsDirectory,
   snapshot,
 } from "../../shared/rpc.ts";
@@ -171,8 +169,6 @@ export function OnboardingScreen({
   const inspectCall = useRpc(onboardingInspect);
   const startCall = useRpc(onboardingStart);
   const statusCall = useRpc(onboardingStatus);
-  const pluginsInstallCall = useRpc(pluginsInstall);
-  const openDesignCatalogCall = useRpc(openDesignCatalog);
 
   const [registeredProjects, setRegisteredProjects] = useState<readonly ProjectDirectoryEntry[]>([]);
   const [paseoProjects, setPaseoProjects] = useState<readonly PaseoProjectTarget[]>([]);
@@ -360,7 +356,7 @@ export function OnboardingScreen({
         <View style={{ gap: SPACING[1] }}>
           <Text style={text(theme, "detailTitle")}>Onboard Project to Factory</Text>
           <Text style={text(theme, "meta")}>
-            Pick an unregistered Paseo Project or browse any folder on this host. Nothing writes to disk until you confirm Start Supervisor in Step 4.
+            Pick an unregistered Paseo Project or browse any folder on this host. Nothing writes to disk until you press Start Supervisor.
           </Text>
         </View>
 
@@ -518,23 +514,6 @@ export function OnboardingScreen({
                   tracker={onboardingTracker}
                   actions={{
                     inspect: (folder) => inspectCall({ folder }),
-                    installPrerequisites: async () => {
-                      const reply = await pluginsInstallCall({ target: "all", includeTools: true });
-                      return reply.ok ? { ok: true } : { ok: false, error: reply.error };
-                    },
-                    listDesigns: async () => {
-                      const reply = await openDesignCatalogCall({});
-                      return reply.ok
-                        ? {
-                            ok: true as const,
-                            projects: reply.projects.map((project) => ({
-                              projectId: project.projectId,
-                              projectName: project.projectName,
-                              screenCount: project.screenCount,
-                            })),
-                          }
-                        : { ok: false as const, error: reply.error };
-                    },
                     start: (input) => startCall(input),
                     status: (input) => statusCall(input),
                   }}

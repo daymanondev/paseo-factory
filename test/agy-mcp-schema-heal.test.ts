@@ -446,3 +446,41 @@ test("agy-pre-tool-hook warms missing allowed schema on call_mcp_tool and skips 
   assertHealedSchemaMatchesCatalog(join(serverDir, "supervisor_dispatch_lead.json"), "supervisor_dispatch_lead");
   assert.equal(existsSync(join(serverDir, "lead_set_contract.json")), false);
 });
+
+test("agy-pre-tool-hook heals supervisor_inspect_factory and supervisor_setup_factory with flat schemas for supervisor only", (t) => {
+  const dir = makeTempDir("agy-schema-factory-operator-");
+  disposeDir(t, dir);
+  const homeDir = join(dir, "home");
+  const workspaceDir = join(dir, "workspace");
+  const stateDir = join(dir, "state");
+  const serverDir = join(homeDir, ".gemini", "antigravity-cli", "mcp", "paseo-factory_paseo_factory");
+  mkdirSync(serverDir, { recursive: true });
+
+  for (const toolName of ["supervisor_inspect_factory", "supervisor_setup_factory"] as const) {
+    // Lead and Agent cannot heal Supervisor-only setup tools.
+    for (const forbiddenSeat of ["lead", "agent"] as const) {
+      const blocked = runHook(
+        { toolCall: { name: "read_file", args: { Path: join(serverDir, `${toolName}.json`) } }, workspacePaths: [workspaceDir] },
+        { HOME: homeDir, PASEO_FACTORY_SEAT: forbiddenSeat, PASEO_FACTORY_STATE_DIR: stateDir, PASEO_FACTORY_PROJECT_ROOT: workspaceDir },
+      );
+      assert.equal(blocked.status, 0, blocked.stderr);
+      assert.equal(existsSync(join(serverDir, `${toolName}.json`)), false, `${forbiddenSeat} must not heal ${toolName}`);
+    }
+
+    // Supervisor heals both schemas cleanly on demand.
+    const supRes = runHook(
+      { toolCall: { name: "read_file", args: { Path: join(serverDir, `${toolName}.json`) } }, workspacePaths: [workspaceDir] },
+      { HOME: homeDir, PASEO_FACTORY_SEAT: "supervisor", PASEO_FACTORY_STATE_DIR: stateDir, PASEO_FACTORY_PROJECT_ROOT: workspaceDir },
+    );
+    assert.equal(supRes.status, 0, supRes.stderr);
+    assert.equal(supRes.output.decision, "allow");
+    assertHealedSchemaMatchesCatalog(join(serverDir, `${toolName}.json`), toolName);
+  }
+
+  const setupSchema = JSON.parse(readFileSync(join(serverDir, "supervisor_setup_factory.json"), "utf8")) as {
+    parameters: Record<string, unknown>;
+  };
+  const serialized = JSON.stringify(setupSchema.parameters);
+  assert.equal(serialized.includes('"oneOf"'), false, "healed supervisor_setup_factory schema omits oneOf");
+  assert.equal(serialized.includes('"anyOf"'), false, "healed supervisor_setup_factory schema omits anyOf");
+});

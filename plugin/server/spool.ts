@@ -69,9 +69,12 @@ import { FACTORY_SEAT_PROVIDER_IDS, formatPeerAgentTitle, formatPeerWorkspaceTit
 import { acceptanceSummary, archiveAcceptedTaskWorkspace, executeAcceptance } from "./commands.ts";
 import { boundTaskPeers, peerIsRunning } from "./task-peers.ts";
 import { projectPeersInFlight, taskFactoryOf } from "./peer-in-flight.ts";
-import { listDaemonPlugins, stopAgentViaCli } from "./daemon-cli.ts";
+import { listDaemonPlugins, installDaemonPlugin, stopAgentViaCli } from "./daemon-cli.ts";
 import type { DaemonReply } from "./daemon-cli.ts";
 import { isPaseoWorkspaceArchivedOnDisk, restoreDaemonWorkspaceViaWs } from "./daemon-cli.ts";
+import type { CompanionToolRunner } from "./core/companion-tools.ts";
+import { executeFactorySetup, inspectFactoryForProject } from "./factory-setup-runner.ts";
+import type { FactorySetupRunnerDeps } from "./factory-setup-runner.ts";
 import type { SurfaceAgentSnapshot, SurfaceDaemonApi } from "./surface-rpc.ts";
 import type { HistoryImportSource } from "./core/history-import.ts";
 import type { ImportStatus } from "./core/history-stage.ts";
@@ -631,6 +634,26 @@ export interface SpoolPeerAskRequest {
   projectSlug?: string;
 }
 
+export interface SpoolFactoryInspectRequest {
+  id: string;
+  kind: "factory_inspect";
+  workspace?: string;
+  projectSlug?: string;
+  submitter?: string;
+  seat?: SpoolSeat;
+}
+
+export interface SpoolFactorySetupRequest {
+  id: string;
+  kind: "factory_setup";
+  actions: unknown;
+  reason: string;
+  workspace?: string;
+  projectSlug?: string;
+  submitter?: string;
+  seat?: SpoolSeat;
+}
+
 export type SpoolRequest =
   | ({ id: string; kind: "upgrade"; submitter?: string; seat?: SpoolSeat } & Omit<UpgradeInput, "controlId">)
   | { id: string; kind: "history_import" | "history_import_status"; sources?: HistoryImportSource[]; project?: string; submitter?: string; seat?: SpoolSeat }
@@ -657,7 +680,9 @@ export type SpoolRequest =
   | SpoolStoreReleaseRequest
   | SpoolStoreNotebookWriteRequest
   | SpoolGateQueueRequest
-  | SpoolPeerAskRequest;
+  | SpoolPeerAskRequest
+  | SpoolFactoryInspectRequest
+  | SpoolFactorySetupRequest;
 
 /** Handles a synthetic ask — `createChoke(...).spoolAskHandler` is the implementation. */
 export type AskHandler = (request: AskRequest) => SpoolReply;
@@ -1372,6 +1397,37 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
       ...projectSlugField,
     };
   }
+  if (req.kind === "factory_inspect") {
+    if (req.workspace !== undefined && (typeof req.workspace !== "string" || req.workspace.trim() === "")) {
+      return undefined;
+    }
+    return {
+      id: req.id,
+      kind: "factory_inspect",
+      ...(typeof req.workspace === "string" ? { workspace: req.workspace.trim() } : {}),
+      ...submitterField,
+      ...seatField,
+      ...projectSlugField,
+    };
+  }
+  if (req.kind === "factory_setup") {
+    if (!Array.isArray(req.actions) || typeof req.reason !== "string") {
+      return undefined;
+    }
+    if (req.workspace !== undefined && (typeof req.workspace !== "string" || req.workspace.trim() === "")) {
+      return undefined;
+    }
+    return {
+      id: req.id,
+      kind: "factory_setup",
+      actions: req.actions,
+      reason: req.reason,
+      ...(typeof req.workspace === "string" ? { workspace: req.workspace.trim() } : {}),
+      ...submitterField,
+      ...seatField,
+      ...projectSlugField,
+    };
+  }
   return undefined;
 }
 
@@ -1912,6 +1968,8 @@ const PROJECT_SCOPED_SPOOL_KINDS = new Set([
   "release",
   "store-release",
   "store-notebook-write",
+  "factory_inspect",
+  "factory_setup",
   "reset",
   "project_rotate",
   "delete",
@@ -1940,6 +1998,8 @@ function contextOfSpoolRequest(request: SpoolRequest): TargetProjectContext {
     case "release":
     case "store-release":
     case "store-notebook-write":
+    case "factory_inspect":
+    case "factory_setup":
       return { project: request.projectSlug, workspace: request.workspace, submitter: request.submitter };
     case "ask":
       return { project: request.projectSlug, task: request.task, workspace: request.cwd, agentId: request.agent, submitter: request.submitter };
@@ -2452,8 +2512,8 @@ export async function handleSpoolRequest(
     }
     return handleAdmittedSpoolRequest(effective, request, deps, registry, routing.slug);
   }
-  const admitted = () => effective.history.runOperation(() => handleAdmittedSpoolRequest(effective, request, deps, registry, routing.slug), { newWork: !["ask", "meter", "repoke", "respawn", "needs_human"].includes(request.kind) });
-  const acquiresOuterIngressLock = !["claim", "needs_human", "close"].includes(request.kind);
+  const admitted = () => effective.history.runOperation(() => handleAdmittedSpoolRequest(effective, request, deps, registry, routing.slug), { newWork: !["ask", "meter", "repoke", "respawn", "needs_human", "factory_inspect"].includes(request.kind) });
+  const acquiresOuterIngressLock = !["claim", "needs_human", "close", "factory_inspect", "factory_setup"].includes(request.kind);
   const run = () => {
     if (!acquiresOuterIngressLock) return admitted();
     const workspace = request.kind === "contract"
@@ -2579,6 +2639,14 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
         ok: false,
         code: "seat-cannot-register",
         message: seatCannotRegisterMessage(effectiveSeat),
+      };
+    }
+    if ((request.kind === "factory_inspect" || request.kind === "factory_setup") && effectiveSeat !== "supervisor") {
+      return {
+        id: request.id,
+        ok: false,
+        code: "seat-not-authorized",
+        message: `Seat ${effectiveSeat ?? "unbound"} cannot call ${request.kind}; only Supervisor is authorized.`,
       };
     }
     if (
@@ -3811,6 +3879,86 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
         summary: `Store notebook (${res.target}${res.appKey ? `/${res.appKey}` : ""}) recorded at ${res.path}${res.synced ? " and synced to Private vault" : ""}${res.syncError ? ` (sync warning: ${res.syncError})` : ""}`,
       };
     }
+    if (request.kind === "factory_inspect" || request.kind === "factory_setup") {
+      const target = resolveSpoolTargetProject(factory.stateDir, request);
+      if (!target.ok) {
+        return { id: request.id, ok: false, code: target.code, message: target.message };
+      }
+      const boundSlug =
+        routedSlug ??
+        (request.projectSlug !== undefined && request.projectSlug.trim() !== "" ? request.projectSlug.trim() : undefined);
+      const projectSlug = target.projectSlug ?? routedSlug;
+      const targetRegistration =
+        projectSlug !== undefined ? readProjectRegistration(factory.stateDir, projectSlug) : undefined;
+      const projectRoot = target.projectRoot ?? targetRegistration?.root;
+      if (
+        projectSlug === undefined ||
+        projectRoot === undefined ||
+        projectRoot.trim() === "" ||
+        targetRegistration === undefined
+      ) {
+        return {
+          id: request.id,
+          ok: false,
+          code: "unknown-project",
+          message: `${request.kind} requires a registered Project workspace`,
+        };
+      }
+      if (boundSlug !== undefined && projectSlug !== boundSlug) {
+        return {
+          id: request.id,
+          ok: false,
+          code: "cross-project-refused",
+          message: `${request.kind} target "${projectSlug}" belongs to another Project (bound to "${boundSlug}")`,
+        };
+      }
+      const paseoHome = resolveSpoolPaseoHome(factory.stateDir, home);
+      const runnerDeps: FactorySetupRunnerDeps = {
+        stateDir: factory.stateDir,
+        home: paseoHome,
+        ...(deps.userHome !== undefined ? { userHome: deps.userHome } : {}),
+        factory: registry?.root ?? factory,
+        ...(registry !== undefined ? { registry } : {}),
+        ...(resolvedDaemon !== undefined ? { daemon: resolvedDaemon } : {}),
+        ...(deps.listPlugins !== undefined ? { listPlugins: deps.listPlugins } : {}),
+        ...(deps.installPlugin !== undefined ? { installPlugin: deps.installPlugin } : {}),
+        ...(deps.vaultRunner !== undefined ? { vaultRunner: deps.vaultRunner } : {}),
+        ...(deps.companionToolRunner !== undefined ? { companionToolRunner: deps.companionToolRunner } : {}),
+        ...(deps.activeSetupProposalRuns !== undefined ? { activeProposalRuns: deps.activeSetupProposalRuns } : {}),
+        ...(deps.onStateChange !== undefined ? { onStateChange: deps.onStateChange } : {}),
+        ...(deps.onLog !== undefined ? { onLog: deps.onLog } : {}),
+      };
+      if (request.kind === "factory_inspect") {
+        const snapshot = await inspectFactoryForProject(runnerDeps, { slug: projectSlug, root: projectRoot });
+        return {
+          id: request.id,
+          ok: true,
+          summary: `Factory readiness inspected for ${projectSlug} (mobile=${snapshot.isMobile}, release=${snapshot.release.mode}, storeRelease=${snapshot.storeRelease.mode})`,
+          data: snapshot,
+        };
+      }
+      const result = await executeFactorySetup(
+        runnerDeps,
+        { slug: projectSlug, root: projectRoot },
+        { actions: request.actions, reason: request.reason },
+      );
+      if (!result.ok) {
+        return {
+          id: request.id,
+          ok: false,
+          code: result.code,
+          message: result.error,
+        };
+      }
+      return {
+        id: request.id,
+        ok: true,
+        summary: result.applied
+          ? `Applied ${result.steps.length} Tier 1 setup action(s) for ${projectSlug}`
+          : `Submitted Tier 2 Setup Proposal ${result.proposalId} for Owner approval in Needs you`,
+        data: result,
+      };
+    }
     // The acceptance (v0.0.14): awaited — a worktree task's local landing
     // runs before the line records, and the reply carries the outcome. The
     // `--by` seat, when the request claims one, overrides the submitter
@@ -3953,6 +4101,16 @@ export interface SpoolOptions {
   storeReleaseRunner?: StoreReleaseRunner;
   /** Injectable daemon plugin lister for `factory-release-lab` discovery (defaults to listDaemonPlugins). */
   listPlugins?: typeof listDaemonPlugins;
+  /** Injectable daemon plugin installer for `factory-release-lab` setup actions (defaults to installDaemonPlugin). */
+  installPlugin?: typeof installDaemonPlugin;
+  /** Injectable runner for `factory-skills-pack` companion setup actions. */
+  companionToolRunner?: CompanionToolRunner;
+  /** Explicit user home directory override for tests (defaults to homedir() / resolveVaultUserHome). */
+  userHome?: string;
+  /** Active in-memory single-flight Setup Proposal runs keyed by project slug / proposal id. */
+  activeSetupProposalRuns?: Map<string, string> | Set<string>;
+  /** Optional stateHub emission callback for setup state mutations. */
+  onStateChange?: (event: { handler: string; projectSlug?: string; projectRoot?: string }) => void;
   /** Asynchronous wakeup hook called when a background store release settles (`enqueueLeadMail` + `pumpProjectLead`). */
   storeReleaseNotify?: (input: { slug: string; text: string }) => Promise<void> | void;
   /** Machine-wide FIFO Gate queue (ADR 0068). `startSpool` creates one when omitted. */
@@ -4305,5 +4463,5 @@ async function handleRequestFile(id: string, requestPath: string, replyPath: str
       await cancelProjectGatesBeforeMaintenance(factory, parsedRequest, deps);
     }
     await admitted.history.withExclusiveMaintenance(work);
-  } else await admitted.history.runOperation(work, { newWork: !["ask", "meter", "repoke", "respawn", "needs_human", "history_import", "history_import_status", ""].includes(kind) });
+  } else await admitted.history.runOperation(work, { newWork: !["ask", "meter", "repoke", "respawn", "needs_human", "history_import", "history_import_status", "factory_inspect", ""].includes(kind) });
 }

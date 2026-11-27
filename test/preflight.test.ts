@@ -283,7 +283,7 @@ test('the kickoff packet renders the SLP MCP tool table and the Project notebook
     const packet = buildSeatKickoffPacket({ role, projectSlug: "repo", projectRoot: root, ledgerEvents: [], stateDir });
     const lines = new Set(packet.split("\n"));
     const tools = role === "supervisor"
-      ? "`supervisor_dispatch_lead`, `supervisor_read_ledger`, `supervisor_end_cycle`"
+      ? "`supervisor_dispatch_lead`, `supervisor_inspect_factory`, `supervisor_setup_factory`, `supervisor_read_ledger`, `supervisor_end_cycle`"
       : "`lead_set_contract`, `lead_dispatch_agent`, `lead_read_ledger`, `lead_verify`, `lead_merge`, `lead_release`, `lead_report_to_supervisor`";
     assert.ok(lines.has(`- Role MCP tools (paseo_factory): ${tools}`), `${role} renders the SLP MCP tool table`);
     assert.doesNotMatch(packet, /scrum/i, `${role} packet carries no Scrum vocabulary`);

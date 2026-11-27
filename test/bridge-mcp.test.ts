@@ -13,8 +13,10 @@ import { builtinVaultRunner } from "../src/vault-transport.ts";
 import type { VaultRunnerCall } from "../src/vault-transport.ts";
 import { readLeadMailbox } from "../src/mailbox.ts";
 import { createLeadMailRuntime, LEAD_ROTATE_TOKENS } from "../plugin/server/lead-mailbox.ts";
-import { startSpool } from "../plugin/server/spool.ts";
+import { handleSpoolRequest, startSpool } from "../plugin/server/spool.ts";
 import { createFactoryRegistry } from "../plugin/server/projects.ts";
+import { createSurfaceHandlers } from "../plugin/server/surface-rpc.ts";
+import { readSetupProposal } from "../src/factory-setup.ts";
 
 const BRIDGE_BIN = resolve(import.meta.dirname, "../plugin/bin/bridge.mjs");
 
@@ -212,7 +214,7 @@ test("bridge.mjs exposes strictly role-scoped tools in tools/list and enforces r
     assert.equal(supInitCaps?.tools?.listChanged, true);
     const supListed = (supResponses[1].result as { tools: Array<{ name: string; description: string; inputSchema: { properties: Record<string, unknown> } }> }).tools;
     const supTools = supListed.map((t) => t.name).sort();
-    assert.deepEqual(supTools, ["lead_close_task", "lead_retire_task", "supervisor_accept_task", "supervisor_dispatch_lead", "supervisor_end_cycle", "supervisor_read_ledger"]);
+    assert.deepEqual(supTools, ["lead_close_task", "lead_retire_task", "supervisor_accept_task", "supervisor_dispatch_lead", "supervisor_end_cycle", "supervisor_inspect_factory", "supervisor_read_ledger", "supervisor_setup_factory"]);
     const supDispatchTool = supListed.find((t) => t.name === "supervisor_dispatch_lead");
     assert.ok(supDispatchTool);
     assert.equal("storeRelease" in supDispatchTool.inputSchema.properties, false, "non-mobile supervisor_dispatch_lead omits storeRelease");
@@ -3804,6 +3806,430 @@ test("ADR 0071 slice 03: bridge.mjs emits notifications/tools/list_changed on to
       }
     }
   } finally {
+    rmSync(homeDir, { recursive: true, force: true });
+    rmSync(mobileRepo, { recursive: true, force: true });
+  }
+});
+
+test("ADR 0073 wave 2: supervisor_inspect_factory & supervisor_setup_factory expose flat schemas to Supervisor only, authorize via Spool, and honor notifications/tools/list_changed", async () => {
+  const homeDir = mkdtempSync(join(tmpdir(), "factory-bridge-adr0073-"));
+  const stateDir = join(homeDir, "plugin-state", "paseo-factory");
+  const userHome = join(homeDir, "user-home");
+  mkdirSync(userHome, { recursive: true });
+  const mobileRepo = makeGitRepo();
+  mkdirSync(join(mobileRepo, "ios"), { recursive: true });
+  writeFileSync(join(mobileRepo, "ios", "Podfile"), "platform :ios, '15.0'\n");
+  execFileSync("git", ["add", "."], { cwd: mobileRepo });
+  execFileSync("git", ["commit", "-m", "chore: ios marker"], { cwd: mobileRepo });
+
+  const reg = ensureProjectRegistered(stateDir, realpathSync(mobileRepo));
+  assert.equal(reg.ok, true);
+  const factory = createFactory({ stateDir, eyeCliProbe: () => false });
+  const registry = createFactoryRegistry({ stateDir, root: factory });
+  const correlations = new CorrelationRegistry(stateDir);
+  const supCorr = correlations.issue({ role: "supervisor", projectSlug: reg.slug, projectRoot: realpathSync(mobileRepo) });
+  const leadCorr = correlations.issue({ role: "lead", projectSlug: reg.slug, projectRoot: realpathSync(mobileRepo) });
+
+  const spool = startSpool(stateDir, factory, {
+    registry,
+    home: homeDir,
+    userHome,
+    pollMs: 25,
+    listPlugins: async () => ({ ok: true, plugins: [] }),
+    vaultRunner: async (call) => {
+      if (call.command === "gh" && call.args[0] === "auth") {
+        return Buffer.from(JSON.stringify({ hosts: { "github.com": [{ login: "octocat", active: true, state: "success" }] } }));
+      }
+      return Buffer.from("");
+    },
+  });
+
+  try {
+    // 1. Flat JSON Schema validation (zero oneOf / anyOf anywhere)
+    const supSession = openInteractiveMcpSession({
+      args: ["--correlation", supCorr.correlationId, "--state-dir", stateDir],
+      cwd: mobileRepo,
+    });
+    try {
+      await supSession.request(1, "initialize", {});
+      const listRes = await supSession.request(2, "tools/list");
+      const tools = (listRes.result as { tools: Array<{ name: string; inputSchema: Record<string, unknown> }> }).tools;
+      const inspectTool = tools.find((t) => t.name === "supervisor_inspect_factory");
+      const setupTool = tools.find((t) => t.name === "supervisor_setup_factory");
+      assert.ok(inspectTool, "supervisor_inspect_factory listed for supervisor");
+      assert.ok(setupTool, "supervisor_setup_factory listed for supervisor");
+
+      const containsUnionKeyword = (node: unknown): boolean => {
+        if (node === null || typeof node !== "object") return false;
+        if (Array.isArray(node)) return node.some(containsUnionKeyword);
+        for (const [k, v] of Object.entries(node as Record<string, unknown>)) {
+          if (k === "oneOf" || k === "anyOf") return true;
+          if (containsUnionKeyword(v)) return true;
+        }
+        return false;
+      };
+      assert.equal(containsUnionKeyword(setupTool.inputSchema), false, "supervisor_setup_factory schema must be flat (no oneOf/anyOf)");
+      const items = (setupTool.inputSchema.properties as { actions: { items: { type: string; required: string[]; properties: Record<string, unknown> } } }).actions.items;
+      assert.equal(items.type, "object");
+      assert.deepEqual(items.required, ["kind"]);
+      assert.deepEqual(
+        Object.keys(items.properties).sort(),
+        ["branch", "enabled", "id", "kind", "mode", "name", "pack", "projectId"],
+      );
+
+      // 2. End-to-end Tier 0 inspection over bridge.mjs -> Spool
+      const inspectRes = await supSession.request(3, "tools/call", {
+        name: "supervisor_inspect_factory",
+        arguments: { workspace: mobileRepo },
+      });
+      const inspectResult = inspectRes.result as { isError?: boolean; content: Array<{ text: string }> };
+      assert.equal(inspectResult.isError, undefined);
+      const snapshot = JSON.parse(inspectResult.content[0].text) as { isMobile: boolean; ghAuth: { authenticated: boolean; user: string } };
+      assert.equal(snapshot.isMobile, true);
+      assert.equal(snapshot.ghAuth.authenticated, true);
+      assert.equal(snapshot.ghAuth.user, "octocat");
+
+      // 3. End-to-end Tier 2 proposal over bridge.mjs -> Spool
+      const setupRes = await supSession.request(4, "tools/call", {
+        name: "supervisor_setup_factory",
+        arguments: {
+          actions: [{ kind: "set_store_release_mode", mode: "on-request" }],
+          reason: "Enable mobile store staging for iOS",
+          workspace: mobileRepo,
+        },
+      });
+      const setupResult = setupRes.result as { isError?: boolean; content: Array<{ text: string }> };
+      assert.equal(setupResult.isError, undefined);
+      const parsedSetup = JSON.parse(setupResult.content[0].text) as {
+        ok: boolean;
+        applied: boolean;
+        proposalPending: boolean;
+        tier: number;
+        proposalId: string;
+        actionsHash: string;
+      };
+      assert.equal(parsedSetup.ok, true);
+      assert.equal(parsedSetup.applied, false);
+      assert.equal(parsedSetup.proposalPending, true);
+      assert.equal(parsedSetup.tier, 2);
+      assert.equal(readSetupProposal(stateDir, reg.slug)?.id, parsedSetup.proposalId);
+
+      // 4. Bridge still emits notifications/tools/list_changed when Store release flips to on-request
+      setProjectStoreReleaseSettings(stateDir, reg.slug, { mode: "on-request" });
+      await supSession.waitForNotificationCount(1, 5_000);
+      assert.equal(supSession.notifications[0].method, "notifications/tools/list_changed");
+      const listUnlocked = await supSession.request(5, "tools/list");
+      assert.equal(
+        ((listUnlocked.result as { tools: Array<{ name: string }> }).tools).some((t) => t.name === "supervisor_record_store_note"),
+        true,
+      );
+    } finally {
+      const code = await supSession.close();
+      assert.equal(code, 0);
+    }
+
+    // 5. Lead cannot call supervisor_inspect_factory or supervisor_setup_factory at bridge OR Spool layers
+    const leadSession = openInteractiveMcpSession({
+      args: ["--correlation", leadCorr.correlationId, "--state-dir", stateDir],
+      cwd: mobileRepo,
+    });
+    try {
+      await leadSession.request(1, "initialize", {});
+      const illegalLeadCall = await leadSession.request(2, "tools/call", {
+        name: "supervisor_inspect_factory",
+        arguments: { workspace: mobileRepo },
+      });
+      assert.equal((illegalLeadCall.result as { isError?: boolean }).isError, true);
+    } finally {
+      const code = await leadSession.close();
+      assert.equal(code, 0);
+    }
+
+    for (const badSeat of ["lead", "agent", undefined] as const) {
+      const inspectDenied = await handleSpoolRequest(
+        factory,
+        {
+          id: `spool-inspect-${badSeat ?? "unbound"}`,
+          kind: "factory_inspect",
+          workspace: mobileRepo,
+          ...(badSeat !== undefined ? { seat: badSeat } : {}),
+        },
+        { home: homeDir, userHome },
+        registry,
+      );
+      assert.equal(inspectDenied.ok, false);
+      assert.equal(inspectDenied.code, "seat-not-authorized");
+
+      const setupDenied = await handleSpoolRequest(
+        factory,
+        {
+          id: `spool-setup-${badSeat ?? "unbound"}`,
+          kind: "factory_setup",
+          actions: [{ kind: "vault_hydrate" }],
+          reason: "Unauthorized setup attempt",
+          workspace: mobileRepo,
+          ...(badSeat !== undefined ? { seat: badSeat } : {}),
+        },
+        { home: homeDir, userHome },
+        registry,
+      );
+      assert.equal(setupDenied.ok, false);
+      assert.equal(setupDenied.code, "seat-not-authorized");
+    }
+  } finally {
+    spool.stop();
+    rmSync(homeDir, { recursive: true, force: true });
+    rmSync(mobileRepo, { recursive: true, force: true });
+  }
+});
+
+test("ADR 0073 wave 2: factory_inspect and factory_setup refuse cross-project workspace overrides on a bound projectSlug while allowing same-project and unbound workspaces", async () => {
+  const homeDir = mkdtempSync(join(tmpdir(), "factory-bridge-cross-proj-"));
+  const stateDir = join(homeDir, "plugin-state", "paseo-factory");
+  const userHome = join(homeDir, "user-home");
+  mkdirSync(userHome, { recursive: true });
+  const repoA = makeGitRepo();
+  const repoB = makeGitRepo();
+  const regA = ensureProjectRegistered(stateDir, realpathSync(repoA));
+  const regB = ensureProjectRegistered(stateDir, realpathSync(repoB));
+  assert.equal(regA.ok, true);
+  assert.equal(regB.ok, true);
+
+  const factory = createFactory({ stateDir, eyeCliProbe: () => false });
+  const registry = createFactoryRegistry({ stateDir, root: factory });
+  const correlations = new CorrelationRegistry(stateDir);
+  const supCorrA = correlations.issue({ role: "supervisor", projectSlug: regA.slug, projectRoot: realpathSync(repoA) });
+
+  const spool = startSpool(stateDir, factory, {
+    registry,
+    home: homeDir,
+    userHome,
+    pollMs: 25,
+    listPlugins: async () => ({ ok: true, plugins: [] }),
+  });
+
+  try {
+    // 1. Direct Spool: bound projectSlug A + workspace B -> cross-project-refused
+    const crossInspect = await handleSpoolRequest(
+      factory,
+      {
+        id: "spool-cross-inspect",
+        kind: "factory_inspect",
+        projectSlug: regA.slug,
+        workspace: repoB,
+        seat: "supervisor",
+      },
+      { home: homeDir, userHome },
+      registry,
+    );
+    assert.equal(crossInspect.ok, false);
+    assert.equal(crossInspect.code, "cross-project-refused");
+
+    const crossSetup = await handleSpoolRequest(
+      factory,
+      {
+        id: "spool-cross-setup",
+        kind: "factory_setup",
+        actions: [{ kind: "set_release_mode", mode: "on-request" }],
+        reason: "Cross-project setup attempt should be refused",
+        projectSlug: regA.slug,
+        workspace: repoB,
+        seat: "supervisor",
+      },
+      { home: homeDir, userHome },
+      registry,
+    );
+    assert.equal(crossSetup.ok, false);
+    assert.equal(crossSetup.code, "cross-project-refused");
+    assert.equal(readSetupProposal(stateDir, regB.slug), undefined, "Project B must not be mutated on Project A's lane");
+
+    // 2. Bridge MCP session bound to Project A passing workspace B -> cross-project-refused
+    const supSessionA = openInteractiveMcpSession({
+      args: ["--correlation", supCorrA.correlationId, "--state-dir", stateDir],
+      cwd: repoA,
+    });
+    try {
+      await supSessionA.request(1, "initialize", {});
+      const bridgeCrossInspect = await supSessionA.request(2, "tools/call", {
+        name: "supervisor_inspect_factory",
+        arguments: { workspace: repoB },
+      });
+      const inspectResult = bridgeCrossInspect.result as { isError?: boolean; content: Array<{ text: string }> };
+      assert.equal(inspectResult.isError, true);
+      assert.match(inspectResult.content[0]!.text, /cross-project-refused/);
+
+      const bridgeCrossSetup = await supSessionA.request(3, "tools/call", {
+        name: "supervisor_setup_factory",
+        arguments: {
+          actions: [{ kind: "set_release_mode", mode: "on-request" }],
+          reason: "Bridge cross-project setup attempt",
+          workspace: repoB,
+        },
+      });
+      const setupResult = bridgeCrossSetup.result as { isError?: boolean; content: Array<{ text: string }> };
+      assert.equal(setupResult.isError, true);
+      assert.match(setupResult.content[0]!.text, /cross-project-refused/);
+      assert.equal(readSetupProposal(stateDir, regB.slug), undefined);
+
+      // 3. Same-project workspace on bound Project A still succeeds
+      const sameProjInspect = await supSessionA.request(4, "tools/call", {
+        name: "supervisor_inspect_factory",
+        arguments: { workspace: repoA },
+      });
+      assert.equal((sameProjInspect.result as { isError?: boolean }).isError, undefined);
+    } finally {
+      const code = await supSessionA.close();
+      assert.equal(code, 0);
+    }
+
+    // 4. Unbound Spool call targeting Project B by workspace still succeeds
+    const unboundInspectB = await handleSpoolRequest(
+      factory,
+      {
+        id: "spool-unbound-inspect-b",
+        kind: "factory_inspect",
+        workspace: repoB,
+        seat: "supervisor",
+      },
+      { home: homeDir, userHome },
+      registry,
+    );
+    assert.equal(unboundInspectB.ok, true);
+  } finally {
+    spool.stop();
+    rmSync(homeDir, { recursive: true, force: true });
+    rmSync(repoA, { recursive: true, force: true });
+    rmSync(repoB, { recursive: true, force: true });
+  }
+});
+
+test("ADR 0073 wave 3a: setupProposalApprove unlocks Store Release tools live via notifications/tools/list_changed without Supervisor handoff on opencode", async () => {
+  const homeDir = mkdtempSync(join(tmpdir(), "factory-bridge-wave3a-"));
+  const stateDir = join(homeDir, "plugin-state", "paseo-factory");
+  const userHome = join(homeDir, "user-home");
+  mkdirSync(userHome, { recursive: true });
+  const mobileRepo = makeGitRepo();
+  mkdirSync(join(mobileRepo, "ios"), { recursive: true });
+  writeFileSync(join(mobileRepo, "ios", "Podfile"), "platform :ios, '15.0'\n");
+  execFileSync("git", ["add", "."], { cwd: mobileRepo });
+  execFileSync("git", ["commit", "-m", "chore: ios marker"], { cwd: mobileRepo });
+
+  const reg = ensureProjectRegistered(stateDir, realpathSync(mobileRepo));
+  assert.equal(reg.ok, true);
+  const factory = createFactory({ stateDir, eyeCliProbe: () => false });
+  const registry = createFactoryRegistry({ stateDir, root: factory });
+  const correlations = new CorrelationRegistry(stateDir);
+  const supCorr = correlations.issue({ role: "supervisor", projectSlug: reg.slug, projectRoot: realpathSync(mobileRepo) });
+
+  const fakeDaemon = {
+    agents: {
+      list: async () => ({
+        entries: [
+          {
+            agent: {
+              id: "sup-oc-live",
+              status: "idle" as const,
+              provider: "opencode/claude-sonnet-4",
+              cwd: realpathSync(mobileRepo),
+              archivedAt: null,
+              labels: { seat: "supervisor", project: reg.slug },
+              lastUserMessageAt: "2026-11-26T10:00:00.000Z",
+            },
+          },
+        ],
+      }),
+      ref: () => ({
+        send: async () => ({}),
+        archive: async () => ({}),
+        cancel: async () => ({}),
+      }),
+      create: async () => ({ agent: { id: "unused" } }),
+    },
+    providers: { list: async () => [] },
+  };
+  writeProjectRegistration(stateDir, reg.slug, { root: realpathSync(mobileRepo), supervisor: "sup-oc-live" });
+
+  const spool = startSpool(stateDir, factory, {
+    registry,
+    home: homeDir,
+    userHome,
+    pollMs: 25,
+    listPlugins: async () => ({ ok: true, plugins: [] }),
+  });
+
+  const wakeups: Array<{ slug: string; requestId: string; text: string }> = [];
+  const handlers = createSurfaceHandlers({
+    factory,
+    registry,
+    stateDir,
+    home: homeDir,
+    userHome,
+    daemon: fakeDaemon as never,
+    notifySupervisorSetup: (slug, requestId, text) => {
+      wakeups.push({ slug, requestId, text });
+    },
+  });
+
+  try {
+    const supSession = openInteractiveMcpSession({
+      args: ["--correlation", supCorr.correlationId, "--state-dir", stateDir],
+      cwd: mobileRepo,
+    });
+    try {
+      await supSession.request(1, "initialize", {});
+      const listBefore = await supSession.request(2, "tools/list");
+      assert.equal(
+        ((listBefore.result as { tools: Array<{ name: string }> }).tools).some((t) => t.name === "supervisor_record_store_note"),
+        false,
+      );
+
+      const setupRes = await supSession.request(3, "tools/call", {
+        name: "supervisor_setup_factory",
+        arguments: {
+          actions: [{ kind: "set_store_release_mode", mode: "on-request" }],
+          reason: "Unlock mobile Store Release live",
+          workspace: mobileRepo,
+        },
+      });
+      const setupParsed = JSON.parse((setupRes.result as { content: Array<{ text: string }> }).content[0]!.text) as {
+        ok: boolean;
+        proposalId: string;
+        actionsHash: string;
+      };
+      assert.equal(setupParsed.ok, true);
+
+      const approveRes = await handlers.setupProposalApprove({
+        projectRoot: mobileRepo,
+        proposalId: setupParsed.proposalId,
+        actionsHash: setupParsed.actionsHash,
+      });
+      assert.equal(approveRes.ok, true);
+      if (!approveRes.ok) return;
+      assert.equal(approveRes.supervisorNeedsHandoff, false, "opencode Supervisor unlocks live without handoff prompt");
+      assert.equal(wakeups.length, 1);
+      assert.match(wakeups[0]!.text, /Store Release Boundary/i);
+
+      await supSession.waitForNotificationCount(1, 5_000);
+      assert.equal(supSession.notifications[0]!.method, "notifications/tools/list_changed");
+
+      const listAfter = await supSession.request(4, "tools/list");
+      assert.equal(
+        ((listAfter.result as { tools: Array<{ name: string }> }).tools).some((t) => t.name === "supervisor_record_store_note"),
+        true,
+      );
+
+      const noteCall = await supSession.request(5, "tools/call", {
+        name: "supervisor_record_store_note",
+        arguments: { target: "lessons", content: "- Wait for TestFlight processing", workspace: mobileRepo },
+      });
+      assert.equal((noteCall.result as { isError?: boolean }).isError, undefined);
+    } finally {
+      const code = await supSession.close();
+      assert.equal(code, 0);
+    }
+  } finally {
+    spool.stop();
+    registry.stop();
     rmSync(homeDir, { recursive: true, force: true });
     rmSync(mobileRepo, { recursive: true, force: true });
   }

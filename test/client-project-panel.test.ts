@@ -3513,3 +3513,768 @@ test("FACTORY_PALETTE covers every Project-tab card in both light and dark theme
     }
   }
 });
+
+// ---- Wave 3b: Needs you Setup Proposal Card UI ----------------------------------------------------
+
+function makeSetupProposalItem(
+  overrides: Partial<NonNullable<PanelView["needsYou"][number]["setupProposal"]>> = {},
+): PanelView["needsYou"][number] {
+  const status = overrides.status ?? "pending";
+  const reason = overrides.reason ?? "Enable mobile store staging and GitHub helper MCP.";
+  const id = overrides.id ?? "prop-1";
+  return {
+    key: `setup-proposal:${id}`,
+    kind: "setup-proposal",
+    title:
+      status === "failed"
+        ? "Setup Proposal failed"
+        : status === "applying"
+          ? "Applying Setup Proposal…"
+          : "Setup Proposal awaiting approval",
+    detail: reason,
+    action: {
+      kind: "setup-proposal",
+      label: status === "failed" ? "Retry" : status === "applying" ? "Applying…" : "Approve & Apply",
+    },
+    setupProposal: {
+      id,
+      actionsHash: "hash-abc123",
+      status,
+      reason,
+      actions: [
+        { label: "Install factory-release-lab", status: "pending" },
+        { label: "Enable GitHub Helper MCP", machineWide: true, status: "pending" },
+      ],
+      warnings: [],
+      ...overrides,
+    },
+  };
+}
+
+test("Wave 3b: Setup Proposal renders first in Needs you, keeps needsYouCount/directory badges consistent, deduplicates reason, and shows actions, badges, errors, and warnings", async () => {
+  const { headerLabel, workspaceRowBadgePlan, sidebarOverviewBadgePlan } = await import("../plugin/client/kit/directory.ts");
+  const proposalItem = makeSetupProposalItem({
+    status: "failed",
+    reason: "Configure store staging and GitHub MCP.",
+    actions: [
+      { label: "Install factory-release-lab", status: "done" },
+      { label: "Enable GitHub Helper MCP", machineWide: true, status: "failed", error: "gh auth failed (redacted)" },
+      { label: "Set store release mode", status: "pending" },
+      { label: "Verify mobile targets", status: "skipped" },
+    ],
+    warnings: [
+      "Missing Vault keys: ASC .p8 — add in Settings -> Private Vault.",
+      "Play Store JSON key not configured yet.",
+    ],
+  });
+  const html = await render(
+    makePanel({
+      summary: "Lead working · 1 Peer · 2 need you",
+      needsYou: [proposalItem, noSupervisorItem],
+    }),
+  );
+
+  assert.ok(at(html, "factory-panel-needs-you") < at(html, "factory-setup-proposal"));
+  assert.ok(at(html, "factory-setup-proposal") < at(html, "factory-panel-needs-you-no-supervisor"));
+  assert.ok(at(html, "factory-setup-proposal") < at(html, "factory-tab"));
+  assert.match(html, /Lead working · 1 Peer · 2 need you/);
+
+  // Directory & overview badge helpers reflect the Setup Proposal's contribution to needsYouCount.
+  const directoryEntry = {
+    slug: "my-app",
+    name: "my-app",
+    root: "/project",
+    workspaceId: "ws-1",
+    needsYouCount: 2,
+    runningCount: 1,
+    activeWorkCount: 1,
+    backgroundWorkCount: 0,
+    handoffActive: false,
+  };
+  assert.equal(headerLabel(2), "Factory · 2");
+  assert.equal(workspaceRowBadgePlan("ws-1", [directoryEntry])?.label, "Needs you · 2");
+  assert.equal(sidebarOverviewBadgePlan([directoryEntry])?.label, "Needs you · 2");
+
+  const card = elementOf(html, "factory-setup-proposal");
+  // Reason is rendered exactly once (not duplicated from item.detail + setupProposal.reason).
+  assert.equal(card.split("Configure store staging and GitHub MCP.").length - 1, 1);
+
+  const action0 = elementOf(card, "factory-setup-proposal-action-0");
+  const action1 = elementOf(card, "factory-setup-proposal-action-1");
+  const action2 = elementOf(card, "factory-setup-proposal-action-2");
+  const action3 = elementOf(card, "factory-setup-proposal-action-3");
+  assert.match(action0, /Install factory-release-lab/);
+  assert.match(action0, /done/);
+  assert.doesNotMatch(action0, /machine-wide/);
+  assert.match(action1, /Enable GitHub Helper MCP/);
+  assert.match(action1, /machine-wide/);
+  assert.match(action1, /failed/);
+  assert.match(action1, /gh auth failed \(redacted\)/);
+  assert.ok(action1.includes("#c8253d"), "step error uses light FACTORY_PALETTE.bad");
+  assert.match(action2, /Set store release mode/);
+  assert.match(action2, /pending/);
+  assert.match(action3, /Verify mobile targets/);
+  assert.match(action3, /skipped/);
+
+  assert.ok(hasHook(card, "factory-setup-proposal-warning"));
+  assert.match(card, /Missing Vault keys: ASC \.p8/);
+  assert.match(card, /Play Store JSON key not configured yet\./);
+
+  const noWarningsHtml = await render(makePanel({ needsYou: [makeSetupProposalItem({ warnings: [] })] }));
+  assert.equal(hasHook(noWarningsHtml, "factory-setup-proposal-warning"), false);
+});
+
+test("Wave 3b: Setup Proposal uses dynamic FACTORY_PALETTE wait/bad tones with zero host accent or status leaks across light and dark canary themes", async () => {
+  const bundle = await build({
+    entryPoints: [join(repoRoot, "plugin/client/factory/project-panel.tsx")],
+    bundle: true,
+    write: false,
+    platform: "node",
+    format: "cjs",
+    jsx: "automatic",
+    external: ["react", "react/jsx-runtime"],
+    plugins: [
+      {
+        name: "setup-proposal-canary-adapter",
+        setup(b) {
+          b.onResolve({ filter: /^(react-native|@getpaseo\/plugin\/client\/ui|@getpaseo\/plugin\/client)$/ }, (args) => ({ path: args.path, namespace: "canary-native" }));
+          b.onLoad({ filter: /.*/, namespace: "canary-native" }, () => ({
+            loader: "js",
+            contents: `
+              const React = require('react');
+              const tag = (name) => ({ children, onPress, disabled, testID, style, accessibilityRole }) =>
+                React.createElement(name, {
+                  disabled,
+                  onClick: onPress,
+                  'data-testid': testID,
+                  'data-role': accessibilityRole,
+                  'data-style': typeof style === 'object' && style !== null ? JSON.stringify(style) : undefined,
+                  'data-idle-style': typeof style === 'function' ? JSON.stringify(style({ pressed: false })) : undefined,
+                }, typeof children === 'function' ? children({ pressed: false }) : children);
+              exports.View = tag('div'); exports.Text = tag('span'); exports.Pressable = tag('button');
+              exports.Icon = () => null;
+              const Modal = ({ children, open }) => open ? React.createElement('div', {}, children) : null;
+              Modal.Content = tag('div');
+              exports.Modal = Modal;
+              exports.TextInput = () => null;
+              exports.Platform = { OS: 'ios', select: (spec) => spec.ios ?? spec.default };
+            `,
+          }));
+        },
+      },
+    ],
+  });
+  const mod = { exports: {} as Exports };
+  new Function("require", "module", "exports", bundle.outputFiles[0]!.text)(createRequire(import.meta.url), mod, mod.exports);
+  const { ProjectPanel } = mod.exports;
+  const { createElement, act } = await import("react");
+  const { JSDOM } = await import(["jsdom"].join(""));
+
+  const canaryLight = {
+    colors: {
+      surface0: "#ffffff", surface1: "#f5f5f5", surface2: "#eeeeee", foreground: "#111111", foregroundMuted: "#555555",
+      border: "#cccccc", accent: "#ff00fe", statusSuccess: "#01ff02", statusWarning: "#fffe01", statusDanger: "#ff0101",
+    },
+  };
+  const canaryDark = {
+    colors: {
+      ...canaryLight.colors,
+      surface0: "#0d1117", surface1: "#161b22", surface2: "#21262d", foreground: "#f0f6fc", foregroundMuted: "#8b949e", border: "#30363d",
+    },
+  };
+  const expectedLight = { wait: "#8f6802", bad: "#c8253d", ok: "#337e58", idle: "#677176" };
+  const expectedDark = { wait: "#cd9a22", bad: "#fe5462", ok: "#68b78d", idle: "#6c767b" };
+
+  for (const [label, t, pal] of [["light", canaryLight, expectedLight], ["dark", canaryDark, expectedDark]] as const) {
+    for (const status of ["pending", "applying", "failed"] as const) {
+      const dom = new JSDOM("<!doctype html><div id=root></div>");
+      const g = globalThis as Record<string, any>;
+      const saved = { window: g.window, document: g.document, IS_REACT_ACT_ENVIRONMENT: g.IS_REACT_ACT_ENVIRONMENT };
+      g.window = dom.window; g.document = dom.window.document; g.IS_REACT_ACT_ENVIRONMENT = true;
+      const { createRoot } = await import("react-dom/client");
+      const container = dom.window.document.getElementById("root")!;
+      const root = createRoot(container);
+      try {
+        const item = makeSetupProposalItem({
+          status,
+          actions: [
+            { label: "Install factory-release-lab", status: status === "failed" ? "done" : "pending" },
+            { label: "Enable GitHub Helper MCP", machineWide: true, status: status === "failed" ? "failed" : "pending", ...(status === "failed" ? { error: "failed step" } : {}) },
+          ],
+          warnings: ["Missing Vault keys"],
+        });
+        await act(() =>
+          root.render(
+            createElement(ProjectPanel, {
+              theme: t,
+              width: 900,
+              mobile: false,
+              now: Date.now(),
+              daemonError: null,
+              panel: makePanel({ needsYou: [item] }),
+              actions: { ...noopActions(), approveSetupProposal() {}, declineSetupProposal() {}, dismissSetupProposal() {} },
+            }),
+          ),
+        );
+        const cardHtml = container.querySelector('[data-testid="factory-setup-proposal"]')!.outerHTML.toLowerCase();
+        for (const forbidden of ["#ff00fe", "#01ff02", "#fffe01", "#ff0101"]) {
+          assert.equal(cardHtml.includes(forbidden), false, `${label} (${status}) must never leak host colour ${forbidden}`);
+        }
+        const expectedTone = status === "failed" ? pal.bad : pal.wait;
+        assert.ok(cardHtml.includes(expectedTone), `${label} (${status}) uses ${expectedTone}`);
+        if (status !== "failed") {
+          assert.equal(cardHtml.includes(pal.bad), false, `${label} (${status}) does not use bad colour`);
+        }
+      } finally {
+        await act(() => root.unmount());
+        Object.assign(g, saved);
+        dom.window.close();
+      }
+    }
+  }
+});
+
+test("Wave 3b: Desktop HITL controls render Approve/Decline, Applying…, Retry/Dismiss, enforce busy lock, and pass proposalId + actionsHash", async () => {
+  const { ProjectPanel } = await loadPanel();
+  const { createElement, act } = await import("react");
+  const { JSDOM } = await import(["jsdom"].join(""));
+
+  const mount = async (status: "pending" | "applying" | "failed", busy: boolean, width = 900) => {
+    const dom = new JSDOM("<!doctype html><div id=root></div>");
+    const g = globalThis as Record<string, any>;
+    const saved = { window: g.window, document: g.document, IS_REACT_ACT_ENVIRONMENT: g.IS_REACT_ACT_ENVIRONMENT };
+    g.window = dom.window; g.document = dom.window.document; g.IS_REACT_ACT_ENVIRONMENT = true;
+    const { createRoot } = await import("react-dom/client");
+    const container = dom.window.document.getElementById("root")!;
+    const root = createRoot(container);
+    const approveCalls: Array<[string, string]> = [];
+    const declineCalls: string[] = [];
+    const dismissCalls: string[] = [];
+    await act(() =>
+      root.render(
+        createElement(ProjectPanel, {
+          theme,
+          width,
+          mobile: false,
+          now: Date.now(),
+          daemonError: null,
+          panel: makePanel({ needsYou: [makeSetupProposalItem({ status })] }),
+          actions: {
+            ...noopActions(),
+            busy,
+            approveSetupProposal: (id: string, hash: string) => { approveCalls.push([id, hash]); },
+            declineSetupProposal: (id: string) => { declineCalls.push(id); },
+            dismissSetupProposal: (id: string) => { dismissCalls.push(id); },
+          },
+        }),
+      ),
+    );
+    const byId = (id: string) => container.querySelector(`[data-testid="${id}"]`) as HTMLButtonElement | null;
+    const cleanup = async () => {
+      await act(() => root.unmount());
+      Object.assign(g, saved);
+      dom.window.close();
+    };
+    return { byId, approveCalls, declineCalls, dismissCalls, cleanup };
+  };
+
+  // Pending (wide & narrow)
+  for (const w of [900, 420]) {
+    const m = await mount("pending", false, w);
+    try {
+      const approve = m.byId("factory-setup-proposal-approve")!;
+      const decline = m.byId("factory-setup-proposal-decline")!;
+      assert.ok(approve && decline);
+      assert.equal(m.byId("factory-setup-proposal-retry"), null);
+      assert.equal(m.byId("factory-setup-proposal-dismiss"), null);
+      assert.equal(approve.disabled, false);
+      assert.equal(decline.disabled, false);
+      assert.equal(approve.textContent, "Approve & Apply");
+      assert.equal(decline.textContent, "Decline");
+      await act(() => approve.click());
+      await act(() => decline.click());
+      assert.deepEqual(m.approveCalls, [["prop-1", "hash-abc123"]]);
+      assert.deepEqual(m.declineCalls, ["prop-1"]);
+    } finally {
+      await m.cleanup();
+    }
+  }
+
+  // Applying status
+  {
+    const m = await mount("applying", false);
+    try {
+      const approve = m.byId("factory-setup-proposal-approve")!;
+      assert.ok(approve);
+      assert.equal(approve.disabled, true);
+      assert.equal(approve.textContent, "Applying…");
+      assert.equal(m.byId("factory-setup-proposal-decline"), null);
+      assert.equal(m.byId("factory-setup-proposal-retry"), null);
+      assert.equal(m.byId("factory-setup-proposal-dismiss"), null);
+      await act(() => approve.click());
+      assert.deepEqual(m.approveCalls, []);
+    } finally {
+      await m.cleanup();
+    }
+  }
+
+  // Pending while actions.busy === true
+  {
+    const m = await mount("pending", true);
+    try {
+      const approve = m.byId("factory-setup-proposal-approve")!;
+      const decline = m.byId("factory-setup-proposal-decline")!;
+      assert.equal(approve.disabled, true);
+      assert.equal(approve.textContent, "Applying…");
+      assert.equal(decline.disabled, true);
+      await act(() => approve.click());
+      await act(() => decline.click());
+      assert.deepEqual(m.approveCalls, []);
+      assert.deepEqual(m.declineCalls, []);
+    } finally {
+      await m.cleanup();
+    }
+  }
+
+  // Failed (idle)
+  {
+    const m = await mount("failed", false);
+    try {
+      const retry = m.byId("factory-setup-proposal-retry")!;
+      const dismiss = m.byId("factory-setup-proposal-dismiss")!;
+      assert.ok(retry && dismiss);
+      assert.equal(m.byId("factory-setup-proposal-approve"), null);
+      assert.equal(m.byId("factory-setup-proposal-decline"), null);
+      assert.equal(retry.disabled, false);
+      assert.equal(dismiss.disabled, false);
+      assert.equal(retry.textContent, "Retry");
+      assert.equal(dismiss.textContent, "Dismiss");
+      await act(() => retry.click());
+      await act(() => dismiss.click());
+      assert.deepEqual(m.approveCalls, [["prop-1", "hash-abc123"]]);
+      assert.deepEqual(m.dismissCalls, ["prop-1"]);
+    } finally {
+      await m.cleanup();
+    }
+  }
+
+  // Failed while actions.busy === true
+  {
+    const m = await mount("failed", true);
+    try {
+      const retry = m.byId("factory-setup-proposal-retry")!;
+      const dismiss = m.byId("factory-setup-proposal-dismiss")!;
+      assert.equal(retry.disabled, true);
+      assert.equal(retry.textContent, "Applying…");
+      assert.equal(dismiss.disabled, true);
+      await act(() => retry.click());
+      await act(() => dismiss.click());
+      assert.deepEqual(m.approveCalls, []);
+      assert.deepEqual(m.dismissCalls, []);
+    } finally {
+      await m.cleanup();
+    }
+  }
+});
+
+test("Wave 3b: Mobile renders Setup Proposal strictly read-only with zero buttons and Desktop hint across all statuses", async () => {
+  for (const status of ["pending", "applying", "failed"] as const) {
+    const html = await render(
+      makePanel({
+        needsYou: [
+          makeSetupProposalItem({
+            status,
+            warnings: ["Missing Vault keys: ASC .p8"],
+          }),
+        ],
+      }),
+      {
+        mobile: true,
+        actions: {
+          approveSetupProposal() { assert.fail("mobile must never invoke approveSetupProposal"); },
+          declineSetupProposal() { assert.fail("mobile must never invoke declineSetupProposal"); },
+          dismissSetupProposal() { assert.fail("mobile must never invoke dismissSetupProposal"); },
+        },
+      },
+    );
+    const card = elementOf(html, "factory-setup-proposal");
+    assert.doesNotMatch(card, /<button/, `mobile (${status}) renders zero <button> elements`);
+    for (const hook of [
+      "factory-setup-proposal-approve",
+      "factory-setup-proposal-decline",
+      "factory-setup-proposal-retry",
+      "factory-setup-proposal-dismiss",
+    ]) {
+      assert.equal(hasHook(card, hook), false, `mobile (${status}) hides ${hook}`);
+    }
+    assert.match(card, /Approve on Paseo Desktop\./);
+    assert.match(card, /Enable mobile store staging and GitHub helper MCP\./);
+    assert.ok(hasHook(card, "factory-setup-proposal-action-0"));
+    assert.match(card, /machine-wide/);
+    assert.ok(hasHook(card, "factory-setup-proposal-warning"));
+  }
+});
+
+test("Wave 3b: FactoryShell wires setupProposalApprove/Decline/Dismiss RPCs with busy lock, toast feedback, stale error recovery, and snapshot refresh", async () => {
+  const shellSource = read("plugin/client/factory/shell.tsx");
+  for (const rpc of ["setupProposalApprove", "setupProposalDecline", "setupProposalDismiss"]) {
+    assert.match(shellSource, new RegExp(`useRpc\\(${rpc}\\)`), `${rpc} is bound in shell.tsx`);
+  }
+  assert.match(shellSource, /busyCountRef/);
+  assert.match(shellSource, /setupProposalBusyRef/);
+  assert.match(shellSource, /if \(setupProposalBusyRef\.current\) return;\s*setupProposalBusyRef\.current = true;\s*void act\(name, run\)\.finally\(\(\) => \{\s*setupProposalBusyRef\.current = false;\s*\}\);/);
+  assert.match(shellSource, /if \(projectRoot === undefined \|\| mobile\) return;\s*runSetupProposalAct\("Apply Setup Proposal", \(\) => setupProposalApproveCall\(\{ projectRoot, proposalId, actionsHash \}\)\)/);
+  assert.match(shellSource, /if \(projectRoot === undefined \|\| mobile\) return;\s*runSetupProposalAct\("Decline Setup Proposal", \(\) => setupProposalDeclineCall\(\{ projectRoot, proposalId \}\)\)/);
+  assert.match(shellSource, /if \(projectRoot === undefined \|\| mobile\) return;\s*runSetupProposalAct\("Dismiss Setup Proposal", \(\) => setupProposalDismissCall\(\{ projectRoot, proposalId \}\)\)/);
+
+  const { FactoryShell } = await loadShellForPanelTest();
+  const { createElement, act } = await import("react");
+  const { JSDOM } = await import(["jsdom"].join(""));
+  const dom = new JSDOM("<!doctype html><div id=root></div>");
+  const g = globalThis as Record<string, any>;
+  const saved = {
+    window: g.window,
+    document: g.document,
+    IS_REACT_ACT_ENVIRONMENT: g.IS_REACT_ACT_ENVIRONMENT,
+    __panelShellRpc: g.__panelShellRpc,
+    __panelShellToasts: g.__panelShellToasts,
+  };
+  g.window = dom.window;
+  g.document = dom.window.document;
+  g.IS_REACT_ACT_ENVIRONMENT = true;
+  g.__panelShellToasts = [];
+
+  let currentPanel = makePanel({ needsYou: [makeSetupProposalItem({ status: "pending" })] });
+  const rpcCalls: Array<{ name: string; input: unknown }> = [];
+  let resolveApprove: ((reply: unknown) => void) | null = null;
+  let nextDeclineReply: unknown = { ok: true, project: "my-app", projectRoot: "/snapshot-project", proposalId: "prop-1", summary: "Proposal declined." };
+  let nextDismissReply: unknown = { ok: true, project: "my-app", projectRoot: "/snapshot-project", proposalId: "prop-1", summary: "Proposal dismissed." };
+  let nextRetryReply: unknown = { ok: true, project: "my-app", projectRoot: "/snapshot-project", proposalId: "prop-1", actionsHash: "hash-abc123", applied: true, steps: [], summary: "Setup retried and applied." };
+
+  const buildSnapshotView = () => ({
+    version: 5,
+    stateDir: "/state",
+    generatedAt: new Date().toISOString(),
+    lanes: { supervisor: "pi/glm-5.3", lead: "pi/glm-5.3", worker: "pi/glm-5.3", watch: "pi/glm-5.3", freshEyes: "eye.json" },
+    machineLanes: { supervisor: "pi/glm-5.3", lead: "pi/glm-5.3", worker: "pi/glm-5.3", watch: "pi/glm-5.3", freshEyes: "eye.json" },
+    kpis: { running: 1, needsHuman: currentPanel.needsYou.length, openTasks: 1, greenClaims: 0, redClaims: 0, sessions: 1 },
+    agents: [], providers: [], supervisor: null, lead: null, daemonError: null,
+    project: { root: "/snapshot-project", slug: "my-app", name: "my-app", missingRoot: false },
+    corePlugin: { id: "paseo-factory", title: "Factory Core", status: "running", enabled: true },
+    companions: [], companionTools: [], pluginsCheckedAt: null,
+    vault: { configured: false, ghAuthenticated: false, historyImports: [], hydratedApps: [] },
+    profiles: [], activeProfileId: null, activeProfileModified: false, hasProjectLaneOverride: false,
+    skillHub: { skillPacksExplicit: false, projectPacks: [] },
+    panel: structuredClone(currentPanel),
+  });
+
+  g.__panelShellRpc = async (name: string, input: unknown) => {
+    rpcCalls.push({ name, input });
+    if (name === "factory.snapshot") return { ok: true, view: buildSnapshotView() };
+    if (name === "factory.self.update.status") return { ok: true, current: "0.23.0", latest: "0.23.0", updateAvailable: false };
+    if (name === "factory.setup_proposal.approve") {
+      if (resolveApprove !== null || currentPanel.needsYou[0]?.setupProposal?.status === "pending") {
+        return await new Promise((resolve) => { resolveApprove = resolve; });
+      }
+      currentPanel = makePanel({ needsYou: [] });
+      return nextRetryReply;
+    }
+    if (name === "factory.setup_proposal.decline") {
+      currentPanel = makePanel({ needsYou: [] });
+      return nextDeclineReply;
+    }
+    if (name === "factory.setup_proposal.dismiss") {
+      currentPanel = makePanel({ needsYou: [] });
+      return nextDismissReply;
+    }
+    return { ok: true };
+  };
+
+  const { createRoot } = await import("react-dom/client");
+  const container = dom.window.document.getElementById("root")!;
+  const root = createRoot(container);
+  const byId = (id: string) => container.querySelector(`[data-testid="${id}"]`) as HTMLButtonElement | null;
+
+  try {
+    await act(async () => {
+      root.render(createElement(FactoryShell, { theme, dir: "/snapshot-project", layout: { compact: false, platform: "web" } }));
+      await new Promise<void>((r) => setTimeout(r, 15));
+    });
+
+    // 1. Stale/error approve reply re-enables buttons and shows error toast.
+    await act(async () => { byId("factory-setup-proposal-approve")!.click(); });
+    assert.equal(byId("factory-setup-proposal-approve")!.disabled, true);
+    assert.equal(byId("factory-setup-proposal-approve")!.textContent, "Applying…");
+    // Second click while in-flight must not send a duplicate RPC.
+    await act(async () => { byId("factory-setup-proposal-approve")!.click(); });
+    assert.equal(rpcCalls.filter((c) => c.name === "factory.setup_proposal.approve").length, 1);
+    assert.deepEqual(rpcCalls.find((c) => c.name === "factory.setup_proposal.approve")?.input, {
+      projectRoot: "/snapshot-project",
+      proposalId: "prop-1",
+      actionsHash: "hash-abc123",
+    });
+
+    await act(async () => {
+      resolveApprove!({ ok: false, code: "setup-proposal-stale", error: "Proposal superseded" });
+      resolveApprove = null;
+      await new Promise<void>((r) => setTimeout(r, 15));
+    });
+    assert.equal(byId("factory-setup-proposal-approve")!.disabled, false);
+    assert.ok(g.__panelShellToasts.some((t: any) => t.error === true && String(t.msg).includes("Proposal superseded")));
+
+    // 2. Successful approve clears card after snapshot refresh.
+    await act(async () => { byId("factory-setup-proposal-approve")!.click(); });
+    await act(async () => {
+      currentPanel = makePanel({ needsYou: [] });
+      resolveApprove!({ ok: true, project: "my-app", projectRoot: "/snapshot-project", proposalId: "prop-1", actionsHash: "hash-abc123", applied: true, steps: [], summary: "Setup applied." });
+      resolveApprove = null;
+      await new Promise<void>((r) => setTimeout(r, 15));
+    });
+    assert.equal(container.querySelector('[data-testid="factory-setup-proposal"]'), null);
+    assert.ok(g.__panelShellToasts.some((t: any) => !t.error && String(t.msg).includes("Setup applied.")));
+
+    // 3. Decline flow.
+    currentPanel = makePanel({ needsYou: [makeSetupProposalItem({ status: "pending" })] });
+    await act(async () => {
+      root.render(createElement(FactoryShell, { key: "decline-pass", theme, dir: "/snapshot-project", layout: { compact: false, platform: "web" } }));
+      await new Promise<void>((r) => setTimeout(r, 15));
+    });
+    await act(async () => {
+      byId("factory-setup-proposal-decline")!.click();
+      await new Promise<void>((r) => setTimeout(r, 15));
+    });
+    assert.deepEqual(rpcCalls.find((c) => c.name === "factory.setup_proposal.decline")?.input, {
+      projectRoot: "/snapshot-project",
+      proposalId: "prop-1",
+    });
+    assert.equal(container.querySelector('[data-testid="factory-setup-proposal"]'), null);
+
+    // 4. Failed proposal Retry & Dismiss flows.
+    currentPanel = makePanel({ needsYou: [makeSetupProposalItem({ status: "failed" })] });
+    await act(async () => {
+      root.render(createElement(FactoryShell, { key: "retry-pass", theme, dir: "/snapshot-project", layout: { compact: false, platform: "web" } }));
+      await new Promise<void>((r) => setTimeout(r, 15));
+    });
+    await act(async () => {
+      byId("factory-setup-proposal-retry")!.click();
+      await new Promise<void>((r) => setTimeout(r, 15));
+    });
+    assert.deepEqual(rpcCalls.filter((c) => c.name === "factory.setup_proposal.approve").at(-1)?.input, {
+      projectRoot: "/snapshot-project",
+      proposalId: "prop-1",
+      actionsHash: "hash-abc123",
+    });
+    assert.equal(container.querySelector('[data-testid="factory-setup-proposal"]'), null);
+
+    currentPanel = makePanel({ needsYou: [makeSetupProposalItem({ status: "failed" })] });
+    await act(async () => {
+      root.render(createElement(FactoryShell, { key: "dismiss-pass", theme, dir: "/snapshot-project", layout: { compact: false, platform: "web" } }));
+      await new Promise<void>((r) => setTimeout(r, 15));
+    });
+    await act(async () => {
+      byId("factory-setup-proposal-dismiss")!.click();
+      await new Promise<void>((r) => setTimeout(r, 15));
+    });
+    assert.deepEqual(rpcCalls.find((c) => c.name === "factory.setup_proposal.dismiss")?.input, {
+      projectRoot: "/snapshot-project",
+      proposalId: "prop-1",
+    });
+    assert.equal(container.querySelector('[data-testid="factory-setup-proposal"]'), null);
+  } finally {
+    await act(() => root.unmount());
+    Object.assign(g, saved);
+    dom.window.close();
+  }
+});
+
+test("Wave 3b (Probe 4a): same-tick double-click and cross-button races dispatch 1 RPC, keep Applying… disabled, emit 0 spurious toasts, and release lock on settle/throw", async () => {
+  const { FactoryShell } = await loadShellForPanelTest();
+  const { createElement, act } = await import("react");
+  const { JSDOM } = await import(["jsdom"].join(""));
+  const dom = new JSDOM("<!doctype html><div id=root></div>");
+  const g = globalThis as Record<string, any>;
+  const saved = {
+    window: g.window,
+    document: g.document,
+    IS_REACT_ACT_ENVIRONMENT: g.IS_REACT_ACT_ENVIRONMENT,
+    __panelShellRpc: g.__panelShellRpc,
+    __panelShellToasts: g.__panelShellToasts,
+  };
+  g.window = dom.window;
+  g.document = dom.window.document;
+  g.IS_REACT_ACT_ENVIRONMENT = true;
+  g.__panelShellToasts = [];
+
+  let currentPanel = makePanel({ needsYou: [makeSetupProposalItem({ id: "p-race", status: "pending" })] });
+  const rpcCalls: Array<{ name: string; input: unknown }> = [];
+  let pendingApprove: { resolve: (reply: unknown) => void; reject: (err: unknown) => void } | null = null;
+
+  const buildSnapshotView = () => ({
+    version: 5,
+    stateDir: "/state",
+    generatedAt: new Date().toISOString(),
+    lanes: { supervisor: "pi/glm-5.3", lead: "pi/glm-5.3", worker: "pi/glm-5.3", watch: "pi/glm-5.3", freshEyes: "eye.json" },
+    machineLanes: { supervisor: "pi/glm-5.3", lead: "pi/glm-5.3", worker: "pi/glm-5.3", watch: "pi/glm-5.3", freshEyes: "eye.json" },
+    kpis: { running: 1, needsHuman: currentPanel.needsYou.length, openTasks: 1, greenClaims: 0, redClaims: 0, sessions: 1 },
+    agents: [], providers: [], supervisor: null, lead: null, daemonError: null,
+    project: { root: "/snapshot-project", slug: "app", name: "app", missingRoot: false },
+    corePlugin: { id: "paseo-factory", title: "Factory Core", status: "running", enabled: true },
+    companions: [], companionTools: [], pluginsCheckedAt: null,
+    vault: { configured: false, ghAuthenticated: false, historyImports: [], hydratedApps: [] },
+    profiles: [], activeProfileId: null, activeProfileModified: false, hasProjectLaneOverride: false,
+    skillHub: { skillPacksExplicit: false, projectPacks: [] },
+    panel: structuredClone(currentPanel),
+  });
+
+  g.__panelShellRpc = async (name: string, input: unknown) => {
+    rpcCalls.push({ name, input });
+    if (name === "factory.snapshot") return { ok: true, view: buildSnapshotView() };
+    if (name === "factory.self.update.status") return { ok: true, current: "0.23.0", latest: "0.23.0", updateAvailable: false };
+    if (name === "factory.setup_proposal.approve") {
+      if (pendingApprove !== null) {
+        return { ok: false, code: "setup-proposal-busy", error: 'Setup proposal "p-race" is already being applied for app.' };
+      }
+      return await new Promise((resolve, reject) => {
+        pendingApprove = { resolve, reject };
+      });
+    }
+    if (name === "factory.setup_proposal.decline") {
+      if (pendingApprove !== null) {
+        return { ok: false, code: "setup-proposal-busy", error: 'Setup proposal "p-race" is currently applying for app.' };
+      }
+      currentPanel = makePanel({ needsYou: [] });
+      return { ok: true, project: "app", projectRoot: "/snapshot-project", proposalId: "p-race", summary: "Proposal declined." };
+    }
+    if (name === "factory.setup_proposal.dismiss") {
+      if (pendingApprove !== null) {
+        return { ok: false, code: "setup-proposal-busy", error: 'Setup proposal "p-race" is currently applying for app.' };
+      }
+      currentPanel = makePanel({ needsYou: [] });
+      return { ok: true, project: "app", projectRoot: "/snapshot-project", proposalId: "p-race", summary: "Proposal dismissed." };
+    }
+    return { ok: true };
+  };
+
+  const { createRoot } = await import("react-dom/client");
+  const container = dom.window.document.getElementById("root")!;
+  const root = createRoot(container);
+  const byId = (id: string) => container.querySelector(`[data-testid="${id}"]`) as HTMLButtonElement | null;
+
+  try {
+    await act(async () => {
+      root.render(createElement(FactoryShell, { theme, dir: "/snapshot-project", layout: { compact: false, platform: "web" } }));
+      await new Promise<void>((r) => setTimeout(r, 15));
+    });
+
+    // 1. Same-tick double-click on Approve & Apply
+    await act(async () => {
+      byId("factory-setup-proposal-approve")!.click();
+      byId("factory-setup-proposal-approve")!.click();
+    });
+    assert.equal(rpcCalls.filter((c) => c.name === "factory.setup_proposal.approve").length, 1);
+    assert.equal(byId("factory-setup-proposal-approve")!.disabled, true);
+    assert.equal(byId("factory-setup-proposal-approve")!.textContent, "Applying…");
+    assert.equal(byId("factory-setup-proposal-decline")!.disabled, true);
+    assert.equal(g.__panelShellToasts.filter((t: any) => t.error === true).length, 0);
+
+    // Settling Call #1 with a server error releases the lock and re-enables buttons cleanly.
+    await act(async () => {
+      pendingApprove!.resolve({ ok: false, code: "setup-proposal-stale", error: "Proposal superseded" });
+      pendingApprove = null;
+      await new Promise<void>((r) => setTimeout(r, 15));
+    });
+    assert.equal(byId("factory-setup-proposal-approve")!.disabled, false);
+    assert.equal(byId("factory-setup-proposal-approve")!.textContent, "Approve & Apply");
+    assert.equal(g.__panelShellToasts.filter((t: any) => t.error === true).length, 1);
+
+    // 2. Same-tick cross-button race: Approve & Apply then Decline
+    g.__panelShellToasts = [];
+    const approveCountBefore = rpcCalls.filter((c) => c.name === "factory.setup_proposal.approve").length;
+    await act(async () => {
+      byId("factory-setup-proposal-approve")!.click();
+      byId("factory-setup-proposal-decline")!.click();
+    });
+    assert.equal(rpcCalls.filter((c) => c.name === "factory.setup_proposal.approve").length, approveCountBefore + 1);
+    assert.equal(rpcCalls.filter((c) => c.name === "factory.setup_proposal.decline").length, 0);
+    assert.equal(byId("factory-setup-proposal-approve")!.disabled, true);
+    assert.equal(byId("factory-setup-proposal-approve")!.textContent, "Applying…");
+    assert.equal(byId("factory-setup-proposal-decline")!.disabled, true);
+    assert.equal(g.__panelShellToasts.filter((t: any) => t.error === true).length, 0);
+
+    await act(async () => {
+      currentPanel = makePanel({ needsYou: [] });
+      pendingApprove!.resolve({ ok: true, project: "app", projectRoot: "/snapshot-project", proposalId: "p-race", actionsHash: "hash-abc123", applied: true, steps: [], summary: "Setup applied." });
+      pendingApprove = null;
+      await new Promise<void>((r) => setTimeout(r, 15));
+    });
+    assert.equal(container.querySelector('[data-testid="factory-setup-proposal"]'), null);
+
+    // 3. Same-tick Retry + Dismiss race on failed proposal, plus rejection/throw lock release
+    currentPanel = makePanel({ needsYou: [makeSetupProposalItem({ id: "p-race", status: "failed" })] });
+    g.__panelShellToasts = [];
+    await act(async () => {
+      root.render(createElement(FactoryShell, { key: "probe4a-failed", theme, dir: "/snapshot-project", layout: { compact: false, platform: "web" } }));
+      await new Promise<void>((r) => setTimeout(r, 15));
+    });
+    const approveCountBeforeRetry = rpcCalls.filter((c) => c.name === "factory.setup_proposal.approve").length;
+    await act(async () => {
+      byId("factory-setup-proposal-retry")!.click();
+      byId("factory-setup-proposal-dismiss")!.click();
+    });
+    assert.equal(rpcCalls.filter((c) => c.name === "factory.setup_proposal.approve").length, approveCountBeforeRetry + 1);
+    assert.equal(rpcCalls.filter((c) => c.name === "factory.setup_proposal.dismiss").length, 0);
+    assert.equal(byId("factory-setup-proposal-retry")!.disabled, true);
+    assert.equal(byId("factory-setup-proposal-retry")!.textContent, "Applying…");
+    assert.equal(byId("factory-setup-proposal-dismiss")!.disabled, true);
+    assert.equal(g.__panelShellToasts.filter((t: any) => t.error === true).length, 0);
+
+    await act(async () => {
+      pendingApprove!.reject(new Error("transport dropped"));
+      pendingApprove = null;
+      await new Promise<void>((r) => setTimeout(r, 15));
+    });
+    assert.equal(byId("factory-setup-proposal-retry")!.disabled, false);
+    assert.equal(byId("factory-setup-proposal-dismiss")!.disabled, false);
+    assert.ok(g.__panelShellToasts.some((t: any) => t.error === true && String(t.msg).includes("transport dropped")));
+
+    // Subsequent Dismiss works cleanly after rejection released the ref lock.
+    await act(async () => {
+      byId("factory-setup-proposal-dismiss")!.click();
+      await new Promise<void>((r) => setTimeout(r, 15));
+    });
+    assert.equal(rpcCalls.filter((c) => c.name === "factory.setup_proposal.dismiss").length, 1);
+    assert.equal(container.querySelector('[data-testid="factory-setup-proposal"]'), null);
+
+    // 4. Overlapping non-proposal act() settling early never clears busy while approve is in flight (busyCountRef).
+    currentPanel = makePanel({
+      needsYou: [
+        makeSetupProposalItem({ id: "p-race", status: "pending" }),
+        { key: "open-design-broken", kind: "open-design-broken", title: "Open Design link is broken", detail: "Missing design files.", action: { kind: "sync-open-design", label: "Sync again" } },
+      ],
+    });
+    await act(async () => {
+      root.render(createElement(FactoryShell, { key: "probe4a-overlap", theme, dir: "/snapshot-project", layout: { compact: false, platform: "web" } }));
+      await new Promise<void>((r) => setTimeout(r, 15));
+    });
+    await act(async () => {
+      byId("factory-setup-proposal-approve")!.click();
+      byId("factory-panel-needs-you-action-open-design-broken")!.click();
+      await new Promise<void>((r) => setTimeout(r, 15));
+    });
+    assert.equal(byId("factory-setup-proposal-approve")!.disabled, true);
+    assert.equal(byId("factory-setup-proposal-approve")!.textContent, "Applying…");
+    assert.equal(byId("factory-setup-proposal-decline")!.disabled, true);
+
+    await act(async () => {
+      currentPanel = makePanel({ needsYou: [] });
+      pendingApprove!.resolve({ ok: true, project: "app", projectRoot: "/snapshot-project", proposalId: "p-race", actionsHash: "hash-abc123", applied: true, steps: [], summary: "Setup applied." });
+      pendingApprove = null;
+      await new Promise<void>((r) => setTimeout(r, 15));
+    });
+    assert.equal(container.querySelector('[data-testid="factory-setup-proposal"]'), null);
+  } finally {
+    await act(() => root.unmount());
+    Object.assign(g, saved);
+    dom.window.close();
+  }
+});

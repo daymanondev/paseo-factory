@@ -409,14 +409,40 @@ test("OnboardingScreen filters unregistered Paseo Projects via paseo.projects.li
       assert.match(folderBadge.getAttribute("data-style") ?? "", /"borderRadius":999/);
       assert.match(folderBadge.getAttribute("data-style") ?? "", /#67717618/);
 
-      // 1-click selection mounts OnboardingWizard inline and runs inspect, never commit.
+      // 1-click selection mounts OnboardingWizard Quick Start inline and runs inspect, never commit.
       await act(() => newBtn.click());
       await act(() => new Promise<void>((r) => setTimeout(r, 10)));
 
       assert.ok(container.querySelector('[data-testid="factory-onboarding"]'), "OnboardingWizard mounts inline");
+      assert.ok(container.querySelector('[data-testid="factory-quickstart"]'), "Quick Start mounts inline");
+      assert.doesNotMatch(container.textContent ?? "", /Step 4/i, "no stale Step 4 copy");
+      assert.match(container.textContent ?? "", /Nothing writes to disk until you press Start Supervisor\./);
+      for (const absent of [
+        "factory-onboarding-progress",
+        "factory-onboarding-steps",
+        "factory-onboarding-step-prerequisites",
+        "factory-onboarding-install-all",
+        "factory-onboarding-od",
+        "factory-onboarding-back",
+        "factory-onboarding-next",
+        "factory-onboarding-start",
+      ]) {
+        assert.equal(container.querySelector(`[data-testid="${absent}"]`), null, `${absent} must be absent in Quick Start`);
+      }
+      // Compact Lane profile renders cleanly even when profiles.length === 0, and Customize models… expands lanes.
+      assert.ok(container.querySelector('[data-testid="factory-onboarding-profiles"]'));
+      assert.ok(container.querySelector('[data-testid="factory-onboarding-profile-machine-defaults"]'));
+      assert.equal(container.querySelector('[data-testid="factory-onboarding-lane-supervisor"]'), null);
+      await act(() => (container.querySelector('[data-testid="factory-quickstart-customize-models"]') as HTMLElement).click());
+      assert.ok(container.querySelector('[data-testid="factory-onboarding-lane-supervisor"]'));
+      assert.ok(container.querySelector('[data-testid="factory-onboarding-lane-lead"]'));
+      assert.ok(container.querySelector('[data-testid="factory-onboarding-lane-worker"]'));
+
       assert.match(container.querySelector('[data-testid="factory-onboard-selected-folder"]')!.textContent!, /\/Users\/owner\/work\/new-app/);
       assert.ok(rpcCalls.some((c) => c.name === "factory.onboarding.inspect" && c.input.folder === "/Users/owner/work/new-app"));
-      assert.equal(rpcCalls.some((c) => c.name === "factory.onboarding.commit"), false, "no commit mutation before Step 4 Start");
+      assert.equal(rpcCalls.some((c) => c.name === "factory.onboarding.commit"), false, "no commit mutation before Start Supervisor");
+      assert.equal(rpcCalls.some((c) => c.name === "factory.plugins.install"), false, "no pluginsInstall RPC on Quick Start");
+      assert.equal(rpcCalls.some((c) => c.name === "factory.open_design.catalog"), false, "no openDesignCatalog RPC on Quick Start");
 
       // Change folder returns to the picker.
       const changeBtn = container.querySelector('[data-testid="factory-onboard-change-folder"]') as HTMLElement;
@@ -770,17 +796,23 @@ async function runWizardStepsToCommit(
     await act(() => new Promise<void>((r) => setTimeout(r, 10)));
   };
 
+  assert.ok(container.querySelector('[data-testid="factory-quickstart"]'), "renders Quick Start");
+  for (const absent of [
+    "factory-onboarding-directive",
+    "factory-onboarding-next",
+    "factory-onboarding-back",
+    "factory-onboarding-step-prerequisites",
+    "factory-onboarding-od",
+  ]) {
+    assert.equal(container.querySelector(`[data-testid="${absent}"]`), null, `${absent} absent in Quick Start`);
+  }
   if (options.initGit) {
     await click("factory-onboarding-init-git");
   }
-  await click("factory-onboarding-next"); // -> Step 2
-  await click("factory-onboarding-next"); // -> Step 3
   if (options.profileId) {
     await click(`factory-onboarding-profile-${options.profileId}`);
   }
-  await click("factory-onboarding-next"); // -> Step 4
-  assert.equal(container.querySelector('[data-testid="factory-onboarding-directive"]'), null, "Step 4 omits directive input");
-  await click("factory-onboarding-start");
+  await click("factory-quickstart-start");
 }
 
 function makeSucceededRun(overrides: { runId?: string; folder: string; agentId: string; slug: string; bootstrapped?: boolean; summary: string }) {
@@ -807,7 +839,7 @@ function makeSucceededRun(overrides: { runId?: string; folder: string; agentId: 
   };
 }
 
-test("05-commit: Step 4 Start calls onboardingStart, reuses an existing active local workspace, opens workspace + Factory panel, and always opens Supervisor chat", async () => {
+test("05-commit: Quick Start calls onboardingStart, reuses an existing active local workspace, opens workspace + Factory panel, and always opens Supervisor chat", async () => {
   const desktop = await loadScreenModule("plugin/index.client.tsx", { platformOs: "web" });
   const { createElement } = await import("react");
 
@@ -960,6 +992,8 @@ test("05-commit: Step 4 Start calls onboardingStart, reuses an existing active l
             worker: "pi/zcode/glm-5.3:off",
           },
         });
+        assert.equal("openDesignProjectId" in startCall!.input, false, "Quick Start does not send openDesignProjectId");
+        assert.equal("directive" in startCall!.input, false, "Quick Start does not send directive");
         assert.deepEqual(createWorkspaceCalls, [], "reuses existing active local workspace without creating a duplicate");
         assert.deepEqual(openedWorkspaces, [{ workspaceId: "ws-active-local", serverId: "h1" }]);
         assert.deepEqual(openedPanels, [{ id: "paseo-factory", options: { workspaceId: "ws-active-local", location: "workspace" } }]);
@@ -979,7 +1013,7 @@ test("05-commit: Step 4 Start calls onboardingStart, reuses an existing active l
   }
 });
 
-test("05-commit: Step 4 Start creates a clean local workspace via workspaces.create (zero dummy agent) with projectId when matching Paseo project exists, or without for arbitrary folders", async () => {
+test("05-commit: Quick Start creates a clean local workspace via workspaces.create (zero dummy agent) with projectId when matching Paseo project exists, or without for arbitrary folders", async () => {
   const { OnboardingScreen } = await loadScreenModule("plugin/client/factory/onboarding-screen.tsx", { platformOs: "web" });
   const { createElement } = await import("react");
 
@@ -1165,7 +1199,7 @@ test("05-commit: Step 4 Start creates a clean local workspace via workspaces.cre
   }
 });
 
-test("05-commit: Step 4 open-workspace failure keeps Step 4 checklist visible and Retry retries only workspace/chat navigation without re-calling onboardingStart", async () => {
+test("05-commit: Quick Start open-workspace failure keeps checklist visible and Retry retries only workspace/chat navigation without re-calling onboardingStart", async () => {
   const { OnboardingScreen } = await loadScreenModule("plugin/client/factory/onboarding-screen.tsx", { platformOs: "web" });
   const { createElement } = await import("react");
 
@@ -1377,7 +1411,7 @@ test("OnboardingScreen uses stateUpdates (onboarding.progress) push on >=0.16.0,
     }
   }
 
-  // Part B: < 0.16.0 re-attach on folder selection -> jumps to Step 4 -> tolerates 2 silent poll failures, shows warning on 3rd, recovers & opens chat.
+  // Part B: < 0.16.0 re-attach on folder selection -> attaches checklist -> tolerates 2 silent poll failures, shows warning on 3rd, recovers & opens chat.
   {
     const { OnboardingScreen } = await loadScreenModule("plugin/client/factory/onboarding-screen.tsx", { platformOs: "web", withSubscription: false });
     const { createElement } = await import("react");
@@ -1457,8 +1491,8 @@ test("OnboardingScreen uses stateUpdates (onboarding.progress) push on >=0.16.0,
           await act(() => (container.querySelector('[data-testid="factory-onboard-select-folder"]') as HTMLElement).click());
           await act(() => new Promise<void>((r) => setTimeout(r, 20)));
 
-          assert.match(container.querySelector('[data-testid="factory-onboarding-progress"]')?.textContent ?? "", /Step 4 of 4/);
-          assert.ok(container.querySelector('[data-testid="factory-onboarding-run-checklist"]'), "re-attached to Step 4 checklist");
+          assert.ok(container.querySelector('[data-testid="factory-quickstart"]'), "renders Quick Start view");
+          assert.ok(container.querySelector('[data-testid="factory-onboarding-run-checklist"]'), "re-attached to Quick Start checklist");
 
           // Wait until 3 transient errors trigger the non-fatal poll warning, then completion clears it.
           let sawPollWarning = false;

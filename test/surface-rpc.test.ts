@@ -44,7 +44,17 @@ import { CORE_FACTORY_SKILLS } from "../plugin/server/core/companion-tools.ts";
 import { FACTORY_ROLE_PROVIDERS } from "../src/role-providers.ts";
 import { prepareTaskWorktree } from "../src/workspace.ts";
 import { readHandoffProgress, writeHandoffProgress } from "../plugin/server/handoff-progress.ts";
-import { storeReleaseWrite } from "../plugin/shared/rpc.ts";
+import { setupProposalApprove, setupProposalDecline, setupProposalDismiss, storeReleaseWrite } from "../plugin/shared/rpc.ts";
+import { PANEL_NEEDS_YOU_KINDS } from "../plugin/shared/view.ts";
+import {
+  classifySetupActionTier,
+  computeSetupActionsHash,
+  readSetupAudit,
+  readSetupProposal,
+  writeSetupProposal,
+} from "../plugin/server/core/factory-setup.ts";
+import type { FactorySetupAction, SetupProposalRecord } from "../plugin/server/core/factory-setup.ts";
+import { withProjectIngressLock } from "../plugin/server/core/project-ingress-lock.ts";
 import { deliverLeadMail, enqueueLeadMail } from "../src/mailbox.ts";
 import { disposeDir, gitCommitAll, makeTempDir, writeLanes } from "./helpers.ts";
 
@@ -10027,5 +10037,1037 @@ test("ADR 0071 (Issue 04): storeReleaseWrite on-request <-> auto-staging, non-mo
     assert.equal(res.supervisorNeedsHandoff, false);
     assert.equal(fake.archived.length, 0);
     assert.equal(fake.sent.length, 0);
+  }
+});
+
+test("ADR 0073 wave 3a: snapshot, seatsDirectory, and overview project setup-proposal at index 0 with crash recovery and machineWide flags", async (t) => {
+  const dir = makeTempDir("surface-setup-panel-");
+  disposeDir(t, dir);
+  const repo = join(dir, "app-repo");
+  mkdirSync(repo, { recursive: true });
+  writeFileSync(join(repo, "package.json"), JSON.stringify({ name: "app" }));
+  gitCommitAll(repo);
+  const project = resolveProject(repo);
+  assert.ok(project.ok);
+  if (!project.ok) return;
+
+  const { stateDir, handlers, factory } = makeRotateSurface(t, []);
+  writeProjectRegistration(stateDir, project.slug, { root: project.root });
+  // Seed a needs-human task and held supervisor mail so we verify setup-proposal sorts at index 0 ahead of both
+  factory.setContract({ task: "T-nh", workspace: project.root, gate: "true" });
+  factory.ledger.append({ event: "needs_human", task: "T-nh", reason: "denied-again", evidence: { denial: 2, repoke: 1 } });
+  enqueueLeadMail(join(stateDir, "projects", project.slug, "mailbox.jsonl"), {
+    to: "supervisor",
+    from: "lead",
+    kind: "report",
+    text: "Waiting on Supervisor",
+  });
+
+  const actions: FactorySetupAction[] = [
+    { kind: "set_release_mode", mode: "on-request" },
+    { kind: "set_helper_mcp", name: "github", enabled: true },
+  ];
+  const actionsHash = computeSetupActionsHash(actions);
+  const record: SetupProposalRecord = {
+    schemaVersion: 1,
+    id: "prop-panel-1",
+    actionsHash,
+    projectSlug: project.slug,
+    // Seed interrupted "applying" to verify read paths recover to "failed"
+    status: "applying",
+    reason: "Enable release mode and GitHub helper MCP",
+    warnings: ["Vault key ascKey missing — add in Private Vault"],
+    actions,
+    steps: actions.map((action, index) => ({
+      index,
+      action,
+      tier: classifySetupActionTier(action),
+      status: index === 0 ? "done" : "pending",
+      ...(index === 0 ? { summary: "Set Release mode to on-request" } : {}),
+    })),
+    createdAt: "2026-11-26T00:00:00.000Z",
+    updatedAt: "2026-11-26T00:00:00.000Z",
+  };
+  writeSetupProposal(stateDir, project.slug, record);
+
+  assert.equal(PANEL_NEEDS_YOU_KINDS[0], "setup-proposal");
+
+  const snap = await handlers.snapshot({ projectRoot: repo });
+  assert.ok(snap.ok);
+  if (!snap.ok) return;
+  const needsYou = snap.view.panel.needsYou;
+  assert.equal(needsYou[0]?.kind, "setup-proposal");
+  assert.equal(needsYou[0]?.action.kind, "setup-proposal");
+  assert.equal(needsYou[0]?.setupProposal?.id, "prop-panel-1");
+  assert.equal(needsYou[0]?.setupProposal?.status, "failed", "interrupted applying recovers to failed on read");
+  assert.deepEqual(needsYou[0]?.setupProposal?.warnings, ["Vault key ascKey missing — add in Private Vault"]);
+  assert.equal(needsYou[0]?.setupProposal?.actions[0]?.status, "done");
+  assert.equal(needsYou[0]?.setupProposal?.actions[1]?.machineWide, true);
+  assert.equal(needsYou[0]?.setupProposal?.actions[1]?.status, "failed");
+  assert.ok(needsYou.some((item) => item.kind === "needs-human"));
+  assert.ok(needsYou.some((item) => item.kind === "no-supervisor"));
+
+  const dirRes = await handlers.seatsDirectory({});
+  assert.ok(dirRes.ok);
+  assert.equal(dirRes.projects.find((p) => p.slug === project.slug)?.needsYouCount, needsYou.length);
+
+  const ovRes = await handlers.overview({});
+  assert.ok(ovRes.ok);
+  assert.equal(ovRes.projects.find((p) => p.slug === project.slug)?.needsYouCount, needsYou.length);
+});
+
+test("ADR 0073 wave 3a: setupProposalApprove/Decline/Dismiss enforce seat-cannot-grant, TOCTOU proposalId/actionsHash, and single-flight busy without holding withProjectIngressLock", async (t) => {
+  const dir = makeTempDir("surface-setup-guards-");
+  disposeDir(t, dir);
+  const repo = join(dir, "mobile-repo");
+  mkdirSync(join(repo, "ios"), { recursive: true });
+  writeFileSync(join(repo, "ios", "Podfile"), "platform :ios, '15.0'\n");
+  gitCommitAll(repo);
+  const project = resolveProject(repo);
+  assert.ok(project.ok);
+  if (!project.ok) return;
+
+  let releaseInstallGate!: () => void;
+  const installPaused = new Promise<void>((resolve) => {
+    releaseInstallGate = resolve;
+  });
+  let installStarted!: () => void;
+  const installEntered = new Promise<void>((resolve) => {
+    installStarted = resolve;
+  });
+
+  const activeSetupProposalRuns = new Map<string, string>();
+  const stateEvents: string[] = [];
+  const base = makeSurface(t, []);
+  const handlers = createSurfaceHandlers({
+    factory: base.factory,
+    stateDir: base.stateDir,
+    home: base.home,
+    daemon: base.fake.daemon,
+    activeSetupProposalRuns,
+    onStateChange: ({ handler }) => {
+      stateEvents.push(handler);
+    },
+    installPlugin: async (installHome, input) => {
+      installStarted();
+      await installPaused;
+      base.pluginInstalls.push({ home: installHome, input });
+      return { ok: true, plugin: { id: input.id, path: `/plugins/${input.id}`, enabled: true, status: "running" } };
+    },
+    vaultRunner: async (call) => {
+      if (call.command === "git" && call.args[0] === "ls-remote") return Buffer.from("abc HEAD\n");
+      return Buffer.from("");
+    },
+  });
+  writeProjectRegistration(base.stateDir, project.slug, { root: project.root });
+
+  const actions: FactorySetupAction[] = [{ kind: "install_companion", id: "factory-release-lab" }];
+  const actionsHash = computeSetupActionsHash(actions);
+  const proposal: SetupProposalRecord = {
+    schemaVersion: 1,
+    id: "prop-guard-1",
+    actionsHash,
+    projectSlug: project.slug,
+    status: "pending",
+    reason: "Install release-lab",
+    actions,
+    steps: [{ index: 0, action: actions[0]!, tier: 2, status: "pending" }],
+    createdAt: "2026-11-26T00:00:00.000Z",
+    updatedAt: "2026-11-26T00:00:00.000Z",
+  };
+  writeSetupProposal(base.stateDir, project.slug, proposal);
+
+  // 1. Seat refusal on approve / decline / dismiss
+  for (const seat of ["supervisor", "lead", "agent"] as const) {
+    const a = await handlers.setupProposalApprove({ projectRoot: repo, proposalId: proposal.id, actionsHash, seat });
+    assert.equal(a.ok, false);
+    if (!a.ok) assert.equal(a.code, "seat-cannot-grant");
+
+    const d = await handlers.setupProposalDecline({ projectRoot: repo, proposalId: proposal.id, seat });
+    assert.equal(d.ok, false);
+    if (!d.ok) assert.equal(d.code, "seat-cannot-grant");
+
+    const m = await handlers.setupProposalDismiss({ projectRoot: repo, proposalId: proposal.id, seat });
+    assert.equal(m.ok, false);
+    if (!m.ok) assert.equal(m.code, "seat-cannot-grant");
+  }
+
+  // 2. TOCTOU stale proposalId / actionsHash
+  const staleId = await handlers.setupProposalApprove({ projectRoot: repo, proposalId: "wrong-id", actionsHash });
+  assert.equal(staleId.ok, false);
+  if (!staleId.ok) assert.equal(staleId.code, "setup-proposal-stale");
+
+  const staleHash = await handlers.setupProposalApprove({
+    projectRoot: repo,
+    proposalId: proposal.id,
+    actionsHash: "0".repeat(64),
+  });
+  assert.equal(staleHash.ok, false);
+  if (!staleHash.ok) assert.equal(staleHash.code, "setup-proposal-stale");
+
+  const staleDecline = await handlers.setupProposalDecline({ projectRoot: repo, proposalId: "wrong-id" });
+  assert.equal(staleDecline.ok, false);
+  if (!staleDecline.ok) assert.equal(staleDecline.code, "setup-proposal-stale");
+
+  const staleDismiss = await handlers.setupProposalDismiss({ projectRoot: repo, proposalId: "wrong-id" });
+  assert.equal(staleDismiss.ok, false);
+  if (!staleDismiss.ok) assert.equal(staleDismiss.code, "setup-proposal-stale");
+
+  // 3. Single-flight applying + no withProjectIngressLock held across slow network step
+  const firstApprove = handlers.setupProposalApprove({ projectRoot: repo, proposalId: proposal.id, actionsHash });
+  await installEntered;
+
+  assert.ok(stateEvents.includes("setupProposalApprove.applying"), "emits state update immediately on applying");
+  assert.equal(readSetupProposal(base.stateDir, project.slug)?.status, "applying");
+
+  // Concurrent approve / decline / dismiss must fail with setup-proposal-busy
+  const concurrentApprove = await handlers.setupProposalApprove({ projectRoot: repo, proposalId: proposal.id, actionsHash });
+  assert.equal(concurrentApprove.ok, false);
+  if (!concurrentApprove.ok) assert.equal(concurrentApprove.code, "setup-proposal-busy");
+
+  const concurrentDecline = await handlers.setupProposalDecline({ projectRoot: repo, proposalId: proposal.id });
+  assert.equal(concurrentDecline.ok, false);
+  if (!concurrentDecline.ok) assert.equal(concurrentDecline.code, "setup-proposal-busy");
+
+  // withProjectIngressLock must NOT be held while installPlugin runs
+  const lockAcquired = await withProjectIngressLock(base.stateDir, project.slug, async () => "unlocked");
+  assert.equal(lockAcquired, "unlocked");
+
+  releaseInstallGate();
+  const approved = setupProposalApprove.output.parse(await firstApprove);
+  assert.ok(approved.ok);
+  assert.equal(activeSetupProposalRuns.size, 0);
+  assert.equal(readSetupProposal(base.stateDir, project.slug), undefined);
+});
+
+test("ADR 0073 wave 3a: setupProposalApprove provider-aware live unlock vs static-client fallback and Lead ADR 0071 refresh", async (t) => {
+  // 1. opencode & factory-supervisor (lane=pi/...) -> supervisorNeedsHandoff: false, Lead retires if unstarted or quiet-point handoff if started
+  for (const [label, supProvider, laneSupervisor] of [
+    ["opencode", "opencode/claude-sonnet-4", "opencode/claude-sonnet-4"],
+    ["pi-role-provider", "factory-supervisor", "pi/zai/glm-5.3"],
+  ] as const) {
+    const dir = makeTempDir(`surface-unlock-dyn-${label}-`);
+    disposeDir(t, dir);
+    const repo = join(dir, "mobile-repo");
+    mkdirSync(join(repo, "android", "app"), { recursive: true });
+    writeFileSync(join(repo, "android", "app", "build.gradle"), "android {}\n");
+    gitCommitAll(repo);
+    const project = resolveProject(repo);
+    assert.ok(project.ok);
+    if (!project.ok) return;
+
+    const agents: FakeAgent[] = [
+      {
+        id: `sup-${label}`,
+        status: "idle",
+        provider: supProvider,
+        labels: { seat: "supervisor", project: project.slug },
+        cwd: project.root,
+        lastUserMessageAt: "2026-11-26T10:00:00.000Z",
+      },
+      {
+        id: `lead-${label}`,
+        status: "idle",
+        provider: "pi/zai/glm-5.3",
+        labels: { seat: "lead", project: project.slug },
+        cwd: project.root,
+        lastUserMessageAt: "2026-11-26T10:00:00.000Z",
+      },
+    ];
+    const wakeups: Array<{ slug: string; requestId: string; text: string }> = [];
+    const base = makeSurface(t, agents);
+    const registry = createFactoryRegistry({ stateDir: base.stateDir, root: base.factory });
+    t.after(() => registry.stop());
+    const handlers = createSurfaceHandlers({
+      factory: base.factory,
+      registry,
+      stateDir: base.stateDir,
+      home: base.home,
+      daemon: base.fake.daemon,
+      stopAgent: async (id) => {
+        base.stopped.push(id);
+        return { ok: true };
+      },
+      handoff: (input) => leadMail.handoff(input),
+      handoffPending: (slug) => leadMail.hasPendingHandoff(slug),
+      onLeadRetired: (input) => leadMail.settleLeadRotation(input.slug),
+      onSeatKickoffSent: (input) => leadMail.markKickoffSent(input.agentId),
+      isSeatStarted: (agent) => leadMail.isSeatStarted(agent),
+      notifySupervisorSetup: (slug, requestId, text) => {
+        wakeups.push({ slug, requestId, text });
+      },
+    });
+    const leadMail = createLeadMailRuntime({
+      factory: base.factory,
+      registry,
+      stateDir: base.stateDir,
+      daemon: base.fake.daemon,
+      ensureLead: (input) => handlers.leadEnsure(input),
+      retireLead: (input) => handlers.leadRotate(input),
+    });
+    t.after(() => leadMail.stop());
+    saveLanes(base.stateDir, { supervisor: laneSupervisor, lead: "pi/zai/glm-5.3" });
+    writeProjectRegistration(base.stateDir, project.slug, {
+      root: project.root,
+      supervisor: `sup-${label}`,
+      lead: `lead-${label}`,
+    });
+
+    const actions: FactorySetupAction[] = [{ kind: "set_store_release_mode", mode: "on-request" }];
+    const actionsHash = computeSetupActionsHash(actions);
+    writeSetupProposal(base.stateDir, project.slug, {
+      schemaVersion: 1,
+      id: `prop-${label}`,
+      actionsHash,
+      projectSlug: project.slug,
+      status: "pending",
+      reason: "Unlock Store Release",
+      actions,
+      steps: [{ index: 0, action: actions[0]!, tier: 2, status: "pending" }],
+      createdAt: "2026-11-26T00:00:00.000Z",
+      updatedAt: "2026-11-26T00:00:00.000Z",
+    });
+
+    const res = setupProposalApprove.output.parse(
+      await handlers.setupProposalApprove({ projectRoot: repo, proposalId: `prop-${label}`, actionsHash }),
+    );
+    assert.ok(res.ok);
+    assert.equal(res.supervisorNeedsHandoff, false, `${label} skips Supervisor handoff prompt`);
+    assert.equal(base.fake.archived.includes(`sup-${label}`), false);
+    assert.equal(readHandoffProgress(base.stateDir, project.slug, "lead")?.state, "handing-over", "started Lead undergoes ADR 0071 handoff");
+    assert.equal(wakeups.length, 1);
+    assert.equal(wakeups[0]!.requestId, `setup-proposal:prop-${label}:approved`);
+    assert.match(wakeups[0]!.text, /Store Release Boundary/i);
+    assert.match(wakeups[0]!.text, /supervisor_dispatch_lead/);
+  }
+
+  // 2. claude / codex / antigravity -> supervisorNeedsHandoff: true fallback
+  for (const staticProvider of ["claude/claude-sonnet-4-6", "codex/gpt-5", "antigravity/gemini-2.5-pro"] as const) {
+    const dir = makeTempDir("surface-unlock-static-");
+    disposeDir(t, dir);
+    const repo = join(dir, "mobile-repo");
+    mkdirSync(join(repo, "ios"), { recursive: true });
+    writeFileSync(join(repo, "ios", "Podfile"), "platform :ios, '15.0'\n");
+    gitCommitAll(repo);
+    const project = resolveProject(repo);
+    assert.ok(project.ok);
+    if (!project.ok) return;
+
+    const agents: FakeAgent[] = [
+      {
+        id: "sup-static",
+        status: "idle",
+        provider: staticProvider,
+        labels: { seat: "supervisor", project: project.slug },
+        cwd: project.root,
+        lastUserMessageAt: "2026-11-26T10:00:00.000Z",
+      },
+      {
+        id: "lead-0turn",
+        status: "idle",
+        labels: { seat: "lead", project: project.slug },
+        cwd: project.root,
+        lastUserMessageAt: null,
+      },
+    ];
+    const base = makeSurface(t, agents);
+    const handlers = createSurfaceHandlers({
+      factory: base.factory,
+      stateDir: base.stateDir,
+      home: base.home,
+      daemon: base.fake.daemon,
+      stopAgent: async (id) => {
+        base.stopped.push(id);
+        return { ok: true };
+      },
+    });
+    writeProjectRegistration(base.stateDir, project.slug, {
+      root: project.root,
+      supervisor: "sup-static",
+      lead: "lead-0turn",
+    });
+
+    const actions: FactorySetupAction[] = [{ kind: "set_store_release_mode", mode: "on-request" }];
+    const actionsHash = computeSetupActionsHash(actions);
+    writeSetupProposal(base.stateDir, project.slug, {
+      schemaVersion: 1,
+      id: "prop-static",
+      actionsHash,
+      projectSlug: project.slug,
+      status: "pending",
+      reason: "Unlock Store Release on static client",
+      actions,
+      steps: [{ index: 0, action: actions[0]!, tier: 2, status: "pending" }],
+      createdAt: "2026-11-26T00:00:00.000Z",
+      updatedAt: "2026-11-26T00:00:00.000Z",
+    });
+
+    const res = setupProposalApprove.output.parse(
+      await handlers.setupProposalApprove({ projectRoot: repo, proposalId: "prop-static", actionsHash }),
+    );
+    assert.ok(res.ok);
+    assert.equal(res.supervisorNeedsHandoff, true, `${staticProvider} preserves supervisorNeedsHandoff: true`);
+    assert.deepEqual(res.refreshedSeats, ["lead"]);
+    assert.equal(base.fake.archived.includes("sup-static"), false);
+  }
+});
+
+test("ADR 0073 wave 3a: fail-fast partial failure, Retry resume, Decline wakeup, and Dismiss no-wakeup", async (t) => {
+  const dir = makeTempDir("surface-setup-retry-");
+  disposeDir(t, dir);
+  const repo = join(dir, "mobile-repo");
+  mkdirSync(join(repo, "ios"), { recursive: true });
+  writeFileSync(join(repo, "ios", "Podfile"), "platform :ios, '15.0'\n");
+  gitCommitAll(repo);
+  const project = resolveProject(repo);
+  assert.ok(project.ok);
+  if (!project.ok) return;
+
+  const wakeups: Array<{ slug: string; requestId: string; text: string }> = [];
+  let releaseCalls = 0;
+  const base = makeSurface(t, []);
+  const userHome = join(dir, "user-home");
+  mkdirSync(userHome, { recursive: true });
+  writeFileSync(join(userHome, ".claude.json"), JSON.stringify({ mcpServers: { github: { command: "npx" } } }));
+
+  const handlers = createSurfaceHandlers({
+    factory: base.factory,
+    stateDir: base.stateDir,
+    home: base.home,
+    userHome,
+    daemon: base.fake.daemon,
+    notifySupervisorSetup: (slug, requestId, text) => {
+      wakeups.push({ slug, requestId, text });
+    },
+  });
+  writeProjectRegistration(base.stateDir, project.slug, { root: project.root });
+
+  // Override helper-mcp toggle failure on first two attempts via chmod/removal trick:
+  // Use set_helper_mcp on unknown MCP first, then create helper-mcps config for Retry success!
+  const actions: FactorySetupAction[] = [
+    { kind: "set_release_mode", mode: "on-request" },
+    { kind: "set_helper_mcp", name: "missing-until-fixed", enabled: true },
+    { kind: "set_store_release_mode", mode: "on-request" },
+  ];
+  const actionsHash = computeSetupActionsHash(actions);
+  writeSetupProposal(base.stateDir, project.slug, {
+    schemaVersion: 1,
+    id: "prop-retry-1",
+    actionsHash,
+    projectSlug: project.slug,
+    status: "pending",
+    reason: "Configure release, helper MCP, and store release",
+    actions,
+    steps: actions.map((action, index) => ({
+      index,
+      action,
+      tier: classifySetupActionTier(action),
+      status: "pending",
+    })),
+    createdAt: "2026-11-26T00:00:00.000Z",
+    updatedAt: "2026-11-26T00:00:00.000Z",
+  });
+
+  // Track release mode writes directly to verify step 0 does not re-run on Retry
+  const origReleaseWrite = handlers.releaseSettingsWrite;
+  (handlers as { releaseSettingsWrite: typeof origReleaseWrite }).releaseSettingsWrite = async (input, ctx) => {
+    releaseCalls += 1;
+    return origReleaseWrite(input, ctx);
+  };
+
+  // Attempt 1 fails at step 1 -> step 0 done, step 1 failed, step 2 skipped
+  const fail1 = await handlers.setupProposalApprove({ projectRoot: repo, proposalId: "prop-retry-1", actionsHash });
+  assert.equal(fail1.ok, false);
+  const persisted1 = readSetupProposal(base.stateDir, project.slug);
+  assert.equal(persisted1?.status, "failed");
+  assert.equal(persisted1?.steps[0]?.status, "done");
+  assert.equal(persisted1?.steps[1]?.status, "failed");
+  assert.equal(persisted1?.steps[2]?.status, "skipped");
+  assert.equal(readStoreReleaseSettings(base.stateDir, project.slug).mode, "off", "step 2 was skipped");
+  assert.equal(releaseCalls, 1);
+  assert.equal(wakeups.length, 1);
+  assert.match(wakeups[0]!.text, /Setup Proposal failed/);
+
+  // Attempt 2 (Retry while still failing) produces a DISTINCT requestId so mailbox does not deduplicate
+  const fail2 = await handlers.setupProposalApprove({ projectRoot: repo, proposalId: "prop-retry-1", actionsHash });
+  assert.equal(fail2.ok, false);
+  assert.equal(releaseCalls, 1, "already-done step 0 was skipped on Retry");
+  assert.equal(wakeups.length, 2);
+  assert.notEqual(wakeups[1]!.requestId, wakeups[0]!.requestId);
+
+  // Now provision the helper MCP in userHome and Retry -> succeeds and clears proposal
+  writeFileSync(
+    join(userHome, ".claude.json"),
+    JSON.stringify({
+      mcpServers: {
+        github: { command: "npx" },
+        "missing-until-fixed": { command: "echo", args: [] },
+      },
+    }),
+  );
+  const passRetry = setupProposalApprove.output.parse(
+    await handlers.setupProposalApprove({ projectRoot: repo, proposalId: "prop-retry-1", actionsHash }),
+  );
+  assert.ok(passRetry.ok);
+  assert.equal(releaseCalls, 1);
+  assert.equal(readSetupProposal(base.stateDir, project.slug), undefined);
+  assert.equal(readStoreReleaseSettings(base.stateDir, project.slug).mode, "on-request");
+  assert.equal(wakeups.length, 3);
+  assert.equal(wakeups[2]!.requestId, "setup-proposal:prop-retry-1:approved");
+
+  // Decline wakes Supervisor & records owner-declined
+  const declineActions: FactorySetupAction[] = [{ kind: "set_release_mode", mode: "auto" }];
+  writeSetupProposal(base.stateDir, project.slug, {
+    schemaVersion: 1,
+    id: "prop-decline-1",
+    actionsHash: computeSetupActionsHash(declineActions),
+    projectSlug: project.slug,
+    status: "pending",
+    reason: "Switch to auto release",
+    actions: declineActions,
+    steps: [{ index: 0, action: declineActions[0]!, tier: 2, status: "pending" }],
+    createdAt: "2026-11-26T00:00:00.000Z",
+    updatedAt: "2026-11-26T00:00:00.000Z",
+  });
+  const declined = setupProposalDecline.output.parse(
+    await handlers.setupProposalDecline({ projectRoot: repo, proposalId: "prop-decline-1" }),
+  );
+  assert.ok(declined.ok);
+  assert.equal(readSetupProposal(base.stateDir, project.slug), undefined);
+  assert.equal(wakeups.length, 4);
+  assert.equal(wakeups[3]!.requestId, "setup-proposal:prop-decline-1:declined");
+
+  // Dismiss clears failed proposal WITHOUT waking Supervisor & records owner-dismissed
+  writeSetupProposal(base.stateDir, project.slug, {
+    schemaVersion: 1,
+    id: "prop-dismiss-1",
+    actionsHash: computeSetupActionsHash(declineActions),
+    projectSlug: project.slug,
+    status: "failed",
+    reason: "Stale failed proposal",
+    actions: declineActions,
+    steps: [{ index: 0, action: declineActions[0]!, tier: 2, status: "failed", error: "transient error" }],
+    createdAt: "2026-11-26T00:00:00.000Z",
+    updatedAt: "2026-11-26T00:00:00.000Z",
+  });
+  const dismissed = setupProposalDismiss.output.parse(
+    await handlers.setupProposalDismiss({ projectRoot: repo, proposalId: "prop-dismiss-1" }),
+  );
+  assert.ok(dismissed.ok);
+  assert.equal(readSetupProposal(base.stateDir, project.slug), undefined);
+  assert.equal(wakeups.length, 4, "Dismiss must NOT wake Supervisor");
+
+  const auditActors = readSetupAudit(base.stateDir, project.slug).map((entry) => entry.actor);
+  assert.deepEqual(auditActors, [
+    "owner-approved",
+    "owner-approved",
+    "owner-approved",
+    "owner-declined",
+    "owner-dismissed",
+  ]);
+});
+
+test("ADR 0073 wave 5: Retry after already-done set_store_release_mode preserves static-client supervisorNeedsHandoff via supervisorHandoffAgentId and guards wakeup text", async (t) => {
+  const provisionHelperMcp = (userHome: string, includeMissing: boolean): void => {
+    mkdirSync(userHome, { recursive: true });
+    writeFileSync(
+      join(userHome, ".claude.json"),
+      JSON.stringify({
+        mcpServers: {
+          github: { command: "npx" },
+          ...(includeMissing ? { "missing-until-fixed": { command: "echo", args: [] } } : {}),
+        },
+      }),
+    );
+  };
+
+  const setupMobileRepo = (suffix: string) => {
+    const dir = makeTempDir(`surface-setup-retry-handoff-${suffix}-`);
+    disposeDir(t, dir);
+    const repo = join(dir, "mobile-repo");
+    mkdirSync(join(repo, "ios"), { recursive: true });
+    writeFileSync(join(repo, "ios", "Podfile"), "platform :ios, '15.0'\n");
+    gitCommitAll(repo);
+    const project = resolveProject(repo);
+    assert.ok(project.ok);
+    if (!project.ok) throw new Error("expected mobile project");
+    return { dir, repo, project, userHome: join(dir, "user-home") };
+  };
+
+  // 1. Started claude Supervisor + multi-retry chain (Attempt 1 fail -> Attempt 2 fail -> Attempt 3 pass)
+  {
+    const { repo, project, userHome } = setupMobileRepo("claude-multi");
+    provisionHelperMcp(userHome, false);
+    const agents: FakeAgent[] = [
+      {
+        id: "sup-claude-multi",
+        status: "idle",
+        provider: "claude/claude-sonnet-4-6",
+        labels: { seat: "supervisor", project: project.slug },
+        cwd: project.root,
+        lastUserMessageAt: "2026-11-26T10:00:00.000Z",
+      },
+    ];
+    const wakeups: Array<{ slug: string; requestId: string; text: string }> = [];
+    const applyingStates: Array<string | undefined> = [];
+    const base = makeSurface(t, agents);
+    const handlers = createSurfaceHandlers({
+      factory: base.factory,
+      stateDir: base.stateDir,
+      home: base.home,
+      userHome,
+      daemon: base.fake.daemon,
+      onStateChange: ({ handler }) => {
+        if (handler === "setupProposalApprove.applying") {
+          applyingStates.push(readSetupProposal(base.stateDir, project.slug)?.supervisorHandoffAgentId);
+        }
+      },
+      notifySupervisorSetup: (slug, requestId, text) => {
+        wakeups.push({ slug, requestId, text });
+      },
+    });
+    writeProjectRegistration(base.stateDir, project.slug, { root: project.root, supervisor: "sup-claude-multi" });
+
+    // Confirm storeReleaseWrite itself does not leak internal supervisorHandoffAgentId
+    const directToggle = await handlers.storeReleaseWrite({ projectRoot: repo, mode: "on-request" });
+    assert.ok(directToggle.ok);
+    assert.equal(directToggle.supervisorNeedsHandoff, true);
+    assert.equal("supervisorHandoffAgentId" in directToggle, false);
+    setProjectStoreReleaseSettings(base.stateDir, project.slug, { mode: "off" });
+
+    const actions: FactorySetupAction[] = [
+      { kind: "set_store_release_mode", mode: "on-request" },
+      { kind: "set_helper_mcp", name: "missing-until-fixed", enabled: true },
+    ];
+    const actionsHash = computeSetupActionsHash(actions);
+    writeSetupProposal(base.stateDir, project.slug, {
+      schemaVersion: 1,
+      id: "prop-claude-multi",
+      actionsHash,
+      projectSlug: project.slug,
+      status: "pending",
+      reason: "Enable Store release and helper MCP",
+      actions,
+      steps: actions.map((action, index) => ({
+        index,
+        action,
+        tier: classifySetupActionTier(action),
+        status: "pending",
+      })),
+      createdAt: "2026-11-26T00:00:00.000Z",
+      updatedAt: "2026-11-26T00:00:00.000Z",
+    });
+
+    // Attempt 1 fails at step 1 -> step 0 done, supervisorHandoffAgentId persisted
+    const fail1 = await handlers.setupProposalApprove({ projectRoot: repo, proposalId: "prop-claude-multi", actionsHash });
+    assert.equal(fail1.ok, false);
+    const persisted1 = readSetupProposal(base.stateDir, project.slug);
+    assert.equal(persisted1?.status, "failed");
+    assert.equal(persisted1?.steps[0]?.status, "done");
+    assert.equal(persisted1?.steps[1]?.status, "failed");
+    assert.equal(persisted1?.supervisorHandoffAgentId, "sup-claude-multi");
+
+    // Attempt 2 (Retry while still failing) preserves supervisorHandoffAgentId through applying & failed states
+    const fail2 = await handlers.setupProposalApprove({ projectRoot: repo, proposalId: "prop-claude-multi", actionsHash });
+    assert.equal(fail2.ok, false);
+    assert.equal(applyingStates[0], undefined);
+    assert.equal(applyingStates[1], "sup-claude-multi");
+    const persisted2 = readSetupProposal(base.stateDir, project.slug);
+    assert.equal(persisted2?.status, "failed");
+    assert.equal(persisted2?.supervisorHandoffAgentId, "sup-claude-multi");
+
+    // Attempt 3 succeeds after provisioning helper MCP
+    provisionHelperMcp(userHome, true);
+    const pass3 = setupProposalApprove.output.parse(
+      await handlers.setupProposalApprove({ projectRoot: repo, proposalId: "prop-claude-multi", actionsHash }),
+    );
+    assert.ok(pass3.ok);
+    assert.equal(applyingStates[2], "sup-claude-multi");
+    assert.equal(pass3.supervisorNeedsHandoff, true);
+    assert.equal(wakeups.length, 3);
+    assert.equal(wakeups[2]!.requestId, "setup-proposal:prop-claude-multi:approved");
+    assert.match(wakeups[2]!.text, /static MCP client fallback: supervisorNeedsHandoff=true/);
+    assert.match(wakeups[2]!.text, /Store Release Boundary/i);
+    assert.doesNotMatch(wakeups[2]!.text, /notifications\/tools\/list_changed/);
+  }
+
+  // 2. on-request -> off with started claude Supervisor + failing step -> Retry returns supervisorNeedsHandoff: true without Store release active wakeup
+  {
+    const { repo, project, userHome } = setupMobileRepo("claude-off");
+    provisionHelperMcp(userHome, false);
+    const agents: FakeAgent[] = [
+      {
+        id: "sup-claude-off",
+        status: "idle",
+        provider: "claude/claude-sonnet-4-6",
+        labels: { seat: "supervisor", project: project.slug },
+        cwd: project.root,
+        lastUserMessageAt: "2026-11-26T10:00:00.000Z",
+      },
+    ];
+    const wakeups: Array<{ slug: string; requestId: string; text: string }> = [];
+    const base = makeSurface(t, agents);
+    const handlers = createSurfaceHandlers({
+      factory: base.factory,
+      stateDir: base.stateDir,
+      home: base.home,
+      userHome,
+      daemon: base.fake.daemon,
+      notifySupervisorSetup: (slug, requestId, text) => {
+        wakeups.push({ slug, requestId, text });
+      },
+    });
+    writeProjectRegistration(base.stateDir, project.slug, { root: project.root, supervisor: "sup-claude-off" });
+    setProjectStoreReleaseSettings(base.stateDir, project.slug, { mode: "on-request" });
+
+    const actions: FactorySetupAction[] = [
+      { kind: "set_store_release_mode", mode: "off" },
+      { kind: "set_helper_mcp", name: "missing-until-fixed", enabled: true },
+    ];
+    const actionsHash = computeSetupActionsHash(actions);
+    writeSetupProposal(base.stateDir, project.slug, {
+      schemaVersion: 1,
+      id: "prop-claude-off",
+      actionsHash,
+      projectSlug: project.slug,
+      status: "pending",
+      reason: "Disable Store release and configure helper MCP",
+      actions,
+      steps: actions.map((action, index) => ({
+        index,
+        action,
+        tier: classifySetupActionTier(action),
+        status: "pending",
+      })),
+      createdAt: "2026-11-26T00:00:00.000Z",
+      updatedAt: "2026-11-26T00:00:00.000Z",
+    });
+
+    const fail1 = await handlers.setupProposalApprove({ projectRoot: repo, proposalId: "prop-claude-off", actionsHash });
+    assert.equal(fail1.ok, false);
+    assert.equal(readSetupProposal(base.stateDir, project.slug)?.supervisorHandoffAgentId, "sup-claude-off");
+
+    provisionHelperMcp(userHome, true);
+    const passRetry = setupProposalApprove.output.parse(
+      await handlers.setupProposalApprove({ projectRoot: repo, proposalId: "prop-claude-off", actionsHash }),
+    );
+    assert.ok(passRetry.ok);
+    assert.equal(passRetry.supervisorNeedsHandoff, true);
+    assert.equal(wakeups.length, 2);
+    assert.doesNotMatch(wakeups[1]!.text, /Store release is active/);
+  }
+
+  // 3. on-request -> auto-staging with started claude Supervisor + failing step -> Retry returns supervisorNeedsHandoff: false and no notifications/tools/list_changed
+  {
+    const { repo, project, userHome } = setupMobileRepo("claude-auto-staging");
+    provisionHelperMcp(userHome, false);
+    const agents: FakeAgent[] = [
+      {
+        id: "sup-claude-auto",
+        status: "idle",
+        provider: "claude/claude-sonnet-4-6",
+        labels: { seat: "supervisor", project: project.slug },
+        cwd: project.root,
+        lastUserMessageAt: "2026-11-26T10:00:00.000Z",
+      },
+    ];
+    const wakeups: Array<{ slug: string; requestId: string; text: string }> = [];
+    const base = makeSurface(t, agents);
+    const handlers = createSurfaceHandlers({
+      factory: base.factory,
+      stateDir: base.stateDir,
+      home: base.home,
+      userHome,
+      daemon: base.fake.daemon,
+      notifySupervisorSetup: (slug, requestId, text) => {
+        wakeups.push({ slug, requestId, text });
+      },
+    });
+    writeProjectRegistration(base.stateDir, project.slug, { root: project.root, supervisor: "sup-claude-auto" });
+    setProjectStoreReleaseSettings(base.stateDir, project.slug, { mode: "on-request" });
+
+    const actions: FactorySetupAction[] = [
+      { kind: "set_store_release_mode", mode: "auto-staging" },
+      { kind: "set_helper_mcp", name: "missing-until-fixed", enabled: true },
+    ];
+    const actionsHash = computeSetupActionsHash(actions);
+    writeSetupProposal(base.stateDir, project.slug, {
+      schemaVersion: 1,
+      id: "prop-claude-auto",
+      actionsHash,
+      projectSlug: project.slug,
+      status: "pending",
+      reason: "Switch Store release to auto-staging",
+      actions,
+      steps: actions.map((action, index) => ({
+        index,
+        action,
+        tier: classifySetupActionTier(action),
+        status: "pending",
+      })),
+      createdAt: "2026-11-26T00:00:00.000Z",
+      updatedAt: "2026-11-26T00:00:00.000Z",
+    });
+
+    const fail1 = await handlers.setupProposalApprove({ projectRoot: repo, proposalId: "prop-claude-auto", actionsHash });
+    assert.equal(fail1.ok, false);
+    assert.equal(readSetupProposal(base.stateDir, project.slug)?.supervisorHandoffAgentId, undefined);
+
+    provisionHelperMcp(userHome, true);
+    const passRetry = setupProposalApprove.output.parse(
+      await handlers.setupProposalApprove({ projectRoot: repo, proposalId: "prop-claude-auto", actionsHash }),
+    );
+    assert.ok(passRetry.ok);
+    assert.equal(passRetry.supervisorNeedsHandoff, false);
+    assert.equal(wakeups.length, 2);
+    assert.match(wakeups[1]!.text, /no Supervisor handoff required/);
+    assert.doesNotMatch(wakeups[1]!.text, /notifications\/tools\/list_changed/);
+  }
+
+  // 4. Started claude Supervisor rotated/replaced between Attempt 1 and Retry -> Retry returns supervisorNeedsHandoff: false
+  {
+    const { repo, project, userHome } = setupMobileRepo("claude-rotated");
+    provisionHelperMcp(userHome, false);
+    const agents: FakeAgent[] = [
+      {
+        id: "sup-claude-old",
+        status: "idle",
+        provider: "claude/claude-sonnet-4-6",
+        labels: { seat: "supervisor", project: project.slug },
+        cwd: project.root,
+        lastUserMessageAt: "2026-11-26T10:00:00.000Z",
+      },
+    ];
+    const wakeups: Array<{ slug: string; requestId: string; text: string }> = [];
+    const base = makeSurface(t, agents);
+    const handlers = createSurfaceHandlers({
+      factory: base.factory,
+      stateDir: base.stateDir,
+      home: base.home,
+      userHome,
+      daemon: base.fake.daemon,
+      notifySupervisorSetup: (slug, requestId, text) => {
+        wakeups.push({ slug, requestId, text });
+      },
+    });
+    writeProjectRegistration(base.stateDir, project.slug, { root: project.root, supervisor: "sup-claude-old" });
+
+    const actions: FactorySetupAction[] = [
+      { kind: "set_store_release_mode", mode: "on-request" },
+      { kind: "set_helper_mcp", name: "missing-until-fixed", enabled: true },
+    ];
+    const actionsHash = computeSetupActionsHash(actions);
+    writeSetupProposal(base.stateDir, project.slug, {
+      schemaVersion: 1,
+      id: "prop-claude-rotated",
+      actionsHash,
+      projectSlug: project.slug,
+      status: "pending",
+      reason: "Enable Store release and helper MCP",
+      actions,
+      steps: actions.map((action, index) => ({
+        index,
+        action,
+        tier: classifySetupActionTier(action),
+        status: "pending",
+      })),
+      createdAt: "2026-11-26T00:00:00.000Z",
+      updatedAt: "2026-11-26T00:00:00.000Z",
+    });
+
+    const fail1 = await handlers.setupProposalApprove({ projectRoot: repo, proposalId: "prop-claude-rotated", actionsHash });
+    assert.equal(fail1.ok, false);
+    assert.equal(readSetupProposal(base.stateDir, project.slug)?.supervisorHandoffAgentId, "sup-claude-old");
+
+    // Simulate Supervisor rotation/replacement before Retry
+    agents[0] = {
+      id: "sup-claude-new",
+      status: "idle",
+      provider: "claude/claude-sonnet-4-6",
+      labels: { seat: "supervisor", project: project.slug },
+      cwd: project.root,
+      lastUserMessageAt: "2026-11-26T10:05:00.000Z",
+    };
+    writeProjectRegistration(base.stateDir, project.slug, { root: project.root, supervisor: "sup-claude-new" });
+
+    provisionHelperMcp(userHome, true);
+    const passRetry = setupProposalApprove.output.parse(
+      await handlers.setupProposalApprove({ projectRoot: repo, proposalId: "prop-claude-rotated", actionsHash }),
+    );
+    assert.ok(passRetry.ok);
+    assert.equal(passRetry.supervisorNeedsHandoff, false);
+    assert.equal(wakeups.length, 2);
+    assert.match(wakeups[1]!.text, /no Supervisor handoff required/);
+    assert.doesNotMatch(wakeups[1]!.text, /notifications\/tools\/list_changed/);
+    assert.doesNotMatch(wakeups[1]!.text, /static MCP client fallback: supervisorNeedsHandoff=true/);
+  }
+
+  // 5. Started opencode Supervisor, no Supervisor, and unstarted 0-turn claude Supervisor -> Retry returns supervisorNeedsHandoff: false
+  for (const modeCase of ["opencode", "none", "claude-0turn"] as const) {
+    const { repo, project, userHome } = setupMobileRepo(modeCase);
+    provisionHelperMcp(userHome, false);
+    const agents: FakeAgent[] =
+      modeCase === "opencode"
+        ? [
+            {
+              id: "sup-opencode",
+              status: "idle",
+              provider: "opencode/claude-sonnet-4",
+              labels: { seat: "supervisor", project: project.slug },
+              cwd: project.root,
+              lastUserMessageAt: "2026-11-26T10:00:00.000Z",
+            },
+          ]
+        : modeCase === "claude-0turn"
+          ? [
+              {
+                id: "sup-claude-0turn",
+                status: "idle",
+                provider: "claude/claude-sonnet-4-6",
+                labels: { seat: "supervisor", project: project.slug },
+                cwd: project.root,
+                lastUserMessageAt: null,
+              },
+            ]
+          : [];
+    const wakeups: Array<{ slug: string; requestId: string; text: string }> = [];
+    const base = makeSurface(t, agents);
+    const handlers = createSurfaceHandlers({
+      factory: base.factory,
+      stateDir: base.stateDir,
+      home: base.home,
+      userHome,
+      daemon: base.fake.daemon,
+      stopAgent: async (id) => {
+        base.stopped.push(id);
+        return { ok: true };
+      },
+      notifySupervisorSetup: (slug, requestId, text) => {
+        wakeups.push({ slug, requestId, text });
+      },
+    });
+    writeProjectRegistration(base.stateDir, project.slug, {
+      root: project.root,
+      ...(agents[0] ? { supervisor: agents[0].id } : {}),
+    });
+
+    const actions: FactorySetupAction[] = [
+      { kind: "set_store_release_mode", mode: "on-request" },
+      { kind: "set_helper_mcp", name: "missing-until-fixed", enabled: true },
+    ];
+    const actionsHash = computeSetupActionsHash(actions);
+    writeSetupProposal(base.stateDir, project.slug, {
+      schemaVersion: 1,
+      id: `prop-${modeCase}`,
+      actionsHash,
+      projectSlug: project.slug,
+      status: "pending",
+      reason: "Enable Store release and helper MCP",
+      actions,
+      steps: actions.map((action, index) => ({
+        index,
+        action,
+        tier: classifySetupActionTier(action),
+        status: "pending",
+      })),
+      createdAt: "2026-11-26T00:00:00.000Z",
+      updatedAt: "2026-11-26T00:00:00.000Z",
+    });
+
+    const fail1 = await handlers.setupProposalApprove({ projectRoot: repo, proposalId: `prop-${modeCase}`, actionsHash });
+    assert.equal(fail1.ok, false);
+    assert.equal(readSetupProposal(base.stateDir, project.slug)?.supervisorHandoffAgentId, undefined);
+    if (modeCase === "claude-0turn") {
+      assert.equal(base.fake.archived.includes("sup-claude-0turn"), true);
+    }
+
+    provisionHelperMcp(userHome, true);
+    const passRetry = setupProposalApprove.output.parse(
+      await handlers.setupProposalApprove({ projectRoot: repo, proposalId: `prop-${modeCase}`, actionsHash }),
+    );
+    assert.ok(passRetry.ok);
+    assert.equal(passRetry.supervisorNeedsHandoff, false, `${modeCase} must keep supervisorNeedsHandoff: false`);
+    assert.equal(wakeups.length, 2);
+    if (modeCase === "opencode") {
+      assert.match(wakeups[1]!.text, /notifications\/tools\/list_changed/);
+    } else {
+      assert.match(wakeups[1]!.text, /no Supervisor handoff required/);
+      assert.doesNotMatch(wakeups[1]!.text, /notifications\/tools\/list_changed/);
+    }
+  }
+
+  // 6. Non-mobile repo with set_store_release_mode: "off" + started claude Supervisor + failing step -> Retry returns supervisorNeedsHandoff: false
+  {
+    const dir = makeTempDir("surface-setup-retry-nonmobile-");
+    disposeDir(t, dir);
+    const webRepo = join(dir, "web-repo");
+    mkdirSync(webRepo, { recursive: true });
+    writeFileSync(join(webRepo, "package.json"), JSON.stringify({ name: "web-app" }));
+    gitCommitAll(webRepo);
+    const project = resolveProject(webRepo);
+    assert.ok(project.ok);
+    if (!project.ok) return;
+    const userHome = join(dir, "user-home");
+    provisionHelperMcp(userHome, false);
+
+    const agents: FakeAgent[] = [
+      {
+        id: "sup-web-claude",
+        status: "idle",
+        provider: "claude/claude-sonnet-4-6",
+        labels: { seat: "supervisor", project: project.slug },
+        cwd: project.root,
+        lastUserMessageAt: "2026-11-26T10:00:00.000Z",
+      },
+    ];
+    const wakeups: Array<{ slug: string; requestId: string; text: string }> = [];
+    const base = makeSurface(t, agents);
+    const handlers = createSurfaceHandlers({
+      factory: base.factory,
+      stateDir: base.stateDir,
+      home: base.home,
+      userHome,
+      daemon: base.fake.daemon,
+      notifySupervisorSetup: (slug, requestId, text) => {
+        wakeups.push({ slug, requestId, text });
+      },
+    });
+    writeProjectRegistration(base.stateDir, project.slug, { root: project.root, supervisor: "sup-web-claude" });
+
+    const actions: FactorySetupAction[] = [
+      { kind: "set_store_release_mode", mode: "off" },
+      { kind: "set_helper_mcp", name: "missing-until-fixed", enabled: true },
+    ];
+    const actionsHash = computeSetupActionsHash(actions);
+    writeSetupProposal(base.stateDir, project.slug, {
+      schemaVersion: 1,
+      id: "prop-nonmobile-off",
+      actionsHash,
+      projectSlug: project.slug,
+      status: "pending",
+      reason: "Keep Store release off on web repo",
+      actions,
+      steps: actions.map((action, index) => ({
+        index,
+        action,
+        tier: classifySetupActionTier(action),
+        status: "pending",
+      })),
+      createdAt: "2026-11-26T00:00:00.000Z",
+      updatedAt: "2026-11-26T00:00:00.000Z",
+    });
+
+    const fail1 = await handlers.setupProposalApprove({ projectRoot: webRepo, proposalId: "prop-nonmobile-off", actionsHash });
+    assert.equal(fail1.ok, false);
+    assert.equal(readSetupProposal(base.stateDir, project.slug)?.supervisorHandoffAgentId, undefined);
+
+    provisionHelperMcp(userHome, true);
+    const passRetry = setupProposalApprove.output.parse(
+      await handlers.setupProposalApprove({ projectRoot: webRepo, proposalId: "prop-nonmobile-off", actionsHash }),
+    );
+    assert.ok(passRetry.ok);
+    assert.equal(passRetry.supervisorNeedsHandoff, false);
+    assert.equal(wakeups.length, 2);
+    assert.doesNotMatch(wakeups[1]!.text, /Store release is active/);
   }
 });

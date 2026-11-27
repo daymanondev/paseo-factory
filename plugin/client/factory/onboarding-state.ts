@@ -1,39 +1,30 @@
 /**
- * The onboarding wizard's pure state machine (v0.6.0 W7, ADR 0056): which of
- * the four steps (Folder → Prerequisites → Models → Start) the Owner is on and
- * everything they have entered. It holds no RPC state and draws nothing — the
- * wizard component owns those — so "back without losing input" and "may this
- * step advance" are plain functions a test can drive. Function-style only; no
- * class syntax reaches the Hermes bundle.
+ * Quick Start onboarding's pure state machine (ADR 0073 amending ADR 0056):
+ * tracks single-screen Quick Start inputs (Git init, seat lanes, Lane profile,
+ * and collapsed-by-default model customization). It holds no RPC state and
+ * draws nothing — the Quick Start component owns those — so state transitions
+ * and readiness checks are plain functions a test can drive. Function-style
+ * only; no class syntax reaches the Hermes bundle.
  */
 import type { z } from "zod";
 import type { onboardingCommit, onboardingInspect } from "../../shared/rpc.ts";
 import type { Lanes } from "../../shared/view.ts";
 
-export const ONBOARDING_STEPS = ["Folder", "Prerequisites", "Models", "Start"] as const;
-export type OnboardingStep = 1 | 2 | 3 | 4;
-
 /** What the folder-inspection RPC answers when it can answer. */
 export type Inspection = Extract<z.output<typeof onboardingInspect.output>, { ok: true }>;
 export type CommitInput = z.input<typeof onboardingCommit.input>;
 
-/** The three seats the Project starts on — the only lanes step 3 offers. */
+/** The three seats the Project starts on — editable via Customize models…. */
 export type OnboardingLaneName = "supervisor" | "lead" | "worker";
 export const ONBOARDING_LANES: readonly OnboardingLaneName[] = ["supervisor", "lead", "worker"];
-
-export interface DesignChoice {
-  projectId: string;
-  projectName: string;
-}
 
 export interface ProfileChoice {
   id: string;
   lanes: Pick<Lanes, OnboardingLaneName>;
 }
 
-/** Everything the Owner has entered — kept across Back and Next. */
+/** Everything the Owner has entered on Quick Start. */
 export interface WizardInput {
-  step: OnboardingStep;
   /** The Owner accepted initialising Git for a folder that is not a repository. */
   initGit: boolean;
   lanes: Record<OnboardingLaneName, string>;
@@ -43,44 +34,35 @@ export interface WizardInput {
   profileLanes: Record<OnboardingLaneName, string> | null;
   /** True when any seat currently differs from the selected Lane profile. */
   profileModified: boolean;
-  design: DesignChoice | null;
+  /** Whether the inline `Customize models…` drawer is expanded. */
+  customizeModels: boolean;
 }
 
 export type WizardAction =
-  | { type: "next" }
-  | { type: "back" }
-  | { type: "step"; step: OnboardingStep }
   | { type: "initGit"; value: boolean }
   | { type: "lane"; lane: OnboardingLaneName; value: string }
   | { type: "profile"; profile: ProfileChoice }
   | { type: "machineDefaults"; machineLanes: Pick<Lanes, OnboardingLaneName> }
-  | { type: "design"; design: DesignChoice | null };
+  | { type: "customizeModels"; value?: boolean };
 
 function pickOnboardingLanes(lanes: Pick<Lanes, OnboardingLaneName>): Record<OnboardingLaneName, string> {
   return { supervisor: lanes.supervisor, lead: lanes.lead, worker: lanes.worker };
 }
 
-/** Step 3 is prefilled from the machine defaults. */
+/** Quick Start defaults to machine lanes with model customization collapsed. */
 export function initialWizard(machineLanes: Pick<Lanes, OnboardingLaneName>): WizardInput {
   return {
-    step: 1,
     initGit: false,
     lanes: pickOnboardingLanes(machineLanes),
     profileId: null,
     profileLanes: null,
     profileModified: false,
-    design: null,
+    customizeModels: false,
   };
 }
 
 export function reduceWizard(state: WizardInput, action: WizardAction): WizardInput {
   switch (action.type) {
-    case "next":
-      return { ...state, step: Math.min(4, state.step + 1) as OnboardingStep };
-    case "back":
-      return { ...state, step: Math.max(1, state.step - 1) as OnboardingStep };
-    case "step":
-      return { ...state, step: action.step };
     case "initGit":
       return { ...state, initGit: action.value };
     case "lane": {
@@ -115,8 +97,8 @@ export function reduceWizard(state: WizardInput, action: WizardAction): WizardIn
         profileModified: false,
         lanes: pickOnboardingLanes(action.machineLanes),
       };
-    case "design":
-      return { ...state, design: action.design };
+    case "customizeModels":
+      return { ...state, customizeModels: action.value ?? !state.customizeModels };
   }
 }
 
@@ -128,13 +110,12 @@ export function blockerOf(inspection: Inspection): "lead-live" | "supervisor-liv
 }
 
 /**
- * May `step` hand over to the next? Only the Folder step gates: it needs an
- * inspection, nothing already running there, and a Git repository (or the
- * Owner's yes to initialise one). Missing prerequisites warn on step 2 and
- * stay on the panel's Needs-you list afterwards, so they never block.
+ * May Quick Start start onboarding? Requires a completed folder inspection,
+ * nothing already running there, and a Git repository (or the Owner's yes to
+ * initialise one). Missing prerequisites stay handled on-demand by Supervisor /
+ * Needs you and never block Quick Start.
  */
-export function canAdvance(step: OnboardingStep, inspection: Inspection | null, initGit: boolean): boolean {
-  if (step !== 1) return true;
+export function canStartOnboarding(inspection: Inspection | null, initGit: boolean): boolean {
   if (inspection === null) return false;
   if (blockerOf(inspection) !== null) return false;
   return inspection.gitRepo || initGit;
@@ -147,13 +128,7 @@ export function commitInputOf(state: WizardInput, inspection: Inspection, folder
     ...(!inspection.gitRepo && state.initGit ? { initGit: true } : {}),
     ...(state.profileId === null ? {} : { profileId: state.profileId }),
     models: { supervisor: state.lanes.supervisor, lead: state.lanes.lead, worker: state.lanes.worker },
-    ...(state.design === null ? {} : { openDesignProjectId: state.design.projectId }),
   };
-}
-
-/** `Step 2 of 4 — Prerequisites`. */
-export function stepLabel(step: OnboardingStep): string {
-  return `Step ${step} of 4 — ${ONBOARDING_STEPS[step - 1]}`;
 }
 
 const TIMEOUT_ERROR_RE = /timed?\s*out|timeout|ETIMEDOUT/i;

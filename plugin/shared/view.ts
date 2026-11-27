@@ -443,7 +443,26 @@ export type SkillHubView = z.infer<typeof SkillHubViewSchema>;
  * (`install-prerequisites`, `start-supervisor`, `sync-open-design`) are desktop-only
  * on the client; mobile renders a hint to use Paseo Desktop in their place.
  */
+export const SetupProposalActionViewSchema = z.object({
+  label: z.string(),
+  machineWide: z.boolean().optional(),
+  status: z.enum(["pending", "done", "failed", "skipped"]),
+  error: z.string().optional(),
+});
+export type SetupProposalActionView = z.infer<typeof SetupProposalActionViewSchema>;
+
+export const SetupProposalPanelViewSchema = z.object({
+  id: z.string(),
+  actionsHash: z.string(),
+  status: z.enum(["pending", "applying", "failed"]),
+  reason: z.string(),
+  actions: z.array(SetupProposalActionViewSchema),
+  warnings: z.array(z.string()),
+});
+export type SetupProposalPanelView = z.infer<typeof SetupProposalPanelViewSchema>;
+
 export const PanelNeedsYouActionSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("setup-proposal"), label: z.string() }),
   z.object({ kind: z.literal("handoff-supervisor"), label: z.string() }),
   z.object({ kind: z.literal("retry-handoff"), seat: z.string(), label: z.string() }),
   z.object({ kind: z.literal("open-agent"), agentId: z.string(), label: z.string() }),
@@ -456,7 +475,7 @@ export const PanelNeedsYouActionSchema = z.discriminatedUnion("kind", [
 export type PanelNeedsYouAction = z.infer<typeof PanelNeedsYouActionSchema>;
 
 /** The Owner-actionable item kinds, in the order the list shows them. */
-export const PANEL_NEEDS_YOU_KINDS = ["needs-human", "attempt-ceiling", "seat-stuck", "no-supervisor", "supervisor-near-mark", "handoff-failed", "handoff-stuck", "prerequisites", "open-design-broken"] as const;
+export const PANEL_NEEDS_YOU_KINDS = ["setup-proposal", "needs-human", "attempt-ceiling", "seat-stuck", "no-supervisor", "supervisor-near-mark", "handoff-failed", "handoff-stuck", "prerequisites", "open-design-broken"] as const;
 
 export const PanelNeedsYouItemSchema = z.object({
   key: z.string(),
@@ -466,6 +485,7 @@ export const PanelNeedsYouItemSchema = z.object({
   detail: z.string().nullable(),
   /** Always one action — when no seat lives to resolve the item, it is Start Supervisor. */
   action: PanelNeedsYouActionSchema,
+  setupProposal: SetupProposalPanelViewSchema.optional(),
 });
 export type PanelNeedsYouItem = z.infer<typeof PanelNeedsYouItemSchema>;
 
