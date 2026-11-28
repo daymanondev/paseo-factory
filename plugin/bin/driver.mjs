@@ -136,6 +136,17 @@ const READ_ONLY_DISPOSITION_EVIDENCE = {
   scout: "concrete file:line evidence paths, the remaining unknowns, and your confidence (low | medium | high)",
 };
 
+const READ_ONLY_DISPOSITION_FENCE = "the read-only-disposition-fence forbids file edits and `git commit`";
+
+// Plain-JS mirror of src/disposition-prompt.ts's renderPeerDispositionGuidance (ADR 0074).
+const PEER_DISPOSITION_GUIDANCE = {
+  engineer:
+    "Disposition guidance (engineer): implement and test inside this isolated Task worktree; catch a failed `git commit` by exit code (a SHA alone proves nothing). Calling `agent_claim` (`factory-claim`) with `outcome: \"complete\"` requires a committed SHA; `reopen`, `blocked`, or `partial` bypasses full verification without burning an attempt (no commit SHA required for `reopen` or `blocked`).",
+  scout: `Disposition guidance (scout): establish repository facts read-only (${READ_ONLY_DISPOSITION_FENCE}) — edit no files, make no commits, no commit sha; return ${READ_ONLY_DISPOSITION_EVIDENCE.scout}.`,
+  architect: `Disposition guidance (architect): read-only boundary design (${READ_ONLY_DISPOSITION_FENCE}) — edit no files, make no commits, no commit sha; return ${READ_ONLY_DISPOSITION_EVIDENCE.architect}.`,
+  reviewer: `Disposition guidance (reviewer): read-only independent audit (${READ_ONLY_DISPOSITION_FENCE}) — edit no files, make no commits, no commit sha; evaluate strictly against the Outcome, Spec/Invariants, and Diff/Commit, and ${READ_ONLY_DISPOSITION_EVIDENCE.reviewer}.`,
+};
+
 const PEER_PREMISE_CHECK_REMINDER =
   "Before writing code, verify the brief's premises and verification command against the actual repository; if reality conflicts with the brief, a prerequisite is missing, or an ambiguity changes behavior, call `agent_ask` immediately rather than guessing.";
 
@@ -183,15 +194,17 @@ PATH="${pathValue}" first.`;
  * never handed the commit + `--sha` instructions.
  */
 export function renderBrief(task, pathValue, description, skills, branch = task, disposition, reopenConditions) {
-  const body = READ_ONLY_DISPOSITIONS.has(disposition)
-    ? readOnlyBriefBody(task, pathValue, disposition)
+  const effectiveDisposition = typeof disposition === "string" && disposition !== "" ? disposition : "engineer";
+  const body = READ_ONLY_DISPOSITIONS.has(effectiveDisposition)
+    ? readOnlyBriefBody(task, pathValue, effectiveDisposition)
     : BRIEF_TEMPLATE.replaceAll("<branch>", branch)
       .replaceAll("<task-id>", task)
       .replace('PATH="<path>" first.', `PATH="${pathValue}" first.`);
-  let brief = body;
+  const guidance = PEER_DISPOSITION_GUIDANCE[effectiveDisposition] ?? PEER_DISPOSITION_GUIDANCE.engineer;
+  let brief = `${body}\n\n${guidance}`;
   if (description !== undefined && description !== null) brief = `Task: ${description}\n\n${brief}`;
-  if (typeof disposition === "string" && disposition !== "engineer")
-    brief = `Disposition: ${disposition}\n\n${brief}`;
+  if (effectiveDisposition !== "engineer")
+    brief = `Disposition: ${effectiveDisposition}\n\n${brief}`;
   if (Array.isArray(skills) && skills.length > 0)
     brief = `Required skills to open first: ${skills.join(", ")} (read ~/.agents/skills/<skill>/SKILL.md or .agents/skills/<skill>/SKILL.md before starting)\n\n${brief}`;
   const reopenIf = formatReopenIfBlock(reopenConditions);

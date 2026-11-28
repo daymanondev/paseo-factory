@@ -22,6 +22,7 @@ export async function executeAcceptance(
   },
 ) {
   return factory.history.runOperation(async () => {
+    factory.validateAccept({ ...input, authority: deps.authority });
     const contract = factory.contractFor(input.task);
     if (contract !== undefined) {
       let excludePaths: Set<string> | undefined;

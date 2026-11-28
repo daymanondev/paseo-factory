@@ -73,6 +73,10 @@ function isValidContractTimeoutSeconds(value) {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= MIN_CONTRACT_TIMEOUT_SECONDS && value <= MAX_CONTRACT_TIMEOUT_SECONDS;
 }
 var GATE_OUTPUT_CAP_BYTES = 2 * 1024 * 1024;
+var WATCH_ACK_MIN_CHARS = 10;
+function isValidWatchAck(value) {
+  return typeof value === "string" && value.replace(/\s+/g, "").length >= WATCH_ACK_MIN_CHARS;
+}
 
 // src/events.ts
 var EVENT_NAMES = [
@@ -361,7 +365,7 @@ function v2PayloadIsValid(event) {
     case "report_written":
       return string("path");
     case "attempt_accepted":
-      return optionalString("accepted_by") && optionalString("landingNote") && (event.landing === void 0 || event.landing === "landed" || event.landing === "pending-conflict");
+      return optionalString("accepted_by") && optionalString("landingNote") && (event.landing === void 0 || event.landing === "landed" || event.landing === "pending-conflict") && (event.watchAck === void 0 || isValidWatchAck(event.watchAck));
     case "task_closed":
       return string("reason") && optionalString("closed_by");
     case "permit_allowed":
@@ -1326,8 +1330,10 @@ __export(ledger_validation_exports, {
   DEFAULT_CONTRACT_TIMEOUT_SECONDS: () => DEFAULT_CONTRACT_TIMEOUT_SECONDS,
   MAX_CONTRACT_TIMEOUT_SECONDS: () => MAX_CONTRACT_TIMEOUT_SECONDS,
   MIN_CONTRACT_TIMEOUT_SECONDS: () => MIN_CONTRACT_TIMEOUT_SECONDS,
+  WATCH_ACK_MIN_CHARS: () => WATCH_ACK_MIN_CHARS,
   isValidContractTimeoutSeconds: () => isValidContractTimeoutSeconds,
   isValidLedgerEvent: () => isValidLedgerEvent,
+  isValidWatchAck: () => isValidWatchAck,
   parseLedgerJsonl: () => parseLedgerJsonl,
   usageIsValid: () => usageIsValid
 });
@@ -1342,6 +1348,10 @@ function isValidContractTimeoutSeconds(value) {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= MIN_CONTRACT_TIMEOUT_SECONDS && value <= MAX_CONTRACT_TIMEOUT_SECONDS;
 }
 var GATE_OUTPUT_CAP_BYTES = 2 * 1024 * 1024;
+var WATCH_ACK_MIN_CHARS = 10;
+function isValidWatchAck(value) {
+  return typeof value === "string" && value.replace(/\s+/g, "").length >= WATCH_ACK_MIN_CHARS;
+}
 
 // src/events.ts
 var EVENT_NAMES = [
@@ -1630,7 +1640,7 @@ function v2PayloadIsValid(event) {
     case "report_written":
       return string("path");
     case "attempt_accepted":
-      return optionalString("accepted_by") && optionalString("landingNote") && (event.landing === void 0 || event.landing === "landed" || event.landing === "pending-conflict");
+      return optionalString("accepted_by") && optionalString("landingNote") && (event.landing === void 0 || event.landing === "landed" || event.landing === "pending-conflict") && (event.watchAck === void 0 || isValidWatchAck(event.watchAck));
     case "task_closed":
       return string("reason") && optionalString("closed_by");
     case "permit_allowed":
@@ -1670,8 +1680,10 @@ function record(value) {
   DEFAULT_CONTRACT_TIMEOUT_SECONDS,
   MAX_CONTRACT_TIMEOUT_SECONDS,
   MIN_CONTRACT_TIMEOUT_SECONDS,
+  WATCH_ACK_MIN_CHARS,
   isValidContractTimeoutSeconds,
   isValidLedgerEvent,
+  isValidWatchAck,
   parseLedgerJsonl,
   usageIsValid
 });
@@ -2114,6 +2126,10 @@ var sharedTools = {
       properties: {
         task: { type: "string", description: "Task ID to accept." },
         attempt: { type: "number", description: "1-indexed Attempt number to accept." },
+        acknowledgeWatch: {
+          type: "string",
+          description: "Optional Watch soft-block acknowledgement reason (>= 10 non-whitespace chars) required when Watch flagged `test-weakened >= 0.5` or `secret-leak >= 0.5` (ADR 0074)."
+        },
         workspace: { type: "string", description: "Optional Project root path." }
       },
       required: ["task", "attempt"]
@@ -2196,6 +2212,10 @@ var sharedTools = {
       properties: {
         task: { type: "string", description: "Task ID to accept." },
         attempt: { type: "number", description: "1-indexed Attempt number to accept." },
+        acknowledgeWatch: {
+          type: "string",
+          description: "Optional Watch soft-block acknowledgement reason (>= 10 non-whitespace chars) required when Watch flagged `test-weakened >= 0.5` or `secret-leak >= 0.5` (ADR 0074)."
+        },
         workspace: { type: "string", description: "Optional Project root path." }
       },
       required: ["task", "attempt"]
@@ -2528,8 +2548,8 @@ var sharedTools = {
   }
 };
 var sharedRoles = {
-  supervisor: ["supervisor_accept_task", "supervisor_dispatch_lead", "supervisor_read_ledger", "supervisor_record_store_note", "supervisor_inspect_factory", "supervisor_setup_factory", "supervisor_end_cycle", "lead_close_task", "lead_retire_task"],
-  lead: ["lead_reply_peer", "lead_needs_human", "lead_create_worktree", "lead_set_contract", "lead_dispatch_agent", "lead_verify", "lead_merge", "lead_remove_worktree", "lead_release", "lead_store_release", "lead_record_store_note", "lead_report_to_supervisor", "lead_close_task", "lead_retire_task", "lead_update_notebook", "lead_read_ledger"],
+  supervisor: ["supervisor_accept_task", "supervisor_dispatch_lead", "supervisor_read_ledger", "supervisor_record_store_note", "supervisor_inspect_factory", "supervisor_setup_factory", "supervisor_end_cycle"],
+  lead: ["lead_reply_peer", "lead_needs_human", "lead_set_contract", "lead_dispatch_agent", "lead_verify", "lead_merge", "lead_release", "lead_store_release", "lead_record_store_note", "lead_report_to_supervisor", "lead_close_task", "lead_update_notebook", "lead_read_ledger"],
   agent: ["agent_claim", "agent_ask"],
   unbound: ["factory_dispatch_supervisor", "factory_status"]
 };
@@ -2839,6 +2859,18 @@ const READ_ONLY_DISPOSITION_EVIDENCE = {
     "argue the strongest evidence-backed weakness with concrete claim plus file:line evidence before agreeing (never manufacturing objections when evidence holds), separating blocking defects from non-blocking notes",
   scout: "concrete file:line evidence paths, the remaining unknowns, and your confidence (low | medium | high)",
 };
+const READ_ONLY_DISPOSITION_FENCE = "the read-only-disposition-fence forbids file edits and `git commit`";
+const PEER_DISPOSITION_GUIDANCE = {
+  engineer:
+    "Disposition guidance (engineer): implement and test inside this isolated Task worktree; catch a failed `git commit` by exit code (a SHA alone proves nothing). Calling `agent_claim` (`factory-claim`) with `outcome: \"complete\"` requires a committed SHA; `reopen`, `blocked`, or `partial` bypasses full verification without burning an attempt (no commit SHA required for `reopen` or `blocked`).",
+  scout: `Disposition guidance (scout): establish repository facts read-only (${READ_ONLY_DISPOSITION_FENCE}) — edit no files, make no commits, no commit sha; return ${READ_ONLY_DISPOSITION_EVIDENCE.scout}.`,
+  architect: `Disposition guidance (architect): read-only boundary design (${READ_ONLY_DISPOSITION_FENCE}) — edit no files, make no commits, no commit sha; return ${READ_ONLY_DISPOSITION_EVIDENCE.architect}.`,
+  reviewer: `Disposition guidance (reviewer): read-only independent audit (${READ_ONLY_DISPOSITION_FENCE}) — edit no files, make no commits, no commit sha; evaluate strictly against the Outcome, Spec/Invariants, and Diff/Commit, and ${READ_ONLY_DISPOSITION_EVIDENCE.reviewer}.`,
+};
+function renderPeerDispositionGuidance(disposition) {
+  const effective = typeof disposition === "string" && disposition !== "" ? disposition : "engineer";
+  return PEER_DISPOSITION_GUIDANCE[effective] ?? PEER_DISPOSITION_GUIDANCE.engineer;
+}
 const PEER_PREMISE_CHECK_REMINDER =
   "Before writing code, verify the brief's premises and verification command against the actual repository; if reality conflicts with the brief, a prerequisite is missing, or an ambiguity changes behavior, call `agent_ask` immediately rather than guessing.";
 function formatReopenIfBlock(reopenConditions) {
@@ -2849,8 +2881,9 @@ function formatReopenIfBlock(reopenConditions) {
   return `Reopen if:\n${clean.map((c) => `- ${c}`).join("\n")}`;
 }
 const LEGACY_ROLE_TOOL_ALIASES = {
+  supervisor: ["lead_close_task", "lead_retire_task"],
+  lead: ["lead_repoke_agent", "lead_retire_task", "lead_create_worktree", "lead_remove_worktree"],
   agent: ["agent_escalate_blocker"],
-  lead: ["lead_repoke_agent"],
 };
 const VALID_KINDS = ["reopen_premise", "gate_mismatch", "dependency", "clarify", "blocked"];
 const VALID_LAYERS = ["foundation", "dependency", "lifecycle", "API", "ownership", "verification"];
@@ -3253,6 +3286,13 @@ async function handleToolCall(name, rawArgs) {
     if (task === "" || !Number.isInteger(attempt) || attempt < 1) {
       return toolResult("supervisor_accept_task requires `task` (string) and `attempt` (positive integer).", true);
     }
+    if (args.acknowledgeWatch !== undefined && typeof args.acknowledgeWatch !== "string") {
+      return toolResult("supervisor_accept_task `acknowledgeWatch` must be a string with at least 10 non-whitespace characters.", true);
+    }
+    const acknowledgeWatch =
+      typeof args.acknowledgeWatch === "string" && args.acknowledgeWatch.trim() !== ""
+        ? args.acknowledgeWatch
+        : undefined;
     const reply = await roundTripSpool(ctx, {
       id: randomId(),
       kind: "accept",
@@ -3260,6 +3300,7 @@ async function handleToolCall(name, rawArgs) {
       attempt,
       by: "supervisor",
       seat: "supervisor",
+      ...(acknowledgeWatch === undefined ? {} : { acknowledgeWatch }),
     });
     if (!reply.ok) return toolResult(`${reply.code}: ${reply.message}`, true);
     return toolResult(reply.summary);
@@ -3701,6 +3742,7 @@ async function handleToolCall(name, rawArgs) {
           ? `Execute task ${task}: ${artifactClause}run fast slice checks during TDD (never pre-run the full cumulative Gate), commit on branch factory/${task}, call agent_claim (automated verification runs asynchronously), and end your turn immediately once \`queued\`.`
           : `Execute task ${task}: this session is Read-Only (disposition ${contract.disposition}) — the read-only-disposition-fence forbids file edits and \`git commit\`; never commit, never edit files. Call agent_claim with no commit and no sha, supplying \`outcome\`, \`scope\`, \`verification\`, and \`unknowns\` carrying your ${contract.disposition} evidence: ${readOnlyEvidence}.`,
       );
+      promptParts.push(renderPeerDispositionGuidance(contract?.disposition));
       const reopenIfBlock = formatReopenIfBlock(contract?.reopenConditions);
       if (reopenIfBlock !== "") {
         promptParts.push(reopenIfBlock);
@@ -3744,6 +3786,13 @@ async function handleToolCall(name, rawArgs) {
     if (task === "" || !Number.isInteger(attempt) || attempt < 1) {
       return toolResult("lead_accept_task requires `task` (string) and `attempt` (positive integer).", true);
     }
+    if (args.acknowledgeWatch !== undefined && typeof args.acknowledgeWatch !== "string") {
+      return toolResult("lead_accept_task `acknowledgeWatch` must be a string with at least 10 non-whitespace characters.", true);
+    }
+    const acknowledgeWatch =
+      typeof args.acknowledgeWatch === "string" && args.acknowledgeWatch.trim() !== ""
+        ? args.acknowledgeWatch
+        : undefined;
     const reply = await roundTripSpool(ctx, {
       id: randomId(),
       kind: "accept",
@@ -3751,6 +3800,7 @@ async function handleToolCall(name, rawArgs) {
       attempt,
       by: "lead",
       seat: "lead",
+      ...(acknowledgeWatch === undefined ? {} : { acknowledgeWatch }),
     });
     if (!reply.ok) return toolResult(`${reply.code}: ${reply.message}`, true);
     return toolResult(reply.summary);

@@ -1431,14 +1431,24 @@ test("Seam 1 (ADR 0053): a re-contract preserves the live bound Peer by default,
   assert.equal(contractLines().at(-1)?.disposition, "scout", "the contract_set line carries disposition: scout");
   assert.equal(contractLines().at(-1)?.description, undefined);
 
-  // 2. Re-contract with resetPeer omitted: the Brief/Gate update in place and
-  //    the live bound Peer survives — no stop, no archive.
-  dropRequest(spoolRootFor(stateDir), { id: "c-2", kind: "contract", task: "T-01", workspace: resolved.root, gate: "true", artifact: "README.md", description: "Reconciled brief after the Peer's challenge", submitter: "owner" });
+  // 2. Re-contract with resetPeer omitted (same disposition): the Brief/Gate update in place and
+  //    the live bound Peer survives — no stop, no archive. Changing disposition without resetPeer
+  //    trips the Disposition Transition Fence (`invalid-contract`).
+  dropRequest(spoolRootFor(stateDir), { id: "c-2-fence", kind: "contract", task: "T-01", workspace: resolved.root, gate: "true", artifact: "README.md", description: "Attempted disposition flip without resetPeer", submitter: "owner" });
+  await until(() => {
+    const fenced = readReply(spoolRootFor(stateDir), "c-2-fence");
+    assert.equal(fenced.ok, false);
+    assert.equal(fenced.code, "invalid-contract");
+    assert.match(String(fenced.message), /resetPeer: true/);
+  });
+  assert.ok((await listedPeerIds()).includes("peer-1"), "fenced disposition change preserves live Peer");
+
+  dropRequest(spoolRootFor(stateDir), { id: "c-2", kind: "contract", task: "T-01", workspace: resolved.root, gate: "true", disposition: "scout", description: "Reconciled brief after the Peer's challenge", submitter: "owner" });
   await until(() => assert.equal(readReply(spoolRootFor(stateDir), "c-2").ok, true, "the default re-contract replies ok"));
   const epochTwo = contractLines();
   assert.equal(epochTwo.length, 2, "a fresh contract_set epoch landed");
   assert.equal(epochTwo.at(-1)?.description, "Reconciled brief after the Peer's challenge", "the new epoch carries the reconciled Brief");
-  assert.equal(epochTwo.at(-1)?.disposition, undefined, "an omitted disposition is recorded omitted — it reads as engineer");
+  assert.equal(epochTwo.at(-1)?.disposition, "scout", "the reconciled epoch preserves disposition: scout");
   assert.ok((await listedPeerIds()).includes("peer-1"), "the bound Peer is still listed (non-archived) after the in-place re-contract");
   assert.deepEqual(stopped, [], "no stop was attempted on the preserved Peer");
 
@@ -3148,4 +3158,80 @@ test("spawn Execute task enrichment places Reopen if and PEER_PREMISE_CHECK_REMI
   assert.equal(r3.ok, true, JSON.stringify(r3));
   const prompt3 = fake.created[2]?.prompt ?? "";
   assert.equal(prompt3.match(/Reopen if:/g)?.length ?? 0, 1, "does not duplicate Reopen if: when already present in prompt");
+});
+
+test("R5 executeAcceptance & spool: validateAccept blocks before commitSeatMemoryOnRoot on watch-soft-blocked, and spool forwards acknowledgeWatch", async (t) => {
+  const dir = makeTempDir("spool-watch-soft-block-");
+  disposeDir(t, dir);
+  const stateDir = join(dir, "state");
+  const repo = join(dir, "repo");
+  mkdirSync(repo, { recursive: true });
+  writeFileSync(join(repo, "README.md"), "base\n");
+  writeFileSync(join(repo, "AGENTS.md"), "# initial memory\n");
+  gitCommitAll(repo, "init");
+
+  const resolved = resolveProject(repo);
+  assert.ok(resolved.ok);
+  writeProjectRegistration(stateDir, resolved.slug, { root: resolved.root });
+
+  const factory = createFactory({
+    stateDir,
+    projectSlug: resolved.slug,
+    fetchTimeline: async () => ({ ok: true, entries: [{ seq: 1, item: { type: "assistant_message", text: "ok" } }] }),
+    watchCopilotProbe: () => true,
+    watchCopilotRunner: async () => ({
+      code: 0,
+      stdout: "destructive-writes: 0\ntest-weakened: 0.9\nstuck-loop: 0\nscope-creep: 0\nsecret-leak: 0",
+      stderr: "",
+      timedOut: false,
+    }),
+  });
+  factory.setContract({ task: "WSB-SP-1", workspace: resolved.root, gate: "true", artifact: "README.md", watch: true });
+  writeFileSync(join(repo, "README.md"), "updated\n");
+  const sha = gitCommitAll(repo, "task change");
+  const claimed = await factory.claim({
+    task: "WSB-SP-1",
+    sha,
+    agent: "peer-1",
+    handoff: { outcome: "complete", scope: "README.md", verification: "true", unknowns: "none" },
+  });
+  assert.equal(claimed.verdict, "green");
+
+  // Dirty root seat memory file — must NOT be committed when Watch soft-blocks accept!
+  writeFileSync(join(repo, "AGENTS.md"), "# dirty seat memory\n");
+  const headBefore = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim();
+
+  assert.equal(
+    parseSpoolRequest({ id: "bad-ack", kind: "accept", task: "WSB-SP-1", attempt: 1, submitter: "owner", acknowledgeWatch: 123 }),
+    undefined,
+    "non-string acknowledgeWatch fails parseSpoolRequest",
+  );
+  const blocked = await handleSpoolRequest(factory, {
+    id: "acc-block",
+    kind: "accept",
+    task: "WSB-SP-1",
+    attempt: 1,
+    submitter: "owner",
+  });
+  assert.equal(blocked.ok, false);
+  if (!blocked.ok) assert.equal(blocked.code, "watch-soft-blocked");
+  const headAfterBlock = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim();
+  assert.equal(headAfterBlock, headBefore, "commitSeatMemoryOnRoot must NOT run when accept is watch-soft-blocked");
+  const statusAfterBlock = execFileSync("git", ["status", "--porcelain"], { cwd: repo, encoding: "utf8" });
+  assert.match(statusAfterBlock, /AGENTS\.md/, "dirty seat memory file stays uncommitted on soft-block");
+
+  // Passing valid acknowledgeWatch commits seat memory and persists watchAck.
+  const unblocked = await handleSpoolRequest(factory, {
+    id: "acc-ok",
+    kind: "accept",
+    task: "WSB-SP-1",
+    attempt: 1,
+    submitter: "owner",
+    acknowledgeWatch: "reviewed test diff manually",
+  });
+  assert.equal(unblocked.ok, true, unblocked.ok ? "" : unblocked.message);
+  const headAfterOk = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim();
+  assert.notEqual(headAfterOk, headBefore, "commitSeatMemoryOnRoot commits once validateAccept succeeds");
+  const acceptedEvt = factory.ledger.eventsFor("WSB-SP-1").findLast((e) => e.event === "attempt_accepted");
+  assert.equal(acceptedEvt?.watchAck, "reviewed test diff manually");
 });

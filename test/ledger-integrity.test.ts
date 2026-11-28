@@ -229,7 +229,7 @@ test("identified readers enforce each event's typed payload while legacy records
     { row: { event: "fresh_eyes_written", attempt: 1, model: "eye", outcome: "clear", finding: "clear", durationMs: 1 }, required: ["model", "outcome", "finding", "durationMs"], invalid: [{ outcome: "green" }, { outcome: ["clear"] }, { durationMs: -1 }] },
     { row: { event: "watch_written", attempt: 1, model: "watch", outcome: "written", durationMs: 1, answers: { safe: 0.5 }, usage: { input_tokens: 1, cost: 0 } }, required: ["model", "outcome", "durationMs"], invalid: [{ answers: [] }, { answers: { safe: 2 } }, { usage: { input_tokens: "1", cost: 0 } }, { error: 5 }, { outcome: "clear" }] },
     { row: { event: "report_written", attempt: 1, path: "report.md" }, required: ["path"] },
-    { row: { event: "attempt_accepted", attempt: 1, accepted_by: "owner", landing: "landed" }, required: [], invalid: [{ accepted_by: 5 }, { landing: "maybe" }, { landingNote: 1 }] },
+    { row: { event: "attempt_accepted", attempt: 1, accepted_by: "owner", landing: "landed", watchAck: "verified test diff manually" }, required: [], invalid: [{ accepted_by: 5 }, { landing: "maybe" }, { landingNote: 1 }, { watchAck: "" }, { watchAck: "short" }, { watchAck: "   123456789   " }, { watchAck: 123 }] },
     { row: { event: "permit_allowed", agent: "peer", name: "Write", kind: "tool" }, required: ["name", "kind"], invalid: [{ command: 2 }] },
     { row: { event: "permit_denied", agent: "peer", name: "Write", kind: "tool", rule: "scope", reason: "outside scope" }, required: ["name", "kind", "reason"] },
     { row: { event: "git_blocked", agent: "peer", command: "git push", rule: "push", reason: "forbidden", cwd: dir, blockId: "block" }, required: ["reason"] },

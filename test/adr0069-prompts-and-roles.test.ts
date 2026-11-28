@@ -70,16 +70,16 @@ function makeContract(overrides: Partial<ContractSet & { reopenConditions?: stri
   };
 }
 
-test("renderRoleContract('agent') and derived Peer surfaces are topology-blind and teach agent_ask + agent_claim + anonymized Devil's Advocate reviewer (ADR 0069)", () => {
-  const surfaces = [
+test("renderRoleContract('agent') neutral core is topology-blind and disposition-neutral, while disposition-scoped surfaces teach active disposition clauses (ADR 0069, ADR 0074)", () => {
+  const neutralSurfaces = [
     renderRoleContract("agent", { task: "T-69", project: { root: "/tmp/repo", slug: "repo-123" } }),
     renderRoleAppendSystem("agent", { task: "T-69" }),
     buildRoleKickoffPrompt("agent", { task: "T-69", project: { root: "/tmp/repo", slug: "repo-123" } }),
   ];
 
-  for (const surface of surfaces) {
-    assertTopologyBlind(surface, "Peer role surface");
-    assert.match(surface, /^#?.*You are an independent engineer/m);
+  for (const surface of neutralSurfaces) {
+    assertTopologyBlind(surface, "Neutral Peer role surface");
+    assert.match(surface, /^#?.*You are an independent Peer/m);
     assert.match(surface, /provisional brief/i);
     assert.match(surface, /isolated Task worktree/i);
     assert.match(surface, /Contract Before Test/);
@@ -88,25 +88,52 @@ test("renderRoleContract('agent') and derived Peer surfaces are topology-blind a
     assert.match(surface, /`reopen_premise` \| `gate_mismatch` \| `dependency` \| `clarify` \| `blocked`/);
     assert.match(surface, /`foundation` \| `dependency` \| `lifecycle` \| `API` \| `ownership` \| `verification`/);
     assert.match(surface, /agent_claim/);
-    assert.match(surface, /automated verification runs.*asynchronously/i);
-    assert.match(surface, /never weaken or skip tests/i);
-    assert.match(surface, /strongest evidence-backed weakness.*file:line.*before agreeing/i);
-    assert.match(surface, /never manufacturing objections when evidence holds/i);
+    for (const leaked of ["read-only-disposition-fence", "--runInBand", "strongest evidence-backed weakness", "alternatives considered"]) {
+      assert.ok(!surface.includes(leaked), `neutral Peer surface must omit disposition-specific term \`${leaked}\``);
+    }
+  }
+
+  for (const disposition of ["engineer", "scout", "architect", "reviewer"] as const) {
+    const scoped = renderRoleContract("agent", {
+      task: "T-69",
+      project: { root: "/tmp/repo", slug: "repo-123" },
+      disposition,
+    });
+    const kickoff = buildRoleKickoffPrompt("agent", {
+      task: "T-69",
+      project: { root: "/tmp/repo", slug: "repo-123" },
+      disposition,
+    });
+    for (const surface of [scoped, kickoff]) {
+      assertTopologyBlind(surface, `Peer role surface (${disposition})`);
+      assert.match(surface, new RegExp(`You are an independent ${disposition}`));
+      if (disposition === "engineer") {
+        assert.match(surface, /automated verification runs.*asynchronously/i);
+        assert.match(surface, /never weaken or skip tests/i);
+      } else {
+        assert.match(surface, /read-only-disposition-fence/);
+        assert.ok(!surface.includes("--sha") && !surface.includes("for the committed HEAD"), `${disposition} omits --sha`);
+      }
+      if (disposition === "reviewer") {
+        assert.match(surface, /Outcome, Spec\/Invariants, and Diff\/Commit/i);
+      }
+    }
   }
 });
 
 test("LEAD_WAVE_LAWS, Lead contract, and Lead bootstrap feature lead_reply_peer, reopenConditions, and anonymized Devil's Advocate reviewer (ADR 0069)", () => {
+  const leadBootstrap = renderSeatBootstrapPrompt({
+    seat: "lead",
+    home: "/tmp/home",
+    stateDir: "/tmp/state",
+    nodePath: process.execPath,
+    path: "/usr/bin",
+    lane: "codex",
+    project: { root: "/tmp/repo", slug: "repo-123" },
+  });
   const leadSurfaces = [
     renderRoleContract("lead", { project: { root: "/tmp/repo", slug: "repo-123" } }),
-    renderSeatBootstrapPrompt({
-      seat: "lead",
-      home: "/tmp/home",
-      stateDir: "/tmp/state",
-      nodePath: process.execPath,
-      path: "/usr/bin",
-      lane: "codex",
-      project: { root: "/tmp/repo", slug: "repo-123" },
-    }),
+    leadBootstrap,
     LEAD_WAVE_LAWS.join("\n"),
   ];
 
@@ -114,15 +141,14 @@ test("LEAD_WAVE_LAWS, Lead contract, and Lead bootstrap feature lead_reply_peer,
     assert.match(surface, /lead_reply_peer/);
     assert.match(surface, /lead_repoke_agent/);
     assert.match(surface, /reopenConditions/);
-    assert.match(surface, /pass strictly Outcome \+ Spec\/Invariants \+ Diff\/Commit/i);
-    assert.match(surface, /never Lead(?: or |\/)Peer rationalizations or pre-baked conclusions/i);
-    assert.match(surface, /strongest evidence-backed weakness.*file:line.*before agreeing/i);
-    assert.match(surface, /never manufacturing objections when evidence holds/i);
+    assert.match(surface, /Outcome \+ Spec\/Invariants \+ Diff\/Commit/i);
+    assert.match(surface, /strongest.*file:line.*weakness without manufacturing objections/i);
   }
 
   const leadContract = renderRoleContract("lead");
   assert.match(leadContract, /paseo-factory_lead_reply_peer/);
-  assert.match(leadContract, /\[--reopen-if <text>\]/);
+  assert.match(leadContract, /If paseo_factory MCP is absent, use the factory CLI fallback via factory --help\./);
+  assert.match(leadBootstrap, /\[--reopen-if <text>\]/);
   for (const surface of leadSurfaces) {
     assert.match(surface, /strictly project-owned verification\/run facts/);
     assert.match(surface, /never record Factory MCP tool names, CLI commands\/flags, or SLP workflow laws/);
@@ -191,9 +217,23 @@ test("driver renderBrief is topology-blind, renders Reopen if:, mirrors Devil's 
 
   const rev = renderBrief("T-69", "/custom/bin", "Audit slice", undefined, "factory/T-69", "reviewer", ["Diff missing tests"]);
   assertTopologyBlind(rev, "driver reviewer brief");
+  assert.ok(rev.includes("Disposition guidance (reviewer):"));
   assert.ok(rev.includes(READ_ONLY_DISPOSITION_EVIDENCE.reviewer));
+  assert.ok(!rev.includes("--sha"));
   assert.ok(rev.includes("Reopen if: Diff missing tests"));
   assert.ok(rev.endsWith(PEER_PREMISE_CHECK_REMINDER));
+
+  const scout = renderBrief("T-69", "/custom/bin", "Map codebase", undefined, "factory/T-69", "scout");
+  assertTopologyBlind(scout, "driver scout brief");
+  assert.ok(scout.includes("Disposition guidance (scout):"));
+  assert.ok(scout.includes(READ_ONLY_DISPOSITION_EVIDENCE.scout));
+  assert.ok(!scout.includes("--sha"));
+
+  const arch = renderBrief("T-69", "/custom/bin", "Design seam", undefined, "factory/T-69", "architect");
+  assertTopologyBlind(arch, "driver architect brief");
+  assert.ok(arch.includes("Disposition guidance (architect):"));
+  assert.ok(arch.includes(READ_ONLY_DISPOSITION_EVIDENCE.architect));
+  assert.ok(!arch.includes("--sha"));
 });
 
 test("plugin/server/roles.ts preserves legacy Peer markers alongside the new independent-engineer marker to prevent duplicate contracts (ADR 0069)", (t) => {

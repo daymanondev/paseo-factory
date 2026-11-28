@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { projectTask } from "./task-state.ts";
 import type { AcceptanceRole } from "./task-state.ts";
 import { existsSync, readFileSync, renameSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { isAbsolute, join } from "node:path";
+import { basename, isAbsolute, join } from "node:path";
 import { Ledger, usageIsValid } from "./ledger.ts";
 import {
   MAX_ATTEMPTS,
@@ -26,8 +26,11 @@ import {
   DEFAULT_CONTRACT_TIMEOUT_SECONDS,
   MAX_CONTRACT_TIMEOUT_SECONDS,
   MIN_CONTRACT_TIMEOUT_SECONDS,
+  WATCH_CALLOUT_THRESHOLD,
+  WATCH_SOFT_BLOCK_QUESTIONS,
   contractTimeoutMs,
   isValidContractTimeoutSeconds,
+  isValidWatchAck,
 } from "./constants.ts";
 import { artifactPathProblem } from "./artifact.ts";
 import { renderHandbackReport, renderReport } from "./report.ts";
@@ -41,7 +44,7 @@ import { changedFiles, checkCleanAt, deleteTaskWorktreeBranch, headCommitSync, l
 import { MEMORY_FILES } from "./choke.ts";
 import { projectStateDir } from "./project.ts";
 import { FactoryError } from "./errors.ts";
-import type { AttemptAccepted, ClaimReported, ContractSet, GateFinished, GateQueued, GitBlocked, LedgerEvent, MeterWritten, MeterUsage, NeedsHuman, NeedsHumanEvidence, NeedsHumanReason, PeerAsked, PeerAskKind, PeerAskLayer, PeerAskSource, PeerDisposition, PeerHandoffFields, RepokeDispatched, RepokeRefused, RespawnDispatched, RespawnRefused, SpawnDispatched, SpawnRefused, TaskClosed, Verdict } from "./events.ts";
+import type { AttemptAccepted, ClaimReported, ContractSet, GateFinished, GateQueued, GitBlocked, LedgerEvent, MeterWritten, MeterUsage, NeedsHuman, NeedsHumanEvidence, NeedsHumanReason, PeerAsked, PeerAskKind, PeerAskLayer, PeerAskSource, PeerDisposition, PeerHandoffFields, RepokeDispatched, RepokeRefused, RespawnDispatched, RespawnRefused, SpawnDispatched, SpawnRefused, TaskClosed, Verdict, WatchWritten } from "./events.ts";
 import type { GateResult } from "./gate.ts";
 import { LedgerAdmission } from "./history-admission.ts";
 import { GATE_QUEUE_FILENAME, readPersistedGateQueue } from "./gate-queue-status.ts";
@@ -140,14 +143,340 @@ export function synthesizeBriefDescription(fields: StructuredBriefFields, dispos
   return sections.map(([heading, body]) => (body === undefined ? heading : `${heading}\n${body}`)).join("\n\n");
 }
 
+function parseBriefHeadingLine(line: string): { section: 0 | 1 | 2 | 3; inlineBody: string } | undefined {
+  let rest = line.trim();
+  if (rest === "") return undefined;
+  rest = rest.replace(/^(?:-|[*](?!\*))\s+/, "");
+  let hasStructuralMarker = false;
+  const hashMatch = /^#{1,6}\s+/.exec(rest);
+  if (hashMatch) {
+    hasStructuralMarker = true;
+    rest = rest.slice(hashMatch[0].length);
+  }
+  const leadWrapMatch = /^(?:\*\*|__|\*(?!\*)|_(?!_))/.exec(rest);
+  if (leadWrapMatch) {
+    hasStructuralMarker = true;
+    rest = rest.slice(leadWrapMatch[0].length);
+  }
+  const numMatch = /^\d+[.)]\s*/.exec(rest);
+  if (numMatch) {
+    hasStructuralMarker = true;
+    rest = rest.slice(numMatch[0].length);
+  }
+  const innerWrapMatch = /^(?:\*\*|__|\*(?!\*)|_(?!_))/.exec(rest);
+  if (innerWrapMatch) {
+    hasStructuralMarker = true;
+    rest = rest.slice(innerWrapMatch[0].length);
+  }
+  rest = rest.trimStart();
+
+  const sectionMatchers: Array<[0 | 1 | 2 | 3, RegExp]> = [
+    [0, /^Bounded Outcome\b/],
+    [1, /^(?:Contract Boundary(?:\s*(?:&|and)\s*Regression Invariants)?|Regression Invariants)\b/],
+    [2, /^(?:Excluded(?:\s*\/\s*Deferred(?:\s+to\s+Later\s+Waves)?)?|Deferred(?:\s+to\s+Later\s+Waves)?)\b/],
+    [3, /^Verification\b/],
+  ];
+  for (const [section, re] of sectionMatchers) {
+    const match = re.exec(rest);
+    if (!match) continue;
+    let tail = rest.slice(match[0].length);
+    tail = tail.replace(/^(?:\*\*|__|[*_])/, "");
+    const trimmedTail = tail.trim();
+    if (trimmedTail === "") {
+      return { section, inlineBody: "" };
+    }
+    const sepMatch = /^[:\u2014\u2013-]\s*(.*)$/.exec(tail.trimStart());
+    if (sepMatch) {
+      const body = sepMatch[1]!.replace(/^(?:\*\*|__|[*_])\s*/, "").trim();
+      return { section, inlineBody: body };
+    }
+    if (hasStructuralMarker) {
+      return { section, inlineBody: trimmedTail };
+    }
+    return undefined;
+  }
+  return undefined;
+}
+
+function analyzeBriefSections(description: string): Array<{ seen: boolean; body: string }> {
+  const sections: Array<{ seen: boolean; bodyParts: string[] }> = [
+    { seen: false, bodyParts: [] },
+    { seen: false, bodyParts: [] },
+    { seen: false, bodyParts: [] },
+    { seen: false, bodyParts: [] },
+  ];
+  let current: 0 | 1 | 2 | 3 | undefined;
+  for (const line of description.split(/\r?\n/)) {
+    const parsed = parseBriefHeadingLine(line);
+    if (parsed !== undefined) {
+      current = parsed.section;
+      sections[current]!.seen = true;
+      if (parsed.inlineBody !== "") {
+        sections[current]!.bodyParts.push(parsed.inlineBody);
+      }
+      continue;
+    }
+    if (current !== undefined && line.trim() !== "") {
+      sections[current]!.bodyParts.push(line.trim());
+    }
+  }
+  return sections.map((entry) => ({
+    seen: entry.seen,
+    body: entry.bodyParts.join("\n"),
+  }));
+}
+
 /** The section headings a description is missing — section 2/3 accept either of their marker aliases. */
 export function missingBriefSections(description: string): string[] {
+  const parsed = analyzeBriefSections(description);
   const missing: string[] = [];
-  if (!description.includes("Bounded Outcome")) missing.push(BRIEF_SECTION_HEADINGS[0]);
-  if (!description.includes("Contract Boundary") && !description.includes("Regression Invariants")) missing.push(BRIEF_SECTION_HEADINGS[1]);
-  if (!description.includes("Excluded") && !description.includes("Deferred")) missing.push(BRIEF_SECTION_HEADINGS[2]);
-  if (!description.includes("Verification")) missing.push(BRIEF_SECTION_HEADINGS[3]);
+  for (let i = 0; i < BRIEF_SECTION_HEADINGS.length; i += 1) {
+    if (!parsed[i]!.seen) missing.push(BRIEF_SECTION_HEADINGS[i]!);
+  }
   return missing;
+}
+
+/** The present 4-Part Brief section headings whose body is empty or whitespace-only (ADR 0074). */
+export function emptyBriefSections(description: string): string[] {
+  const parsed = analyzeBriefSections(description);
+  const empty: string[] = [];
+  for (let i = 0; i < BRIEF_SECTION_HEADINGS.length; i += 1) {
+    if (parsed[i]!.seen && parsed[i]!.body.trim() === "") empty.push(BRIEF_SECTION_HEADINGS[i]!);
+  }
+  return empty;
+}
+
+function splitShellSegments(command: string): string[][] {
+  const segments: string[][] = [];
+  let tokens: string[] = [];
+  let current = "";
+  let tokenStarted = false;
+  let tokenQuoted = false;
+  let skipNextWord = false;
+  let inSingle = false;
+  let inDouble = false;
+  let escaped = false;
+
+  const flushToken = () => {
+    if (!tokenStarted) return;
+    if (skipNextWord) {
+      skipNextWord = false;
+    } else {
+      tokens.push(current);
+    }
+    current = "";
+    tokenStarted = false;
+    tokenQuoted = false;
+  };
+  const flushSegment = () => {
+    flushToken();
+    skipNextWord = false;
+    if (tokens.length > 0) {
+      segments.push(tokens);
+      tokens = [];
+    }
+  };
+
+  for (let i = 0; i < command.length; i += 1) {
+    const ch = command[i]!;
+    const next = command[i + 1];
+    if (inSingle) {
+      if (ch === "'") inSingle = false;
+      else current += ch;
+      continue;
+    }
+    if (inDouble) {
+      if (escaped) {
+        current += ch;
+        escaped = false;
+      } else if (ch === "\\") {
+        escaped = true;
+      } else if (ch === '"') {
+        inDouble = false;
+      } else {
+        current += ch;
+      }
+      continue;
+    }
+    if (escaped) {
+      current += ch;
+      tokenStarted = true;
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\") {
+      escaped = true;
+      tokenStarted = true;
+      continue;
+    }
+    if (ch === "'") {
+      inSingle = true;
+      tokenStarted = true;
+      tokenQuoted = true;
+      continue;
+    }
+    if (ch === '"') {
+      inDouble = true;
+      tokenStarted = true;
+      tokenQuoted = true;
+      continue;
+    }
+    if (ch === " " || ch === "\t" || ch === "\r") {
+      flushToken();
+      continue;
+    }
+    if (ch === "\n" || ch === ";" || ch === "(" || ch === ")") {
+      flushSegment();
+      continue;
+    }
+    if ((ch === "&" && next === "&") || (ch === "|" && (next === "|" || next === "&"))) {
+      flushSegment();
+      i += 1;
+      continue;
+    }
+    if (ch === "|") {
+      flushSegment();
+      continue;
+    }
+    if (ch === "&" && next === ">") {
+      flushToken();
+      i += 1;
+      if (command[i + 1] === ">") i += 1;
+      skipNextWord = true;
+      continue;
+    }
+    if (ch === "&") {
+      flushSegment();
+      continue;
+    }
+    if (ch === ">" || ch === "<") {
+      // Handle fd-prefixed redirections such as `2>&1` or `2>/dev/null`
+      if (tokenStarted && !tokenQuoted && /^\d+$/.test(current)) {
+        current = "";
+        tokenStarted = false;
+      } else {
+        flushToken();
+      }
+      if (next === ch) i += 1;
+      const after = command[i + 1];
+      if (after === "&") {
+        i += 1;
+        if (/^\d$/.test(command[i + 1] ?? "")) {
+          while (i + 1 < command.length && /^\d$/.test(command[i + 1]!)) i += 1;
+        } else {
+          skipNextWord = true;
+        }
+      } else {
+        skipNextWord = true;
+      }
+      continue;
+    }
+    current += ch;
+    tokenStarted = true;
+  }
+  flushSegment();
+  return segments;
+}
+
+function inspectSegmentForForbiddenGitDiff(rawTokens: readonly string[]): "--exit-code" | "--name-only" | undefined {
+  let idx = 0;
+  while (idx < rawTokens.length) {
+    while (idx < rawTokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(rawTokens[idx]!)) {
+      idx += 1;
+    }
+    if (idx >= rawTokens.length) return undefined;
+    const head = rawTokens[idx]!;
+    if (head === "env") {
+      idx += 1;
+      while (idx < rawTokens.length) {
+        const tok = rawTokens[idx]!;
+        if (tok === "--") {
+          idx += 1;
+          break;
+        }
+        if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(tok)) {
+          idx += 1;
+          continue;
+        }
+        if (tok === "-u" || tok === "--unset" || tok === "-C" || tok === "--chdir" || tok === "-S" || tok === "--split-string") {
+          idx += 2;
+          continue;
+        }
+        if (tok.startsWith("-")) {
+          idx += 1;
+          continue;
+        }
+        break;
+      }
+      continue;
+    }
+    if (head === "command") {
+      idx += 1;
+      while (idx < rawTokens.length && (rawTokens[idx] === "-p" || rawTokens[idx] === "-v" || rawTokens[idx] === "-V")) {
+        idx += 1;
+      }
+      continue;
+    }
+    if (head === "exec") {
+      idx += 1;
+      while (idx < rawTokens.length) {
+        const tok = rawTokens[idx]!;
+        if (tok === "-a") {
+          idx += 2;
+          continue;
+        }
+        if (tok === "-c" || tok === "-l") {
+          idx += 1;
+          continue;
+        }
+        break;
+      }
+      continue;
+    }
+    if (head === "time") {
+      idx += 1;
+      if (rawTokens[idx] === "-p") idx += 1;
+      continue;
+    }
+    if (head === "nohup") {
+      idx += 1;
+      continue;
+    }
+    if (head !== "git" && basename(head) !== "git") return undefined;
+    idx += 1;
+    const gitValueOpts = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix", "--config-env"]);
+    while (idx < rawTokens.length) {
+      const tok = rawTokens[idx]!;
+      if (tok === "--") {
+        idx += 1;
+        break;
+      }
+      if (!tok.startsWith("-") || tok === "-") break;
+      if (gitValueOpts.has(tok)) {
+        idx += 2;
+        continue;
+      }
+      idx += 1;
+    }
+    if (idx >= rawTokens.length) return undefined;
+    if (rawTokens[idx] !== "diff") return undefined;
+    for (let j = idx + 1; j < rawTokens.length; j += 1) {
+      const arg = rawTokens[j]!;
+      if (arg === "--") break;
+      if (arg === "--exit-code" || arg === "--name-only") return arg;
+    }
+    return undefined;
+  }
+  return undefined;
+}
+
+/** Rejects raw `git diff --exit-code` / `git diff --name-only` path-locking shell segments in Contract gates (ADR 0074). */
+export function findForbiddenGitDiffGateSegment(gateCommand: string): "--exit-code" | "--name-only" | undefined {
+  for (const segment of splitShellSegments(gateCommand)) {
+    const hit = inspectSegmentForForbiddenGitDiff(segment);
+    if (hit !== undefined) return hit;
+  }
+  return undefined;
 }
 
 /** The LEAD_WAVE_LAWS Brief cap, mechanical since v0.5.0 (ADR 0054 §1). */
@@ -286,6 +615,18 @@ export interface ContractInput {
    * Optional caller seat for attribution; never enables Fresh-eyes (ADR 0030).
    */
   seat?: "supervisor" | "lead" | "agent";
+  /**
+   * Input-only spool signal (never persisted on `contract_set`): true when the
+   * Task currently has a non-error live bound Peer, used by the Disposition
+   * Transition Fence (ADR 0074).
+   */
+  hasLivePeer?: boolean;
+  /**
+   * Input-only explicit Peer reset signal (never persisted on `contract_set`):
+   * when true, the Lead explicitly requested retiring the live bound Peer,
+   * allowing a disposition change across epochs (ADR 0074).
+   */
+  resetPeer?: boolean;
 }
 
 export interface PeerAskInput {
@@ -394,6 +735,12 @@ export interface AcceptInput {
   accepted_by?: string;
   /** Trusted execution authority, separate from readable attribution. */
   authority?: AcceptanceRole;
+  /**
+   * Optional Watch soft-block acknowledgement reason (>= 10 non-whitespace chars)
+   * required when Watch reported `test-weakened >= 0.5` or `secret-leak >= 0.5`
+   * on a completed `watch_written` event (ADR 0074).
+   */
+  acknowledgeWatch?: string;
 }
 
 /**
@@ -567,6 +914,8 @@ export interface Factory {
    * terminals, and neither happens after the other (v0.5.0, ADR 0054 §5).
    */
   accept(input: AcceptInput): Promise<AttemptAccepted>;
+  /** Validates `accept` authority, preconditions, and Watch soft-block status without mutating state or committing root seat memory. */
+  validateAccept(input: AcceptInput): void;
   /**
    * Closes a Task cleanly (v0.5.0, ADR 0054 §5, ticket 05) — the terminal
    * retirement for work that will never be accepted (superseded, split after
@@ -1100,6 +1449,117 @@ export function createFactory(options: FactoryOptions): Factory {
     return finish(finishCtx, attempt, result, resolved.full, watchContext());
   };
 
+  const blockingWatchSignals = (watch: WatchWritten | undefined): string[] => {
+    if (watch?.outcome !== "written" || watch.answers === undefined) return [];
+    return WATCH_SOFT_BLOCK_QUESTIONS.filter((question) => {
+      const score = watch.answers?.[question];
+      return typeof score === "number" && Number.isFinite(score) && score >= WATCH_CALLOUT_THRESHOLD;
+    });
+  };
+
+  const resolveAcceptanceCheck = (
+    target: Factory,
+    { task, attempt, accepted_by, authority, acknowledgeWatch }: AcceptInput,
+  ): {
+    contract: ContractSet;
+    priorAccept: AttemptAccepted | undefined;
+    gate: GateFinished;
+    effectiveWatchAck: string | undefined;
+  } => {
+    assertTaskId(task);
+    if (!Number.isInteger(attempt) || attempt < 1) {
+      throw new FactoryError("invalid-attempt", `attempt must be a positive integer, got ${attempt}`);
+    }
+    if (acknowledgeWatch !== undefined && typeof acknowledgeWatch !== "string") {
+      throw new FactoryError(
+        "invalid-watch-ack",
+        "acknowledgeWatch must be a string with at least 10 non-whitespace characters",
+      );
+    }
+    const fullHistory = ledger.eventsFor(task);
+    const history = epochEventsFor(ledger, task);
+    const contract = target.contractFor(task);
+    if (contract === undefined) {
+      throw new FactoryError("unknown-task", `no contract set for task ${task} — register one first`);
+    }
+    if (inFlightAttempt(history) !== undefined) {
+      throw new FactoryError("gate-in-flight", `task ${task} has an in-flight Attempt — wait for its report before accepting`);
+    }
+    const events = attemptEvents(history, attempt);
+    if (events.length === 0) {
+      throw new FactoryError("unknown-attempt", `task ${task} has no attempt ${attempt}`);
+    }
+    const priorAccept = acceptedAttempt(fullHistory);
+    if (priorAccept !== undefined && priorAccept.landing !== "pending-conflict") {
+      throw new FactoryError(
+        "already-accepted",
+        `task ${task} was already accepted at attempt ${priorAccept.attempt}; the ledger is append-only`,
+      );
+    }
+    // Acceptance's closure gate (v0.5.0, ADR 0054 §5): retirement is the
+    // other terminal — green evidence a close already retired is never
+    // accept-worthy after the fact.
+    const closure = closureEvent(fullHistory);
+    if (closure !== undefined) {
+      throw new FactoryError(
+        "already-closed",
+        `task ${task} was closed (reason: ${closure.reason}) — the retirement is terminal; the ledger is append-only`,
+      );
+    }
+    const gate = events.findLast((e): e is GateFinished => e.event === "gate_finished");
+    if (!gate || gate.verdict !== "green") {
+      throw new FactoryError(
+        "not-green",
+        `attempt ${attempt} of task ${task} has no green verdict — the Owner accepts evidence, and there is none`,
+      );
+    }
+    const state = projectTask(fullHistory, task);
+    const attemptState = state.attempts.find((entry) => entry.attempt === attempt)!;
+    // Direct Owner callers retain compatibility. Transport callers always supply
+    // server-resolved authority, so attribution cannot select a weaker policy.
+    const role = authority ?? (accepted_by === "lead" ? "lead" : "owner");
+    if (role === "agent") throw new FactoryError("agent-cannot-orchestrate", "Working Agents cannot accept Tasks");
+    if (role === "lead" && !attemptState.leadEligible) {
+      throw new FactoryError("lead-accept-refused", `${attemptState.leadRefusal ?? "attempt is ineligible"} — the Owner or delegated Supervisor must override`);
+    }
+    // Watch soft-block (ADR 0074, reopening ADR 0005 / ADR 0006): block ONLY
+    // when a completed watch_written (outcome: "written") scored >= 0.5 on
+    // test-weakened or secret-leak, unless unblocked via valid acknowledgeWatch
+    // (or preserved from an earlier pending-conflict attempt_accepted).
+    const watch = events.findLast((e): e is WatchWritten => e.event === "watch_written" && e.attempt === attempt);
+    const flagged = blockingWatchSignals(watch);
+    const priorWatchAck =
+      priorAccept?.landing === "pending-conflict" &&
+      priorAccept.attempt === attempt &&
+      isValidWatchAck(priorAccept.watchAck)
+        ? priorAccept.watchAck.trim()
+        : undefined;
+    let effectiveWatchAck: string | undefined;
+    if (acknowledgeWatch !== undefined) {
+      if (!isValidWatchAck(acknowledgeWatch)) {
+        if (flagged.length > 0) {
+          throw new FactoryError(
+            "watch-soft-blocked",
+            `attempt ${attempt} of task ${task} is soft-blocked by Watch (${flagged.join(", ")} >= ${WATCH_CALLOUT_THRESHOLD}) — inspect the Watch callout and pass \`acknowledgeWatch\` (CLI \`--ack-watch "<reason>"\`) with at least 10 non-whitespace characters to proceed`,
+          );
+        }
+        throw new FactoryError(
+          "invalid-watch-ack",
+          "acknowledgeWatch must contain at least 10 non-whitespace characters",
+        );
+      }
+      effectiveWatchAck = acknowledgeWatch.trim();
+    } else {
+      effectiveWatchAck = priorWatchAck;
+      if (flagged.length > 0 && effectiveWatchAck === undefined) {
+        throw new FactoryError(
+          "watch-soft-blocked",
+          `attempt ${attempt} of task ${task} is soft-blocked by Watch (${flagged.join(", ")} >= ${WATCH_CALLOUT_THRESHOLD}) — inspect the Watch callout and pass \`acknowledgeWatch\` (CLI \`--ack-watch "<reason>"\`) with at least 10 non-whitespace characters to proceed`,
+        );
+      }
+    }
+    return { contract, priorAccept, gate, effectiveWatchAck };
+  };
 
   const factory: Factory = {
     history,
@@ -1107,7 +1567,7 @@ export function createFactory(options: FactoryOptions): Factory {
     stateDir,
     recoveredAttempts,
 
-    setContract({ task, workspace, gate, artifact, base: inputBase, scope, freshEyes, watch, description, skills, by, disposition, timeoutSeconds, reopenConditions, seat, outcome, invariants, exclusions, verification }) {
+    setContract({ task, workspace, gate, artifact, base: inputBase, scope, freshEyes, watch, description, skills, by, disposition, timeoutSeconds, reopenConditions, seat, outcome, invariants, exclusions, verification, hasLivePeer, resetPeer }) {
       assertTaskId(task);
       // ADR 0054 §2: the shell Gate is the engineer disposition's law; the
       // read-only three (scout|architect|reviewer) may omit it — an empty gate
@@ -1121,6 +1581,15 @@ export function createFactory(options: FactoryOptions): Factory {
           "invalid-contract",
           `gate command must be a non-empty string for the ${resolvedDisposition} disposition — the read-only three (scout|architect|reviewer) may omit it (ADR 0054 §2)`,
         );
+      }
+      if (gateCommand.trim() !== "") {
+        const forbiddenGateFlag = findForbiddenGitDiffGateSegment(gateCommand);
+        if (forbiddenGateFlag !== undefined) {
+          throw new FactoryError(
+            "invalid-contract",
+            `gate command cannot contain raw \`git diff ${forbiddenGateFlag}\` path-locking segment — use \`scope\` to restrict changed paths and behavioral verification (or repo check scripts like \`npm run check\`) in \`gate\``,
+          );
+        }
       }
       const resolvedArtifact = artifact === undefined ? "" : artifact;
       if (artifact !== undefined) {
@@ -1198,6 +1667,13 @@ export function createFactory(options: FactoryOptions): Factory {
           throw new FactoryError(
             "invalid-contract",
             `the 4-Part Brief is missing section(s): ${missing.join("; ")} — a Lead Contract's description must carry all four canonical sections (${BRIEF_SECTION_HEADINGS.join(", ")})`,
+          );
+        }
+        const empty = emptyBriefSections(resolvedDescription);
+        if (empty.length > 0) {
+          throw new FactoryError(
+            "invalid-contract",
+            `the 4-Part Brief has empty section(s): ${empty.join("; ")} — every section must have non-empty content ("None" is valid for 3. Excluded / Deferred)`,
           );
         }
       }
@@ -1332,6 +1808,21 @@ export function createFactory(options: FactoryOptions): Factory {
         throw new FactoryError(
           "gate-in-flight",
           `attempt ${inFlight} of task ${task} is still open — wait for its verdict before re-contracting`,
+        );
+      }
+      // Disposition Transition Fence (ADR 0074): changing an unaccepted Task's
+      // disposition while a live Peer is bound invalidates the Peer's active
+      // prompt/evidence contract unless `resetPeer: true` retires it first.
+      const priorDisposition = priorContract?.disposition ?? "engineer";
+      if (
+        priorContract !== undefined &&
+        hasLivePeer === true &&
+        resetPeer !== true &&
+        priorDisposition !== resolvedDisposition
+      ) {
+        throw new FactoryError(
+          "invalid-contract",
+          `cannot change task ${task} disposition from "${priorDisposition}" to "${resolvedDisposition}" while a live Peer is bound — pass \`resetPeer: true\` to cancel and archive the live Peer first`,
         );
       }
       // The one concurrency guard the audit demanded (H1/H2, v0.0.5 ticket 02):
@@ -1590,57 +2081,13 @@ export function createFactory(options: FactoryOptions): Factory {
       });
     },
 
-    async accept({ task, attempt, accepted_by, authority }) {
-      assertTaskId(task);
-      if (!Number.isInteger(attempt) || attempt < 1) {
-        throw new FactoryError("invalid-attempt", `attempt must be a positive integer, got ${attempt}`);
-      }
-      const fullHistory = ledger.eventsFor(task);
-      const history = epochEventsFor(ledger, task);
-      const contract = this.contractFor(task);
-      if (contract === undefined) {
-        throw new FactoryError("unknown-task", `no contract set for task ${task} — register one first`);
-      }
-      if (inFlightAttempt(history) !== undefined) {
-        throw new FactoryError("gate-in-flight", `task ${task} has an in-flight Attempt — wait for its report before accepting`);
-      }
-      const events = attemptEvents(history, attempt);
-      if (events.length === 0) {
-        throw new FactoryError("unknown-attempt", `task ${task} has no attempt ${attempt}`);
-      }
-      const priorAccept = acceptedAttempt(fullHistory);
-      if (priorAccept !== undefined && priorAccept.landing !== "pending-conflict") {
-        throw new FactoryError(
-          "already-accepted",
-          `task ${task} was already accepted at attempt ${priorAccept.attempt}; the ledger is append-only`,
-        );
-      }
-      // Acceptance's closure gate (v0.5.0, ADR 0054 §5): retirement is the
-      // other terminal — green evidence a close already retired is never
-      // accept-worthy after the fact.
-      const closure = closureEvent(fullHistory);
-      if (closure !== undefined) {
-        throw new FactoryError(
-          "already-closed",
-          `task ${task} was closed (reason: ${closure.reason}) — the retirement is terminal; the ledger is append-only`,
-        );
-      }
-      const gate = events.findLast((e): e is GateFinished => e.event === "gate_finished");
-      if (!gate || gate.verdict !== "green") {
-        throw new FactoryError(
-          "not-green",
-          `attempt ${attempt} of task ${task} has no green verdict — the Owner accepts evidence, and there is none`,
-        );
-      }
-      const state = projectTask(fullHistory, task);
-      const attemptState = state.attempts.find((entry) => entry.attempt === attempt)!;
-      // Direct Owner callers retain compatibility. Transport callers always supply
-      // server-resolved authority, so attribution cannot select a weaker policy.
-      const role = authority ?? (accepted_by === "lead" ? "lead" : "owner");
-      if (role === "agent") throw new FactoryError("agent-cannot-orchestrate", "Working Agents cannot accept Tasks");
-      if (role === "lead" && !attemptState.leadEligible) {
-        throw new FactoryError("lead-accept-refused", `${attemptState.leadRefusal ?? "attempt is ineligible"} — the Owner or delegated Supervisor must override`);
-      }
+    validateAccept(input) {
+      resolveAcceptanceCheck(this, input);
+    },
+
+    async accept(input) {
+      const { task, attempt, accepted_by } = input;
+      const { contract, priorAccept, gate, effectiveWatchAck } = resolveAcceptanceCheck(this, input);
       // Local landing (v0.0.14, ADR 0010 §4): a task that ran in a managed
       // Task worktree integrates its claimedCommit into <project-root>'s
       // local branch BEFORE the acceptance line records — the line carries
@@ -1654,6 +2101,7 @@ export function createFactory(options: FactoryOptions): Factory {
       // fields and still removes the Task worktree (the landing's cleanup
       // half alone). A pending-conflict retry keeps the ordinary landing
       // machinery: that conflict is repair work from an engineer-era accept.
+      const fullHistory = ledger.eventsFor(task);
       const historicalWorktree = priorAccept?.landing === "pending-conflict"
         ? fullHistory.findLast((event): event is SpawnDispatched => event.event === "spawn_dispatched" && typeof event.worktree === "string" && event.worktree !== "")?.worktree
         : undefined;
@@ -1690,6 +2138,7 @@ export function createFactory(options: FactoryOptions): Factory {
         ...(accepted_by === undefined ? {} : { accepted_by }),
         ...(landing === undefined ? {} : { landing }),
         ...(landingNote === undefined ? {} : { landingNote }),
+        ...(effectiveWatchAck === undefined ? {} : { watchAck: effectiveWatchAck }),
       });
     },
 

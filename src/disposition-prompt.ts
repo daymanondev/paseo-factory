@@ -41,6 +41,69 @@ export const PEER_PREMISE_CHECK_REMINDER =
   "Before writing code, verify the brief's premises and verification command against the actual repository; if reality conflicts with the brief, a prerequisite is missing, or an ambiguity changes behavior, call `agent_ask` immediately rather than guessing.";
 
 /**
+ * Disposition-specific contract clauses injected into `renderRoleContract("agent", { disposition })`
+ * so Pi's shared `APPEND_SYSTEM.md` stays compact and disposition-neutral while each Task turn
+ * receives only its active disposition rules (ADR 0074). Strictly topology-blind (ADR 0069).
+ */
+export interface PeerDispositionContractBlock {
+  roleTitle: string;
+  constraints: string;
+  workflow: string;
+  outputRule: string;
+}
+
+export const PEER_DISPOSITION_CONTRACTS: Readonly<Record<PeerDisposition, PeerDispositionContractBlock>> = {
+  engineer: {
+    roleTitle: "independent engineer",
+    constraints:
+      "Modular Tests & Serial Runners: Use modular per-slice test files with isolated fixtures (never bloat one monolithic test file); default runners to sequential single-worker execution (`--runInBand`, `--no-file-parallelism`, `--test-concurrency=1`). Never invoke multi-worker bundlers or native compilers (`expo export`, `next build`, `gradlew`, `xcodebuild`) inside unit tests. Never pre-run the full cumulative Gate before `agent_claim` / `factory-claim`, and never inflate watchdog timeouts to mask a hang.",
+    workflow:
+      "Iterate with fast targeted slice checks using explicit timeouts; catch any failed `git commit` by exit code (a SHA alone proves nothing). Commit completed work, call `paseo-factory_agent_claim` / `agent_claim`, and end your turn immediately when `queued` (automated verification runs asynchronously and sleeps your session at zero tokens). If the gate or brief is broken/stale, never weaken or skip tests — call `agent_ask` (`gate_mismatch` or `reopen_premise`).",
+    outputRule:
+      "`engineer` requires a committed `commit` SHA for `outcome: \"complete\"`; `reopen`, `blocked`, or `partial` hand back without running full verification (no commit SHA required for `reopen` / `blocked`).",
+  },
+  scout: {
+    roleTitle: "independent scout",
+    constraints: `Read-Only Fence: ${READ_ONLY_DISPOSITION_FENCE} — edit no files, make no commits, keep the worktree clean at HEAD, and omit \`commit\` and sha on \`agent_claim\`.`,
+    workflow:
+      "Trace real symbols, configs, call paths, and boundaries directly from files; call `agent_ask` immediately on blocking ambiguity or missing prerequisite.",
+    outputRule: `Omit commit and sha; \`verification\` and \`unknowns\` must carry \`scout\` evidence: ${READ_ONLY_DISPOSITION_EVIDENCE.scout}.`,
+  },
+  architect: {
+    roleTitle: "independent architect",
+    constraints: `Read-Only Fence: ${READ_ONLY_DISPOSITION_FENCE} — edit no files, make no commits, keep the worktree clean at HEAD, and omit \`commit\` and sha on \`agent_claim\`.`,
+    workflow:
+      "Evaluate boundary, lifecycle, and migration options against existing code and invariants; expose unresolved spec-vs-code contradictions via `agent_ask` rather than guessing.",
+    outputRule: `Omit commit and sha; \`verification\` and \`unknowns\` must carry \`architect\` evidence: ${READ_ONLY_DISPOSITION_EVIDENCE.architect}.`,
+  },
+  reviewer: {
+    roleTitle: "independent reviewer",
+    constraints: `Read-Only Fence: ${READ_ONLY_DISPOSITION_FENCE} — edit no files, make no commits, keep the worktree clean at HEAD, and omit \`commit\` and sha on \`agent_claim\`.`,
+    workflow:
+      "Evaluate strictly against the Outcome, Spec/Invariants, and Diff/Commit; verify every claim directly against code, diffs, and real test output.",
+    outputRule: `Omit commit and sha; \`verification\` and \`unknowns\` must carry \`reviewer\` evidence: ${READ_ONLY_DISPOSITION_EVIDENCE.reviewer}.`,
+  },
+};
+
+/**
+ * Topology-blind active disposition guidance delivered at Task kickoff and
+ * Peer-2 continuation when `APPEND_SYSTEM.md` is disposition-neutral (ADR 0074).
+ */
+export function renderPeerDispositionGuidance(disposition?: PeerDisposition): string {
+  const effective: PeerDisposition = disposition ?? "engineer";
+  if (effective === "engineer") {
+    return "Disposition guidance (engineer): implement and test inside this isolated Task worktree; catch a failed `git commit` by exit code (a SHA alone proves nothing). Calling `agent_claim` (`factory-claim`) with `outcome: \"complete\"` requires a committed SHA; `reopen`, `blocked`, or `partial` bypasses full verification without burning an attempt (no commit SHA required for `reopen` or `blocked`).";
+  }
+  if (effective === "scout") {
+    return `Disposition guidance (scout): establish repository facts read-only (${READ_ONLY_DISPOSITION_FENCE}) — edit no files, make no commits, no commit sha; return ${READ_ONLY_DISPOSITION_EVIDENCE.scout}.`;
+  }
+  if (effective === "architect") {
+    return `Disposition guidance (architect): read-only boundary design (${READ_ONLY_DISPOSITION_FENCE}) — edit no files, make no commits, no commit sha; return ${READ_ONLY_DISPOSITION_EVIDENCE.architect}.`;
+  }
+  return `Disposition guidance (reviewer): read-only independent audit (${READ_ONLY_DISPOSITION_FENCE}) — edit no files, make no commits, no commit sha; evaluate strictly against the Outcome, Spec/Invariants, and Diff/Commit, and ${READ_ONLY_DISPOSITION_EVIDENCE.reviewer}.`;
+}
+
+/**
  * Contract shape accepted by `activeContractSnapshot` — extends `ContractSet`
  * with optional `reopenConditions` (ADR 0069).
  */

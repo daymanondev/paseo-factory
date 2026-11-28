@@ -755,3 +755,46 @@ test("v0.0.38: watchLaneAvailable and runWatchPass honor the Contract workspace'
   const pinned = await runWatchPass(inputOf(repoA, "W38C"), projectB.slug);
   assert.equal(pinned.model, "copilot/gpt-5.4", "an explicit trailing slug overrides the workspace's own Project");
 });
+
+test("R5 Watch soft-block blocks accept only on completed watch_written with test-weakened >= 0.5 or secret-leak >= 0.5 and persists valid watchAck", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const { workspace, artifact } = makeWorkspaceAtBase(dir);
+  const stateDir = join(dir, "factory");
+
+  const runCase = async (task: string, stdout: string, runnerCode = 0) => {
+    const fake = fakeCopilotRunner(() => ({ code: runnerCode, stdout }));
+    const factory = createFactory({ stateDir, fetchTimeline: timelineFetcher(TIMELINE).fetch, watchCopilotProbe: () => true, watchCopilotRunner: fake.runner });
+    factory.setContract({ task, workspace, gate: "true", artifact, watch: true });
+    writeFileSync(join(workspace, artifact), `// ${task}\n`);
+    const sha = gitCommitChanges(workspace, `fix ${task}`);
+    const outcome = await factory.claim({ task, sha, agent: `agent-${task}`, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
+    assert.equal(outcome.verdict, "green");
+    return factory;
+  };
+
+  // 1. test-weakened === 0.5 (boundary) soft-blocks; < 10 non-ws ack stays watch-soft-blocked; >= 10 non-ws unblocks and persists watchAck.
+  const f1 = await runCase("WSB-1", copilotAnswerLines({ "destructive-writes": 0, "test-weakened": 0.5, "stuck-loop": 0, "scope-creep": 0, "secret-leak": 0 }));
+  await assert.rejects(() => f1.accept({ task: "WSB-1", attempt: 1 }), factoryErrorCode("watch-soft-blocked"));
+  await assert.rejects(() => f1.accept({ task: "WSB-1", attempt: 1, acknowledgeWatch: "  too short  " }), factoryErrorCode("watch-soft-blocked"));
+  const acc1 = await f1.accept({ task: "WSB-1", attempt: 1, acknowledgeWatch: "  verified test diff manually  " });
+  assert.equal(acc1.watchAck, "verified test diff manually");
+
+  // 2. secret-leak >= 0.5 soft-blocks.
+  const f2 = await runCase("WSB-2", copilotAnswerLines({ "destructive-writes": 0, "test-weakened": 0.1, "stuck-loop": 0, "scope-creep": 0, "secret-leak": 0.8 }));
+  await assert.rejects(() => f2.accept({ task: "WSB-2", attempt: 1 }), factoryErrorCode("watch-soft-blocked"));
+  const acc2 = await f2.accept({ task: "WSB-2", attempt: 1, acknowledgeWatch: "fixture dummy key only" });
+  assert.equal(acc2.watchAck, "fixture dummy key only");
+
+  // 3. Other questions >= 0.5 (destructive-writes, stuck-loop, scope-creep) do NOT soft-block; invalid short acknowledgeWatch on clean accept rejects invalid-watch-ack.
+  const f3 = await runCase("WSB-3", copilotAnswerLines({ "destructive-writes": 0.95, "test-weakened": 0.49, "stuck-loop": 0.9, "scope-creep": 0.9, "secret-leak": 0 }));
+  await assert.rejects(() => f3.accept({ task: "WSB-3", attempt: 1, acknowledgeWatch: "short" }), factoryErrorCode("invalid-watch-ack"));
+  const acc3 = await f3.accept({ task: "WSB-3", attempt: 1 });
+  assert.equal("watchAck" in acc3, false);
+
+  // 4. Failed watch with partial high answer (test-weakened: 0.9, outcome: "failed") does NOT soft-block.
+  const f4 = await runCase("WSB-4", "test-weakened: 0.9\nsecret-leak: high");
+  assert.equal(watchEvent(f4, "WSB-4").outcome, "failed");
+  const acc4 = await f4.accept({ task: "WSB-4", attempt: 1 });
+  assert.equal(acc4.event, "attempt_accepted");
+});

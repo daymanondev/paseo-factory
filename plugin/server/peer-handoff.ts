@@ -14,7 +14,7 @@ import type { SurfaceAgentSnapshot, SurfaceDaemonApi } from "./surface-rpc.ts";
 import { stopAgentViaCli, type DaemonReply } from "./daemon-cli.ts";
 import { boundTaskPeers, peerIsRunning } from "./task-peers.ts";
 import { associateTaskPeer, createTaskPeer, resolvePeerDispatchLane, resolveSpawnWorkspaceAndParent } from "./spool.ts";
-import { formatReopenIfBlock, peerHandoffContinuationFooter, readOnlyDispositionEvidence } from "./core/disposition-prompt.ts";
+import { formatReopenIfBlock, peerHandoffContinuationFooter, readOnlyDispositionEvidence, renderPeerDispositionGuidance } from "./core/disposition-prompt.ts";
 import { laneRef, readHandoffProgress, writeHandoffProgress } from "./handoff-progress.ts";
 import type { HandoffRequest, HandoffReply, HandoffProgress } from "../shared/handoff.ts";
 import { buildSubstituteHandover, extractCleanTimelineText, readHandoverGit, renderOpenTaskEvidence } from "./substitute-handover.ts";
@@ -312,7 +312,8 @@ export function createPeerHandoffRuntime(deps: PeerHandoffDeps) {
       const prompt = [
           `# Peer handoff — Task ${task}`, "You are the fresh successor Peer at 0% context. Continue from the existing Task worktree state; preserve completed work and uncommitted edits.",
           "## Active Contract Brief",
-          ...(readOnlyEvidence === undefined ? [] : [`Disposition: ${disposition} (Read-Only)`]),
+          `Disposition: ${disposition}${readOnlyEvidence === undefined ? "" : " (Read-Only)"}`,
+          renderPeerDispositionGuidance(disposition),
           contract.description ?? "(no description)",
           `Allowed scope: ${contract.scope?.join(", ") ?? "the Task worktree"}`, `Required skills: ${contract.skills?.join(", ") ?? "role defaults"}`,
           `Gate: ${readOnlyEvidence !== undefined && contract.gate.trim() === "" ? "(none)" : contract.gate}`,

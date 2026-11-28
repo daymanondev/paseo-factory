@@ -586,6 +586,7 @@ test("ticket 02: a read-only Contract with an explicit non-empty gate runs the s
     outcome: "Run the audit script.",
     invariants: "No code changes.",
     exclusions: "Excluded: fixes.",
+    verification: "Run the reviewer audit gate command.",
   });
   const red = await factory.claim({
     task: "SYNGATE-4",
@@ -606,6 +607,7 @@ test("ticket 02: a read-only Contract with an explicit non-empty gate runs the s
     outcome: "Run the check.",
     invariants: "No code changes.",
     exclusions: "Excluded: fixes.",
+    verification: "Run the scout check gate command.",
   });
   const green = await factory.claim({
     task: "SYNGATE-5",
@@ -913,4 +915,130 @@ test("gate-queue ticket 01: lead_set_contract advertises, validates, and forward
     assert.match(bad.content[0]?.text ?? "", /60.*3600/);
     assert.equal(projectFactory.contractFor(taskId), undefined, `${taskId} must not be persisted on ledger`);
   }
+});
+
+test("R4 Contract Gate Linter: rejects empty 4-Part Brief section bodies on lead seat while preserving inline, markdown, 'None', and prose-inside-body forms", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const workspace = makeRepo(dir);
+  const factory = createFactory({ stateDir: join(dir, "state") });
+
+  // 1. Heading-only / whitespace-only / inline-colon-with-empty-body fail with invalid-contract naming the empty section(s).
+  const emptyCases: Array<[string, string, RegExp]> = [
+    [
+      "EMPTY-1",
+      "1. Bounded Outcome\n\n2. Contract Boundary & Regression Invariants\nKeep intact.\n\n3. Excluded / Deferred\nNone\n\n4. Verification\ntrue",
+      /empty section\(s\): 1\. Bounded Outcome/,
+    ],
+    [
+      "EMPTY-2",
+      "1. Bounded Outcome\nDone.\n\n2. Contract Boundary & Regression Invariants\n   \n\n3. Excluded / Deferred\nNone.\n\n4. Verification\ntrue",
+      /empty section\(s\): 2\. Contract Boundary & Regression Invariants/,
+    ],
+    [
+      "EMPTY-3",
+      "1. Bounded Outcome\nDone.\n\n2. Contract Boundary & Regression Invariants\nInvariants.\n\n3. Excluded / Deferred\n\n4. Verification\ntrue",
+      /empty section\(s\): 3\. Excluded \/ Deferred/,
+    ],
+    [
+      "EMPTY-4",
+      "1. Bounded Outcome: Done.\n2. Contract Boundary & Regression Invariants: Safe.\n3. Excluded / Deferred: None\n4. Verification:",
+      /empty section\(s\): 4\. Verification/,
+    ],
+  ];
+  for (const [task, description, pattern] of emptyCases) {
+    const err = invalidContract(() => factory.setContract({ task, workspace, gate: "true", seat: "lead", description }));
+    assert.match(err.message, pattern);
+  }
+
+  // 2. Structured fields missing exclusions (or missing verification on engineer) synthesize empty sections and get rejected.
+  const missingExcl = invalidContract(() =>
+    factory.setContract({
+      task: "EMPTY-STRUCT-1",
+      workspace,
+      gate: "true",
+      seat: "lead",
+      outcome: "Implement A.",
+      invariants: "Keep B.",
+      verification: "npm test",
+    }),
+  );
+  assert.match(missingExcl.message, /empty section\(s\): 3\. Excluded \/ Deferred/);
+
+  // 3. Prose starting with "Verification ..." inside another section body does not falsely satisfy section 4.
+  const proseTrap = invalidContract(() =>
+    factory.setContract({
+      task: "PROSE-TRAP",
+      workspace,
+      gate: "true",
+      seat: "lead",
+      description: [
+        "1. Bounded Outcome",
+        "Verification harness runs faster now.",
+        "",
+        "2. Contract Boundary & Regression Invariants",
+        "Keep API stable.",
+        "",
+        "3. Excluded / Deferred",
+        "None",
+      ].join("\n"),
+    }),
+  );
+  assert.match(proseTrap.message, /missing section\(s\): 4\. Verification/);
+
+  // 4. Valid variations pass: "None", "3. Excluded / Deferred to Later Waves", markdown headings, inline bodies.
+  const validDescriptions = [
+    "1. Bounded Outcome\nLand X.\n\n2. Contract Boundary & Regression Invariants\nKeep Y.\n\n3. Excluded / Deferred to Later Waves\nNone\n\n4. Verification\nnpm test",
+    "## 1. Bounded Outcome\nLand X.\n- **2. Contract Boundary & Regression Invariants**: Keep Y.\n3. Excluded / Deferred: None.\n4. Verification: npm test",
+  ];
+  validDescriptions.forEach((description, idx) => {
+    const evt = factory.setContract({ task: `BRIEF-OK-${idx}`, workspace, gate: "true", seat: "lead", description });
+    assert.equal(evt.description, description);
+  });
+});
+
+test("R4 Contract Gate Linter: rejects raw git diff --exit-code / --name-only shell segments while allowing repo scripts and non-path-locking git commands", (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const workspace = makeRepo(dir);
+  const factory = createFactory({ stateDir: join(dir, "state") });
+
+  const rejectedGates = [
+    "git diff --exit-code",
+    "git diff --name-only",
+    "git -C /tmp/repo diff --exit-code",
+    "/usr/bin/git diff --name-only",
+    "git --no-pager diff --stat --exit-code HEAD",
+    "npm run check && git diff --exit-code",
+    "test -f a || git diff --name-only",
+    "echo ok; git diff --exit-code",
+    "git diff --exit-code | head",
+    "FOO=1 env -u BAR command git diff --exit-code >/dev/null",
+    "(git diff --name-only)",
+    "2>/dev/null git diff --exit-code",
+  ];
+  rejectedGates.forEach((gate, idx) => {
+    const err = invalidContract(() =>
+      factory.setContract({ task: `GATE-BAD-${idx}`, workspace, gate, seat: "lead", description: FOUR_PART_BRIEF }),
+    );
+    assert.match(err.message, /git diff --(?:exit-code|name-only)/, `gate "${gate}" should be rejected`);
+    assert.match(err.message, /scope/i);
+  });
+
+  const allowedGates = [
+    "npm run check",
+    "npm run sync:plugin-core:check",
+    "git status",
+    "git diff",
+    "git diff --stat",
+    "git show --name-only",
+    "git diff -- --exit-code",
+    'echo "git diff --exit-code"',
+    `node -e "console.log('git diff --name-only')"`,
+    "npm test 2>&1",
+  ];
+  allowedGates.forEach((gate, idx) => {
+    const evt = factory.setContract({ task: `GATE-OK-${idx}`, workspace, gate, seat: "lead", description: FOUR_PART_BRIEF });
+    assert.equal(evt.gate, gate, `gate "${gate}" should be allowed`);
+  });
 });

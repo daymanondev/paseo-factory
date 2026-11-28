@@ -147,24 +147,28 @@ test("interactive roles carry managed APPEND_SYSTEM.md; headless never does; onl
     seen.add(content);
   }
 
-  // The canonical table itself: each entry carries the role's immutable SLP
-  // contract plus its exact factory CLI command vocabulary — Supervisor gets
-  // lead dispatch / status / accept --by supervisor (never contract or run)
-  // plus the Fire-and-End-Turn law; Lead gets contract / run / status / lanes
-  // get / accept --by lead / supervisor report plus the Seat write fence;
-  // the working agent gets its single factory-claim command.
-  assert.ok(ROLE_PROMPTS.supervisor.includes("You are"), "the supervisor contract opens with its SLP law");
-  for (const cmd of ["factory --home", "lead dispatch", "status", "lanes get", "accept <task> --attempt <n> --by supervisor"]) {
-    assert.ok(ROLE_PROMPTS.supervisor.includes(cmd), `ROLE_PROMPTS.supervisor names \`${cmd}\``);
+  // The canonical table itself: each entry carries the role's compact 5-section
+  // SLP contract plus its MCP vocabulary and 1-line CLI fallback pointer for
+  // Supervisor/Lead; the working agent keeps its disposition-neutral core with
+  // agent_claim / factory-claim and zero orchestration/CLI-help pointers.
+  assert.ok(ROLE_PROMPTS.supervisor.includes("## 1. Role & Core Goal"), "the supervisor contract opens with the 5-section header");
+  assert.ok(ROLE_PROMPTS.supervisor.includes("You are the Supervisor seat of the paseo-factory"), "the supervisor contract names its seat");
+  for (const token of [
+    "paseo-factory_supervisor_dispatch_lead",
+    "supervisor_inspect_factory",
+    "supervisor_read_ledger",
+    "If paseo_factory MCP is absent, use the factory CLI fallback via factory --help.",
+  ]) {
+    assert.ok(ROLE_PROMPTS.supervisor.includes(token), `ROLE_PROMPTS.supervisor names \`${token}\``);
   }
   assert.ok(
     ROLE_PROMPTS.supervisor.includes(
-      "Immediately after running `lead dispatch`, end your turn and wait for Lead to wake you via `factory supervisor report` or `needs_human`.",
+      "Fire-and-End-Turn Law: After `supervisor_dispatch_lead`, end turn and wait for `lead_report_to_supervisor`/`needs_human`; never `sleep`, poll, decompose (`T-01..`), or edit/commit product code.",
     ),
     "ROLE_PROMPTS.supervisor states the Fire-and-End-Turn law",
   );
-  for (const forbidden of ["contract --task", "factory contract", "factory run", "run <task>"]) {
-    assert.ok(!ROLE_PROMPTS.supervisor.includes(forbidden), `ROLE_PROMPTS.supervisor never lists \`${forbidden}\``);
+  for (const forbidden of ["contract --task", "factory contract", "factory run", "run <task>", "lead dispatch --workspace", "accept <task> --attempt"]) {
+    assert.ok(!ROLE_PROMPTS.supervisor.includes(forbidden), `ROLE_PROMPTS.supervisor omits \`${forbidden}\``);
   }
   for (const storeTerm of [
     "Store Release",
@@ -182,20 +186,26 @@ test("interactive roles carry managed APPEND_SYSTEM.md; headless never does; onl
     assert.ok(!ROLE_PROMPTS.lead.includes(storeTerm), `shared Pi lead APPEND_SYSTEM.md omits \`${storeTerm}\``);
     assert.ok(!ROLE_PROMPTS.agent.includes(storeTerm), `shared Pi agent APPEND_SYSTEM.md omits \`${storeTerm}\``);
   }
-  for (const cmd of [
-    "factory --home",
-    "contract --task",
-    "run <task>",
-    "status",
-    "lanes get",
-    "accept <task> --attempt <n> --by lead",
-    "supervisor report --workspace",
+  for (const token of [
+    "paseo-factory_lead_set_contract",
+    "paseo-factory_lead_dispatch_agent",
+    "paseo-factory_lead_read_ledger",
+    "lead_merge",
+    "paseo-factory_lead_report_to_supervisor",
     "Seat write fence",
+    "If paseo_factory MCP is absent, use the factory CLI fallback via factory --help.",
   ]) {
-    assert.ok(ROLE_PROMPTS.lead.includes(cmd), `ROLE_PROMPTS.lead names \`${cmd}\``);
+    assert.ok(ROLE_PROMPTS.lead.includes(token), `ROLE_PROMPTS.lead names \`${token}\``);
   }
-  assert.ok(ROLE_PROMPTS.agent.includes("factory-claim"), "the working agent's vocabulary is factory-claim");
+  for (const forbidden of ["contract --task", "run <task>", "accept <task> --attempt", "lead_create_worktree"]) {
+    assert.ok(!ROLE_PROMPTS.lead.includes(forbidden), `ROLE_PROMPTS.lead omits \`${forbidden}\``);
+  }
+  assert.ok(ROLE_PROMPTS.agent.includes("factory-claim"), "the working agent's vocabulary includes factory-claim");
   assert.ok(!ROLE_PROMPTS.agent.includes("factory --home"), "orchestration commands are withheld from the working agent");
+  assert.ok(!ROLE_PROMPTS.agent.includes("factory --help"), "Factory CLI fallback pointer is withheld from the working agent");
+  for (const dispOnly of ["read-only-disposition-fence", "--runInBand", "strongest evidence-backed weakness", "alternatives considered"]) {
+    assert.ok(!ROLE_PROMPTS.agent.includes(dispOnly), `shared Pi agent APPEND_SYSTEM.md stays disposition-neutral (omits \`${dispOnly}\`)`);
+  }
 
   // lead, agent, and headless stay strictly stripped of the operator's
   // prompts and skills — only Supervisor keeps 100% command parity.

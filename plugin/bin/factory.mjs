@@ -115,9 +115,11 @@ commands:
                                      defaults to 900 seconds when omitted)
 
   accept     Accept one green attempt of a task (the Owner's act)
-             accept <task> --attempt <n> [--by owner|supervisor|lead] [--project <slug>]
+             accept <task> --attempt <n> [--by owner|supervisor|lead] [--ack-watch "<reason>"] [--project <slug>]
              --by names the accepting seat (v0.0.14): owner/supervisor are
              the unconditional override, lead accepts green + CONCERN-free;
+             --ack-watch provides >= 10 non-whitespace chars to acknowledge a
+             Watch soft-block (test-weakened >= 0.5 or secret-leak >= 0.5);
              --project (v0.0.89) pins the target Project when two Projects
              share a Task id
 
@@ -746,6 +748,7 @@ if (command === "accept") {
   const parsed = parseCommandOptions({
     attempt: { type: "string" },
     by: { type: "string" },
+    "ack-watch": { type: "string" },
     project: { type: "string" },
     "wait-secs": { type: "string" },
   });
@@ -764,6 +767,7 @@ if (command === "accept") {
     }
     by = parsed.values.by;
   }
+  const acknowledgeWatch = parsed.values["ack-watch"];
   // v0.0.89: the explicit target Project (ADR 0045 §1) — the router's
   // top-priority context when two Projects share a Task id.
   const projectSlug =
@@ -772,7 +776,16 @@ if (command === "accept") {
       : undefined;
 
   const reply = await roundTrip(
-    { id: randomId(), kind: "accept", task, attempt, submitter, ...(by === undefined ? {} : { by }), ...(projectSlug === undefined ? {} : { projectSlug }) },
+    {
+      id: randomId(),
+      kind: "accept",
+      task,
+      attempt,
+      submitter,
+      ...(by === undefined ? {} : { by }),
+      ...(acknowledgeWatch === undefined ? {} : { acknowledgeWatch }),
+      ...(projectSlug === undefined ? {} : { projectSlug }),
+    },
     waitSeconds(parsed),
   );
   console.log(`factory: ${reply.summary}`);

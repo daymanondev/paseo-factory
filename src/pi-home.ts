@@ -13,7 +13,7 @@
  * headless pass ever inherits the operator's global TUI rules or pays its
  * package-resolution cost. Since v0.0.20 (ADR 0013) the three interactive
  * roles each carry a MANAGED `APPEND_SYSTEM.md` — their immutable SLP
- * contract + exact `factory` CLI vocabulary (`ROLE_PROMPTS[role]`), the file
+ * contract + MCP/CLI fallback pointer (`ROLE_PROMPTS[role]`), the file
  * Pi's `DefaultResourceLoader` reloads into `_baseSystemPrompt` on every
  * turn, every `/compact`, and every `agent.session_open` resume (the
  * compaction-proof channel `config.systemPrompt` alone is not) — and

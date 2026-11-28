@@ -439,6 +439,8 @@ export interface AttemptAccepted extends EventIdentityMetadata {
   landing?: LandingResult["landing"];
   /** The pending-conflict's reason — the conflict the Lead or Supervisor resolves. */
   landingNote?: string;
+  /** Optional Watch soft-block acknowledgement reason (`>= 10` non-whitespace chars; ADR 0074). */
+  watchAck?: string;
 }
 
 /**

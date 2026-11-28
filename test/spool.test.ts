@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createFactory } from "../plugin/server/core/factory.ts";
-import { PEER_PREMISE_CHECK_REMINDER } from "../plugin/server/core/disposition-prompt.ts";
+import { PEER_PREMISE_CHECK_REMINDER, renderPeerDispositionGuidance } from "../plugin/server/core/disposition-prompt.ts";
 import { CorrelationRegistry } from "../plugin/server/core/correlations.ts";
 import { resolveProject } from "../plugin/server/core/project.ts";
 import { saveLanes } from "../src/lanes.ts";
@@ -1791,11 +1791,11 @@ test("spawn prepends the Skill discipline hint on a skills-less Contract (expo p
   assert.ok(!prompts[3]!.includes("expo-router"), "explicit Off overrides filesystem auto-detection");
 
   // (3) explicit skills (User Story 9): the unchanged Required-skills line
-  // with PEER_PREMISE_CHECK_REMINDER appended at the end, and no Skill-discipline hint.
+  // with disposition guidance + PEER_PREMISE_CHECK_REMINDER appended at the end, and no Skill-discipline hint.
   assert.equal(
     prompts[2]!.split("\n\nProject Peer skills allowed:")[0],
-    `Required skills to open first: tdd (read ~/.agents/skills/<skill>/SKILL.md or .agents/skills/<skill>/SKILL.md before starting)\n\nExecute task T-HINT-EXPLICIT: make it green.\n\n${PEER_PREMISE_CHECK_REMINDER}`,
-    "explicit contract.skills preserves the Required-skills line with premise-check reminder appended",
+    `Required skills to open first: tdd (read ~/.agents/skills/<skill>/SKILL.md or .agents/skills/<skill>/SKILL.md before starting)\n\nExecute task T-HINT-EXPLICIT: make it green.\n\n${renderPeerDispositionGuidance("engineer")}\n\n${PEER_PREMISE_CHECK_REMINDER}`,
+    "explicit contract.skills preserves the Required-skills line with disposition guidance and premise-check reminder appended",
   );
   assert.ok(!prompts[2]!.includes("Skill discipline"), "no hint alongside explicit skills");
 });
@@ -2079,4 +2079,96 @@ test("ADR 0068: read-only dispositions (scout, architect, reviewer) and separate
     registry,
   );
   assert.equal(eng4.ok, true, "attempt-ceiling (RED 3/3) settled writable Peer unblocks next writable Peer");
+});
+
+test("R2 spool spawn & createTaskPeer deliver active disposition guidance idempotently across all 4 dispositions before Reopen if / skill scope", async (t) => {
+  const dir = makeTempDir("spool-disp-guidance-");
+  disposeDir(t, dir);
+  const stateDir = join(dir, "state");
+  const repo = join(dir, "repo");
+  mkdirSync(repo, { recursive: true });
+  writeFileSync(join(repo, "README.md"), "base\n");
+  gitCommitAll(repo, "init");
+  const resolved = resolveProject(repo);
+  assert.ok(resolved.ok);
+  const factory = createFactory({ stateDir });
+
+  const prompts: string[] = [];
+  const fakeDaemon = {
+    agents: {
+      list: async () => ({ entries: [] }),
+      create: async (opts: { prompt?: string }) => {
+        prompts.push(opts.prompt ?? "");
+        return { id: `peer-${prompts.length}` };
+      },
+      ref: () => ({ send: async () => ({ messageId: "m-1" }), cancel: async () => {}, archive: async () => {} }),
+    },
+  };
+  const deps = { daemon: fakeDaemon as never, home: join(dir, "home") };
+
+  // 1. Custom non-"Execute task" prompt still receives disposition guidance via createTaskPeer before skill scope & reminder.
+  for (const disposition of ["engineer", "scout", "architect", "reviewer"] as const) {
+    const task = `DISP-CUSTOM-${disposition.toUpperCase()}`;
+    factory.setContract({
+      task,
+      workspace: resolved.root,
+      gate: disposition === "engineer" ? "true" : "",
+      disposition,
+      description: `Check ${disposition}`,
+    });
+    const res = await handleSpoolRequest(
+      factory,
+      {
+        id: `sp-${task}`,
+        kind: "spawn",
+        task,
+        provider: "pi/zai/glm-5.3",
+        arity: 1,
+        prompt: `Custom briefing for ${task}.\n\n${PEER_PREMISE_CHECK_REMINDER}`,
+        submitter: "lead-1",
+        seat: "lead",
+      },
+      deps,
+    );
+    assert.equal(res.ok, true, res.ok ? "" : res.message);
+    const p = prompts.at(-1)!;
+    const expected = renderPeerDispositionGuidance(disposition);
+    assert.ok(p.includes(expected), `${disposition}: custom prompt includes guidance`);
+    assert.equal(p.match(/Disposition guidance \(/g)?.length, 1, `${disposition}: guidance appears exactly once`);
+    const gIdx = p.indexOf(expected);
+    const rIdx = p.indexOf(PEER_PREMISE_CHECK_REMINDER);
+    const sIdx = p.indexOf("Project Peer skills allowed:");
+    assert.ok(gIdx < rIdx && rIdx < sIdx, `${disposition}: guidance < premise reminder < skill scope`);
+    assert.doesNotMatch(p, /\b(Owner|Supervisor|Driver|GateQueue)\b/, `${disposition}: topology-blind`);
+  }
+
+  // 2. Execute-task enrichment injects Disposition: <ro> + guidance once (never duplicated by createTaskPeer).
+  factory.setContract({
+    task: "DISP-EXEC-SCOUT",
+    workspace: resolved.root,
+    gate: "",
+    disposition: "scout",
+    description: "Scout code",
+    reopenConditions: ["missing file"],
+  });
+  const execRes = await handleSpoolRequest(
+    factory,
+    {
+      id: "sp-exec-scout",
+      kind: "spawn",
+      task: "DISP-EXEC-SCOUT",
+      provider: "pi/zai/glm-5.3",
+      arity: 1,
+      prompt: "Execute task DISP-EXEC-SCOUT: inspect.",
+      submitter: "lead-1",
+      seat: "lead",
+    },
+    deps,
+  );
+  assert.equal(execRes.ok, true);
+  const ep = prompts.at(-1)!;
+  assert.ok(ep.includes("Disposition: scout"));
+  assert.equal(ep.match(/Disposition guidance \(/g)?.length, 1);
+  assert.ok(ep.indexOf("Execute task DISP-EXEC-SCOUT:") < ep.indexOf("Disposition guidance (scout):"));
+  assert.ok(ep.indexOf("Disposition guidance (scout):") < ep.indexOf("Reopen if: missing file"));
 });

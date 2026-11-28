@@ -214,7 +214,7 @@ test("bridge.mjs exposes strictly role-scoped tools in tools/list and enforces r
     assert.equal(supInitCaps?.tools?.listChanged, true);
     const supListed = (supResponses[1].result as { tools: Array<{ name: string; description: string; inputSchema: { properties: Record<string, unknown> } }> }).tools;
     const supTools = supListed.map((t) => t.name).sort();
-    assert.deepEqual(supTools, ["lead_close_task", "lead_retire_task", "supervisor_accept_task", "supervisor_dispatch_lead", "supervisor_end_cycle", "supervisor_inspect_factory", "supervisor_read_ledger", "supervisor_setup_factory"]);
+    assert.deepEqual(supTools, ["supervisor_accept_task", "supervisor_dispatch_lead", "supervisor_end_cycle", "supervisor_inspect_factory", "supervisor_read_ledger", "supervisor_setup_factory"]);
     const supDispatchTool = supListed.find((t) => t.name === "supervisor_dispatch_lead");
     assert.ok(supDispatchTool);
     assert.equal("storeRelease" in supDispatchTool.inputSchema.properties, false, "non-mobile supervisor_dispatch_lead omits storeRelease");
@@ -236,7 +236,7 @@ test("bridge.mjs exposes strictly role-scoped tools in tools/list and enforces r
     const leadInitCaps = (leadResponses[0].result as { capabilities?: { tools?: { listChanged?: boolean } } }).capabilities;
     assert.equal(leadInitCaps?.tools?.listChanged, true);
     const leadTools = ((leadResponses[1].result as { tools: Array<{ name: string }> }).tools).map((t) => t.name).sort();
-    assert.deepEqual(leadTools, ["lead_close_task", "lead_create_worktree", "lead_dispatch_agent", "lead_merge", "lead_needs_human", "lead_read_ledger", "lead_release", "lead_remove_worktree", "lead_reply_peer", "lead_report_to_supervisor", "lead_retire_task", "lead_set_contract", "lead_update_notebook", "lead_verify"]);
+    assert.deepEqual(leadTools, ["lead_close_task", "lead_dispatch_agent", "lead_merge", "lead_needs_human", "lead_read_ledger", "lead_release", "lead_reply_peer", "lead_report_to_supervisor", "lead_set_contract", "lead_update_notebook", "lead_verify"]);
 
     // 3. Working Agent session
     const agentResponses = await runMcpSession({
@@ -1075,7 +1075,8 @@ test("lead_set_contract carries disposition and resetPeer end-to-end (ADR 0053):
       { jsonrpc: "2.0", id: 1, method: "tools/list" },
       { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "SCOUT-1", gate: "true", disposition: "scout", description: brief4("Reconnoiter the workspace layout") } } },
       { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "lead_dispatch_agent", arguments: { tasks: ["SCOUT-1"] } } },
-      { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "SCOUT-1", gate: "true", artifact: "README.md", description: brief4("Reconciled brief after the Scout's challenge") } } },
+      { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "SCOUT-1", gate: "true", disposition: "scout", description: brief4("Reconciled brief after the Scout's challenge") } } },
+      { jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "SCOUT-1", gate: "true", artifact: "README.md", description: brief4("Attempted disposition switch without resetPeer") } } },
     ],
   });
 
@@ -1114,16 +1115,20 @@ test("lead_set_contract carries disposition and resetPeer end-to-end (ADR 0053):
     "the Peer kickoff prompt names the active disposition",
   );
 
-  // 4. Re-contract with resetPeer omitted: the Brief updates in place and the
-  //    spawned bound Peer survives — no stop, no archive.
+  // 4. Re-contract with resetPeer omitted (same disposition): the Brief updates in place and the
+  //    spawned bound Peer survives — no stop, no archive. Switching disposition without resetPeer
+  //    is refused with invalid-contract and preserves the bound Peer.
   assert.match(okText(4), /live Peer preserved/i, "the reply names the preserved Peer");
+  const fencedRes = byId.get(5)!.result as { isError?: boolean; content: Array<{ text: string }> };
+  assert.equal(fencedRes.isError, true, "switching scout -> engineer without resetPeer is refused");
+  assert.match(fencedRes.content[0].text, /invalid-contract.*resetPeer: true/);
   const spawnedPeerId = "peer-created-1";
   assert.ok(liveAgents.has(spawnedPeerId), "the spawned Peer exists");
   assert.equal(stopped.length, 0, "no Peer was stopped on the default re-contract");
   assert.equal(archived.length, 0, "no Peer was archived on the default re-contract");
   assert.equal(liveAgents.get(spawnedPeerId)?.archivedAt, null, "the bound Peer is still live and non-archived");
   assert.equal(projectFactory.contractFor("SCOUT-1")?.description, brief4("Reconciled brief after the Scout's challenge"));
-  assert.equal(projectFactory.contractFor("SCOUT-1")?.disposition, undefined, "the reconciled epoch omits the disposition — it reads as engineer");
+  assert.equal(projectFactory.contractFor("SCOUT-1")?.disposition, "scout", "the reconciled epoch preserves the scout disposition");
 
   // 5. resetPeer: true (a fresh session) cancels and archives the bound Peer.
   const resetResponses = await runMcpSession({
@@ -1143,7 +1148,7 @@ test("lead_set_contract carries disposition and resetPeer end-to-end (ADR 0053):
   assert.equal(contractSets().length, 3, "three Contract epochs landed (scout, reconcile, reset)");
   assert.deepEqual(
     contractSets().map((e) => e.disposition ?? "(omitted)"),
-    ["scout", "(omitted)", "(omitted)"],
+    ["scout", "scout", "(omitted)"],
     "the disposition rides the epochs verbatim",
   );
 });
@@ -1210,7 +1215,7 @@ test("lead_repoke_agent with message delivers the Lead's ruling into the live Pe
       { jsonrpc: "2.0", id: 1, method: "tools/list" },
       { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "RULING-1", gate: "true", disposition: "architect", description: brief4("Brief v1: design the adapter boundary.") } } },
       { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "lead_dispatch_agent", arguments: { tasks: ["RULING-1"] } } },
-      { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "RULING-1", gate: "true", artifact: "README.md", description: brief4("Brief v2 (reconciled): the facade owns the retry policy.") } } },
+      { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "RULING-1", gate: "true", disposition: "architect", description: brief4("Brief v2 (reconciled): the facade owns the retry policy.") } } },
       { jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "lead_reply_peer", arguments: { task: "RULING-1", agent: "peer-created-1", message: "Ruling (REOPEN_REQUEST foundation): the facade owns the retry policy — drop the caller-side backoff." } } },
       { jsonrpc: "2.0", id: 6, method: "tools/call", params: { name: "lead_repoke_agent", arguments: { task: "RULING-1", agent: "peer-created-1", message: "Second turn: green the gate on the reconciled Brief." } } },
     ],
@@ -1240,7 +1245,7 @@ test("lead_repoke_agent with message delivers the Lead's ruling into the live Pe
   const first = deliveries[0]?.text ?? "";
   assert.ok(first.includes("Ruling (REOPEN_REQUEST foundation): the facade owns the retry policy — drop the caller-side backoff."), "the delivered text carries the Lead's ruling verbatim");
   assert.ok(first.includes("RULING-1"), "the task context prefixes the ruling");
-  assert.ok(first.includes("engineer"), "the reconciled epoch's disposition (engineer default) rides the prefix");
+  assert.ok(first.includes("architect"), "the reconciled epoch's disposition (architect) rides the prefix");
   assert.ok(first.includes("Brief v2 (reconciled): the facade owns the retry policy."), "the updated Brief is named after the lead_set_contract reconciliation");
   assert.ok((deliveries[1]?.text ?? "").includes("Second turn: green the gate on the reconciled Brief."), "the second turn's ruling rode its own delivery");
 
@@ -4232,5 +4237,210 @@ test("ADR 0073 wave 3a: setupProposalApprove unlocks Store Release tools live vi
     registry.stop();
     rmSync(homeDir, { recursive: true, force: true });
     rmSync(mobileRepo, { recursive: true, force: true });
+  }
+});
+
+test("R2 bridge.mjs kickoff disposition delivery across all 4 dispositions, R3 hidden legacy tools backward-compatibility & cross-role denial, and R5 Watch soft-block across lead_merge / lead_accept_task / supervisor_accept_task", async (t) => {
+  const homeDir = mkdtempSync(join(tmpdir(), "factory-bridge-m2-"));
+  const stateDir = join(homeDir, "plugin-state", "paseo-factory");
+  const repoDir = makeGitRepo();
+  t.after(() => {
+    rmSync(homeDir, { recursive: true, force: true });
+    rmSync(repoDir, { recursive: true, force: true });
+  });
+
+  const factory = createFactory({
+    stateDir,
+    fetchTimeline: async () => ({ ok: true, entries: [{ seq: 1, item: { type: "assistant_message", text: "checked" } }] }),
+    watchCopilotProbe: () => true,
+    watchCopilotRunner: async () => ({
+      code: 0,
+      stdout: "destructive-writes: 0\ntest-weakened: 0.8\nstuck-loop: 0\nscope-creep: 0\nsecret-leak: 0",
+      stderr: "",
+      timedOut: false,
+    }),
+  });
+  const reg = ensureProjectRegistered(stateDir, repoDir);
+  assert.equal(reg.ok, true);
+  const slug = reg.ok ? reg.slug : "demo";
+  const registry = createFactoryRegistry({ stateDir, root: factory });
+
+  const createdPrompts: string[] = [];
+  const fakeDaemon = {
+    agents: {
+      list: async () => ({ entries: [] }),
+      create: async (opts: { prompt?: string }) => {
+        createdPrompts.push(opts.prompt ?? "");
+        return { id: `peer-${createdPrompts.length}` };
+      },
+      ref: () => ({ send: async () => ({ messageId: "m-1" }), cancel: async () => {}, archive: async () => {} }),
+    },
+  };
+  const spool = startSpool(stateDir, factory, { registry, pollMs: 10, daemon: fakeDaemon as never, home: homeDir });
+  t.after(() => spool.stop());
+
+  const correlations = new CorrelationRegistry(stateDir);
+  const leadCorr = correlations.issue({ role: "lead", projectSlug: slug, projectRoot: repoDir, agentId: "lead-1" });
+  const supCorr = correlations.issue({ role: "supervisor", projectSlug: slug, projectRoot: repoDir, agentId: "sup-1" });
+  const agentCorr = correlations.issue({ role: "agent", projectSlug: slug, projectRoot: repoDir, task: "M2-ENG", agentId: "agent-1" });
+
+  // 1. R2 kickoff disposition delivery across all 4 dispositions (direct Spool fallback)
+  for (const disposition of ["engineer", "scout", "architect", "reviewer"] as const) {
+    const task = `M2-KICK-${disposition.toUpperCase()}`;
+    const res = await runMcpSession({
+      args: ["--correlation", leadCorr.correlationId, "--state-dir", stateDir],
+      cwd: repoDir,
+      requests: [
+        {
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: {
+            name: "lead_set_contract",
+            arguments: {
+              task,
+              gate: disposition === "engineer" ? "true" : "",
+              disposition,
+              reopenConditions: ["premise mismatch"],
+              description: brief4(`Task for ${disposition}`),
+            },
+          },
+        },
+        { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "lead_dispatch_agent", arguments: { tasks: [task] } } },
+      ],
+    });
+    for (const r of res) {
+      const toolRes = r.result as { isError?: boolean; content: Array<{ text: string }> };
+      assert.notEqual(toolRes.isError, true, toolRes.content[0].text);
+    }
+    const prompt = createdPrompts.at(-1)!;
+    assert.ok(prompt.includes(`Disposition guidance (${disposition}):`), `${disposition} guidance present`);
+    assert.equal(prompt.match(/Disposition guidance \(/g)?.length, 1, `${disposition} guidance not duplicated`);
+    assert.ok(prompt.indexOf(`Execute task ${task}:`) < prompt.indexOf(`Disposition guidance (${disposition}):`));
+    assert.ok(prompt.indexOf(`Disposition guidance (${disposition}):`) < prompt.indexOf("Reopen if: premise mismatch"));
+    assert.doesNotMatch(prompt, /\b(Owner|Supervisor|Driver|GateQueue)\b/, `${disposition} stays topology-blind`);
+    if (disposition !== "engineer") {
+      assert.ok(prompt.includes("read-only-disposition-fence"), `${disposition} carries read-only fence`);
+      assert.doesNotMatch(prompt, /--sha/, `${disposition} omits --sha`);
+    }
+  }
+
+  // 2. R3 hidden legacy tools: tools/call backward compatibility & cross-role denial
+  const projectFactory = registry.factoryForProject(slug);
+  const legLeadCreate = await runMcpSession({
+    args: ["--correlation", leadCorr.correlationId, "--state-dir", stateDir],
+    cwd: repoDir,
+    requests: [
+      { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "LEG-1", gate: "true", description: brief4("Leg 1") } } },
+      { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "lead_create_worktree", arguments: { task: "LEG-1" } } },
+      { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "LEG-RETIRE", gate: "true", description: brief4("Leg retire") } } },
+      { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "lead_retire_task", arguments: { task: "LEG-RETIRE", reason: "retired via legacy alias" } } },
+    ],
+  });
+  for (const r of legLeadCreate) {
+    const toolRes = r.result as { isError?: boolean; content: Array<{ text: string }> };
+    assert.notEqual(toolRes.isError, true, toolRes.content[0].text);
+  }
+  const headSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repoDir, encoding: "utf8" }).trim();
+  const legClaim = await projectFactory.claim({
+    task: "LEG-1",
+    sha: headSha,
+    handoff: { outcome: "complete", scope: "README.md", verification: "true", unknowns: "none" },
+  });
+  assert.equal(legClaim.verdict, "green");
+  await projectFactory.accept({ task: "LEG-1", attempt: 1 });
+  const legLeadRemove = await runMcpSession({
+    args: ["--correlation", leadCorr.correlationId, "--state-dir", stateDir],
+    cwd: repoDir,
+    requests: [
+      { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_remove_worktree", arguments: { task: "LEG-1" } } },
+    ],
+  });
+  assert.notEqual((legLeadRemove[0].result as { isError?: boolean }).isError, true, (legLeadRemove[0].result as { content: Array<{ text: string }> }).content[0].text);
+
+  const legSupRes = await runMcpSession({
+    args: ["--correlation", supCorr.correlationId, "--state-dir", stateDir],
+    cwd: repoDir,
+    requests: [
+      { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_set_contract", arguments: { task: "LEG-2", gate: "true", description: brief4("Leg 2") } } },
+      { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "lead_create_worktree", arguments: { task: "LEG-2" } } },
+    ],
+  });
+  // supervisor cannot call lead_set_contract or lead_create_worktree
+  assert.equal((legSupRes[0].result as { isError?: boolean }).isError, true);
+  assert.equal((legSupRes[1].result as { isError?: boolean }).isError, true);
+
+  projectFactory.setContract({ task: "LEG-SUP-1", workspace: repoDir, gate: "true", seat: "lead", description: brief4("Sup close 1") });
+  projectFactory.setContract({ task: "LEG-SUP-2", workspace: repoDir, gate: "true", seat: "lead", description: brief4("Sup close 2") });
+  const supLegacyClose = await runMcpSession({
+    args: ["--correlation", supCorr.correlationId, "--state-dir", stateDir],
+    cwd: repoDir,
+    requests: [
+      { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_close_task", arguments: { task: "LEG-SUP-1", reason: "sup close" } } },
+      { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "lead_retire_task", arguments: { task: "LEG-SUP-2", reason: "sup retire" } } },
+    ],
+  });
+  assert.notEqual((supLegacyClose[0].result as { isError?: boolean }).isError, true);
+  assert.notEqual((supLegacyClose[1].result as { isError?: boolean }).isError, true);
+
+  const agentDeny = await runMcpSession({
+    args: ["--correlation", agentCorr.correlationId, "--state-dir", stateDir],
+    cwd: repoDir,
+    requests: [
+      { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "lead_retire_task", arguments: { task: "LEG-SUP-1", reason: "no" } } },
+      { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "lead_create_worktree", arguments: { task: "LEG-SUP-1" } } },
+    ],
+  });
+  assert.equal((agentDeny[0].result as { isError?: boolean }).isError, true);
+  assert.equal((agentDeny[1].result as { isError?: boolean }).isError, true);
+
+  // 3. R5 Watch soft-block across lead_merge and supervisor_accept_task (both test-weakened and secret-leak)
+  for (const [task, acceptTool, answers] of [
+    ["WSB-MCP-1", "lead_merge", { "destructive-writes": 0, "test-weakened": 0.8, "stuck-loop": 0, "scope-creep": 0, "secret-leak": 0 }],
+    ["WSB-MCP-2", "lead_merge", { "destructive-writes": 0, "test-weakened": 0, "stuck-loop": 0, "scope-creep": 0, "secret-leak": 0.65 }],
+    ["WSB-MCP-3", "supervisor_accept_task", { "destructive-writes": 0, "test-weakened": 0.8, "stuck-loop": 0, "scope-creep": 0, "secret-leak": 0 }],
+  ] as const) {
+    projectFactory.setContract({ task, workspace: repoDir, gate: "true", seat: "lead", description: brief4(`Watch ${task}`) });
+    writeFileSync(join(repoDir, `${task}.txt`), `${task}\n`);
+    execFileSync("git", ["add", `${task}.txt`], { cwd: repoDir });
+    execFileSync("git", ["commit", "-m", task], { cwd: repoDir });
+    const sha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repoDir, encoding: "utf8" }).trim();
+    const outcome = await projectFactory.claim({
+      task,
+      sha,
+      agent: `peer-${task}`,
+      handoff: { outcome: "complete", scope: `${task}.txt`, verification: "true", unknowns: "none" },
+    });
+    assert.equal(outcome.verdict, "green");
+    projectFactory.ledger.append({
+      event: "watch_written",
+      task,
+      attempt: 1,
+      model: "copilot/gpt-5.4",
+      outcome: "written",
+      durationMs: 10,
+      answers: { ...answers },
+    });
+
+    const corr = acceptTool === "supervisor_accept_task" ? supCorr.correlationId : leadCorr.correlationId;
+    const res = await runMcpSession({
+      args: ["--correlation", corr, "--state-dir", stateDir],
+      cwd: repoDir,
+      requests: [
+        { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: acceptTool, arguments: { task, attempt: 1 } } },
+        { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: acceptTool, arguments: { task, attempt: 1, acknowledgeWatch: "too short" } } },
+        { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: acceptTool, arguments: { task, attempt: 1, acknowledgeWatch: `verified ${task} manually` } } },
+      ],
+    });
+    const r1 = res[0].result as { isError?: boolean; content: Array<{ text: string }> };
+    const r2 = res[1].result as { isError?: boolean; content: Array<{ text: string }> };
+    const r3 = res[2].result as { isError?: boolean; content: Array<{ text: string }> };
+    assert.equal(r1.isError, true);
+    assert.match(r1.content[0].text, /^watch-soft-blocked:/);
+    assert.equal(r2.isError, true);
+    assert.match(r2.content[0].text, /^watch-soft-blocked:/);
+    assert.notEqual(r3.isError, true, r3.content[0].text);
+    const acc = projectFactory.ledger.eventsFor(task).findLast((e) => e.event === "attempt_accepted");
+    assert.equal(acc?.watchAck, `verified ${task} manually`);
   }
 });

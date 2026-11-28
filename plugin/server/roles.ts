@@ -34,6 +34,7 @@ import {
   renderSeatBootstrapPrompt,
 } from "./core/roles-contract.ts";
 import type { ProjectIdentity, RoleName, SeatBootstrapInput, SeatName } from "./core/roles-contract.ts";
+import type { PeerDisposition } from "./core/events.ts";
 import { ensureProjectRegistered, listProjectRegistrations, readProjectRegistration, writeProjectRegistration } from "./projects.ts";
 import { parseTaskWorktreePath } from "../shared/worktree-shape.mjs";
 
@@ -74,8 +75,13 @@ export function renderSeatContract(
 }
 
 /** The working Agent's law — appended to its task-worktree agent's system prompt. */
-export function renderAgentContract(task: string, slug: string): string {
-  return renderRoleContract("agent", { factoryCmd: "factory", project: { root: "", slug }, task });
+export function renderAgentContract(task: string, slug: string, disposition?: PeerDisposition): string {
+  return renderRoleContract("agent", {
+    factoryCmd: "factory",
+    project: { root: "", slug },
+    task,
+    ...(disposition !== undefined ? { disposition } : {}),
+  });
 }
 
 // ---- the bootstrap orientation (the initial-prompt channel) --------------------------------
@@ -138,7 +144,7 @@ function peerSkillContext(stateDir: string, projectSlug: string, task?: string, 
   const contract = task && read?.events ? projectTask(read.events, task).contract : undefined;
   const configuredPacks = readProjectSettings(stateDir, projectSlug).skillPacks;
   const context = { stateDir, projectRoot: root, userHome, configuredPacks, contractSkills: contract?.skills };
-  return { ...context, skills: resolveRoleSkillsForProject({ ...context, role: "peer" }) };
+  return { ...context, contract, skills: resolveRoleSkillsForProject({ ...context, role: "peer" }) };
 }
 
 // ---- the PASEO_FACTORY_* env channel -------------------------------------------------------
@@ -725,6 +731,16 @@ export function injectRoleOnCreate<R extends AgentCreateRequest>(
             projectSlug: target.promptProject.slug,
           })
         : undefined;
+    const agentDisposition =
+      !isLiveContract && target.role === "agent"
+        ? (peerSkillContext(
+            stateDir,
+            target.promptProject.slug,
+            target.task,
+            userHome,
+            target.promptProject.root,
+          ).contract?.disposition ?? "engineer")
+        : undefined;
     const fencedConfig = applyProviderExecutionFence(
       {
         ...request.config,
@@ -740,6 +756,7 @@ export function injectRoleOnCreate<R extends AgentCreateRequest>(
                   project: target.promptProject,
                   helperMcps: discoverHelperMcps({ stateDir, userHome }).servers,
                   ...(storeRelease !== undefined ? { storeRelease } : {}),
+                  ...(agentDisposition !== undefined ? { disposition: agentDisposition } : {}),
                 }),
               ),
             }),
@@ -825,7 +842,18 @@ function appendContract(existing: string | undefined, contract: string): string 
   let prefix = existing ?? "";
   const markers = [ROLE_CONTEXT_MARK];
   // Compatibility with prompts injected before the explicit start marker.
-  if (prefix.includes(FOOTER_MARK)) markers.push("You are the Supervisor seat of the paseo-factory", "You are the Lead seat of the paseo-factory", "You are a working Agent of the paseo-factory", "You are a Peer of the paseo-factory", "You are an independent engineer");
+  if (prefix.includes(FOOTER_MARK)) markers.push(
+    "## 1. Role & Core Goal\n",
+    "You are the Supervisor seat of the paseo-factory",
+    "You are the Lead seat of the paseo-factory",
+    "You are a working Agent of the paseo-factory",
+    "You are a Peer of the paseo-factory",
+    "You are an independent Peer",
+    "You are an independent engineer",
+    "You are an independent scout",
+    "You are an independent architect",
+    "You are an independent reviewer",
+  );
   const starts = markers.map(marker => prefix.indexOf(marker)).filter(index => index >= 0);
   if (starts.length) prefix = prefix.slice(0, Math.min(...starts)).trimEnd();
   return `${prefix ? prefix + "\n\n" : ""}${ROLE_CONTEXT_MARK}\n${contract}`;
@@ -972,22 +1000,21 @@ function renderLiveRoleContract(
           projectSlug: input.project.slug,
         })
       : undefined;
+  const peerContext =
+    role === "agent"
+      ? peerSkillContext(input.stateDir, input.project.slug, input.task, input.userHome, input.project.root)
+      : undefined;
+  const disposition = peerContext !== undefined ? (peerContext.contract?.disposition ?? "engineer") : undefined;
   const basePrompt = buildRoleKickoffPrompt(role, {
     factoryCmd: "factory",
     project: input.project,
     ...(input.task !== undefined ? { task: input.task } : {}),
     helperMcps,
     ...(storeRelease !== undefined ? { storeRelease } : {}),
+    ...(disposition !== undefined ? { disposition } : {}),
   });
-  if (role !== "agent") return basePrompt;
-  const peerSkills = peerSkillContext(
-    input.stateDir,
-    input.project.slug,
-    input.task,
-    input.userHome,
-    input.project.root,
-  ).skills;
-  return `${basePrompt}\n\n${renderPeerSkillScope(peerSkills)}`;
+  if (peerContext === undefined) return basePrompt;
+  return `${basePrompt}\n\n${renderPeerSkillScope(peerContext.skills)}`;
 }
 
 /**

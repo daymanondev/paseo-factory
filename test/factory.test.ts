@@ -2356,3 +2356,75 @@ test("gate_queued projects as open/running, blocks double-claim, skips recoverIn
     assert.equal(replay.outcome.verdict, "green");
   }
 });
+
+test("R2 Disposition Transition Fence blocks changing disposition with a live Peer unless resetPeer: true, and never persists input-only flags", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const workspace = join(dir, "repo");
+  mkdirSync(workspace, { recursive: true });
+  writeFileSync(join(workspace, "app.txt"), "base\n");
+  const baseSha = gitCommitAll(workspace, "init");
+  const factory = createFactory({ stateDir: join(dir, "state") });
+
+  factory.setContract({ task: "FENCE-1", workspace, gate: "", disposition: "scout" });
+
+  // 1. Read-only -> writable and read-only -> read-only are blocked when hasLivePeer: true and resetPeer !== true.
+  for (const next of [{ disposition: "engineer" as const, gate: "true" }, { disposition: "architect" as const, gate: "" }, { disposition: "reviewer" as const, gate: "" }]) {
+    assert.throws(
+      () => factory.setContract({ task: "FENCE-1", workspace, gate: next.gate, disposition: next.disposition, hasLivePeer: true }),
+      (err: unknown) => err instanceof FactoryError && err.code === "invalid-contract" && /resetPeer: true/.test(err.message),
+    );
+  }
+  assert.equal(factory.ledger.eventsFor("FENCE-1").filter((e) => e.event === "contract_set").length, 1);
+
+  // 2. Same disposition succeeds even with hasLivePeer: true and resetPeer omitted.
+  const sameEvt = factory.setContract({ task: "FENCE-1", workspace, gate: "", disposition: "scout", description: "Updated brief", hasLivePeer: true });
+  assert.equal(sameEvt.disposition, "scout");
+  assert.equal("hasLivePeer" in sameEvt, false);
+  assert.equal("resetPeer" in sameEvt, false);
+
+  // 3. No live Peer (hasLivePeer omitted / false) allows disposition transitions freely.
+  factory.setContract({ task: "FENCE-1", workspace, gate: "true" }); // omitted disposition === "engineer"
+  // Omitted <-> explicit "engineer" counts as the same disposition even with hasLivePeer: true.
+  const sameEng = factory.setContract({ task: "FENCE-1", workspace, gate: "true", disposition: "engineer", hasLivePeer: true });
+  assert.equal(sameEng.disposition, "engineer");
+
+  // 4. Writable -> read-only is blocked with hasLivePeer: true unless resetPeer: true.
+  assert.throws(
+    () => factory.setContract({ task: "FENCE-1", workspace, gate: "", disposition: "reviewer", hasLivePeer: true, resetPeer: false }),
+    factoryErrorCode("invalid-contract"),
+  );
+  const resetEvt = factory.setContract({ task: "FENCE-1", workspace, gate: "", disposition: "reviewer", hasLivePeer: true, resetPeer: true });
+  assert.equal(resetEvt.disposition, "reviewer");
+  assert.equal("hasLivePeer" in resetEvt, false);
+  assert.equal("resetPeer" in resetEvt, false);
+
+  // 5. Precedence: gate-in-flight, already-accepted, and already-closed take precedence over the fence.
+  const admitted = await factory.admitClaim({
+    task: "FENCE-1",
+    sha: baseSha,
+    handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" },
+  });
+  assert.equal(admitted.status, "executed");
+  assert.equal(admitted.outcome.verdict, "green");
+  await factory.accept({ task: "FENCE-1", attempt: 1 });
+  assert.throws(
+    () => factory.setContract({ task: "FENCE-1", workspace, gate: "true", disposition: "engineer", hasLivePeer: true }),
+    factoryErrorCode("already-accepted"),
+  );
+
+  factory.setContract({ task: "FENCE-INFLIGHT", workspace, gate: "true", disposition: "engineer" });
+  factory.ledger.append({ event: "claim_reported", task: "FENCE-INFLIGHT", attempt: 1, sha: baseSha });
+  factory.ledger.append({ event: "gate_started", task: "FENCE-INFLIGHT", attempt: 1, cmd: "true" });
+  assert.throws(
+    () => factory.setContract({ task: "FENCE-INFLIGHT", workspace, gate: "", disposition: "scout", hasLivePeer: true }),
+    factoryErrorCode("gate-in-flight"),
+  );
+
+  factory.setContract({ task: "FENCE-CLOSED", workspace, gate: "", disposition: "scout" });
+  await factory.close({ task: "FENCE-CLOSED", reason: "retired" });
+  assert.throws(
+    () => factory.setContract({ task: "FENCE-CLOSED", workspace, gate: "true", disposition: "engineer", hasLivePeer: true }),
+    factoryErrorCode("already-closed"),
+  );
+});

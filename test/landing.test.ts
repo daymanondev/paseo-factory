@@ -192,3 +192,60 @@ test("large untracked .factory-dependencies-* staging trees do not overflow or b
   assert.equal((await factory.claim({ task, sha: claimed, handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } })).verdict, "green");
   assert.equal((await factory.accept({ task, attempt: 1 })).landing, "landed");
 });
+
+test("R5 pending-conflict retry preserves valid watchAck from priorAccept and rejects explicit invalid acknowledgeWatch", async (t) => {
+  const dir = makeTempDir("factory-landing-watch-ack-");
+  disposeDir(t, dir);
+  const workspace = join(dir, "repo");
+  mkdirSync(workspace);
+  writeFileSync(join(workspace, "app.txt"), "before\n");
+  writeFileSync(join(workspace, "package.json"), '{"name":"landing-watch-ack"}\n');
+  const base = gitCommitAll(workspace);
+  const task = "LAND-WATCH";
+  const worktree = join(dir, "worktree");
+  execFileSync("git", ["worktree", "add", "-b", `factory/${task}`, worktree, base], { cwd: workspace, stdio: "pipe" });
+
+  const factory = createFactory({
+    stateDir: join(dir, "state"),
+    fetchTimeline: async () => ({
+      ok: true,
+      entries: [{ seq: 1, item: { type: "assistant_message", text: "checked" } }],
+    }),
+    watchCopilotProbe: () => true,
+    watchCopilotRunner: async () => ({
+      code: 0,
+      stdout: [
+        "destructive-writes: 0",
+        "test-weakened: 0.85",
+        "stuck-loop: 0",
+        "scope-creep: 0",
+        "secret-leak: 0",
+      ].join("\n"),
+      stderr: "",
+      timedOut: false,
+    }),
+  });
+  factory.setContract({ task, workspace, gate: "true", artifact: "app.txt", watch: true });
+  assert.equal(factory.requestSpawn({ task, provider: "claude", arity: 1, worktree }).outcome, "dispatched");
+  writeFileSync(join(worktree, "app.txt"), "after\n");
+  const claimed = gitCommitChanges(worktree, "implement application");
+  const outcome = await factory.claim({ task, sha: claimed, agent: "peer-1", handoff: { outcome: "complete", scope: "s", verification: "v", unknowns: "n" } });
+  assert.equal(outcome.verdict, "green");
+
+  // Dirty root triggers pending-conflict, and Watch soft-blocks until acknowledged.
+  writeFileSync(join(workspace, "owner.txt"), "owner edit\n");
+  await assert.rejects(() => factory.accept({ task, attempt: 1 }), factoryErrorCode("watch-soft-blocked"));
+
+  const first = await factory.accept({ task, attempt: 1, acknowledgeWatch: "inspected test diff; safe" });
+  assert.equal(first.landing, "pending-conflict");
+  assert.equal(first.watchAck, "inspected test diff; safe");
+
+  // Explicit invalid acknowledgeWatch on retry is rejected rather than silently falling back.
+  await assert.rejects(() => factory.accept({ task, attempt: 1, acknowledgeWatch: "short" }), factoryErrorCode("watch-soft-blocked"));
+
+  // Clean root and omit acknowledgeWatch on retry: priorAccept.watchAck is preserved!
+  rmSync(join(workspace, "owner.txt"));
+  const retried = await factory.accept({ task, attempt: 1 });
+  assert.equal(retried.landing, "landed");
+  assert.equal(retried.watchAck, "inspected test diff; safe");
+});

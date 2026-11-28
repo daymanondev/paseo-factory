@@ -59,6 +59,11 @@ export const sharedTools: Record<string, ToolDefinition> = {
       properties: {
         task: { type: "string", description: "Task ID to accept." },
         attempt: { type: "number", description: "1-indexed Attempt number to accept." },
+        acknowledgeWatch: {
+          type: "string",
+          description:
+            "Optional Watch soft-block acknowledgement reason (>= 10 non-whitespace chars) required when Watch flagged `test-weakened >= 0.5` or `secret-leak >= 0.5` (ADR 0074).",
+        },
         workspace: { type: "string", description: "Optional Project root path." },
       },
       required: ["task", "attempt"],
@@ -146,6 +151,11 @@ export const sharedTools: Record<string, ToolDefinition> = {
       properties: {
         task: { type: "string", description: "Task ID to accept." },
         attempt: { type: "number", description: "1-indexed Attempt number to accept." },
+        acknowledgeWatch: {
+          type: "string",
+          description:
+            "Optional Watch soft-block acknowledgement reason (>= 10 non-whitespace chars) required when Watch flagged `test-weakened >= 0.5` or `secret-leak >= 0.5` (ADR 0074).",
+        },
         workspace: { type: "string", description: "Optional Project root path." },
       },
       required: ["task", "attempt"],
@@ -496,14 +506,15 @@ export const sharedTools: Record<string, ToolDefinition> = {
 
 
 export const sharedRoles = {
-  supervisor: ["supervisor_accept_task", "supervisor_dispatch_lead", "supervisor_read_ledger", "supervisor_record_store_note", "supervisor_inspect_factory", "supervisor_setup_factory", "supervisor_end_cycle", "lead_close_task", "lead_retire_task"],
-  lead: ["lead_reply_peer", "lead_needs_human", "lead_create_worktree", "lead_set_contract", "lead_dispatch_agent", "lead_verify", "lead_merge", "lead_remove_worktree", "lead_release", "lead_store_release", "lead_record_store_note", "lead_report_to_supervisor", "lead_close_task", "lead_retire_task", "lead_update_notebook", "lead_read_ledger"],
+  supervisor: ["supervisor_accept_task", "supervisor_dispatch_lead", "supervisor_read_ledger", "supervisor_record_store_note", "supervisor_inspect_factory", "supervisor_setup_factory", "supervisor_end_cycle"],
+  lead: ["lead_reply_peer", "lead_needs_human", "lead_set_contract", "lead_dispatch_agent", "lead_verify", "lead_merge", "lead_release", "lead_store_release", "lead_record_store_note", "lead_report_to_supervisor", "lead_close_task", "lead_update_notebook", "lead_read_ledger"],
   agent: ["agent_claim", "agent_ask"],
   unbound: ["factory_dispatch_supervisor", "factory_status"],
 };
 
 export const LEGACY_ROLE_TOOL_ALIASES: Record<string, readonly string[]> = {
-  lead: ["lead_repoke_agent"],
+  supervisor: ["lead_close_task", "lead_retire_task"],
+  lead: ["lead_repoke_agent", "lead_retire_task", "lead_create_worktree", "lead_remove_worktree"],
   agent: ["agent_escalate_blocker"],
 };
 sharedTools.supervisor_read_ledger = { ...sharedTools.factory_status, name: "supervisor_read_ledger" };

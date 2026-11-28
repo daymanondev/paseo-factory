@@ -41,7 +41,7 @@ import { isValidContractTimeoutSeconds } from "./core/constants.ts";
 import { usageIsValid } from "./core/ledger.ts";
 import { isReadOnlyPeerDisposition, MAX_ATTEMPTS, needsHumanEvidenceIsValid, NEEDS_HUMAN_REASONS, PEER_ASK_KINDS, PEER_ASK_LAYERS, PEER_ASK_SOURCES, PEER_DISPOSITIONS, PEER_HANDOFF_OUTCOMES, STORE_RELEASE_ACTIONS } from "./core/events.ts";
 import type { StoreReleaseAction } from "./core/events.ts";
-import { activeContractSnapshot, formatReopenIfBlock, PEER_PREMISE_CHECK_REMINDER, repokeCompletionFooter } from "./core/disposition-prompt.ts";
+import { activeContractSnapshot, formatReopenIfBlock, PEER_PREMISE_CHECK_REMINDER, renderPeerDispositionGuidance, repokeCompletionFooter } from "./core/disposition-prompt.ts";
 import { projectTask } from "./core/task-state.ts";
 import { handoffLines } from "./core/report.ts";
 import type { ClaimOutcome, Factory } from "./core/factory.ts";
@@ -208,6 +208,8 @@ export interface AcceptRequest {
   seat?: SpoolSeat;
   /** Explicit target Project slug (v0.0.89) — the CLI's `--project <slug>` flag. */
   projectSlug?: string;
+  /** Optional Watch soft-block acknowledgement reason (>= 10 non-whitespace chars; ADR 0074). */
+  acknowledgeWatch?: string;
 }
 
 /**
@@ -990,12 +992,14 @@ export function parseSpoolRequest(body: unknown): SpoolRequest | undefined {
     // identity is part of the act (ADR 0006).
     if (typeof req.submitter !== "string" || req.submitter.trim() === "") return undefined;
     if (req.by !== undefined && req.by !== "owner" && req.by !== "supervisor" && req.by !== "lead") return undefined;
+    if (req.acknowledgeWatch !== undefined && typeof req.acknowledgeWatch !== "string") return undefined;
     return {
       id: req.id,
       kind: "accept",
       task: req.task,
       attempt: req.attempt,
       ...(req.by === undefined ? {} : { by: req.by }),
+      ...(req.acknowledgeWatch === undefined ? {} : { acknowledgeWatch: req.acknowledgeWatch }),
       submitter: req.submitter,
       ...seatField,
       ...projectSlugField,
@@ -1797,7 +1801,19 @@ export async function createTaskPeer(input: {
   const targetCwd = request.worktree ?? contract?.workspace ?? "";
   const proj = contract !== undefined ? resolveProject(contract.workspace) : undefined;
   const peerSkills = resolveRoleSkillsForProject({ stateDir: factory.stateDir, role: "peer", projectRoot: contract?.workspace, configuredPacks: proj?.ok ? readProjectSettings(factory.stateDir, proj.slug).skillPacks : undefined, contractSkills: contract?.skills });
-  const effectivePrompt = `${requestedPrompt}\n\n${renderPeerSkillScope(peerSkills)}`;
+  let promptBody = requestedPrompt;
+  if (contract !== undefined && !promptBody.includes("Disposition guidance (")) {
+    const guidance = renderPeerDispositionGuidance(contract.disposition);
+    const reminderIndex = promptBody.lastIndexOf(PEER_PREMISE_CHECK_REMINDER);
+    if (reminderIndex !== -1) {
+      const before = promptBody.slice(0, reminderIndex).trimEnd();
+      const after = promptBody.slice(reminderIndex);
+      promptBody = before === "" ? `${guidance}\n\n${after}` : `${before}\n\n${guidance}\n\n${after}`;
+    } else {
+      promptBody = `${promptBody.trimEnd()}\n\n${guidance}`;
+    }
+  }
+  const effectivePrompt = `${promptBody}\n\n${renderPeerSkillScope(peerSkills)}`;
   const peerTitle = formatPeerAgentTitle(request.task);
   const labels: Record<string, string> = {
     ...extraLabels,
@@ -2770,6 +2786,7 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
       // taskPeers can never be overwritten or killed; zero awaits intervene
       // between this check, setContract, and queued-only dequeue in cancelMatching.
       if (hasRunningTaskGate()) return gateInFlightReply();
+      const hasLivePeer = previousPeers.some((peer) => peer.status !== "error");
       const contractEvt = factory.setContract({
         task: request.task,
         workspace: request.workspace,
@@ -2788,6 +2805,8 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
         ...(request.reopenConditions === undefined ? {} : { reopenConditions: request.reopenConditions }),
         ...(request.disposition === undefined ? {} : { disposition: request.disposition }),
         ...(request.timeoutSeconds === undefined ? {} : { timeoutSeconds: request.timeoutSeconds }),
+        ...(hasLivePeer ? { hasLivePeer: true } : {}),
+        ...(request.resetPeer === true ? { resetPeer: true } : {}),
         by: request.submitter,
         ...(effectiveSeat === undefined ? {} : { seat: effectiveSeat }),
       });
@@ -3432,10 +3451,16 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
           if (contract.description !== undefined && contract.description.trim() !== "") {
             enriched.push(`Task (${request.task}): ${contract.description.trim()}`);
           }
+          if (isReadOnlyPeerDisposition(contract.disposition) && !effectivePrompt.includes(`Disposition: ${contract.disposition}`)) {
+            enriched.push(`Disposition: ${contract.disposition}`);
+          }
           if (contract.scope !== undefined && contract.scope.length > 0) {
             enriched.push(`Allowed scope: ${contract.scope.join(", ")}`);
           }
           enriched.push(effectivePrompt);
+          if (!effectivePrompt.includes("Disposition guidance (")) {
+            enriched.push(renderPeerDispositionGuidance(contract.disposition));
+          }
           const reopenBlock = formatReopenIfBlock(contract.reopenConditions);
           if (reopenBlock !== "" && !effectivePrompt.includes(reopenBlock) && !effectivePrompt.includes("Reopen if:")) {
             enriched.push(reopenBlock);
@@ -3977,7 +4002,16 @@ async function handleAdmittedSpoolRequest(factory: Factory, request: SpoolReques
       }
     }
     const acceptedBy = request.by ?? request.submitter;
-    const accepted = await executeAcceptance(factory, { task: request.task, attempt: request.attempt, accepted_by: acceptedBy }, { authority: effectiveSeat ?? (request.by === "lead" ? "lead" : "owner"), daemon: resolvedDaemon, home });
+    const accepted = await executeAcceptance(
+      factory,
+      {
+        task: request.task,
+        attempt: request.attempt,
+        accepted_by: acceptedBy,
+        ...(request.acknowledgeWatch === undefined ? {} : { acknowledgeWatch: request.acknowledgeWatch }),
+      },
+      { authority: effectiveSeat ?? (request.by === "lead" ? "lead" : "owner"), daemon: resolvedDaemon, home },
+    );
     // The acceptance is a terminal Task boundary too (v0.0.87, ADR 0043 §3):
     // the accepted attempt's Peer gets its final flush and — when tokens
     // grew past its Gate-boundary line — the one closing `meter_written`.

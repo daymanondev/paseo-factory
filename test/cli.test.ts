@@ -1657,3 +1657,100 @@ test("factory gate-queue CLI manages concurrency, pause/resume, status, and enfo
   assert.equal(leadRefused.status, 2);
   assert.match(leadRefused.stderr, /seat-cannot-gate-queue/i);
 });
+
+test("R5 factory accept --ack-watch unblocks Watch soft-block and R2 factory contract --reset-peer resets live Peer across CLI", async (t) => {
+  const dir = makeTempDir();
+  disposeDir(t, dir);
+  const workspace = join(dir, "workspace");
+  copyFixture("sample-workspace", workspace);
+  gitCommitAll(workspace);
+  const home = join(dir, "paseo-home");
+  const stateDir = join(home, "plugin-state", "paseo-factory");
+
+  const factory = createFactory({
+    stateDir,
+    fetchTimeline: async () => ({ ok: true, entries: [{ seq: 1, item: { type: "assistant_message", text: "checked" } }] }),
+    watchCopilotProbe: () => true,
+    watchCopilotRunner: async () => ({
+      code: 0,
+      stdout: "destructive-writes: 0\ntest-weakened: 0\nstuck-loop: 0\nscope-creep: 0\nsecret-leak: 0.75",
+      stderr: "",
+      timedOut: false,
+    }),
+  });
+  const liveAgents: Array<{ id: string; status: string; archivedAt: string | null; cwd: string; labels: Record<string, string> }> = [
+    { id: "peer-cli-1", status: "idle", archivedAt: null, cwd: workspace, labels: { task: "CLI-FENCE", seat: "agent" } },
+  ];
+  const stopped: string[] = [];
+  const fakeDaemon = {
+    agents: {
+      list: async () => ({ entries: liveAgents.filter((a) => a.archivedAt === null).map((agent) => ({ agent })) }),
+      ref: (id: string) => ({
+        send: async () => ({ messageId: "m1" }),
+        cancel: async () => {},
+        archive: async () => {
+          const hit = liveAgents.find((a) => a.id === id);
+          if (hit) hit.archivedAt = new Date().toISOString();
+          return { archivedAt: hit?.archivedAt ?? null };
+        },
+      }),
+    },
+  };
+  const spool = startSpool(stateDir, factory, {
+    pollMs: 15,
+    home,
+    daemon: fakeDaemon as never,
+    stopAgent: async (id) => {
+      stopped.push(id);
+      return { ok: true };
+    },
+  });
+  t.after(() => spool.stop());
+
+  const ownerEnv = { PASEO_HOME: home };
+  const agentEnv = { FACTORY_STATE_DIR: stateDir, PASEO_AGENT_ID: "agent-cli-watch" };
+
+  // 1. R5 CLI accept --ack-watch
+  const cRes = await run(ownerCli, ["contract", "--task", "CLI-WATCH", "--workspace", workspace, "--gate", "true", "--artifact", "README.md", "--watch"], ownerEnv);
+  assert.equal(cRes.status, 0, cRes.stderr);
+  writeFileSync(join(workspace, "README.md"), "updated for watch\n");
+  const sha = gitCommitAll(workspace, "cli watch change");
+  const claimRes = await run(claimCli, ["--task", "CLI-WATCH", "--sha", sha, "--outcome", "complete", "--scope", "README.md", "--verification", "true", "--unknowns", "none"], agentEnv);
+  assert.equal(claimRes.status, 0, claimRes.stderr);
+  await until(() => {
+    assert.ok(factory.ledger.eventsFor("CLI-WATCH").some((e) => e.event === "report_written" && e.attempt === 1));
+  });
+
+  const blocked = await run(ownerCli, ["accept", "CLI-WATCH", "--attempt", "1"], ownerEnv);
+  assert.equal(blocked.status, 2);
+  assert.match(blocked.stderr, /factory: watch-soft-blocked:/);
+
+  const shortAck = await run(ownerCli, ["accept", "CLI-WATCH", "--attempt", "1", "--ack-watch", "short"], ownerEnv);
+  assert.equal(shortAck.status, 2);
+  assert.match(shortAck.stderr, /factory: watch-soft-blocked:/);
+
+  const okAck = await run(ownerCli, ["accept", "CLI-WATCH", "--attempt", "1", "--ack-watch", "verified dummy token only"], ownerEnv);
+  assert.equal(okAck.status, 0, okAck.stderr);
+  const accEvt = factory.ledger.eventsFor("CLI-WATCH").findLast((e) => e.event === "attempt_accepted");
+  assert.equal(accEvt?.watchAck, "verified dummy token only");
+
+  // 2. R2 CLI contract --reset-peer
+  const ws2 = join(dir, "workspace2");
+  copyFixture("sample-workspace", ws2);
+  gitCommitAll(ws2);
+  const { resolveProject: resolveCoreProject, writeProjectRegistration } = await import("../plugin/server/core/project.ts");
+  const reg2 = resolveCoreProject(ws2);
+  assert.ok(reg2.ok);
+  writeProjectRegistration(stateDir, reg2.slug, { root: reg2.root });
+  const f1 = await run(ownerCli, ["contract", "--task", "CLI-FENCE", "--workspace", ws2, "--disposition", "scout"], ownerEnv);
+  assert.equal(f1.status, 0, f1.stderr);
+  liveAgents[0]!.cwd = ws2;
+  liveAgents[0]!.labels = { task: "CLI-FENCE", project: reg2.slug };
+  const fBlocked = await run(ownerCli, ["contract", "--task", "CLI-FENCE", "--workspace", ws2, "--gate", "true", "--disposition", "engineer"], ownerEnv);
+  assert.equal(fBlocked.status, 2);
+  assert.match(fBlocked.stderr, /factory: invalid-contract:/);
+  assert.deepEqual(stopped, []);
+  const fReset = await run(ownerCli, ["contract", "--task", "CLI-FENCE", "--workspace", ws2, "--gate", "true", "--disposition", "engineer", "--reset-peer"], ownerEnv);
+  assert.equal(fReset.status, 0, fReset.stderr);
+  assert.deepEqual(stopped, ["peer-cli-1"]);
+});

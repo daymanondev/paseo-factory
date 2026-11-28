@@ -1,14 +1,18 @@
 import {
   DEFAULT_CONTRACT_TIMEOUT_SECONDS,
   isValidContractTimeoutSeconds,
+  isValidWatchAck,
   MAX_CONTRACT_TIMEOUT_SECONDS,
   MIN_CONTRACT_TIMEOUT_SECONDS,
+  WATCH_ACK_MIN_CHARS,
 } from "./constants.ts";
 export {
   DEFAULT_CONTRACT_TIMEOUT_SECONDS,
   isValidContractTimeoutSeconds,
+  isValidWatchAck,
   MAX_CONTRACT_TIMEOUT_SECONDS,
   MIN_CONTRACT_TIMEOUT_SECONDS,
+  WATCH_ACK_MIN_CHARS,
 };
 import {
   eventAllowsUnboundEpoch,
@@ -426,7 +430,7 @@ function v2PayloadIsValid(event: Record<string, unknown>): boolean {
       return event.outcome !== "failed" || string("error");
     }
     case "report_written": return string("path");
-    case "attempt_accepted": return optionalString("accepted_by") && optionalString("landingNote") && (event.landing === undefined || event.landing === "landed" || event.landing === "pending-conflict");
+    case "attempt_accepted": return optionalString("accepted_by") && optionalString("landingNote") && (event.landing === undefined || event.landing === "landed" || event.landing === "pending-conflict") && (event.watchAck === undefined || isValidWatchAck(event.watchAck));
     case "task_closed": return string("reason") && optionalString("closed_by");
     case "permit_allowed": case "permit_denied": return string("name") && string("kind") && optionalString("command") && (event.event !== "permit_denied" || string("reason"));
     case "git_blocked": return string("reason");

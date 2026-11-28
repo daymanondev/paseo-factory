@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.28.0] - 2026-11-28
+
+**Front-loaded 5-section role contracts with static UTF-8 byte budgets, disposition-scoped Peer contracts & Disposition Transition Fence, MCP tool-surface hygiene, Contract Gate linter, and Watch soft-block with Ledger `watchAck` (ADR 0074).**
+
+### Added
+
+- **Disposition-scoped `Peer` Contracts & Transition Fence (`src/disposition-prompt.ts`, `src/roles-contract.ts`, `src/pi-home.ts`, `plugin/server/roles.ts`, `plugin/server/spool.ts`, `plugin/server/peer-handoff.ts`, `src/factory.ts`):** Split `Peer` contracts into a compact disposition-neutral Pi `APPEND_SYSTEM.md` plus active disposition modules (`engineer` | `scout` | `architect` | `reviewer`) resolved via `agent.open.before` and Task kickoff/handoff; added the Disposition Transition Fence requiring `resetPeer: true` to switch `disposition` while a live Peer is bound (`test/role-budgets-and-disposition.test.ts`).
+- **Contract Gate Linter (`src/factory.ts`):** Enforced non-empty bodies under all 4 Brief sections (`"None"` allowed for `3. Excluded / Deferred`) and rejected raw `git diff --exit-code` / `git diff --name-only` path-locking segments in `gate` (`invalid-contract`) while preserving repo check scripts (`test/factory.test.ts`, `test/contract-claim-gate.test.ts`).
+- **Watch Soft-Block & Ledger `watchAck` (`src/constants.ts`, `src/events.ts`, `src/ledger-validation.ts`, `src/factory.ts`, `plugin/server/commands.ts`, `plugin/bin/bridge.mjs`, `plugin/bin/factory.mjs`):** Soft-blocked `lead_merge`, `supervisor_accept_task`, and `factory accept` on completed `watch_written` events flagging `test-weakened >= 0.5` or `secret-leak >= 0.5` (never blocking when Watch is off, absent, or `failed`), unblockable with `acknowledgeWatch` / `--ack-watch` (`>= 10` non-whitespace chars) persisted as backward-compatible `watchAck?: string` on `attempt_accepted` (`test/watch.test.ts`, `test/cli.test.ts`, `test/ledger-integrity.test.ts`).
+
+### Changed
+
+- **5-Section Front-Loaded Role Contracts & Static UTF-8 Budgets (`src/roles-contract.ts`, `src/linked-design.ts`):** Restructured `Supervisor` (`<= 6144 B`), `Lead` (`<= 12288 B`), and disposition-scoped `Peer` (`<= 4608 B`) contracts into the 5 front-loaded sections, replaced inline Day-1 CLI flag tables in `renderRoleContract` with a 1-line `factory --help` fallback pointer, and normalized the 4-Line Ratification Card labels to English with Owner-language matching (`test/roles.test.ts`, `test/adr0069-prompts-and-roles.test.ts`, `test/role-budgets-and-disposition.test.ts`).
+- **MCP Tool-Surface Hygiene (`src/mcp/shared.ts`, `plugin/bin/bridge.mjs`):** Moved `lead_retire_task` (both seats), `lead_close_task` (`supervisor` only), and `lead_create_worktree` / `lead_remove_worktree` (`lead`) into `LEGACY_ROLE_TOOL_ALIASES` (hidden from `tools/list`, still callable via `tools/call`; `test/bridge-mcp.test.ts`).
+
+### Documentation
+
+- **ADR 0074 & `CONTEXT.md`:** Added `docs/adr/0074-front-loaded-role-contracts-disposition-scoping-contract-linter-and-watch-soft-block.md` (amending ADRs 0005, 0006, 0015, 0016, 0054, 0069, and 0071) and updated `CONTEXT.md` with **Disposition-scoped role contract**, **Contract Gate linter**, and **Watch soft-block**.
+
 ## [0.27.0] - 2026-11-27
 
 **`Supervisor` as Factory Operator: 3-tier capability provisioning, atomic `Setup Proposal` in `Needs you`, provider-aware live unlock, and single-screen **Quick Start** onboarding (ADR 0073).**

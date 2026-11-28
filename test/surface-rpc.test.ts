@@ -1233,22 +1233,24 @@ function makeProject(t: TestContext, name: string): { root: string; slug: string
 test("roles: the seat contracts carry the role law and the 1-line skill trigger index footer", () => {
   const supervisor = renderSeatContract("supervisor", { root: "/w/repo", slug: "repo-abc123" });
   assert.match(supervisor, /Supervisor seat of the paseo-factory/);
-  assert.match(supervisor, /AGENTS\.md or CONTEXT\.md/);
+  assert.match(supervisor, /AGENTS\.md`\/`CONTEXT\.md/);
+  assert.match(supervisor, /If paseo_factory MCP is absent, use the factory CLI fallback via factory --help\./);
   assert.match(supervisor, /paseo-factory role skills: grilling, domain-modeling$/);
 
   const lead = renderSeatContract("lead", { root: "/w/repo", slug: "repo-abc123" });
   assert.match(lead, /Lead seat of the paseo-factory/);
-  assert.match(lead, /accept --by lead/);
+  assert.match(lead, /lead_merge/);
+  assert.match(lead, /If paseo_factory MCP is absent, use the factory CLI fallback via factory --help\./);
   assert.match(lead, /paseo-factory role skills: codebase-design, domain-modeling, tdd$/);
 
   const agent = renderAgentContract("T1", "repo-abc123");
   assert.match(agent, /task T1, project repo-abc123/);
-  assert.match(agent, /never modify AGENTS\.md, CLAUDE\.md, or CONTEXT\.md/);
+  assert.match(agent, /Never modify `AGENTS\.md`, `CLAUDE\.md`, or `CONTEXT\.md`/);
   // Topology-blind reporting boundary (ADR 0069): names only the Peer's own
-  // reporting tools and forbids external lifecycle/orchestration calls without
+  // reporting tools and forbids external orchestration calls without
   // leaking Owner/Supervisor/Driver/Factory CLI narration.
-  assert.match(agent, /Use only your assigned reporting tools \(`agent_ask` and `agent_claim` \/ `factory-claim`\) inside this worktree/);
-  assert.match(agent, /never invoke external lifecycle or orchestration tools/);
+  assert.match(agent, /Use only assigned reporting tools .*`agent_ask`.*`agent_claim` \/ `factory-claim`.* inside this worktree/);
+  assert.match(agent, /never invoke external orchestration tools/);
   assert.match(agent, /paseo-factory role skills: tdd, diagnosing-bugs, codebase-design$/);
 });
 
@@ -1281,7 +1283,7 @@ test("roles: agent.create injection appends system prompts additively, idempoten
   const seatRequest = injectRoleOnCreate(seatCreate, stateDir, userHome);
   assert.ok(seatRequest !== undefined, "a seat-titled create is injected");
   assert.match(seatRequest.config.systemPrompt!, /paseo-factory role skills: grilling, domain-modeling/);
-  assert.match(seatRequest.config.systemPrompt!, /additive/);
+  assert.match(seatRequest.config.systemPrompt!, /additive/i);
   assert.equal(seatRequest.env?.PASEO_FACTORY_SEAT, "supervisor");
   assert.equal(seatRequest.env?.PASEO_FACTORY_PROJECT, project.slug);
   assert.equal(seatRequest.env?.PASEO_FACTORY_PROJECT_ROOT, project.root);

@@ -95,6 +95,10 @@ function isValidContractTimeoutSeconds(value) {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= MIN_CONTRACT_TIMEOUT_SECONDS && value <= MAX_CONTRACT_TIMEOUT_SECONDS;
 }
 var GATE_OUTPUT_CAP_BYTES = 2 * 1024 * 1024;
+var WATCH_ACK_MIN_CHARS = 10;
+function isValidWatchAck(value) {
+  return typeof value === "string" && value.replace(/\s+/g, "").length >= WATCH_ACK_MIN_CHARS;
+}
 
 // src/peer-thinking.ts
 var PEER_THINKING_LEVELS = ["low", "medium", "high", "xhigh", "max"];
@@ -316,7 +320,7 @@ function v2PayloadIsValid(event) {
     case "report_written":
       return string("path");
     case "attempt_accepted":
-      return optionalString("accepted_by") && optionalString("landingNote") && (event.landing === void 0 || event.landing === "landed" || event.landing === "pending-conflict");
+      return optionalString("accepted_by") && optionalString("landingNote") && (event.landing === void 0 || event.landing === "landed" || event.landing === "pending-conflict") && (event.watchAck === void 0 || isValidWatchAck(event.watchAck));
     case "task_closed":
       return string("reason") && optionalString("closed_by");
     case "permit_allowed":

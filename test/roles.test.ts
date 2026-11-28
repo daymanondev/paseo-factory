@@ -70,24 +70,24 @@ test("src/roles-contract.ts is the single source of truth for Supervisor, Lead, 
   assert.equal(supervisorBootstrap, directBootstrap, "roles.ts renderSeatBootstrap delegates directly to renderSeatBootstrapPrompt");
   assert.equal(ROLE_PROMPTS.supervisor, renderRoleAppendSystem("supervisor"), "pi-home ROLE_PROMPTS.supervisor delegates to roles-contract");
 
-  // Supervisor contract & bootstrap include lead dispatch, status, accept --by supervisor, and the Fire-and-End-Turn law.
-  for (const surface of [supervisorContract, supervisorSeat, supervisorBootstrap, ROLE_PROMPTS.supervisor]) {
-    assert.match(surface, /lead dispatch --workspace "<project-root>" --message "<directive>"/);
-    assert.match(surface, /status/);
-    assert.match(surface, /accept <task> --attempt <n> --by supervisor/);
-    assert.match(
-      surface,
-      /Immediately after running `lead dispatch`, end your turn and wait for Lead to wake you via `factory supervisor report` or `needs_human`\. Never run `sleep`, never poll files, never decompose tasks \(`T-01\.\.`\), and never edit product source code or commit on `<project-root>`\./,
-    );
+  // Supervisor bootstrap retains Day-1 CLI flags; contracts/ROLE_PROMPTS carry MCP tools + 1-line CLI fallback pointer + Fire-and-End-Turn law.
+  for (const surface of [supervisorContract, supervisorSeat, ROLE_PROMPTS.supervisor]) {
+    assert.match(surface, /paseo-factory_supervisor_dispatch_lead/);
+    assert.match(surface, /supervisor_read_ledger/);
+    assert.match(surface, /If paseo_factory MCP is absent, use the factory CLI fallback via factory --help\./);
+    assert.match(surface, /Fire-and-End-Turn Law: After `supervisor_dispatch_lead`, end turn and wait for `lead_report_to_supervisor`\/`needs_human`/);
     assert.match(surface, /paseo-factory role skills: grilling, domain-modeling/);
-    // Supervisor never lists factory contract or factory run.
     assert.doesNotMatch(surface, /contract --task/);
     assert.doesNotMatch(surface, /factory contract/);
     assert.doesNotMatch(surface, /factory run/);
     assert.doesNotMatch(surface, /\brun <task>/);
   }
+  assert.match(supervisorBootstrap, /lead dispatch --workspace "<project-root>" --message "<directive>"/);
+  assert.match(supervisorBootstrap, /accept <task> --attempt <n> --by supervisor/);
+  assert.match(supervisorBootstrap, /paseo-factory role skills: grilling, domain-modeling/);
+  assert.doesNotMatch(supervisorBootstrap, /contract --task/);
 
-  // Lead contract & bootstrap own decomposition, contract, run, intermediate accept --by lead, supervisor report, and Seat write fence.
+  // Lead contract & bootstrap own decomposition, Contracts, dispatch, merge, supervisor report, and Seat write fence.
   const leadContract = renderRoleContract("lead", { factoryCmd: "factory", home: "/h/paseo" });
   const leadSeat = renderSeatContract("lead", { root: "/w/repo", slug: "repo-abc123" });
   const leadBootstrap = renderSeatBootstrap({
@@ -102,17 +102,24 @@ test("src/roles-contract.ts is the single source of truth for Supervisor, Lead, 
   });
   assert.equal(ROLE_PROMPTS.lead, renderRoleAppendSystem("lead"), "pi-home ROLE_PROMPTS.lead delegates to roles-contract");
 
-  for (const surface of [leadContract, leadSeat, leadBootstrap, ROLE_PROMPTS.lead]) {
-    assert.match(surface, /contract --task <id> --workspace <dir> --gate <cmd> \[--artifact <path>\]/);
-    assert.match(surface, /run <task>/);
-    assert.match(surface, /accept <task> --attempt <n> --by lead/);
-    assert.match(surface, /supervisor report --workspace "<project-root>" --message "<summary>"/);
+  for (const surface of [leadContract, leadSeat, ROLE_PROMPTS.lead]) {
+    assert.match(surface, /paseo-factory_lead_set_contract/);
+    assert.match(surface, /paseo-factory_lead_dispatch_agent/);
+    assert.match(surface, /lead_merge/);
+    assert.match(surface, /paseo-factory_lead_report_to_supervisor/);
+    assert.match(surface, /If paseo_factory MCP is absent, use the factory CLI fallback via factory --help\./);
     assert.match(surface, /Seat write fence/);
     assert.match(surface, /never.*product source code.*<project-root>/i);
     assert.match(surface, /paseo-factory role skills: codebase-design, domain-modeling, tdd/);
+    assert.doesNotMatch(surface, /lead_create_worktree/);
   }
+  assert.match(leadBootstrap, /contract --task <id> --workspace <dir> --gate <cmd> \[--artifact <path>\]/);
+  assert.match(leadBootstrap, /run <task>/);
+  assert.match(leadBootstrap, /accept <task> --attempt <n> --by lead/);
+  assert.match(leadBootstrap, /supervisor report --workspace "<project-root>" --message "<summary>"/);
+  assert.doesNotMatch(leadBootstrap, /lead_create_worktree/);
 
-  // Agent contract: works strictly inside assigned Task worktree on branch factory/<task>, runs Gate check, commits, calls factory-claim, ends turn.
+  // Agent contract: works strictly inside assigned Task worktree on branch factory/<task>, calls agent_claim / factory-claim, ends turn.
   const agentContract = renderRoleContract("agent", { factoryCmd: "factory" });
   const agentSeat = renderAgentContract("T-01", "repo-abc123");
   assert.equal(ROLE_PROMPTS.agent, renderRoleAppendSystem("agent"), "pi-home ROLE_PROMPTS.agent delegates to roles-contract");
@@ -129,18 +136,18 @@ test("src/roles-contract.ts is the single source of truth for Supervisor, Lead, 
 test("Supervisor contract diagnoses run failures read-only and dispatches repairs to Lead", () => {
   const contract = renderRoleContract("supervisor");
   assert.match(contract, /Diagnostics & Run-Verification Law:/);
-  assert.match(contract, /Owner reports.*cannot run.*command fails/);
-  assert.match(contract, /read-only.*`ls -la`.*`cat package.json`.*`node_modules\/\.bin`/);
-  assert.match(contract, /Never run package-mutating.*`npm install`.*git-mutating commands/);
-  assert.match(contract, /immediately dispatch.*`supervisor_dispatch_lead`/);
+  assert.match(contract, /On failures, inspect `<project-root>` read-only/);
+  assert.match(contract, /`ls -la`.*`cat package\.json`.*`node_modules\/\.bin`/);
+  assert.match(contract, /without `npm install`\/git mutations/);
+  assert.match(contract, /dispatch evidence via `supervisor_dispatch_lead`/);
 });
 
 test("Lead contracts follow the Outcome & Regression-Gate Law without pre-solving file scopes (ADR 0028)", () => {
   const contract = renderRoleContract("lead");
   assert.match(contract, /Outcome & Regression-Gate Law:/);
-  assert.match(contract, /desired behavioral outcome and regression invariants/);
-  assert.match(contract, /never pre-solve or handcuff which code files the working Agent may touch/);
-  assert.match(contract, /entrypoint integration.*`index\.html`.*`src\/main\.ts`.*AND the repository's existing test\/typecheck\/build suite/);
+  assert.match(contract, /behavioral outcomes and regression invariants/);
+  assert.match(contract, /never pre-solve which files Peer touches/);
+  assert.match(contract, /verifies new behavior \(`index\.html`\/`src\/main\.ts` when applicable\) AND existing test\/typecheck\/build suites/);
 });
 
 test("injectSessionEnv injects PASEO_FACTORY_SEAT=supervisor for normal-chat agentIds recorded in reg.dispatchers at <project-root> (v0.0.24, T-03)", (t) => {
@@ -1384,11 +1391,11 @@ test("role surfaces enforce rolling waves, modular isolated tests, bounded check
       buildSeatKickoffPacket({ role: seat, projectSlug: "repo", projectRoot: root, ledgerEvents: [] })];
     for (const surface of surfaces) {
       assert.match(surface, /monolithic test file/);
-      assert.match(surface, /per.slice test files/);
+      assert.match(surface, /per-slice test files/);
       assert.doesNotMatch(surface, /Godot|Unity|Phaser|playable Hero|Rain of Fire/);
       if (seat === "lead") {
         assert.match(surface, /rolling-wave outline/);
-        assert.match(surface, /Stable Checkpoint.*repository growth.*split/);
+        assert.match(surface, /Stable Checkpoint inspect repo growth and split/);
         assert.match(surface, /T-04a.*T-04b/);
         assert.match(surface, /isolated fixture/);
         assert.match(surface, /timeout/);
@@ -1398,12 +1405,15 @@ test("role surfaces enforce rolling waves, modular isolated tests, bounded check
     }
   }
   for (const surface of [renderRoleContract("agent"), renderAgentContract("T-04", "repo"), ROLE_PROMPTS.agent]) {
-    assert.match(surface, /per.slice test files/);
-    assert.match(surface, /isolated fixture/);
-    assert.match(surface, /explicit timeout/);
     assert.doesNotMatch(surface, /Run the full cumulative Gate before (?:factory-claim|agent_claim)/i);
     assert.match(surface, /agent_claim.*queued|queued.*end your turn/i);
     assert.doesNotMatch(surface, /Godot|Unity|Phaser/);
+  }
+  for (const surface of [renderRoleContract("agent", { disposition: "engineer" }), renderAgentContract("T-04", "repo", "engineer")]) {
+    assert.match(surface, /per-slice test files/);
+    assert.match(surface, /isolated fixture/);
+    assert.match(surface, /explicit timeouts/);
+    assert.match(surface, /never pre-run the full cumulative Gate before `agent_claim`/i);
   }
 });
 
@@ -1414,22 +1424,22 @@ test("Lead role surfaces require vertical user journeys after at most two setup 
   for (const surface of [renderRoleContract("lead"), renderSeatContract("lead", project), ROLE_PROMPTS.lead,
     renderSeatBootstrapPrompt(input), renderSeatBootstrap(input),
     buildSeatKickoffPacket({ role: "lead", projectSlug: project.slug, projectRoot: project.root, ledgerEvents: [] })]) {
-    assert.match(surface, /at most 1–2 foundational setup waves/);
-    assert.match(surface, /T-01.*app shell.*harness.*design tokens.*T-02.*core schema.*repository seam/);
-    assert.match(surface, /T-03\+.*vertical user-facing journey slice.*interactive screen\/UI.*state\/data wiring.*journey test/);
-    assert.match(surface, /Never.*horizontal chains of backend-only micro-waves.*screens.*placeholders/);
-    assert.match(surface, /split.*distinct user journeys or screens.*rather than horizontal data-plumbing layers/);
+    assert.match(surface, /1–2 setup waves/);
+    assert.match(surface, /T-01 shell\/harness\/tokens.*T-02 core schema\/seam/);
+    assert.match(surface, /T-03\+ delivers vertical user-facing journey slices.*interactive UI \+ wiring \+ journey test/);
+    assert.match(surface, /never horizontal backend chains over placeholder screens/);
+    assert.match(surface, /split oversized waves along distinct user journeys\/screens/);
   }
 });
 
 test("Lead briefs preserve implementation freedom with focused journey verification (ADR 0044)", () => {
   for (const surface of [renderRoleContract("lead"), renderSeatContract("lead", { root: "/workspace/repo", slug: "repo" }),
     ROLE_PROMPTS.lead, buildSeatKickoffPacket({ role: "lead", projectSlug: "repo", projectRoot: "/workspace/repo", ledgerEvents: [] })]) {
-    assert.match(surface, /4-Part Brief.*concise/);
+    assert.match(surface, /4-Part Brief: Cap/);
     assert.match(surface, /Bounded Outcome.*Contract Boundary & Regression Invariants.*Excluded \/ Deferred to Later Waves.*Verification.*exact Gate command/);
-    assert.match(surface, /Do not pre-solve internal helper function signatures/);
-    assert.match(surface, /do not mandate 4–6 separate unit-test files per task/);
-    assert.match(surface, /1–2 focused slice\/journey test files suffice unless the repository's existing layout requires otherwise/);
+    assert.match(surface, /never pre-solve signatures/);
+    assert.match(surface, /require 4–6 test files/);
+    assert.match(surface, /1–2 slice\/journey files suffice/);
   }
 });
 
@@ -1457,10 +1467,10 @@ test("buildRoleKickoffPrompt embeds the Open Design Linked Specification exactly
 test("Lead wave laws cap 4-Part Briefs at 2,500 chars and make domain skills Peer-owned (v0.0.97, ADR 0047 Decisions 3–4)", () => {
   const briefLaw = LEAD_WAVE_LAWS.find((law) => law.startsWith("4-Part Brief"))!;
   assert.ok(briefLaw !== undefined, "the 4-Part Brief law exists");
-  assert.match(briefLaw, /Keep every Contract\.description concise — capped at <= 2,500 chars —/);
-  assert.match(briefLaw, /Do not read deep implementation files before contracting to pre-solve internal helper function or prop names/);
-  assert.match(briefLaw, /Peer-Owned Domain Skills: never read \(`cat`\) implementation or framework SKILL\.md files \(expo-\*, eas-\*, firebase-\*, etc\.\) into your own context window/);
-  assert.match(briefLaw, /domain and implementation skills belong to the working Agent \(Peer\), which discovers them natively via <available_skills>/);
+  assert.match(briefLaw, /Cap `Contract\.description` <= 2,500 chars/);
+  assert.match(briefLaw, /never pre-solve signatures/);
+  assert.match(briefLaw, /Peer-Owned Domain Skills: never `cat` framework SKILL\.md/);
+  assert.match(briefLaw, /Peer uses `<available_skills>`/);
 
   // The contract states the Peer-Owned rule as its own law line, and every Lead
   // surface carries the cap and the SKILL.md prohibition.
@@ -1470,9 +1480,9 @@ test("Lead wave laws cap 4-Part Briefs at 2,500 chars and make domain skills Pee
   for (const surface of [renderRoleContract("lead"), renderSeatContract("lead", project), ROLE_PROMPTS.lead,
     renderSeatBootstrapPrompt(input), renderSeatBootstrap(input),
     buildSeatKickoffPacket({ role: "lead", projectSlug: project.slug, projectRoot: project.root, ledgerEvents: [] })]) {
-    assert.match(surface, /Peer-Owned Domain Skills: [Nn]ever read \(`cat`\) implementation or framework SKILL\.md files/);
-    assert.match(surface, /capped at <= 2,500 chars/);
-    assert.match(surface, /discovers them natively via <available_skills>/);
+    assert.match(surface, /Peer-Owned Domain Skills: [Nn]ever `cat` framework SKILL\.md/);
+    assert.match(surface, /<= 2,500 chars/);
+    assert.match(surface, /<available_skills>/);
   }
 });
 
@@ -1480,10 +1490,10 @@ test("Lead closure review reads bounded per-file diffs without REPL middle-trunc
   const closureLaw = LEAD_WAVE_LAWS.find((law) => law.startsWith("Closure & Integration Loop"))!;
   assert.ok(closureLaw !== undefined, "the Closure & Integration Loop law exists");
   // Report and stat come first, then targeted per-file diffs in bounded chunks.
-  assert.match(closureLaw, /read `<projectStateDir>\/report-<task>-<n>\.md` and `git show --stat "<sha>"` first/);
+  assert.match(closureLaw, /read `<projectStateDir>\/report-<task>-<n>\.md`.*`git show --stat "<sha>"`/);
   assert.match(closureLaw, /`git diff "<sha>\^" "<sha>" -- <file>`/);
-  assert.match(closureLaw, /bounded chunks \(<= 6,000 tokens per call\)/);
-  assert.match(closureLaw, /never wrapping multi-file `git diff` or `cat` outputs inside `JSON\.stringify` \(`text\(\{i,\.\.\.r\}\)`\) in a single REPL `exec` call/);
+  assert.match(closureLaw, /<= 6,000-token chunks/);
+  assert.match(closureLaw, /never `JSON\.stringify` \(`text\(\{i,\.\.\.r\}\)`\) over multi-file diffs\/`cat`/);
 
   const project = { root: "/workspace/repo", slug: "repo" };
   const input = { seat: "lead" as const, home: "/trial", stateDir: "/trial/state", nodePath: process.execPath,
@@ -1491,7 +1501,7 @@ test("Lead closure review reads bounded per-file diffs without REPL middle-trunc
   for (const surface of [renderRoleContract("lead"), renderSeatContract("lead", project), ROLE_PROMPTS.lead,
     renderSeatBootstrapPrompt(input), renderSeatBootstrap(input),
     buildSeatKickoffPacket({ role: "lead", projectSlug: project.slug, projectRoot: project.root, ledgerEvents: [] })]) {
-    assert.match(surface, /<= 6,000 tokens per call/);
+    assert.match(surface, /<= 6,000-token chunks/);
     assert.match(surface, /JSON\.stringify/);
     assert.match(surface, /report-<task>-<n>\.md/);
   }
@@ -1506,11 +1516,12 @@ test("the primary lead_set_contract example drops skills curation while the skil
     const example = surface.match(/paseo-factory_lead_set_contract\(\{[^\n]+/)![0];
     assert.ok(!example.includes("skills"), `the primary example carries no skills parameter: ${example}`);
     assert.doesNotMatch(surface, /skills: \["tdd"\]/, "no surface teaches Lead to curate Contract.skills via the example");
-    // Backward compatibility is binding: the optional --skills CLI flag remains.
-    assert.match(surface, /\[--skills <s1,s2>\]/);
+  }
+  for (const bootstrap of [renderSeatBootstrapPrompt(input), renderSeatBootstrap(input)]) {
+    assert.match(bootstrap, /\[--skills <s1,s2>\]/);
   }
   for (const surface of [renderRoleContract("lead"), renderSeatContract("lead", project), ROLE_PROMPTS.lead]) {
-    assert.match(surface, /set each Contract \(gate, description, optional artifact, skills, reopenConditions\)/, "the Contract schema still names skills as an optional field");
+    assert.match(surface, /set Contracts \(gate,description,artifact,skills,reopenConditions\)/, "the Contract schema still names skills as an optional field");
   }
 });
 
@@ -1521,13 +1532,13 @@ test("Lead review accepts genuine contracted GREEN proof without inventing post-
   for (const surface of [renderRoleContract("lead"), renderSeatContract("lead", project), ROLE_PROMPTS.lead,
     renderSeatBootstrapPrompt(input), renderSeatBootstrap(input),
     buildSeatKickoffPacket({ role: "lead", projectSlug: project.slug, projectRoot: project.root, ledgerEvents: [] })]) {
-    assert.match(surface, /Gate.*GREEN.*exit 0.*Watch.*no concern.*< 0\.5/);
-    assert.match(surface, /git show --stat "<sha>".*git diff "<sha>\^" "<sha>".*strictly against the 4-Part Brief/);
-    assert.match(surface, /If the claimed behavior disappeared, would the Peer's test fail\?/);
-    assert.match(surface, /contracted outcome.*no out-of-scope regressions or fake tests.*proof is genuine.*must accept and land immediately/);
-    assert.match(surface, /Never write or execute ad-hoc out-of-band shell\/node\/python scripts.*uncontracted edge cases after a GREEN Gate/);
+    assert.match(surface, /Gate GREEN \(exit 0\) and Watch < 0\.5/);
+    assert.match(surface, /git show --stat "<sha>".*git diff "<sha>\^" "<sha>"/);
+    assert.match(surface, /If claimed behavior disappeared, would test fail\?/);
+    assert.match(surface, /accept GREEN genuine proof via `lead_accept_task`\/`lead_merge`/);
+    assert.match(surface, /never.*`node -e`\/`node <<'JS'`\/`npx tsx -e`\/`python3 -c` probes/);
     for (const example of ["node -e", "node <<'JS'", "npx tsx -e", "python3 -c"]) assert.ok(surface.includes(example));
-    assert.match(surface, /polish.*newly discovered edge case outside.*Contract.*downstream.*after landing.*Stable Checkpoint/);
+    assert.match(surface, /never re-contract for DRYness\/polish/);
   }
 });
 
@@ -1537,13 +1548,13 @@ test("Lead wave laws require a bounded Project notebook at <projectStateDir>/not
 
   // The law itself carries the cap, both fixed section headers with their
   // subsections and table columns, and the audience-separation prohibition.
-  assert.match(notebookLaw, /<= 80 lines \/ <= 4 KB/);
+  assert.match(notebookLaw, /<= 80 lines\/<= 4 KB/);
   assert.match(notebookLaw, /outside `<project-root>`/);
   assert.match(notebookLaw, /## 1\. Verification & Run Recipe/);
   assert.match(notebookLaw, /Worktree & Env Setup.*Fast Slice Check.*Full Cumulative Gate.*Process & Port Cleanup/);
   assert.match(notebookLaw, /## 2\. Recurrence Guard/);
   assert.match(notebookLaw, /\| ID \| Cause → Effect Mechanism \| Evidence \(Task \/ seq\) \| State \| Enforcement \|/);
-  assert.match(notebookLaw, /never write.*Lead-only operational or orchestration recipes into `<project-root>\/AGENTS\.md` or `<project-root>\/CONTEXT\.md`/);
+  assert.match(notebookLaw, /never write `<project-root>\/\.scratch\/notebook\.md` or Lead recipes in `AGENTS\.md`\/`CONTEXT\.md`/);
 
   // Every Lead surface (contract, seat contract, ROLE_PROMPTS, bootstraps,
   // Turn-1 kickoff packet) carries the notebook upkeep obligations.
@@ -1554,10 +1565,10 @@ test("Lead wave laws require a bounded Project notebook at <projectStateDir>/not
     renderSeatBootstrapPrompt(input), renderSeatBootstrap(input),
     buildSeatKickoffPacket({ role: "lead", projectSlug: project.slug, projectRoot: project.root, ledgerEvents: [] })]) {
     assert.match(surface, /<projectStateDir>\/notebook\.md/);
-    assert.match(surface, /<= 80 lines \/ <= 4 KB/);
+    assert.match(surface, /<= 80 lines\/<= 4 KB/);
     assert.match(surface, /## 1\. Verification & Run Recipe/);
     assert.match(surface, /## 2\. Recurrence Guard/);
-    assert.match(surface, /never write.*Lead-only operational or orchestration recipes into `<project-root>\/AGENTS\.md` or `<project-root>\/CONTEXT\.md`/);
+    assert.match(surface, /never write `<project-root>\/\.scratch\/notebook\.md` or Lead recipes in `AGENTS\.md`\/`CONTEXT\.md`/);
   }
 });
 
@@ -1569,10 +1580,10 @@ test("Lead wave laws condense the Project notebook / Recurrence Guard ceremonies
   // recurrence threshold, the one-change cap, mechanical-first preference, and
   // the Owner Ratification path for prose edits.
   assert.match(guardLaw, /Task \(seq N\)/);
-  assert.match(guardLaw, /no permanent rule for a one-off/);
+  assert.match(guardLaw, /no rule for 1x/);
   assert.match(guardLaw, />= 2 distinct seqs/);
-  assert.match(guardLaw, /at most 1 highest-leverage hardening per Stable Checkpoint/);
-  assert.match(guardLaw, /preferring mechanical structure first/);
+  assert.match(guardLaw, /<= 1 hardening per Stable Checkpoint/);
+  assert.match(guardLaw, /mechanical first/);
   assert.match(guardLaw, /4-Line Ratification Card/);
 
   // The bureaucratic state machine and the 3-Tier hierarchy are gone — from the
@@ -1592,7 +1603,7 @@ test("Lead wave laws condense the Project notebook / Recurrence Guard ceremonies
     assert.doesNotMatch(surface, /Tier 2 \(1-Line Repo Convention\)/);
     assert.doesNotMatch(surface, /Tier 3 \(No-Op Rule Deprecation\)/);
     assert.match(surface, /Task \(seq N\)/);
-    assert.match(surface, /at most 1 highest-leverage hardening per Stable Checkpoint/);
+    assert.match(surface, /<= 1 hardening per Stable Checkpoint/);
   }
 });
 
@@ -1608,14 +1619,13 @@ test("Lead wave laws rewrite the Project notebook for the plugin single writer �
   assert.match(guardLaw, /never write `<project-root>\/\.scratch\/notebook\.md`/);
 
   // The row cap and the seatworks 3-rule graduation discipline.
-  assert.match(guardLaw, /<= 12 active Recurrence Guard rows/);
-  assert.match(guardLaw, /Fold rows that share one underlying `Cause → Effect` mechanism/);
-  assert.match(guardLaw, /retire `State: verified` rows once their Tier-1 check or helper has held across 3 subsequent waves/);
-  assert.match(guardLaw, /expire `State: observed \(1x\)` rows that have not recurred within 5 waves/);
+  assert.match(guardLaw, /<= 12 rows/);
+  assert.match(guardLaw, /fold shared mechanisms/);
+  assert.match(guardLaw, /retire `State: verified` after 3 waves/);
+  assert.match(guardLaw, /expire `State: observed \(1x\)` after 5 waves/);
 
   // The Tier-2 quote cap: prose conventions are a 2–3 wave bridge, then Tier-1.
-  assert.match(guardLaw, /at most 2–3 waves/);
-  assert.match(guardLaw, /encode it as Tier-1 mechanical structure/);
+  assert.match(guardLaw, /<= 2–3 waves then Tier-1/);
 
   // Every Lead surface carries the single writer, the row cap, and the graduation.
   const project = { root: "/workspace/repo", slug: "repo" };
@@ -1626,7 +1636,7 @@ test("Lead wave laws rewrite the Project notebook for the plugin single writer �
     buildSeatKickoffPacket({ role: "lead", projectSlug: project.slug, projectRoot: project.root, ledgerEvents: [] })]) {
     assert.match(surface, /lead_update_notebook/);
     assert.match(surface, /\.scratch\/notebook\.md/);
-    assert.match(surface, /<= 12 active Recurrence Guard rows/);
+    assert.match(surface, /<= 12 rows/);
     assert.match(surface, /State: observed \(1x\)/);
     assert.match(surface, /State: verified/);
     assert.match(surface, /strictly project-owned verification\/run facts/);
@@ -1640,12 +1650,11 @@ test("Lead wave laws cap post-split verification tails at 1 combined journey wav
 
   // The verification tail after a context-ceiling split is ONE combined journey
   // wave — happy path and failure/retry recovery together, not a chain.
-  assert.match(boundedLaw, /at most 1 combined journey wave/);
-  assert.match(boundedLaw, /happy path.*failure\/retry recovery.*one concise suite/);
+  assert.match(boundedLaw, /<= 1 combined journey wave/);
+  assert.match(boundedLaw, /happy \+ failure\/retry/);
   // Standalone test-only negative-matrix sub-wave chains are explicitly forbidden.
   assert.match(boundedLaw, /standalone test-only negative-matrix sub-wave chains/);
-  assert.match(boundedLaw, /individual error\/refusal branches with `src\/` frozen/);
-  assert.match(boundedLaw, /refusal behavior of temporary stubs slated for replacement/);
+  assert.match(boundedLaw, /`src\/` frozen or stub refusals/);
   assert.match(boundedLaw, /are forbidden/);
 
   const project = { root: "/workspace/repo", slug: "repo" };
@@ -1654,7 +1663,7 @@ test("Lead wave laws cap post-split verification tails at 1 combined journey wav
   for (const surface of [renderRoleContract("lead"), renderSeatContract("lead", project), ROLE_PROMPTS.lead,
     renderSeatBootstrapPrompt(input), renderSeatBootstrap(input),
     buildSeatKickoffPacket({ role: "lead", projectSlug: project.slug, projectRoot: project.root, ledgerEvents: [] })]) {
-    assert.match(surface, /at most 1 combined journey wave/);
+    assert.match(surface, /<= 1 combined journey wave/);
     assert.match(surface, /test-only negative-matrix sub-wave chains/);
   }
 });
@@ -1666,12 +1675,11 @@ test("Lead wave laws make recurred context-ceiling on a >1,500-line central file
   // Two context-ceiling BLOCKEDs on Tasks touching the same central
   // orchestration / provider / test-fixture file over 1,500 lines mandate the
   // structural decomposition, not more micro-splitting around the monolith.
-  assert.match(boundedLaw, /recurs \(>= 2 times\)/);
-  assert.match(boundedLaw, /same central orchestration, provider, or test-fixture file/);
-  assert.match(boundedLaw, /over 1,500 lines/);
-  assert.match(boundedLaw, /mandatory Wave Hardening action is a bounded module\/fixture extraction wave/);
-  assert.match(boundedLaw, /~200–400 line files/);
-  assert.match(boundedLaw, /rather than further micro-splitting/);
+  assert.match(boundedLaw, />= 2 ceiling BLOCKEDs/);
+  assert.match(boundedLaw, /central file > 1,500 lines/);
+  assert.match(boundedLaw, /Wave Hardening extraction/);
+  assert.match(boundedLaw, /~200–400 line modules/);
+  assert.match(boundedLaw, /instead of micro-splitting/);
 
   const project = { root: "/workspace/repo", slug: "repo" };
   const input = { seat: "lead" as const, home: "/trial", stateDir: "/trial/state", nodePath: process.execPath,
@@ -1679,9 +1687,9 @@ test("Lead wave laws make recurred context-ceiling on a >1,500-line central file
   for (const surface of [renderRoleContract("lead"), renderSeatContract("lead", project), ROLE_PROMPTS.lead,
     renderSeatBootstrapPrompt(input), renderSeatBootstrap(input),
     buildSeatKickoffPacket({ role: "lead", projectSlug: project.slug, projectRoot: project.root, ledgerEvents: [] })]) {
-    assert.match(surface, /over 1,500 lines/);
-    assert.match(surface, /module\/fixture extraction wave/);
-    assert.match(surface, /~200–400 line files/);
+    assert.match(surface, /central file > 1,500 lines/);
+    assert.match(surface, /Wave Hardening extraction/);
+    assert.match(surface, /~200–400 line modules/);
   }
 });
 
@@ -1691,13 +1699,12 @@ test("Lead closure reuses the shared cumulative Gate runner parameterized by the
 
   // Shared Gate runner parameterized by the current slice's test file — no
   // per-task scripts/verify-<task>.mjs minting.
-  assert.match(closureLaw, /reuse the repository's shared cumulative Gate runner parameterized by the current slice's test file/);
+  assert.match(closureLaw, /Reuse shared cumulative Gate runner parameterized by slice test file/);
   assert.match(closureLaw, /scripts\/verify-<task>\.mjs/);
   // Once GREEN + outcome + falsification hold, landing is immediate — test
   // polish alone never re-opens a GREEN wave; structural cleanup defers to
   // Wave Hardening.
-  assert.match(closureLaw, /re-contracting that GREEN wave solely for test-file DRYness, helper deduplication, or redundant zero-call assertions is forbidden/);
-  assert.match(closureLaw, /defer structural test cleanup to Wave Hardening on the next wave/);
+  assert.match(closureLaw, /never re-contract for DRYness\/polish/);
 
   const project = { root: "/workspace/repo", slug: "repo" };
   const input = { seat: "lead" as const, home: "/trial", stateDir: "/trial/state", nodePath: process.execPath,
@@ -1705,9 +1712,9 @@ test("Lead closure reuses the shared cumulative Gate runner parameterized by the
   for (const surface of [renderRoleContract("lead"), renderSeatContract("lead", project), ROLE_PROMPTS.lead,
     renderSeatBootstrapPrompt(input), renderSeatBootstrap(input),
     buildSeatKickoffPacket({ role: "lead", projectSlug: project.slug, projectRoot: project.root, ledgerEvents: [] })]) {
-    assert.match(surface, /shared cumulative Gate runner parameterized by the current slice's test file/);
+    assert.match(surface, /shared cumulative Gate runner parameterized by slice test file/);
     assert.match(surface, /scripts\/verify-<task>\.mjs/);
-    assert.match(surface, /test-file DRYness, helper deduplication, or redundant zero-call assertions is forbidden/);
+    assert.match(surface, /never re-contract for DRYness\/polish/);
   }
 });
 
@@ -1718,21 +1725,21 @@ test("Lead wave laws reference the ADR 0054 surfaces — single worker lane with
   // Per-dispatch effort: the single Owner-configured worker lane carries all
   // four dispositions; thinking is selected by uncertainty and verification
   // burden with a mandatory reason — never by disposition label.
-  assert.match(briefLaw, /single `worker` lane/);
+  assert.match(briefLaw, /`worker` lane/);
   assert.match(briefLaw, /`thinking`.*`thinkingReason`/);
-  assert.match(briefLaw, /by task uncertainty and verification burden, never by disposition label/);
+  assert.match(briefLaw, /by uncertainty\/verification burden, never by disposition/);
 
   // Disposition-specific 6-Field Handoff evidence expectations (ticket 03).
-  assert.match(briefLaw, /alternatives considered.*strongest counterargument.*reversal conditions/);
-  assert.match(briefLaw, /`reviewer`.*concrete `claim` \+ `file:line` evidence per finding/);
-  assert.match(briefLaw, /`scout`.*`file:line` evidence paths, remaining unknowns, and confidence \(`low \| medium \| high`\)/);
+  assert.match(briefLaw, /alternatives, counterargument, reversal conditions, `file:line`/);
+  assert.match(briefLaw, /`reviewer`.*argues strongest `claim` \+ `file:line` weakness without manufacturing objections/);
+  assert.match(briefLaw, /`scout`.*`file:line` paths, unknowns, confidence `low\|medium\|high`/);
 
   // lead_close_task is the clean retirement for superseded or split unaccepted
   // Tasks (ticket 05) — it lives where the context-ceiling split is ruled.
   const boundedLaw = LEAD_WAVE_LAWS.find((law) => law.startsWith("Bounded Verification & Context-Ceiling Recovery"))!;
   assert.ok(boundedLaw !== undefined, "the Bounded Verification & Context-Ceiling Recovery law exists");
   assert.match(boundedLaw, /lead_close_task/);
-  assert.match(boundedLaw, /superseded or split/);
+  assert.match(boundedLaw, /superseded Task/);
 
   // Every Lead surface carries the per-dispatch effort law and the retirement.
   const project = { root: "/workspace/repo", slug: "repo" };
@@ -1741,7 +1748,7 @@ test("Lead wave laws reference the ADR 0054 surfaces — single worker lane with
   for (const surface of [renderRoleContract("lead"), renderSeatContract("lead", project), ROLE_PROMPTS.lead,
     renderSeatBootstrapPrompt(input), renderSeatBootstrap(input),
     buildSeatKickoffPacket({ role: "lead", projectSlug: project.slug, projectRoot: project.root, ledgerEvents: [] })]) {
-    assert.match(surface, /never by disposition label/);
+    assert.match(surface, /never by disposition/);
     assert.match(surface, /lead_close_task/);
   }
 });
@@ -1754,14 +1761,19 @@ test("the Lead command block names lead_update_notebook, lead_close_task, and th
     renderSeatBootstrapPrompt(input), renderSeatBootstrap(input)]) {
     // MCP vocabulary: notebook single writer, clean task retirement, and the
     // thinking/thinkingReason pair on dispatch.
-    assert.match(surface, /paseo-factory_lead_update_notebook\(\{ content:/);
-    assert.match(surface, /paseo-factory_lead_close_task\(\{ task: "<id>", reason:/);
-    assert.match(surface, /paseo-factory_lead_dispatch_agent\(\{ tasks: \["<id>"\], thinking: "/);
-    assert.match(surface, /thinkingReason: "/);
-    // CLI vocabulary: the same three surfaces as factory notebook / close / run --thinking.
-    assert.match(surface, /run <task> \[<task>\.\.\.\] \[--thinking <low\|medium\|high\|xhigh\|max>\]/);
-    assert.match(surface, /close --task <id> --reason "<text>"/);
-    assert.match(surface, /notebook \(--content <text> \| --file <path>\)/);
+    assert.match(surface, /lead_update_notebook\(\{ content/);
+    assert.match(surface, /lead_close_task\(\{ task/);
+    assert.match(surface, /paseo-factory_lead_dispatch_agent\(\{ tasks:?\s*\["<id>"\],?\s*thinking/);
+    assert.match(surface, /thinkingReason/);
+  }
+  // Bootstraps carry the Day-1 CLI flag vocabulary; contracts carry the 1-line CLI fallback pointer.
+  for (const bootstrap of [renderSeatBootstrapPrompt(input), renderSeatBootstrap(input)]) {
+    assert.match(bootstrap, /run <task> \[<task>\.\.\.\] \[--thinking <low\|medium\|high\|xhigh\|max>\]/);
+    assert.match(bootstrap, /close --task <id> --reason "<text>"/);
+    assert.match(bootstrap, /notebook \(--content <text> \| --file <path>\)/);
+  }
+  for (const contractSurface of [renderRoleContract("lead"), renderSeatContract("lead", project), ROLE_PROMPTS.lead]) {
+    assert.match(contractSurface, /If paseo_factory MCP is absent, use the factory CLI fallback via factory --help\./);
   }
   // The Supervisor block never gains the Lead-only vocabulary.
   for (const supervisorSurface of [renderRoleContract("supervisor"), renderSeatContract("supervisor", project), ROLE_PROMPTS.supervisor]) {
@@ -1770,15 +1782,16 @@ test("the Lead command block names lead_update_notebook, lead_close_task, and th
   }
 });
 
-test("Supervisor outcome boundary presents Tier-2/Tier-3 proposals as the 4-Line Owner Ratification Card and edits AGENTS.md/CONTEXT.md only after explicit Owner Ratification (v0.1.0, ADR 0048 Decisions 2, 4)", () => {
+test("Supervisor outcome boundary presents Tier-2/Tier-3 proposals as the 4-Line Owner Ratification Card in English with active-language rule and edits AGENTS.md/CONTEXT.md only after explicit Owner Ratification (v0.1.0, ADR 0048 Decisions 2, 4)", () => {
   // The boundary constant itself codifies the card and the ratification gate.
-  assert.match(SUPERVISOR_OUTCOME_BOUNDARY, /hardening Proposal that would change repo prose.*>= 2 `Task \(seq N\)` citations from the Recurrence Guard/);
-  assert.match(SUPERVISOR_OUTCOME_BOUNDARY, /1\. Chuyện gì đã lặp lại/);
-  assert.match(SUPERVISOR_OUTCOME_BOUNDARY, /2\. Nguyên nhân gốc/);
-  assert.match(SUPERVISOR_OUTCOME_BOUNDARY, /3\. Nếu duyệt sẽ sửa gì \(Preview diff\)/);
-  assert.match(SUPERVISOR_OUTCOME_BOUNDARY, /4\. Tác dụng/);
+  assert.match(SUPERVISOR_OUTCOME_BOUNDARY, />= 2 `Task \(seq N\)` citations in Recurrence Guard/);
+  assert.match(SUPERVISOR_OUTCOME_BOUNDARY, /1\. Recurrence/);
+  assert.match(SUPERVISOR_OUTCOME_BOUNDARY, /2\. Root Cause/);
+  assert.match(SUPERVISOR_OUTCOME_BOUNDARY, /3\. Proposed Diff/);
+  assert.match(SUPERVISOR_OUTCOME_BOUNDARY, /4\. Expected Effect/);
+  assert.match(SUPERVISOR_OUTCOME_BOUNDARY, /matching Owner's active conversation language/);
   assert.match(SUPERVISOR_OUTCOME_BOUNDARY, /edit `<project-root>\/AGENTS\.md` or `<project-root>\/CONTEXT\.md` only after explicit Owner Ratification/);
-  assert.match(SUPERVISOR_OUTCOME_BOUNDARY, /never edit them on an unratified proposal/);
+  assert.match(SUPERVISOR_OUTCOME_BOUNDARY, /never unratified/);
 
   // Every Supervisor surface (contract, seat contract, ROLE_PROMPTS,
   // bootstraps, Turn-1 kickoff packet law line) carries the card and the gate.
@@ -1789,46 +1802,51 @@ test("Supervisor outcome boundary presents Tier-2/Tier-3 proposals as the 4-Line
     renderSeatBootstrapPrompt(input), renderSeatBootstrap(input),
     buildSeatKickoffPacket({ role: "supervisor", projectSlug: project.slug, projectRoot: project.root, ledgerEvents: [] })]) {
     assert.match(surface, /4-Line Owner Ratification Card/);
-    assert.match(surface, /1\. Chuyện gì đã lặp lại/);
-    assert.match(surface, /2\. Nguyên nhân gốc/);
-    assert.match(surface, /3\. Nếu duyệt sẽ sửa gì \(Preview diff\)/);
-    assert.match(surface, /4\. Tác dụng/);
+    assert.match(surface, /1\. Recurrence/);
+    assert.match(surface, /2\. Root Cause/);
+    assert.match(surface, /3\. Proposed Diff/);
+    assert.match(surface, /4\. Expected Effect/);
+    assert.match(surface, /matching Owner's active conversation language/);
     assert.match(surface, /`<project-root>\/AGENTS\.md` or `<project-root>\/CONTEXT\.md` only after explicit Owner Ratification/);
   }
 });
 
-test("Peer contract carries the independent-engineer stance, Contract Before Test, and the 6-Field Handoff — escalation is never gated behind a third failed fix (ADR 0053 §2/§4–§5, ADR 0069)", () => {
+test("Peer contract carries the disposition-neutral core + disposition-scoped clauses, Contract Before Test, and the 6-Field Handoff (ADR 0053 §2/§4–§5, ADR 0069, ADR 0074)", () => {
   for (const surface of [renderRoleContract("agent"), renderRoleAppendSystem("agent"), ROLE_PROMPTS.agent, renderAgentContract("T-06", "repo")]) {
-    // Independent engineer with its own judgment — topology-blind, no obedience framing.
-    assert.match(surface, /independent engineer/i);
-    assert.match(surface, /provisional map for this one turn/);
-    assert.match(surface, /data to reconcile, not disobedience/);
+    // Independent Peer with its own judgment — topology-blind, disposition-neutral.
+    assert.match(surface, /independent Peer/i);
+    assert.match(surface, /provisional map for this one turn/i);
+    assert.match(surface, /never defend assumptions/i);
     assert.doesNotMatch(surface, /Strict Wave Boundary/);
     // Contract Before Test: the premise challenge fires immediately, before any
     // test or code, through agent_ask — never after 3 failures.
     assert.match(surface, /Contract Before Test/);
-    assert.match(surface, /challenge immediately, BEFORE writing tests or code/);
+    assert.match(surface, /BEFORE writing tests or code/);
     assert.match(surface, /`agent_ask`/);
     assert.match(surface, /`reopen_premise` \| `gate_mismatch` \| `dependency` \| `clarify` \| `blocked`/);
     assert.match(surface, /`foundation` \| `dependency` \| `lifecycle` \| `API` \| `ownership` \| `verification`/);
-    assert.match(surface, /session stays alive and paused for a ruling/);
+    assert.match(surface, /paused for a ruling/);
     assert.doesNotMatch(surface, /Before escalating/);
     assert.doesNotMatch(surface, /third.*fail.*before.*escalat/i);
     // The false-RED law: a RED test explores implementation, never invents a contract.
     assert.match(surface, /RED test may explore implementation, but must never invent an undecided contract/);
-    assert.match(surface, /loosening or skipping an assertion to force GREEN/);
-    // The 6-Field Handoff obligation and the read-only disposition handoff law.
+    assert.match(surface, /loosen\/skip assertions to force GREEN/);
+    // The 6-Field Handoff obligation.
     assert.match(surface, /Six-Field Handoff/);
     assert.match(surface, /`outcome` \(complete \| partial \| blocked \| reopen\)/);
-    assert.match(surface, /`scope` \(files changed or read, with concrete paths\)/);
-    assert.match(surface, /`verification` \(commands run \+ real output, and what was deliberately skipped\)/);
-    assert.match(surface, /`unknowns` \(assumptions stood on, open risks, or "none"\)/);
-    assert.match(surface, /Read-only dispositions \(`scout`, `architect`, `reviewer`\) write no files and make no commit/);
-    assert.match(surface, /`engineer` disposition commits its own work/);
-    assert.match(surface, /claiming done before done is worse than BLOCKED/);
+    assert.match(surface, /`scope` \(concrete paths changed or read\)/);
+    assert.match(surface, /`verification` \(commands \+ real output \+ deliberate skips\)/);
+    assert.match(surface, /`unknowns` \(assumptions\/risks or "none"\)/);
+    assert.match(surface, /Claiming done before done is worse than BLOCKED/);
     // Unknown is a legitimate result (the Scout law).
     assert.match(surface, /'Unknown' is a legitimate result/);
   }
+  const engineerScoped = renderRoleContract("agent", { task: "T-06", project: { root: "/w/repo", slug: "repo" }, disposition: "engineer" });
+  assert.match(engineerScoped, /independent engineer/i);
+  assert.match(engineerScoped, /Commit completed work/);
+  const scoutScoped = renderRoleContract("agent", { task: "T-06", project: { root: "/w/repo", slug: "repo" }, disposition: "scout" });
+  assert.match(scoutScoped, /independent scout/i);
+  assert.match(scoutScoped, /read-only-disposition-fence/);
 });
 
 test("Lead contract carries the canonical LEAD.md laws — neutral Briefs, Spec-vs-Code ruling, four dispositions, live in-place reconciliation, handoff-bearing acceptance, and the five Reviewer triggers (ADR 0053 §5, User Story 18)", () => {
@@ -1839,37 +1857,34 @@ test("Lead contract carries the canonical LEAD.md laws — neutral Briefs, Spec-
     renderSeatBootstrapPrompt(input), renderSeatBootstrap(input),
     buildSeatKickoffPacket({ role: "lead", projectSlug: project.slug, projectRoot: project.root, ledgerEvents: [] })]) {
     // Neutral Brief / no pre-solve: the provisional-map premise, stated to the Peer.
-    assert.match(surface, /neutral and never pre-solve implementation/);
-    assert.match(surface, /provisional map for ONE Peer turn/);
-    assert.match(surface, /Peer merely types your ideas back/);
+    assert.match(surface, /Neutral provisional map for ONE Peer turn/);
+    assert.match(surface, /never pre-solve signatures/);
     // Spec-vs-Code conflict is the Lead's architectural ruling, or an architect rebuilds the boundary.
     assert.match(surface, /Spec-vs-Code Ruling/);
-    assert.match(surface, /picking the reading is an architectural ruling that belongs to you/);
-    assert.match(surface, /read-only `architect` disposition to rebuild the boundary before anyone writes tests/);
+    assert.match(surface, /rule one reading with reason or dispatch `architect` first — never pass both readings/);
     // The four dispositions dispatched through lead_set_contract's disposition parameter.
-    assert.match(surface, /`lead_set_contract`'s `disposition` parameter/);
+    assert.match(surface, /Set `disposition` \(`scout`\|`architect`\|`engineer`\|`reviewer`\) on `lead_set_contract`/);
     for (const disposition of ["scout", "architect", "engineer", "reviewer"]) {
       assert.ok(surface.includes(`\`${disposition}\``), `the Lead vocabulary names the ${disposition} disposition`);
     }
     // Live, in-place challenge reconciliation (ticket 02 surfaces, ADR 0069).
-    assert.match(surface, /data to reconcile, not disobedience/);
-    assert.match(surface, /`lead_reply_peer`'s `message` parameter/);
-    assert.match(surface, /`lead_repoke_agent`/);
-    assert.match(surface, /preserved by default \(`resetPeer: false`\)/);
-    assert.match(surface, /`resetPeer: true`\) only when its context is truly misaligned/);
+    assert.match(surface, /Challenge Reconciliation \(live, in place\)/);
+    assert.match(surface, /`lead_reply_peer` \(`lead_repoke_agent`\)/);
+    assert.match(surface, /default `resetPeer: false`/);
+    assert.match(surface, /`resetPeer: true` only on context drift or disposition change/);
     // Acceptance reads the 6-Field Handoff plus the attested diff before accepting.
-    assert.match(surface, /report-<task>-<n>\.md` and `git show --stat "<sha>"` first — the report carries the Peer's 6-Field Handoff \(Outcome, Snapshot, Scope, Verification, Unknown \/ risk, Ownership\)/);
+    assert.match(surface, /report-<task>-<n>\.md` \(6-Field Handoff: Outcome, Snapshot, Scope, Verification, Unknown\/risk, Ownership/);
     assert.match(surface, /git diff "<sha>\^" "<sha>"/);
     assert.match(surface, /`lead_accept_task`/);
-    assert.match(surface, /missing or hand-waved handoff field is a question back to the Peer/);
+    assert.match(surface, /missing = ask Peer/);
     assert.match(surface, /Unknown stays Unknown/);
     // The independent Reviewer layer: default NO, five mandatory triggers.
     assert.match(surface, /Independent Reviewer — default is NO/);
-    assert.match(surface, /five triggers/);
-    assert.match(surface, /pre-solved the solution, not just the outcome/);
-    assert.match(surface, /hard to reverse/);
-    assert.match(surface, /proof is suspect/);
-    assert.match(surface, /withdrew it without new evidence/);
+    assert.match(surface, /5 triggers/);
+    assert.match(surface, /Brief pre-solved/);
+    assert.match(surface, /hard-to-reverse/);
+    assert.match(surface, /suspect proof/);
+    assert.match(surface, /without new evidence/);
   }
 });
 
@@ -1885,17 +1900,17 @@ test("Supervisor contract carries neutral intent framing downward, the downward 
     assert.match(surface, /not a second project Lead/);
     // The downward privacy firewall.
     assert.match(surface, /Downward Privacy Firewall/);
-    assert.match(surface, /no verbatim Owner quotes or transcripts/);
-    assert.match(surface, /Express authorized decisions directly as project instructions/);
+    assert.match(surface, /no verbatim Owner quotes\/transcripts/);
+    assert.match(surface, /express decisions as project instructions/);
     // Active SLP Loop Auditing with the named coaching triggers.
     assert.match(surface, /Active SLP Loop Auditing/);
     assert.match(surface, /original Lead Brief → actual Peer response → explicit Lead disposition/);
     assert.match(surface, /Lead's summary alone is not proof that the loop closed/);
     assert.match(surface, /pre-solving Briefs/);
     assert.match(surface, /micro-splitting waves/);
-    assert.match(surface, /instead of dispatching a read-only Scout/);
-    assert.match(surface, /bouncing technical decisions/);
-    assert.match(surface, /never a parallel command chain to workers/);
+    assert.match(surface, /deep reads instead of Scout/);
+    assert.match(surface, /bouncing rulings/);
+    assert.match(surface, /never product code\/worker commands/);
   }
 });
 
@@ -1909,26 +1924,26 @@ test("role surfaces teach bounded serial waves, closure, and structured challeng
   });
   for (const surface of [renderRoleContract("supervisor"), renderRoleAppendSystem("supervisor"), bootstrap("supervisor")]) {
     assert.match(surface, /Outcome & Architecture Boundary/);
-    assert.match(surface, /Owner.*explicitly requested/);
-    assert.match(surface, /single-file.*index.html/);
+    assert.match(surface, /Owner confirms/);
+    assert.match(surface, /single-file `index\.html`/);
   }
   for (const surface of [renderRoleContract("lead"), renderRoleAppendSystem("lead"), bootstrap("lead"),
     buildSeatKickoffPacket({ role: "lead", projectSlug: "repo", projectRoot: root, ledgerEvents: [] })]) {
     assert.doesNotMatch(surface, /Fresh-eyes|wait for CLEAR|CONCERN-free/);
     assert.doesNotMatch(surface, /Parallel dispatch \(up to 3 Tasks\)/);
-    for (const law of [/Serial Waves by Default/, /~120K/, /single-task.*focused bugfix/i,
-      /Never pass.*multi-subsystem.*single monolithic Task/, /single.file.*index.html/,
-      /current wave only/, /at most one active writable.*engineer.*Peer per Project/i,
+    for (const law of [/Serial Waves by Default/, /~120K/, /single-task dispatch only for isolated fixes/i,
+      /never pass multi-subsystem.*monolithic Task/i, /index\.html/,
+      /current wave only/, /<= 1 active writable `engineer` Peer per Project/i,
       /Bounded Outcome/, /Contract Boundary & Regression Invariants/,
-      /Excluded \/ Deferred to Later Waves/, /Verification.*exact.*Gate/,
-      /git show --stat/, /git diff/, /lead_merge/, /final wave.*before.*lead_report_to_supervisor/,
-      /next wave.*same turn/, /Never accept.*Needs-human/, /two-party separation of judgment/i, /re-contract.*lead_set_contract/,
-      /REOPEN_REQUEST/, /foundation.*dependency.*lifecycle.*API.*ownership.*verification/,
+      /Excluded \/ Deferred to Later Waves/, /Verification \(exact Gate command\)/,
+      /git show --stat/, /git diff/, /lead_merge/, /final wave before `lead_report_to_supervisor`/,
+      /spawn next wave same turn/, /never accept Needs-human/, /Peer \+ Lead = separation/i, /Re-contract defects/,
+      /REOPEN_REQUEST/, /foundation\|dependency\|lifecycle\|API\|ownership\|verification/,
       /DEPENDENCY_REQUEST/, /BLOCKED/]) assert.match(surface, law);
   }
   for (const surface of [renderRoleContract("agent"), renderRoleAppendSystem("agent")]) {
-    for (const law of [/Excluded \/ Deferred to Later Waves/, /third fix attempt.*same symptom/,
-      /stop local patching.*underlying mechanism/, /commit any independent completed work/,
+    for (const law of [/Excluded \/ Deferred to Later Waves/, /third fix attempt hits the same symptom/,
+      /stop local patching, inspect the underlying mechanism/,
       /reopen_premise/, /foundation.*dependency.*lifecycle.*API.*ownership.*verification/,
       /`dependency`/, /`blocked`/, /agent_ask/]) assert.match(surface, law);
   }
@@ -2056,7 +2071,7 @@ test("isSupervisorCandidate recognises the three candidate arms — the factory-
   );
 });
 
-test("Lead contracts enforce Scout-First Context Discipline (<= 3 targeted boundary reads), Missing-Capability Fail-Fast Guard, and keep both MCP + CLI fallback", () => {
+test("Lead contracts enforce Scout-First Context Discipline (<= 3 boundary reads), Missing-Capability Fail-Fast Guard, and keep MCP + 1-line CLI fallback pointer", () => {
   const project = { root: "/workspace/repo", slug: "repo" };
   const input = {
     seat: "lead" as const,
@@ -2070,14 +2085,18 @@ test("Lead contracts enforce Scout-First Context Discipline (<= 3 targeted bound
   const contract = renderRoleContract("lead", { project });
   assert.doesNotMatch(contract, /read and inspect the repository, decompose/, "Lead is no longer told to read the whole repository into its own context");
   assert.match(contract, /Missing-Capability Fail-Fast Guard:/);
-  assert.match(contract, /NEVER inspect, search, or read.*~\/\.paseo\/plugins\/\*\*/);
+  assert.match(contract, /NEVER read `~\/\.paseo\/plugins\/\*\*`/);
   assert.match(contract, /paseo-factory_lead_read_ledger/);
-  assert.match(contract, /factory contract/);
-  assert.match(contract, /factory run/);
+  assert.match(contract, /If paseo_factory MCP is absent, use the factory CLI fallback via factory --help\./);
+
+  for (const bootstrap of [renderSeatBootstrapPrompt(input), renderSeatBootstrap(input)]) {
+    assert.match(bootstrap, /contract --task <id>/);
+    assert.match(bootstrap, /run <task>/);
+  }
 
   for (const surface of [contract, renderSeatContract("lead", project), ROLE_PROMPTS.lead, renderSeatBootstrapPrompt(input), renderSeatBootstrap(input)]) {
     assert.match(surface, /Scout-First Context Discipline & Assignment Vocabulary:/);
-    assert.match(surface, /<= 3 targeted boundary/);
+    assert.match(surface, /<= 3 boundary files/);
     assert.match(surface, /disposition: "scout"/);
     assert.match(surface, /disposition: "architect"/);
     assert.match(surface, /lead_read_ledger/);
@@ -2137,7 +2156,7 @@ test("Lead and Supervisor role laws teach three-mode Release ownership, semver r
     assert.match(surface, /\bauto\b/);
     assert.match(surface, /engineer.*wave|prep.*engineer/i);
     assert.match(surface, /## \[Unreleased\]/);
-    assert.match(surface, /never bump major/i);
+    assert.match(surface, /never auto-bump major/i);
     assert.match(surface, /0\.x\s*(?:->|→|to)\s*1\.0/);
   }
 
@@ -2758,7 +2777,7 @@ test("injectSessionEnv delivers fresh live role contracts and Peer skill scope v
   assert.match(peerOpen.appendSystemPrompt?.[0] ?? "", /Project Peer skills allowed:.*initial-skill/);
   assert.match(peerOpen.appendSystemPrompt?.[0] ?? "", /docs/);
 
-  // Update Helper MCPs and Contract skills, then resume — fresh appendSystemPrompt reflects updates
+  // Update Helper MCPs, Contract skills, and disposition, then resume — fresh appendSystemPrompt reflects updates
   writeFileSync(
     join(userHome, ".pi", "agent", "mcp.json"),
     JSON.stringify({ mcpServers: { docs: { command: process.execPath, args: ["--version"] }, figma: { command: process.execPath, args: ["--version"] } } }),
@@ -2773,6 +2792,7 @@ test("injectSessionEnv delivers fresh live role contracts and Peer skill scope v
       workspace: repoDir,
       gate: "true",
       skills: ["updated-skill"],
+      disposition: "reviewer",
     }) + "\n",
   );
   const peerResumed = injectSessionEnv(
@@ -2791,6 +2811,9 @@ test("injectSessionEnv delivers fresh live role contracts and Peer skill scope v
   assert.ok(peerResumed !== undefined);
   assert.match(peerResumed.appendSystemPrompt?.[0] ?? "", /figma/);
   assert.match(peerResumed.appendSystemPrompt?.[0] ?? "", /updated-skill/);
+  assert.match(peerResumed.appendSystemPrompt?.[0] ?? "", /You are an independent reviewer \(task T-OPEN, project /);
+  assert.match(peerResumed.appendSystemPrompt?.[0] ?? "", /read-only-disposition-fence/);
+  assert.doesNotMatch(peerResumed.appendSystemPrompt?.[0] ?? "", /Commit completed work/);
 
   // 3. Negative gates: history open strips even pre-populated appendSystemPrompt
   const historyOpen = injectSessionEnv(
@@ -2890,14 +2913,14 @@ test("ADR 0068 role contracts enforce single writable Peer per Project, serial t
   ]) {
     assert.doesNotMatch(surface, /Parallel dispatch \(up to 3 Tasks\)/);
     assert.doesNotMatch(surface, /the full cumulative Gate runs before Claim/i);
-    assert.match(surface, /at most one active writable `engineer` Peer per Project/i);
-    assert.match(surface, /read-only `scout`, `architect`, or `reviewer` Peers may run concurrently/i);
+    assert.match(surface, /<= 1 active writable `engineer` Peer per Project/i);
+    assert.match(surface, /read-only `scout`\/`architect`\/`reviewer` may run concurrently/i);
     assert.match(surface, /sequential/i);
     assert.match(surface, /--runInBand.*--no-file-parallelism.*--test-concurrency=1/);
-    assert.match(surface, /never invoke real multi-worker bundlers or native compilers.*expo export.*next build.*gradlew.*xcodebuild.*inside unit-test suites/i);
-    assert.match(surface, /Wave Gate.*lint \+ serial tests \+ typecheck.*Checkpoint\/Build Gate/i);
+    assert.match(surface, /without bundlers\/compilers.*expo export.*next build.*gradlew.*xcodebuild.*inside unit tests/i);
+    assert.match(surface, /Wave Gates.*lint \+ serial tests \+ typecheck.*Checkpoint\/Build Gates/i);
     assert.match(surface, /timeoutSeconds.*60.*3,600s.*900s/);
-    assert.match(surface, /never pre-run the full cumulative Gate before Claim/i);
+    assert.match(surface, /never pre-run full Gate before Claim/i);
     assert.match(surface, /Gate queue.*sleeps live at zero tokens/i);
   }
 
@@ -2909,11 +2932,19 @@ test("ADR 0068 role contracts enforce single writable Peer per Project, serial t
   ]) {
     assert.doesNotMatch(surface, /Run the full cumulative Gate before (?:factory-claim|agent_claim)/i);
     assert.doesNotMatch(surface, /, run the Gate check, and hand off/i);
+    assert.match(surface, /agent_claim.*end your turn immediately when `queued`/is);
+    assert.doesNotMatch(surface, /--runInBand/);
+  }
+
+  for (const surface of [
+    renderRoleContract("agent", { disposition: "engineer" }),
+    renderAgentContract("T-04", "repo", "engineer"),
+  ]) {
     assert.match(surface, /sequential/i);
     assert.match(surface, /--runInBand.*--no-file-parallelism.*--test-concurrency=1/);
-    assert.match(surface, /never invoke real multi-worker bundlers or native compilers.*expo export.*next build.*gradlew.*xcodebuild.*inside unit-test suites/i);
+    assert.match(surface, /expo export.*next build.*gradlew.*xcodebuild.*inside unit tests/i);
     assert.match(surface, /never pre-run the full cumulative Gate before/i);
-    assert.match(surface, /agent_claim.*queued.*end your turn immediately.*sleep live at zero tokens/i);
+    assert.match(surface, /agent_claim.*end your turn immediately when `queued`.*sleeps your session at zero tokens/is);
   }
 
   const footer = repokeCompletionFooter("T-04", {

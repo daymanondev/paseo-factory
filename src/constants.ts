@@ -60,9 +60,20 @@ export const WATCH_DIFF_MAX_CHARS = 16_000;
 export const WATCH_GATE_OUTPUT_MAX_CHARS = 8_000;
 
 /**
- * The report's ≥0.5 callout (ticket 03 §7) — display-only, one shared
- * constant; nothing in the factory branches on it (record-only law). The
- * pre-registered battery threshold is this same 0.5, applied to the recorded
- * probabilities at close-out.
+ * The Watch callout & soft-block threshold (ticket 03 §7, amended by ADR 0074):
+ * `accept` soft-blocks when a completed `watch_written` (`outcome === "written"`)
+ * reports `>= 0.5` on `WATCH_SOFT_BLOCK_QUESTIONS` unless `acknowledgeWatch`
+ * is provided (`>= WATCH_ACK_MIN_CHARS` non-whitespace chars).
  */
 export const WATCH_CALLOUT_THRESHOLD = 0.5;
+
+/** Watch questions whose `>= WATCH_CALLOUT_THRESHOLD` score soft-blocks acceptance (ADR 0074). */
+export const WATCH_SOFT_BLOCK_QUESTIONS = ["test-weakened", "secret-leak"] as const;
+
+/** Minimum non-whitespace character count required for `acknowledgeWatch` / `watchAck` (ADR 0074). */
+export const WATCH_ACK_MIN_CHARS = 10;
+
+/** Validates a Watch soft-block acknowledgement reason (`>= 10` non-whitespace chars). */
+export function isValidWatchAck(value: unknown): value is string {
+  return typeof value === "string" && value.replace(/\s+/g, "").length >= WATCH_ACK_MIN_CHARS;
+}
